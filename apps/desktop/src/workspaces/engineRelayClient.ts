@@ -1,5 +1,6 @@
 import { runInKeyedLane } from "../keyedLane";
 import {
+  RelayApiVersionError,
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -439,6 +440,10 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
+    if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
+    if (error.message === "relay-api-version-too-new") throw new RelayApiVersionError("server");
+  }
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
@@ -501,6 +506,10 @@ export interface EngineRelayWorkspaceClient {
   pullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
+    // Called after each page whose ops the engine applied. The engine commits
+    // a page before the next one is requested, so a caller learns of applied
+    // ops even when a later page fails.
+    onApplied?: () => void;
   }): Promise<PullSharedChannelResult>;
   pushSharedChannel(input: {
     shareId: string;
@@ -892,7 +901,7 @@ export class EngineRelayClient {
             workspaceId: workspace.workspaceId,
           }),
         ),
-      pullSharedChannel: async ({ shareId, channelWireId }) => {
+      pullSharedChannel: async ({ shareId, channelWireId, onApplied }) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
@@ -925,9 +934,11 @@ export class EngineRelayClient {
           );
           previousCursor = pageCursor;
           nextCursor = pageCursor;
+          const pageApplied = numberField(result, "applied", "share.channel.pull");
           fetched += numberField(result, "fetched", "share.channel.pull");
-          applied += numberField(result, "applied", "share.channel.pull");
+          applied += pageApplied;
           skipped += numberField(result, "skipped", "share.channel.pull");
+          if (pageApplied > 0) onApplied?.();
           if (!hasMore) break;
         }
         return {

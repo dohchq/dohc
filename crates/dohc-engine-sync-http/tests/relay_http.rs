@@ -1092,24 +1092,29 @@ fn every_relay_fixture_code_maps_to_its_rust_variant() {
 fn expected_relay_error(code: &str) -> RelayError {
     match code {
         "ambiguous_selector" => RelayError::AmbiguousSelector,
+        "api_version_too_new" => RelayError::ApiVersionTooNew,
+        "api_version_too_old" => RelayError::ApiVersionTooOld,
         "authorship_mismatch" => RelayError::AuthorshipMismatch,
         "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" | "dependents_changed" => RelayError::Conflict,
+        "conflict" | "dependents_changed" | "notice_list_full" => RelayError::Conflict,
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,
         "identity_not_recognized" => RelayError::IdentityNotRecognized,
         "identity_required" => RelayError::IdentityRequired,
         "internal_error" => RelayError::ServerInternal,
-        "invalid_channel" => RelayError::InvalidChannel,
+        "invalid_chat" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "link_discussion_blocked" | "link_discussion_paused" => RelayError::Forbidden,
+        "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
+            RelayError::Forbidden
+        }
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
+        "notice_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
@@ -1130,6 +1135,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let handler_etag = etag.clone();
     let server = FakeServer::start(move |request| {
         assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+        assert_eq!(request.header("x-dohc-api-version"), Some("1"));
         let mut seen = handler_seen.lock().expect("seen endpoints");
         seen.insert(format!("{} {}", request.method, request.path()));
         seen.insert(format!("TARGET {}", request.target));

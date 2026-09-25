@@ -58,7 +58,7 @@ describe("dataset CLI", () => {
     const send = vi.fn(async () => result);
     const executed = await executeCli({argv:["--as-agent","dataset","invoke",JSON.stringify(request),"--json"],request:send,env:{}});
     expect(executed.exitCode).toBe(0);
-    expect(JSON.parse(executed.stdout)).toEqual({schemaVersion:1,...result});
+    expect(JSON.parse(executed.stdout)).toEqual({schemaVersion:2,...result});
     expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({verb:"dataset",args:expect.objectContaining({actor:"agent",request})}));
     expect(parseCliResult("dataset",result)).toEqual(result);
   });
@@ -73,11 +73,16 @@ describe("dataset CLI", () => {
   });
   it("explains creation and approval without requiring a running desktop", async () => {
     const send = vi.fn();
-    const result = await executeCli({argv:["dataset","--help"],request:send});
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("create: definition");
-    expect(result.stdout).toContain("revisionSha256");
-    expect(result.stdout).toContain("same input and idempotencyKey");
+    const help = async (...argv: string[]) => {
+      const result = await executeCli({argv:["dataset",...argv,"--help"],request:send});
+      expect(result.exitCode).toBe(0);
+      return result.stdout.replace(/\s+/g," ");
+    };
+    expect(await help()).toContain("create Write source for a new Collection, ready to approve.");
+    expect(await help("create")).toContain("Fields: workspaceId, definition");
+    expect(await help("approve")).toContain("Fields: workspaceId, preparationId, revisionSha256");
+    expect(await help("invoke")).toContain("same input and idempotencyKey");
+    expect(await help("export")).toContain("Fields: workspaceId, datasetId, savePath Optional fields: overwrite");
     expect(send).not.toHaveBeenCalled();
   });
   it("requires a chosen export destination and returns no private archive bytes", async () => {

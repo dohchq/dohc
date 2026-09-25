@@ -129,6 +129,39 @@ impl ContentKind {
 
 const SUCCESSOR_EPOCH_DOMAIN: &[u8] = b"dohc:ydoc-successor-epoch:v1";
 const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
+const SEED_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-seed-client:v1";
+
+/// The Yjs client an editor seeds `key`'s lineage under, from the head it
+/// seeds.
+///
+/// Every device that seeds the same head moment gets the same client, so their
+/// seeds are the same bytes, originate the same base, and share one lineage. A
+/// later head gets another client even when its text is the same, so a lineage
+/// seeded after a delete, a restore, or an archive never reuses a retired
+/// claim. The value fits a Yjs client id: nonzero and at most 32 bits.
+pub fn seed_client_id(
+    key: &crate::DocKey,
+    content_kind: ContentKind,
+    head_moment_id: &str,
+    head_blob_sha256: &str,
+) -> u32 {
+    let mut hash = Sha256::new();
+    hash.update(SEED_CLIENT_DOMAIN);
+    for field in [
+        key.workspace_id.as_str(),
+        key.version_id.as_str(),
+        key.object_id.as_str(),
+        content_kind.as_str(),
+        head_moment_id,
+        head_blob_sha256,
+    ] {
+        let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
+        hash.update(length.to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    let digest = hash.finalize();
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]).max(1)
+}
 
 /// The deterministic identity of one fresh successor lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]

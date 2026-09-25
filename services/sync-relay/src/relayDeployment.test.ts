@@ -29,6 +29,11 @@ function read(path: string, table: string) {
   try { return db.prepare(`SELECT * FROM ${table}`).get()!; } finally { db.close(); }
 }
 
+// tsx compiles each fixture child on startup; under load that took over 20 s.
+// 45 s matches main.integration's tsx startup bound, and each test allows its
+// children plus 10 s.
+const TSX_CHILD_TIMEOUT_MS = 45_000;
+
 describe("relay deployment continuity", () => {
   it("reuses its private dataset root and reclaims crashed preview directories on restart",async()=>{
     const f=fixture(),first=openRelayDeployment(f.configPath);
@@ -54,11 +59,11 @@ describe("relay deployment continuity", () => {
     try {
       expect(() => openRelayDeployment(f.configPath)).toThrow();
       const contender = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), f.configPath, "contender"],
-        { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+        { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS });
       expect(contender.error).toBeUndefined();
       expect(contender.status, contender.stderr).toBe(0);
       const missingConfig = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), join(f.root, "missing.json"), "contender"],
-        { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+        { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS });
       expect(missingConfig.error).toBeUndefined();
       expect(missingConfig.status).not.toBe(0);
       expect(missingConfig.stderr).toMatch(/ENOENT|no such file/);
@@ -71,7 +76,7 @@ describe("relay deployment continuity", () => {
       expect(second.history.namespace).toBe(first.history.namespace);
       expect(second.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("owned");
     } finally { second.storage.close(); }
-  });
+  }, 2 * TSX_CHILD_TIMEOUT_MS + 10_000);
 
   it("refuses a permission-only rollback with no new journal event", async () => {
     const f = fixture(), current = openRelayDeployment(f.configPath);
@@ -172,7 +177,7 @@ describe("relay deployment continuity", () => {
   it.each(["before-commit", "after-commit"])("retains the actual production interruption at %s", boundary => {
     const f = fixture();
     const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), f.configPath, boundary],
-      { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+      { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS });
     expect(child.error).toBeUndefined();
     expect(child.stderr).toBe("");
     expect(child.status).toBe(boundary === "before-commit" ? 81 : 82);
@@ -182,7 +187,7 @@ describe("relay deployment continuity", () => {
       try { expect(restarted.storage.claimWorkspace({ workspaceId: "interrupted", ownerUserId: "owner", createdAtMs: 2 })).toBe("owned"); }
       finally { restarted.storage.close(); }
     }
-  });
+  }, TSX_CHILD_TIMEOUT_MS + 10_000);
 });
 
 describe("relay write and response lifetime", () => {

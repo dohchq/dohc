@@ -6,6 +6,7 @@ import type {
   ActorNeutralWriteMetadata,
   FileObjectRecord,
   MomentAuthor,
+  MomentMetadata,
   SecretFileMoment,
   SecretFileStore,
   TextFileSnapshot,
@@ -194,6 +195,17 @@ function publicOrigin(origin: string): ActorNeutralWriteMetadata["origin"] {
   }
 }
 
+// A moment keeps the live settle's "ydoc" origin, which History shows as a
+// live edit. Snapshot, conflict, and secret metadata share the write type,
+// so they keep the write origins above.
+function momentMetadataFromOrigin(
+  origin: string,
+  supplied?: ActorNeutralWriteMetadata,
+): MomentMetadata {
+  const metadata = metadataFromOrigin(origin, supplied);
+  return origin === "ydoc" ? { ...metadata, origin } : metadata;
+}
+
 function snapshotFromWire(
   value: VersionedTextReadValue,
   metadata?: ActorNeutralWriteMetadata,
@@ -233,6 +245,9 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
     );
   }
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
+  if (author.kind === "named") {
+    return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+  }
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -306,7 +321,7 @@ function momentFromWire(
       // reconstructed from the before side.
       after: payloadSnapshot(moment, "after"),
     },
-    metadata: metadataFromOrigin(moment.metadataOrigin, {
+    metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
         ? { summary: moment.metadataSummary }
@@ -338,7 +353,7 @@ function momentSummaryFromWire(
     ...(moment.afterByteLength !== null
       ? { byteLength: moment.afterByteLength }
       : {}),
-    metadata: metadataFromOrigin(moment.metadataOrigin, {
+    metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
         ? { summary: moment.metadataSummary }
@@ -519,7 +534,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 }
 
 function adapterAuthor(author: MomentAuthor): AgentAuthor {
-  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public authorship can only arrive through relay replication.");
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public and named authorship can only arrive through relay replication.");
   return {
     kind: "agent",
     agentId: author.agentId,

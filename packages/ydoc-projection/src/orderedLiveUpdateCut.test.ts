@@ -2675,7 +2675,7 @@ describe('validateOrderedLiveUpdateCut', () => {
       expect(ast.getText(ast)).toContain(write)
       expect(() => assertProjectedWrites(ast), write).toThrow()
     }
-  }, 15_000)
+  })
 
   it('keeps the deep module private and the two static safety proofs intact', () => {
     const source = readFileSync(ORDERED_CUT_SOURCE, 'utf8')
@@ -3222,7 +3222,7 @@ describe('[held-boundary] ordered cut portable limits', () => {
       { mode: 'registration', checkpoint },
       highPolicy({ maxValueNodeVisits: exact - 1 }),
     )).toMatchObject({ kind: 'refused', reason: 'capacity-refused' })
-  }, 15_000)
+  })
 
   it('keeps 100,000 dense nonmergeable client ranges bounded and charged', () => {
     const clientId = 100_000
@@ -3245,7 +3245,7 @@ describe('[held-boundary] ordered cut portable limits', () => {
       kind: 'refused',
       reason: 'capacity-refused',
     })
-  }, 15_000)
+  })
 })
 
 

@@ -1,4 +1,6 @@
 import {
+  RelayApiVersionError,
+  type RelayApiUpdate,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   type PullWorkspaceFromRelayResult,
@@ -47,13 +49,20 @@ export interface CloudSyncEngineOptions {
   // every sync pass (push member ops, pull peers'). Best-effort — the
   // callback owns its own error handling (revocation marking, logging); a
   // throw here is logged and never fails the workspace's own pass, so a
-  // revoked share can't wedge file sync into permanent backoff.
-  syncSharedChannels?: () => Promise<void>;
+  // revoked share can't wedge file sync into permanent backoff. Resolves true
+  // when it applied ops, so a quiet pass announces its end.
+  syncSharedChannels?: () => Promise<boolean>;
   // Runs after the workspace pull has fully succeeded through the capture
   // gate (including materialization and cursor commit). Follow-up projection
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
-  afterSuccessfulPull?: () => Promise<void>;
+  // `recovered` is true for the first successful pass after a failed one,
+  // which is when the relay answers again.
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs before each pull request is sent, and must finish any durable write
+  // it needs before it returns. The function it returns runs when that pull
+  // ends, whatever the outcome.
+  pullStarting?: () => () => void;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -67,6 +76,10 @@ export interface CloudSyncSnapshot {
   pendingChangeCount: number;
   conflictCount: number;
   authExpired: boolean;
+  // Sync stopped because the relay does not serve this build's relay API
+  // version. Names the side that must update; sync starts again after dohc
+  // restarts on a version the relay serves.
+  updateRequired?: RelayApiUpdate;
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
   syncFailing?: boolean;
@@ -75,6 +88,7 @@ export interface CloudSyncSnapshot {
 export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
+  queuePull(): void;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -93,6 +107,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let conflictCount = 0;
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
+  let updateRequired: RelayApiUpdate | null = null;
   let authExpired = false;
   let syncFailing = false;
   let sharingDeclined: SharingDeclined[] = [];
@@ -102,13 +117,25 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  // A pull the Chats polls asked for while local writes held the debounce.
+  let pullTimer: ReturnType<typeof setTimeout> | undefined;
   let retryQueued = false;
+  // Passes queued on the chain or running. Each of them pulls.
+  let passesPending = 0;
+  // Counts change events, so a quiet pass knows whether anything announced
+  // `syncing` while it ran.
+  let changeEvents = 0;
   let chain: Promise<void> = Promise.resolve();
+
+  function emitChange(): void {
+    changeEvents += 1;
+    options.onChange();
+  }
 
   function setSyncFailing(value: boolean): void {
     if (syncFailing === value) return;
     syncFailing = value;
-    options.onChange();
+    emitChange();
   }
 
   function clearTimers(): void {
@@ -119,6 +146,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (backoffTimer !== undefined) {
       clearTimeout(backoffTimer);
       backoffTimer = undefined;
+    }
+    if (pullTimer !== undefined) {
+      clearTimeout(pullTimer);
+      pullTimer = undefined;
     }
   }
 
@@ -140,7 +171,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       authExpired = true;
       stopped = true;
       clearTimers();
-      options.onChange();
+      emitChange();
+      return;
+    }
+    // Retrying cannot help until one side updates, so sync stops and says which.
+    if (error instanceof RelayApiVersionError) {
+      updateRequired = error.update;
+      stopped = true;
+      syncFailing = false;
+      clearTimers();
+      emitChange();
       return;
     }
     consecutiveFailures += 1;
@@ -149,7 +189,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     scheduleBackoff();
   }
 
-  async function doPass(): Promise<void> {
+  // Resolves true when the workspace pull or the shared-channel pass applied
+  // ops. The shared-channel pass tells the renderer itself, and the renderer
+  // then reads `syncing`, so a quiet pass must announce that it ended.
+  async function doPass(): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
     let passOwnerPending = ownerAdmissionPending;
@@ -161,6 +204,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
       async (materializePage) => {
+        const pull = async () => {
+          const ended = options.pullStarting?.();
+          try {
+            return await operations.pull(materializePage);
+          } finally {
+            ended?.();
+          }
+        };
         // A join-bootstrap engine is pull-only until its first pull succeeds:
         // a fresh join must never append ops before it has the remote state.
         if (!bootstrapPass) {
@@ -177,7 +228,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           }
         }
         try {
-          return await operations.pull(materializePage);
+          return await pull();
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // A pull can find that this machine's local origin disagrees with its
@@ -187,7 +238,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           if (!bootstrapPass) {
             await push();
           }
-          return operations.pull(materializePage);
+          return pull();
         }
       },
     );
@@ -197,7 +248,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     bootstrapPullPending = false;
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull();
+        await options.afterSuccessfulPull({ recovered: consecutiveFailures > 0 });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }
@@ -205,9 +256,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // Shared channels ride the same cadence but never gate the pass: chat
     // replay touches no workspace files, so it runs outside runRelaySync's
     // capture gate, and its failures are contained here.
+    let sharedChannelsApplied = false;
     if (options.syncSharedChannels) {
       try {
-        await options.syncSharedChannels();
+        sharedChannelsApplied = await options.syncSharedChannels();
       } catch (error) {
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
@@ -239,21 +291,47 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         void runPass(false);
       }, 0);
     }
+    return pullResult.applied > 0 || sharedChannelsApplied;
   }
 
-  function runPass(rethrow: boolean): Promise<void> {
+  // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
+  // every pass, so they do not count.
+  function visibleState(): string {
+    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
+  }
+
+  // A quiet pass serves queuePull. Each change event refreshes Chats, so a
+  // quiet pass announces nothing at its start, and at its end only when it
+  // applied ops, changed what the snapshot shows, or something announced
+  // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
+  function runPass(rethrow: boolean, quiet = false): Promise<void> {
+    passesPending += 1;
+    // This pass pulls, so it serves a pull waiting on its own deadline.
+    if (pullTimer !== undefined) {
+      clearTimeout(pullTimer);
+      pullTimer = undefined;
+    }
     const result = chain.then(async () => {
-      if (stopped) return;
-      syncing = true;
-      options.onChange();
       try {
-        await doPass();
-      } catch (error) {
-        handleFailure(error);
-        if (rethrow) throw error;
+        if (stopped) return;
+        const eventsBefore = changeEvents;
+        const stateBefore = visibleState();
+        let applied = false;
+        syncing = true;
+        if (!quiet) emitChange();
+        try {
+          applied = await doPass();
+        } catch (error) {
+          handleFailure(error);
+          if (rethrow) throw error;
+        } finally {
+          syncing = false;
+          if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+            emitChange();
+          }
+        }
       } finally {
-        syncing = false;
-        options.onChange();
+        passesPending -= 1;
       }
     });
     chain = result.catch(() => undefined);
@@ -268,7 +346,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     queueSync() {
       if (authExpired || stopped) return;
       pendingChangeCount += 1;
-      options.onChange();
+      emitChange();
       if (backoffTimer !== undefined) {
         retryQueued = true;
         return;
@@ -280,6 +358,26 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }, debounceMs);
     },
 
+    // A pull the Chats polls ask for. Members' replies to conversations this
+    // workspace owns land in its own relay log, and nothing else fetches them
+    // while the desktop is idle. Unlike queueSync this records no local change,
+    // so a poll cannot show "Local changes". It yields to a queued or running
+    // pass and to failure backoff, because those pull too. Each local write
+    // restarts the debounce, so the pull keeps its own deadline: steady writes
+    // cannot postpone it past one debounce interval.
+    queuePull() {
+      if (authExpired || stopped) return;
+      if (passesPending > 0 || backoffTimer !== undefined || pullTimer !== undefined) return;
+      if (debounceTimer === undefined) {
+        void runPass(false, true);
+        return;
+      }
+      pullTimer = setTimeout(() => {
+        pullTimer = undefined;
+        void runPass(false, true);
+      }, debounceMs);
+    },
+
     snapshot() {
       return {
         syncing,
@@ -287,6 +385,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         pendingChangeCount,
         conflictCount,
         authExpired,
+        ...(updateRequired ? { updateRequired } : {}),
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         ...(syncFailing ? { syncFailing: true } : {}),

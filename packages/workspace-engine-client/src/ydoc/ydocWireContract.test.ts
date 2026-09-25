@@ -120,10 +120,10 @@ describe("ydoc.open result", () => {
     ).toBe("scene");
   });
 
-  it("carries optional seed content through", () => {
-    expect(decodeYdocResult(YDOC_METHOD.open, openResult({ seedContent: "# Seed\n" }))).toMatchObject({
-      seedContent: "# Seed\n",
-    });
+  it("carries optional seed content and its seed client through", () => {
+    expect(
+      decodeYdocResult(YDOC_METHOD.open, openResult({ seedContent: "# Seed\n", seedClientId: 7 })),
+    ).toMatchObject({ seedContent: "# Seed\n", seedClientId: 7 });
   });
 
   it("carries validated artifact asset descriptors through", () => {

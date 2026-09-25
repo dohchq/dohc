@@ -96,11 +96,21 @@ export interface ActorNeutralWriteMetadata {
   correlationId?: string;
 }
 
+// A recorded moment can also say that a live document session settled it.
+// The settle names no author, and it can carry a collaborator's synced
+// updates, so "ydoc" says how the change arrived, not who made it. Writes
+// take ActorNeutralWriteMetadata, so no write can claim it.
+export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"> {
+  origin: ActorNeutralWriteOrigin | "ydoc";
+}
+
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
 // stays actor-neutral). Tracked agent runs stamp the agent variant. Relay
 // collection creates stamp the public variant using a grant-scoped public
-// principal mapping, never an internal principal or account ID. Ordinary
-// edits, reconciliation, and external agent CLIs remain actor-neutral.
+// principal mapping, never an internal principal or account ID. A named
+// recipient's direct write to a Collection's own files stamps the named
+// variant with the opaque relay user id, never an email. Ordinary edits,
+// reconciliation, and external agent CLIs remain actor-neutral.
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
@@ -114,7 +124,14 @@ interface PublicMomentAuthor {
   grantId: string;
 }
 
-export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor;
+interface NamedMomentAuthor {
+  kind: "named";
+  userId: string;
+  grantId: string;
+  grantGeneration: number;
+}
+
+export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor | NamedMomentAuthor;
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
@@ -316,7 +333,7 @@ export interface VersionedTextMoment {
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
   payload: VersionedTextMomentPayload;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   // Present only when a dohc-tracked agent run authored this moment.
   author?: MomentAuthor;
   before?: TextFileSnapshot | null;
@@ -340,7 +357,7 @@ export interface VersionedTextMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: VersionedFileContentKind;
   byteLength?: number;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   // Present only when a dohc-tracked agent run authored this moment.
   author?: MomentAuthor;
   momentOrder: number;

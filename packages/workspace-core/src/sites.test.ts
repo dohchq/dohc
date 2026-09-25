@@ -58,6 +58,16 @@ describe("site package derived facts", () => {
 });
 
 describe("discoverSites", () => {
+  it("discovers an app declared only by app.publish.json", () => {
+    expect(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx", "trip/trip-poll/responses/collection.yaml"])).toEqual([
+      { root: "trip/trip-poll", title: "Trip Poll", kind: "configured", confidence: "high", scripts: {}, buildOutputs: [], diagnostics: [] },
+    ]);
+  });
+
+  it("keeps an app with app.publish.json even when its dohc.json names another type", () => {
+    expect(discoverSites([{ path: "poll/dohc.json", body: '{"type":"plugin"}' }, "poll/app.publish.json"]).map(site => site.root)).toEqual(["poll"]);
+  });
+
   it("discovers a plain static website from index.html", () => {
     expect(
       discoverSites([

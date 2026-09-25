@@ -281,6 +281,9 @@ fn idempotency_key_reuse_is_guarded() {
 fn close_reopen_mutate_cycle_stays_writable() {
     let scratch = ScratchDir::new().expect("scratch dir");
     let db = engine_db_path(&scratch).expect("db path");
+    let migration_count = open(&db, 0)
+        .table_row_count("engine_migrations")
+        .expect("initial ledger");
 
     for round in 0..3_i64 {
         let mut store = open(&db, round + 1);
@@ -297,10 +300,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
 
     let store = open(&db, 99);
     assert_eq!(moments(&store), 3);
-    // Each shipped migration, including pending owner settlements, runs once.
+    // Reopening never adds duplicate migration records.
     assert_eq!(
         store.table_row_count("engine_migrations").expect("ledger"),
-        5
+        migration_count
     );
     let conflict_objects = store
         .read_with(|conn| {

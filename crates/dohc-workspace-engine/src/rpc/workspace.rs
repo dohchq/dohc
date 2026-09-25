@@ -18,6 +18,7 @@ use crate::rpc::request::validated_author;
 use crate::rpc::ydoc::YdocSession;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
+use dohc_engine_protocol::transport::ProgressSink;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::ActorHandle;
@@ -30,9 +31,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
@@ -314,6 +319,79 @@ pub(super) fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Res
     }
 }
 
+/// How often an open that asked for progress reads its counters: well under
+/// any silence a caller would tolerate, and each read is a few atomic loads.
+const OPEN_PROGRESS_POLL: Duration = Duration::from_millis(500);
+
+/// What an open has done so far, from counters its work already keeps: the
+/// store's SQLite work while it opens and migrates and then while this open
+/// runs, each command its actor serves (the capture baseline's batches among
+/// them), and each job the startup replay takes on; the files the capture
+/// scan has hashed; and the open's own steps between them. The actor holds
+/// the store counter weakly, so dropping this ends its counting on every
+/// path out of the open.
+struct OpenWork {
+    /// Present only when the open reports progress, so an open that does not
+    /// ask pays for no counting in the store or its actor.
+    store: Option<Arc<AtomicU64>>,
+    steps: AtomicU64,
+    scan: OnceLock<capture_driver::ScanGauge>,
+}
+
+impl OpenWork {
+    fn new(counting: bool) -> Self {
+        OpenWork {
+            store: counting.then(|| Arc::new(AtomicU64::new(0))),
+            steps: AtomicU64::new(0),
+            scan: OnceLock::new(),
+        }
+    }
+
+    fn step(&self) {
+        self.steps.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Movement is what counts, not the value: a restarted files layer starts
+    /// its scan count again.
+    fn total(&self) -> u64 {
+        let store = self
+            .store
+            .as_ref()
+            .map_or(0, |store| store.load(Ordering::Relaxed));
+        let scan = self.scan.get().map_or(0, capture_driver::ScanGauge::hashed);
+        store
+            .wrapping_add(self.steps.load(Ordering::Relaxed))
+            .wrapping_add(scan)
+    }
+}
+
+/// Run `work` to its end, reporting progress on each poll that finds `done`
+/// moved since the last. A poll that finds nothing new reports nothing, so a
+/// caller can tell a stuck request from a slow one.
+async fn report_while<T>(
+    progress: &ProgressSink,
+    done: impl Fn() -> u64,
+    work: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(work);
+    let mut polls = tokio::time::interval(OPEN_PROGRESS_POLL);
+    polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut seen = done();
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut work => return output,
+            _ = polls.tick() => {
+                let now = done();
+                if now != seen {
+                    seen = now;
+                    progress.report();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -340,6 +418,20 @@ impl EngineService {
         ctx: &RequestContext,
         params: Value,
     ) -> Result<Value, WireError> {
+        let work = OpenWork::new(ctx.progress.is_active());
+        let open = self.open_workspace(ctx, params, &work);
+        if !ctx.progress.is_active() {
+            return open.await;
+        }
+        report_while(&ctx.progress, || work.total(), open).await
+    }
+
+    async fn open_workspace(
+        &self,
+        ctx: &RequestContext,
+        params: Value,
+        work: &OpenWork,
+    ) -> Result<Value, WireError> {
         let capture_author_supplied = params
             .as_object()
             .is_some_and(|object| object.contains_key("captureAuthor"));
@@ -364,6 +456,8 @@ impl EngineService {
             }
             serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
+        // Waiting for the lock is not this open's progress; holding it is.
+        work.step();
         let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
             .map_err(map_root_binding)?;
         let requested_mode = if params.skip_startup_maintenance {
@@ -508,10 +602,15 @@ impl EngineService {
         #[cfg(not(test))]
         let bind_root_faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
         let binding_root = root.clone();
+        let store_work = work.store.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
-                WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
-                WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
+                WorkspaceOpenMode::Full => {
+                    supervisor.open_counting(&actor_path, now_ms, store_work)
+                }
+                WorkspaceOpenMode::ReadOnly => {
+                    supervisor.open_read_only_counting(&actor_path, store_work)
+                }
             };
             // Establish cleanup ownership inside the blocking task that creates
             // the actor. If the awaiting request is cancelled, Tokio drops this
@@ -672,6 +771,7 @@ impl EngineService {
         } else {
             open_guard
         };
+        work.step();
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -697,7 +797,12 @@ impl EngineService {
             // land on disk while nothing is watching (no suppression window),
             // and the baseline reconcile below then scans the POST-replay disk.
             actor
-                .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
+                .materialize_replay_pending_counting(
+                    root.clone(),
+                    params.workspace_id.clone(),
+                    now_ms,
+                    work.store.clone(),
+                )
                 .await
                 .map_err(map_runtime)?;
             // The files layer spawns only here, after the root binding
@@ -717,6 +822,9 @@ impl EngineService {
                     apply_probe: self.capture_apply_probe.clone(),
                 })
             });
+            if let Some(capture) = &capture {
+                let _ = work.scan.set(capture.scan_gauge());
+            }
             // STARTUP ORDERING BARRIER: existing stores and uncertain scans
             // apply the closed-period baseline before the handle is handed
             // out. A proven fresh, all-Added import may return earlier; Added
@@ -1589,6 +1697,7 @@ mod tests {
                     workspace: Some(handle.clone()),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: json!({"versionId":"main","path":"held.md"}),
                 },
             ));
@@ -1750,6 +1859,73 @@ mod tests {
         let _handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
         assert!(db_path.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_is_reported_on_each_poll_that_finds_the_work_moved() {
+        let done = AtomicU64::new(0);
+        let reports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&reports);
+        let sink = ProgressSink::new(1, move |message| {
+            count.fetch_add(1, Ordering::SeqCst);
+            drop(message);
+        });
+        let work = async {
+            // Between polls, so each poll finds exactly one step.
+            tokio::time::sleep(OPEN_PROGRESS_POLL / 2).await;
+            for _ in 0..3 {
+                done.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(OPEN_PROGRESS_POLL).await;
+            }
+            // A stall: the polls find nothing new and report nothing.
+            tokio::time::sleep(OPEN_PROGRESS_POLL * 10).await;
+            "opened"
+        };
+        let opened = report_while(&sink, || done.load(Ordering::Relaxed), work).await;
+        assert_eq!(opened, "opened");
+        assert_eq!(reports.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_that_asked_reports_its_store_work_while_it_is_still_open() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let probe = capture_driver::CaptureApplyProbe::default();
+        probe.pause_next_open_install();
+        let mut service = EngineService::with_supervisor(supervisor);
+        service.capture_apply_probe = Some(probe.clone());
+        let service = Arc::new(service);
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = RequestContext::unbounded().with_progress(ProgressSink::new(5, move |message| {
+            let _ = reported.send(message.id());
+        }));
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "progress-open",
+            "captureMode": "none"
+        });
+        let opening_service = Arc::clone(&service);
+        let opening =
+            tokio::spawn(async move { opening_service.workspace_open(&ctx, params).await });
+        // The store has opened and migrated; the open holds before it installs.
+        probe.wait_until_open_install_paused().await;
+        let id = tokio::time::timeout(OPEN_PROGRESS_POLL * 120, reports.recv())
+            .await
+            .expect("a poll reports the store work")
+            .expect("the sink is still open");
+        assert_eq!(id, 5);
+        probe.release_open_install();
+        let opened = opening
+            .await
+            .expect("open task")
+            .expect("workspace.open succeeds");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2244,6 +2420,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
+                    bootstrap_complete: true,
                     cursor: 7,
                     replication_epoch: "epoch".to_owned(),
                     stream_identity: "stream".to_owned(),

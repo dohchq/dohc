@@ -23,10 +23,26 @@ Store signing and notarization secrets in the GitHub `desktop-release` environme
 Do not store them as repository or organization secrets available to arbitrary branches.
 Restrict that environment to the `main` branch, with no tag rules.
 
-The release workflow runs for pushes to `main`.
-Manual dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
+The release workflow starts only when someone dispatches it.
+Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
 Pull requests use local verification. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
+
+## Provide self-hosted runners
+
+Every release job runs on a self-hosted runner. Cloud runners stay off.
+
+| Jobs | Runner labels |
+| --- | --- |
+| Preflight, Publish, and the Linux x64 package | `self-hosted`, `linux`, `x64` |
+| Windows x64 package | `self-hosted`, `windows`, `x64` |
+| macOS x64 and arm64 packages | `self-hosted`, `macos`, `arm64` |
+
+A job waits in the queue until a runner with its labels is online.
+Each runner needs Git with bash, rustup, and the platform's native build tools.
+The Linux runner also needs `xvfb-run` for the fuse smoke and the GitHub CLI, `gh`, for publishing.
+The package and publish jobs receive the environment's secrets.
+Register only runners that the release owner controls.
 
 ## Publish a stable version
 
@@ -37,8 +53,16 @@ Dispatch `Desktop Release` from `main` with `channel=latest` and the matching pa
 Use `dry_run=true` to check unsigned packaging without publication.
 For publication, use `dry_run=false`. Stable Windows and macOS builds require signing.
 
-Pushing a tag does not start a release. The publish job creates the version's release tag.
-After enabling the workflow, pushes to `main` produce nightly builds.
+Pushing a tag does not start a release.
+The publish job creates the release as a draft at the dispatched commit and uploads every file to it.
+Its last step publishes the draft, and GitHub then creates the version's tag.
+Updaters never read a draft.
+A dispatch stops before packaging if its version already has a tag or a release, published or draft.
+Then bump the version, or delete the draft that a stopped run left, and dispatch again.
+To build a nightly, dispatch `Desktop Release` from `main` with `channel=nightly`.
+A push to `main` starts no release.
+A second dispatch on the same channel waits for the running one to finish.
+GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
 
 ## Choose an update feed
 

@@ -28,8 +28,9 @@ type CheckState =
 export function AddAgentForm(props: {
   workspaceId: string;
   settings: DesktopUserSettings;
-  // Saves the whole settings object, the way the settings dialog does.
-  onSave: (settings: DesktopUserSettings) => Promise<void>;
+  // Saves the changed settings with the settings they came from, the way the
+  // settings dialog does.
+  onSave: (settings: DesktopUserSettings, base: DesktopUserSettings) => Promise<void>;
   onError: (message: string) => void;
   onDone: () => void;
   onCancel: () => void;
@@ -79,7 +80,7 @@ export function AddAgentForm(props: {
         ...settings,
         profile: { ...settings.profile, agentName: validAgentName },
         runner: { ...settings.runner, command: command.trim(), profile, enabled: true },
-      });
+      }, settings);
       return requests.isCurrent(token);
     } catch (cause) {
       if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."));

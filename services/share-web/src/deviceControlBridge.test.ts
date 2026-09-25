@@ -7,9 +7,11 @@ import { DEVICE_CONTROL_PROTOCOL, type DeviceControlLimits } from "@dohc/live-se
 import { createDeviceControlBridge } from "./deviceControlBridge.js";
 import { DeviceCreditSender } from "@dohc/service-http";
 
+// The relay handshake spans several socket hops that a loaded gate host can
+// stall past 200 ms; only the handshake-bound test shortens it.
 const limits: DeviceControlLimits = { maxConnections: 2, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
-  handshakeTimeoutMs: 200, heartbeatIntervalMs: 200, heartbeatTimeoutMs: 300, closeTimeoutMs: 50 };
+  handshakeTimeoutMs: 10_000, heartbeatIntervalMs: 200, heartbeatTimeoutMs: 300, closeTimeoutMs: 50 };
 const key = "configured-device-control-relay-key";
 const notice = { type: "registered", mode: "device", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection" };
 const admission = { capacity: 20, refillPerSecond: 1, maxKeys: 8 };
@@ -75,7 +77,8 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, ingress = {
     return { device, closed };
   }
   const { device, closed } = connect();
-  await upgraded;
+  // A short handshake bound can close the device before the relay sees its upgrade.
+  await Promise.race([upgraded, closed]);
   return { bridge, relayHttp, device, closed, connect, requestCount: () => requestCount,
     headers: () => headers, upstream: () => upstream, rawSocket: () => rawSocket!,
     async register() { const message = once(device, "message"); accept!(); await message; } };
@@ -163,7 +166,7 @@ it("carries frames larger than the bridge budget in both directions after a rece
     expect(Buffer.concat(chunks)).toEqual(expected);
     queue.close();
   }));
-}, 20_000);
+});
 
 it("cancels the internal pending handshake when the outbound device leaves", async () => {
   const fixture = await setup({ handshakeTimeoutMs: 60_000 });
@@ -174,7 +177,7 @@ it("cancels the internal pending handshake when the outbound device leaves", asy
 });
 
 it("bounds the internal handshake when the relay never sends registration", async () => {
-  const fixture = await setup();
+  const fixture = await setup({ handshakeTimeoutMs: 200 });
   await fixture.closed;
   expect(fixture.device.readyState).toBe(WebSocket.CLOSED);
 });

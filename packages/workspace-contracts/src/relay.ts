@@ -100,6 +100,29 @@ export class RelayKeyEnvelopeMissingError extends Error {
   }
 }
 
+// Which side must update when the relay does not serve the relay API version
+// this build speaks. "app" means the relay needs a newer dohc; "server" means
+// the relay is older than this dohc.
+export type RelayApiUpdate = "app" | "server";
+
+export const RELAY_API_VERSION_CAUSE: Readonly<Record<RelayApiUpdate, string>> = {
+  app: "This server needs a newer version of dohc.",
+  server: "This server runs an older version of dohc.",
+};
+
+export class RelayApiVersionError extends Error {
+  constructor(readonly update: RelayApiUpdate) {
+    super(
+      `${RELAY_API_VERSION_CAUSE[update]} ${
+        update === "app"
+          ? "Update dohc, then try again."
+          : "Ask the person who runs it to update it."
+      }`,
+    );
+    this.name = "RelayApiVersionError";
+  }
+}
+
 export interface RecoverRelayOriginResult {
   // The diverged origin id the relay is authoritative for; it is retired
   // locally (never pushed again) but its ops stay as shared history.
@@ -170,7 +193,7 @@ export function decodeRelayWorkspaceBootstrap(
 }
 
 export class SharedChannelReadOnlyError extends Error {
-  constructor(message = "This shared channel is read-only for you.") {
+  constructor(message = "You can only read this.") {
     super(message);
     this.name = "SharedChannelReadOnlyError";
   }
@@ -361,3 +384,162 @@ export interface ShareProposalSettlement {
   proposalId: string;
   state: ShareProposalState;
 }
+// A Notice sent to a person lives in that person's notice list on the relay,
+// so it reaches every computer they sign in on. The relay derives who sent
+// it, what kind of sender it shows, and the sender's name. `recipients` says
+// who a kind may be sent to: "self" kinds describe the sender's own work, and
+// "readers" kinds may go to anyone who can read the notice's target path.
+export type NoticeSenderKind = "person" | "agent" | "automation";
+
+export const NOTICE_KINDS = {
+  mention: { senderKind: "person", recipients: "self" },
+  "agent-run": { senderKind: "agent", recipients: "self" },
+  "schedule-skipped": { senderKind: "automation", recipients: "self" },
+  "automation-failed": { senderKind: "automation", recipients: "readers" },
+  "automation-notify": { senderKind: "automation", recipients: "readers" },
+} as const satisfies Record<string, {
+  senderKind: NoticeSenderKind;
+  recipients: "self" | "readers";
+}>;
+
+export type NoticeKind = keyof typeof NOTICE_KINDS;
+
+// Lengths count code points, as a person counts characters.
+export const NOTICE_TITLE_MAX_CHARS = 120;
+export const NOTICE_BODY_MAX_CHARS = 500;
+// The relay's display-name limit for a sender.
+export const NOTICE_SENDER_LABEL_MAX_CHARS = 40;
+// The target as JSON, in UTF-8 bytes.
+const NOTICE_TARGET_MAX_BYTES = 2_048;
+export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
+// The id a sender posts.
+export const NOTICE_POSTED_ID_MAX_CHARS = 256;
+// The id the relay stores and serves. A notice from another person is
+// stored as `from:<sender user id, percent-encoded>:<posted id>`, so no
+// sender can take an id that another sender, or the recipient, will use.
+export const NOTICE_ID_MAX_CHARS = 1_024;
+export const NOTICE_FROM_PREFIX = "from:";
+export const NOTICE_MARKS_PER_REQUEST = 100;
+export const NOTICE_PAGE_MAX = 200;
+
+// A person's notice list keeps at most this many rows. A new notice past it
+// removes read and dismissed rows first, oldest first, then the oldest unread.
+export const NOTICE_LIST_ROW_LIMIT = 1_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// How long a row stays after it arrives unread, after it is read, and after
+// it is dismissed. A dismissed row stays as a tombstone so a computer that
+// was away still learns of the dismissal.
+export const NOTICE_UNREAD_RETENTION_MS = 180 * DAY_MS;
+export const NOTICE_READ_RETENTION_MS = 90 * DAY_MS;
+export const NOTICE_DISMISSED_RETENTION_MS = 30 * DAY_MS;
+
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+// A body may carry tabs and line feeds, and no other control character.
+const BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
+
+// A non-empty, trimmed line of at most `maxChars` code points with no
+// control characters. Titles, ids, labels, and target fields are lines.
+export function isNoticeLine(value: unknown, maxChars: number): value is string {
+  return typeof value === "string" && value.length > 0 && value === value.trim() &&
+    !CONTROL_CHARS.test(value) && [...value].length <= maxChars;
+}
+
+export function isNoticeBody(value: unknown): value is string {
+  return typeof value === "string" && !BODY_CONTROL_CHARS.test(value) &&
+    [...value].length <= NOTICE_BODY_MAX_CHARS;
+}
+
+// What a notice points at. Every field is optional; a notice for someone
+// other than its sender must name a path both of them can read.
+export interface NoticeTarget {
+  path?: string;
+  record?: string;
+  thread?: string;
+  message?: string;
+  share?: string;
+  automation?: string;
+  run?: string;
+}
+
+const NOTICE_TARGET_FIELDS = [
+  "path", "record", "thread", "message", "share", "automation", "run",
+] as const satisfies readonly (keyof NoticeTarget)[];
+
+export function isNoticeTarget(value: unknown): value is NoticeTarget {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value).every(([field, fieldValue]) =>
+    (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
+    isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS)) &&
+    new TextEncoder().encode(JSON.stringify(value)).byteLength <= NOTICE_TARGET_MAX_BYTES;
+}
+
+// How the sender reaches the notice's workspace: the owner names the
+// workspace, and a person it was shared with names the share. The relay
+// derives the workspace from a share and never serves a grantee the owner's
+// workspace id.
+export type NoticeReach =
+  | { workspaceId: string; shareId?: undefined }
+  | { shareId: string; workspaceId?: undefined };
+
+// POST /sync/notices. A second post of the same `noticeId` for the same
+// recipient changes nothing, so two computers of one sender post one notice.
+// Posting to yourself always works. A notice for another person needs a
+// "readers" kind and a `target.path` both people can read, and only the
+// workspace owner or a person the work was shared with by name can send one.
+export type PostNoticeRequest = NoticeReach & {
+  noticeId: string;
+  recipientUserId: string;
+  kind: NoticeKind;
+  title: string;
+  body: string;
+  target: NoticeTarget;
+  // The computer that posted. It names where a notice started and grants
+  // nothing: an action a notice offers, such as Try again on a failed
+  // automation, must check that the notice's sender is the person acting,
+  // never this value.
+  originInstallId: string;
+};
+
+// One row of GET /sync/notices?cursor=<nextCursor>. `changeSeq` rises on every
+// change to the row, including read and dismissed, and counts per person.
+export interface RelayNotice {
+  noticeId: string;
+  changeSeq: number;
+  // Exactly one of these is set. `workspaceId` is the workspace when the
+  // recipient owns it or named it in its own post. `recipientShareId` is the
+  // share through which the recipient reads the notice's target.
+  workspaceId: string | null;
+  recipientShareId: string | null;
+  kind: NoticeKind;
+  senderKind: NoticeSenderKind;
+  senderUserId: string;
+  senderLabel: string;
+  title: string;
+  body: string;
+  // Null once the recipient can no longer read what the notice pointed at.
+  target: NoticeTarget | null;
+  originInstallId: string;
+  createdAtMs: number;
+  readAtMs: number | null;
+  dismissedAtMs: number | null;
+  // The relay removed the row to make room in the list. Drop it; its body
+  // and target are gone.
+  removed: boolean;
+}
+
+export interface RelayNoticePage {
+  notices: RelayNotice[];
+  // Opaque. Pass it back as `cursor` for the changes after this page; no
+  // cursor asks for the whole list.
+  nextCursor: string;
+  hasMore: boolean;
+  // The page starts the list over, because the cursor is older than the
+  // relay keeps removed rows or came from another relay history. Drop every
+  // cached row, keep your own waiting posts and marks, and take this page
+  // and the pages after it as the whole list.
+  replace: boolean;
+}
+
+// POST /sync/notices/marks. Read and dismissed are one-way: marking a row
+// again, or a row the relay no longer holds, changes nothing.
+export type NoticeMark = "read" | "dismissed";

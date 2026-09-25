@@ -557,11 +557,11 @@ describe("DM request decisions", () => {
     );
     const input: Parameters<typeof classifyDmRequests>[0] = {
       received: [
-        { shareId: "share-pending", granterEmail: "pending@example.com", selector: { kind: "chat-channel", channelWireId: "wire-pending" } },
-        { shareId: "share-declined", granterEmail: "declined@example.com", selector: { kind: "chat-channel", channelWireId: "wire-declined" } },
-        { shareId: "share-channel", selector: { kind: "chat-channel", channelWireId: "wire-channel" } },
-        { shareId: "share-unknown", selector: { kind: "chat-channel", channelWireId: "wire-unknown" } },
-        { shareId: "share-claimed", selector: { kind: "chat-channel", channelWireId: "wire-claimed" } },
+        { shareId: "share-pending", granterEmail: "pending@example.com", selector: { kind: "chat", channelWireId: "wire-pending" } },
+        { shareId: "share-declined", granterEmail: "declined@example.com", selector: { kind: "chat", channelWireId: "wire-declined" } },
+        { shareId: "share-channel", selector: { kind: "chat", channelWireId: "wire-channel" } },
+        { shareId: "share-unknown", selector: { kind: "chat", channelWireId: "wire-unknown" } },
+        { shareId: "share-claimed", selector: { kind: "chat", channelWireId: "wire-claimed" } },
       ],
       kindCache,
       peekKind,
@@ -587,12 +587,12 @@ describe("DM request decisions", () => {
       {
         shareId: "share-pending",
         granterEmail: "pending@example.com",
-        selector: { kind: "chat-channel", channelWireId: "wire-pending" },
+        selector: { kind: "chat", channelWireId: "wire-pending" },
       },
       {
         shareId: "share-declined",
         granterEmail: "declined@example.com",
-        selector: { kind: "chat-channel", channelWireId: "wire-declined" },
+        selector: { kind: "chat", channelWireId: "wire-declined" },
       },
     ];
     const kindCache = new Map<string, "dm" | "not-dm">();
@@ -631,7 +631,7 @@ describe("DM request decisions", () => {
         {
           shareId: "share-new",
           granterEmail: "owner@example.com",
-          selector: { kind: "chat-channel", channelWireId: "wire-x" },
+          selector: { kind: "chat", channelWireId: "wire-x" },
         },
       ],
       kindCache: new Map<string, "dm" | "not-dm">(),
@@ -681,7 +681,7 @@ describe("DM request decisions", () => {
         granterEmail: "granter@example.com",
         channelWireId: "wire-c",
         access: "read-write",
-        kind: "chat-channel" as const,
+        kind: "chat" as const,
         createdAtMs: 1,
       }),
       pull,
@@ -706,7 +706,7 @@ describe("DM request decisions", () => {
       granterEmail: "granter@example.com",
       channelWireId: "wire-race",
       access: "read-write" as const,
-      kind: "chat-channel" as const,
+      kind: "chat" as const,
       createdAtMs: 1,
     };
     const fetchResolvers: Array<(value: typeof info) => void> = [];
@@ -811,7 +811,7 @@ describe("DM request decisions", () => {
           granterEmail: "owner@example.com",
           channelWireId: "wire-x",
           access: "read-write",
-          kind: "chat-channel" as const,
+          kind: "chat" as const,
           createdAtMs: 1,
         }),
         pull: async () => ({ applied: 0 }),
@@ -847,7 +847,7 @@ describe("DM request decisions", () => {
         {
           shareId: "share-new",
           granterEmail: "owner@example.com",
-          selector: { kind: "chat-channel", channelWireId: "wire-x" },
+          selector: { kind: "chat", channelWireId: "wire-x" },
         },
       ],
       kindCache: new Map(),
@@ -886,7 +886,7 @@ describe("DM request decisions", () => {
           granterEmail: "owner@example.com",
           channelWireId: "wire-x",
           access: "read-write",
-          kind: "chat-channel" as const,
+          kind: "chat" as const,
           createdAtMs: 1,
         }),
         pull: async () => ({ applied: 0 }),
@@ -919,7 +919,7 @@ describe("DM request decisions", () => {
     ];
     const classified = await classifyDmRequests({
       received: [
-        { shareId: "share-x", granterEmail: "x@example.com", selector: { kind: "chat-channel", channelWireId: "wire-x" } },
+        { shareId: "share-x", granterEmail: "x@example.com", selector: { kind: "chat", channelWireId: "wire-x" } },
       ],
       kindCache: new Map(),
       peekKind: async () => "dm",
@@ -947,7 +947,7 @@ describe("DM request decisions", () => {
         granterEmail: "x@example.com",
         channelWireId: "wire-x",
         access: "read-write",
-        kind: "chat-channel" as const,
+        kind: "chat" as const,
         createdAtMs: 1,
       }),
       pull,
@@ -979,7 +979,7 @@ describe("DM request decisions", () => {
           {
             shareId: "share-live",
             granterEmail: "x@example.com",
-            selector: { kind: "chat-channel", channelWireId: "wire-live" },
+            selector: { kind: "chat", channelWireId: "wire-live" },
           },
         ],
         kindCache,
@@ -1031,7 +1031,7 @@ describe("DM request decisions", () => {
         granterEmail: "x@example.com",
         channelWireId: "wire-live",
         access: "read-write",
-        kind: "chat-channel" as const,
+        kind: "chat" as const,
         createdAtMs: 1,
       }),
       pull: async () => ({ applied: 0 }),
@@ -1054,7 +1054,7 @@ describe("requireShareableChatChannel", () => {
 
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "dm-1", store }),
-    ).rejects.toThrow(/Direct messages can't be shared as channels/u);
+    ).rejects.toThrow(/can't be shared as a group/u);
 
     await seed({
       method: CHATS_METHOD.channelCreate,
@@ -1070,7 +1070,7 @@ describe("requireShareableChatChannel", () => {
     });
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "agent-1", store }),
-    ).rejects.toThrow(/Only ordinary channels can be shared/u);
+    ).rejects.toThrow(/Only groups can be shared/u);
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "missing-channel", store }),
     ).rejects.toThrow(/no longer exists/u);
@@ -1225,7 +1225,7 @@ describe("listDmRecords", () => {
           shareId: "share-existing",
           granterEmail: "alice@x.com",
           selector: {
-            kind: "chat-channel",
+            kind: "chat",
             channelWireId: "owner-channel-existing",
           },
         },

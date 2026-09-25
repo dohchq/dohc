@@ -5,6 +5,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
+import { IgnoredSettings } from "./settingsFile";
 
 const PreferredNameForIpc = z
   .string()
@@ -116,7 +117,9 @@ export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const
 export const DesktopUserSettingsResult = z.object({
   settings: DesktopUserSettings,
   source: z.enum(SETTINGS_READ_SOURCES),
-  warning: z.string().min(1).max(500).optional(),
+  // Names the file, so it is bounded above a full path.
+  warning: z.string().min(1).max(4600).optional(),
+  ignored: IgnoredSettings.optional(),
 }).strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 

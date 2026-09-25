@@ -143,8 +143,9 @@ export function createDesktopPluginSdk<Operation extends PluginSdkOperation>(dep
           // writeAuthoredText: a writable workspace and a running engine
           // capture, resolved when the write happens, never cached.
           editCollections: {
-            // The idempotency key is the automation run's claim-id-plus-ordinal:
-            // it must reach the seam, or a reaper re-run could write twice.
+            // The idempotency key is the automation run's claim, attempt, and
+            // write ordinal: it must reach the seam, or a retried request
+            // could write twice.
             setRecordFields: async ({
               recordPath,
               fields,

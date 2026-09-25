@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
 import { sendCliRequest, type CliClientOptions } from "./client";
 import { cliErrorLine, DohcCliError } from "./errors";
+import { renderCliHelp } from "./help";
 import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
@@ -66,7 +67,7 @@ function buildCliRequest(
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "ownerAppResponses":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
-    case "channels":
+    case "groups":
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
@@ -76,7 +77,7 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, channel: command.channel },
+        args: { cwd: common.cwd, actor: common.actor, group: command.group },
       };
     case "inbox":
       return {
@@ -98,7 +99,7 @@ function buildCliRequest(
           cwd: common.cwd,
           actor: common.actor,
           ...(runId ? { runId } : {}),
-          channel: command.channel,
+          group: command.group,
           ...(command.title ? { title: command.title } : {}),
           attachments: command.attachments,
           needsDecision: command.needsDecision,
@@ -144,7 +145,7 @@ function buildCliRequest(
           cwd: common.cwd,
           actor: common.actor,
           pattern: command.pattern,
-          ...(command.channel ? { channel: command.channel } : {}),
+          ...(command.group ? { group: command.group } : {}),
           ...(command.thread ? { thread: command.thread } : {}),
           ...(command.from ? { from: command.from } : {}),
           ...(command.since ? { since: command.since } : {}),
@@ -175,39 +176,9 @@ function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
 
 export async function executeCli(options: CliExecutionOptions): Promise<CliExecutionResult> {
   try {
-    if (options.argv.length === 2 && options.argv[0] === "dataset" && ["--help", "-h"].includes(options.argv[1]!)) return {
-      exitCode: 0, stderr: "", stdout: [
-        "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
-        "Actions: list, describe, history, permissions, setGrant, removeGrant, lifecycle, archive, restore, deletePreview, delete, pendingAttempts, reconcileAttempt, cancelAttempt, create, prepare, approve, discard, invoke, export",
-        "Source actions: historyRevision, prepareHistoryRestore, prepareMigration, prepareSchemaChange, migrationPreviewPage, approveMigration, discardMigration, createForm",
-        "File actions: upload, file",
-        "Recovery actions: prepareRecovery, claimRecovery, discardRecovery",
-        "Every request names workspaceId. Run this command from its owning workspace.",
-        "list: optional after and limit. describe: datasetId.",
-        "history: datasetId, optional beforeRevision and limit. Shows saved operations and prior values for reversible edits.",
-        "deletePreview: datasetId, optional after and limit. Review affected apps and the current cursor.",
-        "delete: datasetId, expected cursor and reviewToken from deletePreview, acknowledge:true. Permanently removes private data and history.",
-        "Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.",
-        "permissions: datasetId, optional after and limit. Shows app bindings and explicit data grants.",
-        "setGrant: datasetId, grantId, grant with revision, revisionSha256, operationIds, and discover.",
-        "removeGrant: datasetId and principalKey from permissions.",
-        "create: definition. Writes generated source and prepares it for approval.",
-        "prepare: descriptorPath. Captures existing source for review.",
-        "approve: preparationId and revisionSha256 from the reviewed preparation.",
-        "discard: preparationId. Leaves the source files in place.",
-        "prepareRecovery: explicit absolute sourcePath ending in .dohc-recovery. Review result before claimRecovery.",
-        "claimRecovery: datasetId, transferId, manifestSha256, sourceCursor, oldHostStopped:true. Stop the old host first.",
-        "discardRecovery: transferId. Cancels a prepared recovery before installation.",
-        "export: datasetId, absolute savePath ending in .dohc-recovery, optional overwrite.",
-        "Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.",
-        "invoke: datasetId, revision, revisionSha256, operationId, input, idempotencyKey.",
-        "Use describe to find approved operation IDs. Retry uncertain writes with the same input and idempotencyKey.",
-        "Commands use the same Collection rules as dohc. They do not accept SQL or caller identity.",
-        "",
-      ].join("\n"),
-    };
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
+    if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
     const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
     const request = buildCliRequest(
       command,

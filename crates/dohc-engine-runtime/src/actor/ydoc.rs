@@ -55,6 +55,9 @@ pub struct YdocOpenState {
     pub lineage_claim_id: Option<String>,
     pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
+    /// The Yjs client the seed of `seed_content` must use. Present exactly
+    /// when `seed_content` is; see [`dohc_engine_collab::seed_client_id`].
+    pub seed_client_id: Option<u32>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
     /// Record facts the open's deferred drain committed, in drain order. The
@@ -650,6 +653,7 @@ impl ActorHandle {
                         MaterializationReplayScope {
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
+                            progress: None,
                         },
                         now_ms,
                         &NoFaults,
@@ -1667,6 +1671,17 @@ pub(super) fn ydoc_open_state_on_store(
     } else {
         Vec::new()
     };
+    let seed = (content_kind != ContentKind::Scene && !lineage_existing)
+        .then_some(head.as_ref())
+        .flatten();
+    let seed_client_id = seed.map(|snapshot| {
+        dohc_engine_collab::seed_client_id(
+            &key,
+            content_kind,
+            &snapshot.latest_moment_id,
+            &snapshot.blob_sha256,
+        )
+    });
     Ok(YdocOpenState {
         owner_seed_source: head.as_ref().map(|snapshot| {
             dohc_engine_collab::owner_base_source::OwnerSeedSource {
@@ -1682,9 +1697,8 @@ pub(super) fn ydoc_open_state_on_store(
         lineage_existing,
         lineage_claim_id,
         restore_generation,
-        seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
-            .then(|| head.map(|snapshot| snapshot.text))
-            .flatten(),
+        seed_content: seed_client_id.and(head).map(|snapshot| snapshot.text),
+        seed_client_id,
         artifact_assets,
         seed_materialization_jobs,
         record_facts,
@@ -2993,6 +3007,7 @@ fn materialize_ydoc_drain(
         MaterializationReplayScope {
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
+            progress: None,
         },
         now_ms,
         faults,
@@ -3381,6 +3396,7 @@ mod scene_seed_transaction_tests {
             MaterializationReplayScope {
                 workspace_id: "workspace",
                 self_writes: None,
+                progress: None,
             },
             3,
             &NoFaults,
@@ -3415,12 +3431,14 @@ mod scene_seed_transaction_tests {
                 .expect("recover conflict"),
             0
         );
+        let jobs_taken = std::sync::atomic::AtomicU64::new(0);
         let recovered = replay_pending_materializations(
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
                 workspace_id: "workspace",
                 self_writes: None,
+                progress: Some(&jobs_taken),
             },
             7,
             &NoFaults,
@@ -3429,6 +3447,9 @@ mod scene_seed_transaction_tests {
         )
         .expect("recovery replay");
         assert_eq!(recovered.completed, 1);
+        let jobs_taken = jobs_taken.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(jobs_taken > 0);
+        assert_eq!(jobs_taken, recovered.selected_seen as u64);
         assert_eq!(
             std::fs::read(target).expect("materialized asset"),
             [1, 2, 3, 4]

@@ -1908,6 +1908,66 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toBe(input)
   })
 
+  it('ends a table at a row with more cells than its header so no cell text disappears', () => {
+    for (const input of [
+      '| a | b |\n|---|---|\n| c | d | hidden |\n',
+      'a | b\n--- | ---\nc | d\ne | f | hidden\n',
+      '> | a | b |\n> |---|---|\n> | c | d | hidden |\n',
+      '- [ ] task\n  | a | b |\n  |---|---|\n  | c | d | hidden |\n',
+      '| a | b |\n|---|---|\n| `c|x` | d | hidden |\n',
+      // A code-span pipe in the header sends the importer to the raw text,
+      // where the code span in the row splits too.
+      '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n',
+    ]) {
+      expect(yDocToMarkdown(markdownToYDoc(input)), JSON.stringify(input)).toContain('hidden')
+    }
+  })
+
+  it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
+    expect(yDocToMarkdown(markdownToYDoc('Hello\n\n[x]: https://h.example "kept"\n')))
+      .toBe('Hello\n\n\\[x]: https://h.example "kept"')
+    // marked drops a second definition of a label without a token.
+    expect(yDocToMarkdown(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')))
+      .toBe('\\[x]: https://a.example\n\n\\[x]: https://b.example "kept"')
+    // A link with no text keeps its destination and title as text.
+    expect(yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0])
+      .toEqual({ type: 'paragraph', content: [{ type: 'text', text: 'Hello[](https://h.example "kept")' }] })
+    expect(yDocBodyJSON(markdownToYDoc('[docs](https://example.com)\n')).content?.[0]?.content?.[0])
+      .toMatchObject({ text: 'docs', marks: [{ type: 'link' }] })
+  })
+
+  it('keeps repeated definitions of one label in linear work', () => {
+    const repeats = 10_000
+    const hasOwn = vi.spyOn(Object, 'hasOwn')
+    try {
+      const doc = markdownToYDoc('[x]: /a\n'.repeat(repeats))
+      expect(yDocBodyJSON(doc).content?.length).toBe(repeats)
+      // One check for each definition, with room for the rest of the import.
+      expect(hasOwn.mock.calls.length).toBeLessThan(10 * repeats)
+    } finally { hasOwn.mockRestore() }
+    const body = yDocBodyJSON(markdownToYDoc('See [docs][x].\n\n[x]: https://example.com\n'))
+    expect(body.content?.[0]?.content?.[1]).toMatchObject({
+      text: 'docs',
+      marks: [{ type: 'link', attrs: { href: 'https://example.com' } }],
+    })
+    expect(body.content?.[1]).toEqual({
+      type: 'paragraph',
+      content: [{ type: 'text', text: '[x]: https://example.com' }],
+    })
+  })
+
+  it('still reads an empty extra cell and a pipe inside inline code as one table', () => {
+    for (const [input, rows] of [
+      ['| a | b |\n|---|---|\n| c | d |  |\n', [['a', 'b'], ['c', 'd']]],
+      ['| a | b |\n|---|---|\n| `c|x` | d |\n', [['a', 'b'], ['c|x', 'd']]],
+    ] as const) {
+      const table = yDocBodyJSON(markdownToYDoc(input)).content?.[0]
+      expect(table?.type, input).toBe('table')
+      expect(table?.content?.map(row => row.content?.map(cell =>
+        cell.content?.[0]?.content?.[0]?.text ?? ''))).toEqual(rows)
+    }
+  })
+
   it('escapes literal table-cell pipes before computing column widths', () => {
     const doc = yDocFromBody([
       {

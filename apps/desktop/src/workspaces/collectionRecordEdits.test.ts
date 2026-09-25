@@ -1,6 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 
@@ -8,6 +8,7 @@ import {
   actorOriginIdFor,
   attributionFor,
   createCollectionRecord,
+  derivedRecordId,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "./collectionRecordEdits";
@@ -22,13 +23,22 @@ const AGENT = {
   onBehalfOf: "local",
 } as const;
 
+const AUTOMATION = {
+  kind: "automation",
+  automationId: "collection:tasks#finished-date",
+  onBehalfOf: "local",
+  depth: 1,
+} as const;
+
 interface FakeSessionLog {
   doc: Y.Doc;
   order: string[];
   journaled: Array<{
     actorOriginId?: string;
     attribution?: ChangeAttributionWire;
+    idempotencyKey?: string;
   }>;
+  updates: Uint8Array[];
 }
 
 function fakeSession(options: { settleError?: Error; onSettle?: () => Promise<void> } = {}): {
@@ -36,7 +46,10 @@ function fakeSession(options: { settleError?: Error; onSettle?: () => Promise<vo
   log: FakeSessionLog;
 } {
   const doc = new Y.Doc();
-  const log: FakeSessionLog = { doc, order: [], journaled: [] };
+  const log: FakeSessionLog = { doc, order: [], journaled: [], updates: [] };
+  // The engine's rule (durable.rs): a key already journaled with other
+  // update bytes refuses, so a re-run that reuses a key with a new update fails.
+  const journaledKeys = new Map<string, string>();
   const session = {
     doc,
     get initialUpdate() {
@@ -51,10 +64,20 @@ function fakeSession(options: { settleError?: Error; onSettle?: () => Promise<vo
         idempotencyKey?: string;
       },
     ) {
+      const key = applyOptions?.idempotencyKey;
+      const bytes = Buffer.from(update).toString("base64");
+      if (key !== undefined && journaledKeys.has(key)) {
+        if (journaledKeys.get(key) !== bytes) {
+          throw new Error("idempotency key reused with different content");
+        }
+        return;
+      }
+      if (key !== undefined) journaledKeys.set(key, bytes);
       // The real session journals the update and applies it to its doc.
       Y.applyUpdate(doc, update);
       log.order.push("apply");
       log.journaled.push({ ...applyOptions });
+      log.updates.push(update);
       onArmed?.();
     },
     async settleNow() {
@@ -86,9 +109,98 @@ function contextFor(
     },
     workspaceRoot: root,
     withAdapter: async () => null,
+    onCaptureSettled: () => () => undefined,
+    signal: new AbortController().signal,
     ...overrides,
   };
 }
+
+/**
+ * The engine side of a create: records it has adopted, keyed by id, and its
+ * capture announcements. A lookup of an id it has not adopted answers the
+ * way collections.getRecord does.
+ */
+function fakeEngine() {
+  const records = new Map<string, string>();
+  const listeners = new Set<(paths: readonly string[] | null) => void>();
+  const waitingForListener: Array<() => void> = [];
+  const lookups: string[] = [];
+  const waitingForLookups: Array<{ count: number; resolve: () => void }> = [];
+  let refusal: Error | null = null;
+  const overrides: Partial<CollectionRecordEditContext> = {
+    withAdapter: async (work) =>
+      await work({
+        async getCollectionRecord({ collectionPath, recordId }) {
+          lookups.push(recordId);
+          for (const waiter of [...waitingForLookups]) {
+            if (lookups.length < waiter.count) continue;
+            waitingForLookups.splice(waitingForLookups.indexOf(waiter), 1);
+            waiter.resolve();
+          }
+          if (refusal) throw refusal;
+          const path = records.get(recordId);
+          if (path === undefined) throw new Error("collection-record-not-found");
+          return {
+            collection: { path: collectionPath, status: "valid", reasons: [] },
+            record: { id: recordId, path, conflicted: false, values: [] },
+            history: [],
+            nextBeforeHistoryId: null,
+          };
+        },
+      }),
+    onCaptureSettled: (listener) => {
+      listeners.add(listener);
+      for (const resolve of waitingForListener.splice(0)) resolve();
+      return () => listeners.delete(listener);
+    },
+  };
+  return {
+    overrides,
+    records,
+    lookups,
+    listeners,
+    /** Resolves once the seam is waiting for an announcement. */
+    listening(): Promise<void> {
+      if (listeners.size > 0) return Promise.resolve();
+      return new Promise((resolve) => waitingForListener.push(resolve));
+    },
+    /** Resolves once the seam has asked for `count` records. */
+    lookupsReached(count: number): Promise<void> {
+      if (lookups.length >= count) return Promise.resolve();
+      return new Promise((resolve) => waitingForLookups.push({ count, resolve }));
+    },
+    refuseLookups(error: Error | null) {
+      refusal = error;
+    },
+    announce(paths: readonly string[] | null) {
+      for (const listener of [...listeners]) listener(paths);
+    },
+    /** Adopts the file the seam wrote at `path` under the id in its frontmatter. */
+    async adopt(root: string, path: string): Promise<string> {
+      const text = await readFile(join(root, path), "utf8");
+      const recordId = /^---\nid: (rec_[a-z2-7]{26})\n---\n$/.exec(text)?.[1];
+      if (!recordId) throw new Error(`Not a new record file: ${text}`);
+      records.set(recordId, path);
+      return recordId;
+    },
+    /**
+     * Adopts the file at `path` under a new id, as the engine does when the
+     * file's own id belongs to another record now or in history, and writes
+     * that id back into the file.
+     */
+    async adoptUnderNewId(root: string, path: string, recordId: string) {
+      await writeFile(join(root, path), `---\nid: ${recordId}\n---\n`);
+      records.set(recordId, path);
+    },
+  };
+}
+
+const ADOPTION_TIMEOUT_MESSAGE =
+  "The record file was created at tasks/two.md, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("setCollectionRecordFields", () => {
   it.each([
@@ -130,7 +242,10 @@ describe("setCollectionRecordFields", () => {
         fields: { status: "done", estimate: 3 },
         author: AGENT,
       }),
-    ).resolves.toEqual({ path: "tasks/one.md" });
+    ).resolves.toEqual({
+      path: "tasks/one.md",
+      replaced: { status: null, estimate: null },
+    });
 
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
     // One journaled update carrying the agent's origin, settled before release.
@@ -149,31 +264,205 @@ describe("setCollectionRecordFields", () => {
   it("records an automation author under its subscription id with its depth and claim key", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
-    const automation = {
-      kind: "automation",
-      automationId: "hello-plugin/triage",
-      onBehalfOf: "local",
-      depth: 1,
-    } as const;
 
     await setCollectionRecordFields(contextFor(root, session), {
       recordPath: "tasks/one.md",
       fields: { status: "done" },
-      author: automation,
-      idempotencyKey: "claim-7",
+      author: AUTOMATION,
+      idempotencyKey: "claim-7/1/0",
     });
 
     // The actor origin IS the engine subscription id, so the engine's
-    // self-skip guard binds (lane 2), and the wire key is the claim id, so
-    // a re-run handler's identical write dedupes instead of writing twice.
+    // self-skip guard binds (lane 2), and the wire key is the claim's.
     expect(log.journaled).toEqual([
       {
-        actorOriginId: "hello-plugin/triage",
+        actorOriginId: AUTOMATION.automationId,
         attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
-        idempotencyKey: "claim-7",
+        idempotencyKey: "claim-7/1/0",
       },
     ]);
-    expect(actorOriginIdFor(automation)).toBe("hello-plugin/triage");
+    expect(actorOriginIdFor(AUTOMATION)).toBe(AUTOMATION.automationId);
+  });
+
+  it("writes only the fields that change and returns the values they replaced", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const frontmatter = log.doc.getMap("frontmatter");
+    frontmatter.set("status", "open");
+    frontmatter.set("tags", ["a", "b"]);
+    frontmatter.set("estimate", 2);
+    const before = Y.encodeStateAsUpdate(log.doc);
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { status: "done", tags: ["a", "b"], estimate: 2, owner: "ana" },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({
+      path: "tasks/one.md",
+      // A field the record did not have reads as null, as record history shows it.
+      replaced: { status: "open", owner: null },
+    });
+
+    // The one journaled update touches only the changed fields.
+    expect(log.updates).toHaveLength(1);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, before);
+    const touched: string[] = [];
+    replica.getMap("frontmatter").observe((event) => {
+      touched.push(...event.keysChanged);
+    });
+    Y.applyUpdate(replica, log.updates[0]!);
+    expect(touched.sort()).toEqual(["owner", "status"]);
+    expect(frontmatter.toJSON()).toEqual({
+      status: "done",
+      tags: ["a", "b"],
+      estimate: 2,
+      owner: "ana",
+    });
+  });
+
+  it("journals and settles nothing when every field already holds its value", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const frontmatter = log.doc.getMap("frontmatter");
+    frontmatter.set("status", "done");
+    frontmatter.set("meta", { due: "2026-09-24", points: [1, 2] });
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { meta: { points: [1, 2], due: "2026-09-24" }, status: "done" },
+        author: AGENT,
+        idempotencyKey: "claim-7/1/0",
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    expect(log.order).toEqual(["close"]);
+  });
+
+  it("compares a nested shared value by its JSON and returns that JSON as the replaced value", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const frontmatter = log.doc.getMap("frontmatter");
+    const tags = new Y.Array<string>();
+    tags.push(["a", "b"]);
+    frontmatter.set("tags", tags);
+    const owner = new Y.Map<string>();
+    owner.set("name", "Ana");
+    frontmatter.set("owner", owner);
+    const context = contextFor(root, session);
+
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { tags: ["a", "b"], owner: { name: "Ana" } },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { tags: ["a"], owner: { name: "Ana" } },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { tags: ["a", "b"] } });
+    expect(log.order).toEqual(["close", "apply", "settle", "close"]);
+  });
+
+  it("treats a requested null on a field the record lacks as no change", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    log.doc.getMap("frontmatter").set("status", "open");
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { due: null, status: null },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { status: "open" } });
+    expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: null });
+  });
+
+  it("keeps a field named __proto__ in the replaced values", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    log.doc.getMap("frontmatter").set("__proto__", "old");
+    const fields = JSON.parse('{"__proto__": "new"}') as Record<string, unknown>;
+
+    const result = await setCollectionRecordFields(contextFor(root, session), {
+      recordPath: "tasks/one.md",
+      fields,
+      author: AGENT,
+    });
+
+    expect(Object.keys(result.replaced)).toEqual(["__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(result.replaced, "__proto__")?.value).toBe("old");
+    expect(log.doc.getMap("frontmatter").get("__proto__")).toBe("new");
+  });
+
+  it("writes nothing when its caller ends while the session opens", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const controller = new AbortController();
+    const context = contextFor(root, session, {
+      signal: controller.signal,
+      capture: {
+        async openYDocSession() {
+          // An automation run's deadline passes while the engine opens it.
+          controller.abort();
+          return session;
+        },
+      },
+    });
+
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { status: "done" },
+        author: AUTOMATION,
+      }),
+    ).rejects.toThrow(/no longer active/);
+    expect(log.order).toEqual(["close"]);
+  });
+
+  it("re-runs one logical write under a new attempt's key until the record converges", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const context = contextFor(root, session);
+    const attempt = (number: number) =>
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { status: "done", finishedOn: "2026-09-24" },
+        author: AUTOMATION,
+        idempotencyKey: `claim-7/${number}/0`,
+      });
+
+    await expect(attempt(1)).resolves.toEqual({
+      path: "tasks/one.md",
+      replaced: { status: null, finishedOn: null },
+    });
+    // The run stops before it settles its claim, and someone reopens the
+    // task before the engine hands the claim out again.
+    log.doc.getMap("frontmatter").set("status", "open");
+    await expect(attempt(2)).resolves.toEqual({
+      path: "tasks/one.md",
+      replaced: { status: "open" },
+    });
+    await expect(attempt(3)).resolves.toEqual({
+      path: "tasks/one.md",
+      replaced: {},
+    });
+
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
+      "claim-7/1/0",
+      "claim-7/2/0",
+    ]);
+    expect(log.doc.getMap("frontmatter").toJSON()).toEqual({
+      status: "done",
+      finishedOn: "2026-09-24",
+    });
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {
@@ -255,34 +544,36 @@ describe("setCollectionRecordFields", () => {
 });
 
 describe("createCollectionRecord", () => {
-  it("creates the md file, waits for the minted id, and seeds fields through the same seam", async () => {
+  it("writes the file with a new record id, finishes on the engine's announcement without polling, and seeds fields", async () => {
+    vi.useFakeTimers();
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
-    const context = contextFor(root, session, {
-      withAdapter: async (work) =>
-        await work({
-          queryCollectionRecords: async ({ collectionPath }) => ({
-            collection: { path: collectionPath, status: "valid", reasons: [] },
-            records: [
-              { id: "rec_9", path: "tasks/two.md", conflicted: false, values: [] },
-            ],
-            groups: null,
-            nextCursor: null,
-          }),
-        }),
-    });
+    const engine = fakeEngine();
 
-    await expect(
-      createCollectionRecord(context, {
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
         collectionPath: "tasks",
         name: "two",
         fields: { status: "open" },
         author: AGENT,
-      }),
-    ).resolves.toEqual({ path: "tasks/two.md", recordId: "rec_9" });
+      },
+    );
 
-    // The record file exists on disk through the desktop's create path.
-    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe("");
+    // One lookup when the wait starts. The only timer is the adoption
+    // ceiling, and time short of it looks nothing up again.
+    await engine.lookupsReached(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(14_999);
+    engine.announce(["tasks/other.md"]);
+    expect(engine.lookups).toHaveLength(1);
+
+    const recordId = await engine.adopt(root, "tasks/two.md");
+    engine.announce(["tasks/two.md"]);
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId });
+    expect(engine.lookups).toEqual([recordId, recordId]);
+    expect(engine.listeners.size).toBe(0);
+
     // Fields were seeded through the one write seam, attributed to the agent.
     expect(log.journaled).toEqual([
       {
@@ -293,73 +584,263 @@ describe("createCollectionRecord", () => {
     expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
   });
 
+  it("checks again when an announcement does not list its paths", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      { collectionPath: "tasks", name: "two", author: AGENT },
+    );
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/two.md");
+    engine.announce(null);
+
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId });
+  });
+
+  it("returns the record a deterministic id already names instead of adding another", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const recordId = derivedRecordId("claim-7/0");
+    const attempt = (number: number) =>
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        idempotencyKey: `claim-7/${number}/0`,
+        recordId,
+      });
+
+    const first = attempt(1);
+    await engine.listening();
+    await expect(engine.adopt(root, "tasks/two.md")).resolves.toBe(recordId);
+    engine.announce(["tasks/two.md"]);
+    await expect(first).resolves.toEqual({ path: "tasks/two.md", recordId });
+
+    // The run stops before it settles; the next attempt finds the record,
+    // even after someone renamed it, and has nothing left to write.
+    engine.records.set(recordId, "tasks/renamed.md");
+    await expect(attempt(2)).resolves.toEqual({
+      path: "tasks/renamed.md",
+      recordId,
+    });
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
+      "claim-7/1/0",
+    ]);
+    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe(
+      `---\nid: ${recordId}\n---\n`,
+    );
+  });
+
+  it("returns the id the engine adopted the file under when it could not keep the requested one", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const requested = derivedRecordId("claim-7/0");
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        recordId: requested,
+      },
+    );
+    await engine.listening();
+    // The requested id belonged to a record someone deleted, so the engine
+    // adopts the file under a new id and writes that id into it.
+    const adopted = derivedRecordId("minted by the engine");
+    await engine.adoptUnderNewId(root, "tasks/two.md", adopted);
+    engine.announce(["tasks/two.md"]);
+
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId: adopted });
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  });
+
+  it("continues with an earlier attempt's file that the engine has not adopted yet", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const recordId = derivedRecordId("claim-7/0");
+    // The earlier attempt wrote the file and stopped before adoption.
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        recordId,
+      },
+    );
+    await engine.listening();
+    await engine.adopt(root, "tasks/two.md");
+    engine.announce(["tasks/two.md"]);
+
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId });
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  });
+
+  it("refuses a taken name and never writes into the other record", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const other = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: done\n---\nNotes\n";
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "two.md"), other);
+
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AGENT,
+      }),
+    ).rejects.toThrow("tasks/two.md already exists. Choose another record name.");
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        recordId: derivedRecordId("claim-7/0"),
+      }),
+    ).rejects.toThrow("tasks/two.md already exists. Choose another record name.");
+
+    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe(other);
+    expect(context.openedPaths).toEqual([]);
+    expect(engine.listeners.size).toBe(0);
+  });
+
+  it("stops waiting when the caller's signal aborts and never seeds a record adopted after that", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const controller = new AbortController();
+    engine.refuseLookups(new Error("collection reloading"));
+    const context = contextFor(root, session, {
+      ...engine.overrides,
+      signal: controller.signal,
+    });
+
+    const created = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "open" },
+      author: AUTOMATION,
+    });
+    // A second lookup starts only after the seam has taken the first refusal.
+    await engine.listening();
+    engine.announce(["tasks/two.md"]);
+    await engine.lookupsReached(2);
+    controller.abort();
+    const error = await created.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    // The engine adopts the file only after the run's deadline.
+    engine.refuseLookups(null);
+    await engine.adopt(root, "tasks/two.md");
+    engine.announce(["tasks/two.md"]);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
+    expect(((error as Error).cause as Error).message).toBe("collection reloading");
+    expect(engine.listeners.size).toBe(0);
+    expect(engine.lookups).toHaveLength(2);
+    expect(context.openedPaths).toEqual([]);
+  });
+
+  it("stops waiting at the adoption ceiling when the caller's signal allows longer", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      { collectionPath: "tasks", name: "two", author: AGENT },
+    );
+    const outcome = created.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    await engine.lookupsReached(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(((await outcome) as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
+    expect(engine.listeners.size).toBe(0);
+  });
+
   it("names the created record when seeding its fields fails", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession({ settleError: new Error("settle refused") });
-    const context = contextFor(root, session, {
-      withAdapter: async (work) =>
-        await work({
-          queryCollectionRecords: async ({ collectionPath }) => ({
-            collection: { path: collectionPath, status: "valid", reasons: [] },
-            records: [
-              { id: "rec_p", path: "tasks/partial.md", conflicted: false, values: [] },
-            ],
-            groups: null,
-            nextCursor: null,
-          }),
-        }),
-    });
+    const engine = fakeEngine();
 
-    // The file and its id exist by the time the seed fails: the error says
-    // so, so a caller reconciles instead of creating a second record.
-    await expect(
-      createCollectionRecord(context, {
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
         collectionPath: "tasks",
         name: "partial",
         fields: { status: "open" },
         author: AGENT,
-      }),
-    ).rejects.toThrow(/created at tasks\/partial\.md \(id rec_p\).*settle refused/);
+      },
+    );
+    await engine.listening();
+    const recordId = await engine.adopt(root, "tasks/partial.md");
+    engine.announce(["tasks/partial.md"]);
+
+    // The file and its id exist by the time the seed fails: the error says
+    // so, so a caller reconciles instead of creating a second record.
+    await expect(created).rejects.toThrow(
+      `The record was created at tasks/partial.md (id ${recordId}), but its fields could not be set: settle refused`,
+    );
   });
 
   it("returns without a session when fields are absent or empty", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
-    const context = contextFor(root, session, {
-      withAdapter: async (work) =>
-        await work({
-          queryCollectionRecords: async () => ({
-            collection: { path: "tasks", status: "valid", reasons: [] },
-            records: [
-              { id: "rec_1", path: "tasks/solo.md", conflicted: false, values: [] },
-            ],
-            groups: null,
-            nextCursor: null,
-          }),
-        }),
-    });
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
 
-    await expect(
-      createCollectionRecord(context, {
-        collectionPath: "tasks",
-        name: "solo",
-        author: AGENT,
-      }),
-    ).resolves.toEqual({ path: "tasks/solo.md", recordId: "rec_1" });
+    const solo = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "solo",
+      author: AGENT,
+    });
+    await engine.listening();
+    const soloId = await engine.adopt(root, "tasks/solo.md");
+    engine.announce(["tasks/solo.md"]);
+    await expect(solo).resolves.toEqual({ path: "tasks/solo.md", recordId: soloId });
+
     // The CLI and MCP always send a fields object; an empty one is the same
     // request as none, not a refusal.
-    await expect(
-      createCollectionRecord(context, {
-        collectionPath: "tasks",
-        name: "solo",
-        fields: {},
-        author: AGENT,
-      }),
-    ).resolves.toEqual({ path: "tasks/solo.md", recordId: "rec_1" });
+    const empty = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "empty",
+      fields: {},
+      author: AGENT,
+    });
+    await engine.listening();
+    const emptyId = await engine.adopt(root, "tasks/empty.md");
+    engine.announce(["tasks/empty.md"]);
+    await expect(empty).resolves.toEqual({ path: "tasks/empty.md", recordId: emptyId });
     expect(log.order).toEqual([]);
   });
 
-  it("refuses a record name with separators and an aborted surface before writing", async () => {
+  it("refuses a bad record name or id and an aborted surface before writing", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const aborted = new AbortController();
@@ -373,10 +854,34 @@ describe("createCollectionRecord", () => {
       }),
     ).rejects.toThrow(/plain file name/i);
     await expect(
+      createCollectionRecord(contextFor(root, session), {
+        collectionPath: "tasks",
+        name: "two",
+        author: AGENT,
+        recordId: "rec_TOO_SHORT",
+      }),
+    ).rejects.toThrow(/Record id must be "rec_"/);
+    await expect(
       createCollectionRecord(
         contextFor(root, session, { signal: aborted.signal }),
         { collectionPath: "tasks", name: "two", author: AGENT },
       ),
     ).rejects.toThrow(/no longer active/i);
+    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+});
+
+describe("derivedRecordId", () => {
+  it("derives the same valid record id from the same seed and different ids from different seeds", () => {
+    const id = derivedRecordId("claim-7/0");
+    expect(id).toMatch(/^rec_[a-z2-7]{26}$/);
+    expect(derivedRecordId("claim-7/0")).toBe(id);
+    expect(derivedRecordId("claim-7/1")).not.toBe(id);
+    // Pinned (RFC 4648 base32 of the first 16 SHA-256 bytes, as the engine
+    // encodes record ids) so a change to the derivation cannot orphan the
+    // records earlier attempts created.
+    expect(id).toBe("rec_dcsqghdllg25i2gjn2zgruogiq");
   });
 });

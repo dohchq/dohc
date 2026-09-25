@@ -318,12 +318,10 @@ describe("DocumentMenu", () => {
     // Wait for the timer by waiting for what it does: the transient label
     // retires, as it always did. No wall-clock assertion — a slow machine
     // delays this test, it cannot fail it.
-    await waitFor(
-      () =>
-        expect(
-          screen.getByTestId("document-menu-item-copy-markdown").textContent,
-        ).toBe("Copy as Markdown"),
-      { timeout: FEEDBACK_MS * 4 },
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("document-menu-item-copy-markdown").textContent,
+      ).toBe("Copy as Markdown"),
     );
 
     // The two things that must not retire with it.
@@ -357,9 +355,7 @@ describe("DocumentMenu", () => {
     // A confirmation owes no next step, so the region says nothing.
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
 
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull(), {
-      timeout: FEEDBACK_MS * 4,
-    });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
   // codex r2 on #684: a clipboard write settles after the click that started
@@ -406,12 +402,10 @@ describe("DocumentMenu", () => {
       screen.getByTestId("document-menu-item-export-markdown").textContent,
     ).toBe("Document not open");
     expect(screen.queryByText("Copied")).toBeNull();
-    await waitFor(
-      () =>
-        expect(
-          screen.getByTestId("document-menu-item-export-markdown").textContent,
-        ).toBe("Export as Markdown…"),
-      { timeout: FEEDBACK_MS * 4 },
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("document-menu-item-export-markdown").textContent,
+      ).toBe("Export as Markdown…"),
     );
     expect(screen.queryByRole("menu")).not.toBeNull();
   });

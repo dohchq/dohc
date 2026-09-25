@@ -125,6 +125,9 @@ importers:
       '@legendapp/list':
         specifier: 3.3.11
         version: 3.3.11(patch_hash=56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@lezer/highlight':
+        specifier: ^1.2.3
+        version: 1.2.3
       '@tiptap/core':
         specifier: 3.30.5
         version: 3.30.5(@tiptap/pm@3.30.5)
@@ -431,6 +434,9 @@ importers:
       quickjs-emscripten:
         specifier: 0.32.0
         version: 0.32.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^24.13.3
@@ -694,6 +700,9 @@ importers:
 
   packages/workspace-contracts:
     dependencies:
+      acorn:
+        specifier: ^8.18.0
+        version: 8.18.0
       effect:
         specifier: 4.0.0-beta.107
         version: 4.0.0-beta.107

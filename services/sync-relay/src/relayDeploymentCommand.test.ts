@@ -4,8 +4,19 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { build } from "esbuild";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { openRelayDeployment } from "./relayDeployment.js";
+
+// A test that runs several commands needs more than the package's 30 s. Beside
+// 32 CPU burners one test's three runs took 52 s.
+// Each run gets up to 30 s, cut to what is left of its test's
+// 90 s, so a stalled run fails as itself.
+const TEST_TIMEOUT_MS = 90_000;
+const RUN_TIMEOUT_MS = 30_000;
+vi.setConfig({ testTimeout: TEST_TIMEOUT_MS });
+let testDeadline = 0;
+beforeEach(() => { testDeadline = Date.now() + TEST_TIMEOUT_MS - 5_000; });
+const runTimeout = () => Math.max(1, Math.min(RUN_TIMEOUT_MS, testDeadline - Date.now()));
 
 const exec = promisify(execFile);
 let root: string, command: string;
@@ -20,14 +31,15 @@ beforeAll(async () => {
     outfile: command, bundle: true, platform: "node", format: "esm", target: "node24",
     external: ["better-auth", "better-auth/*", "pg"], logLevel: "silent",
   });
-});
+  // Beside 32 CPU burners this bundle overran the 10 s hook default.
+}, 30_000);
 
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
 async function run(args: string[]) {
   try {
     const result = await exec(process.execPath, [command, ...args], {
-      windowsHide: true, timeout: 30_000, env: { ...process.env, NODE_OPTIONS: "" },
+      windowsHide: true, timeout: runTimeout(), env: { ...process.env, NODE_OPTIONS: "" },
     });
     return { code: 0, ...result };
   } catch (error) {

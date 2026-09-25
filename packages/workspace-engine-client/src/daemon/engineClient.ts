@@ -32,6 +32,8 @@ const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
 // frame sniffing.
 const BLOB_CAPABILITY = "blobs";
+// A request can ask for progress only on a session that negotiated this.
+const PROGRESS_CAPABILITY = "progress";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 // Mirrors MIN_NEGOTIABLE_FRAME_BYTES in crates/dohc-engine-protocol/src/limits.rs:
@@ -549,7 +551,11 @@ type EngineClientErrorCode =
  * request and refusing it, so anything that models this bound builds the
  * envelope here rather than measuring what it was handed.
  */
-export function requestEnvelope(request: Request, wireId: number): Envelope {
+export function requestEnvelope(
+  request: Request,
+  wireId: number,
+  progress = false,
+): Envelope {
   return {
     type: "request",
     ...request,
@@ -557,6 +563,9 @@ export function requestEnvelope(request: Request, wireId: number): Envelope {
     workspace: request.workspace ?? null,
     deadlineMs: request.deadlineMs ?? null,
     idempotencyKey: request.idempotencyKey ?? null,
+    // Absent unless asked, as the engine encodes it, so a request that does
+    // not ask for progress is unchanged on the wire.
+    ...(progress ? { progress: true } : {}),
   };
 }
 
@@ -689,10 +698,13 @@ export interface EngineClientConnection {
 
 interface PendingRequest {
   readonly callerId: number;
+  readonly request: Request;
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
   readonly restoreOutput?: PrivateLiveOutput;
+  // Present only when the request asked the engine for progress.
+  readonly onProgress?: () => void;
 }
 
 interface PendingBlob {
@@ -1050,8 +1062,25 @@ export class EngineClient implements EngineTransport {
     return this.readyPromise;
   }
 
-  async sendRequest(request: Request, signal?: AbortSignal): Promise<Response> {
-    return this.sendRequestWithInput(request, undefined, signal);
+  /**
+   * `onProgress` runs each time the engine reports that this request's work
+   * moved. It can run only when `reportsProgress()` is true, and only for a
+   * method whose work reports (today `workspace.open`).
+   */
+  async sendRequest(
+    request: Request,
+    signal?: AbortSignal,
+    onProgress?: () => void,
+  ): Promise<Response> {
+    return this.sendRequestWithInput(request, undefined, signal, undefined, onProgress);
+  }
+
+  /** Whether this session negotiated PROGRESS_CAPABILITY with the engine. */
+  reportsProgress(): boolean {
+    return (
+      this.connectOptions.capabilities.includes(PROGRESS_CAPABILITY) &&
+      (this.helloAck?.capabilities.includes(PROGRESS_CAPABILITY) ?? false)
+    );
   }
 
   private async sendRequestWithInput(
@@ -1059,6 +1088,7 @@ export class EngineClient implements EngineTransport {
     writeInput?: (wireId: number) => Promise<void>,
     signal?: AbortSignal,
     restoreOutput?: PrivateLiveOutput,
+    onProgress?: () => void,
   ): Promise<Response> {
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
@@ -1078,7 +1108,10 @@ export class EngineClient implements EngineTransport {
 
     const wireId = this.nextRequestId++;
     if (restoreOutput) restoreOutput.wireId = wireId;
-    const envelope = requestEnvelope(request, wireId);
+    // A caller that asks on a session without the capability just hears
+    // nothing; the engine would ignore the flag anyway.
+    const progress = onProgress !== undefined && this.reportsProgress();
+    const envelope = requestEnvelope(request, wireId, progress);
     // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
     // `transport-error` — which is a lie twice over: nothing was transported,
@@ -1133,10 +1166,12 @@ export class EngineClient implements EngineTransport {
           : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
+        request,
         resolve,
         reject,
         ...(restoreOutput ? { restoreOutput } : {}),
         ...(deadlineTimer ? { deadlineTimer } : {}),
+        ...(progress ? { onProgress } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
       writeTask = this.writeEnvelope(envelope).then(async () => {
@@ -1645,6 +1680,17 @@ export class EngineClient implements EngineTransport {
     return this.inboundFrames;
   }
 
+  // Requests still waiting for their answer that `match` selects, by the
+  // object each caller sent. One the client cancelled or abandoned at its
+  // deadline no longer counts.
+  outstandingRequests(match: (request: Request) => boolean): number {
+    let count = 0;
+    for (const pending of this.pending.values()) {
+      if (match(pending.request)) count += 1;
+    }
+    return count;
+  }
+
   private receiveFrame(frame: Frame): void {
     this.inboundFrames += 1;
     if (frame.kind === "blobChunk") {
@@ -1732,6 +1778,9 @@ export class EngineClient implements EngineTransport {
             // transport dispatch to the remaining subscribers.
           }
         }
+        return;
+      case "progress":
+        this.receiveProgress(envelope.id);
         return;
       case "blobStart":
         this.receiveBlobStart(envelope);
@@ -1836,6 +1885,19 @@ export class EngineClient implements EngineTransport {
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
     this.connectTimer = undefined;
     this.readyResolve(this);
+  }
+
+  // Progress only informs a waiting caller. Progress no caller is waiting for,
+  // such as for a request that stopped waiting or never asked, is dropped: it
+  // cannot corrupt any state, so it must not end the transport.
+  private receiveProgress(id: number): void {
+    const onProgress = this.pending.get(id)?.onProgress;
+    if (!onProgress) return;
+    try {
+      onProgress();
+    } catch {
+      // A progress observer cannot interrupt transport dispatch.
+    }
   }
 
   private receiveBlobStart(start: BlobStart): void {

@@ -3,6 +3,8 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
+  api_version_too_new: 400,
+  api_version_too_old: 400,
   authorship_mismatch: 403,
   bad_request: 400,
   blob_missing: 422,
@@ -17,7 +19,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   identity_required: 409,
   internal_error: 500,
   invalid_access: 400,
-  invalid_channel: 400,
+  invalid_chat: 400,
   invalid_path: 400,
   invalid_version: 400,
   key_envelope_not_found: 404,
@@ -26,6 +28,9 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   link_read_rate_limited: 429,
   method_not_allowed: 405,
   not_found: 404,
+  notice_list_full: 409,
+  notice_rate_limited: 429,
+  notice_refused: 403,
   payload_too_large: 413,
   presence_capacity: 429,
   quota_exceeded: 413,
@@ -58,7 +63,9 @@ export const RELAY_ERRORS = Object.freeze(
 // deliberately says no more than its code: which op failed, which selector
 // kind, or which bound tripped would let a probing caller map the share.
 export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Object.freeze({
-  ambiguous_selector: "a chat-channel share must not also carry paths or versionId",
+  ambiguous_selector: "a chat share must not also carry paths or versionId",
+  api_version_too_new: "this relay is older than the dohc that sent the request",
+  api_version_too_old: "this relay needs a newer dohc",
   authorship_mismatch: "chat op author does not match the authenticated actor",
   bad_request: "bad request",
   blob_missing: "log append references a blob not stored on the relay",
@@ -75,7 +82,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   identity_required: "this workspace requires replication identity",
   internal_error: "internal error",
   invalid_access: "access is invalid",
-  invalid_channel: "channel is not shareable",
+  invalid_chat: "chat is not shareable",
   invalid_path: "path is invalid",
   invalid_version: "versionId is invalid",
   key_envelope_not_found: "key envelope not found",
@@ -84,6 +91,9 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   link_read_rate_limited: "too many link reads",
   method_not_allowed: "method not allowed",
   not_found: "not found",
+  notice_list_full: "the recipient has too many unread notices",
+  notice_rate_limited: "too many notices",
+  notice_refused: "notice refused",
   payload_too_large: "payload too large",
   presence_capacity: "presence is at capacity",
   quota_exceeded: "workspace quota exceeded",

@@ -7,6 +7,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  RelayApiVersionError,
   MAX_REPORTED_REFUSALS,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -818,6 +819,27 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("says which side must update when the relay does not serve this build's API version", async () => {
+    let message = "relay-api-version-too-old";
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.proposal.submit") return undefined;
+      throw new DaemonRefusalError({ code: "PROTOCOL_VERSION_UNSUPPORTED", message, retry: "no" }, new Error("refused"));
+    });
+    const { client, sessions } = await harness(daemon);
+    const submit = async (submitId: string): Promise<unknown> =>
+      await client.submitShareProposal({ shareId: "share-file", grantedSelector: EDIT_SELECTOR, submitId })
+        .catch((error: unknown) => error);
+
+    const old = await submit("submit-old");
+    expect(old).toBeInstanceOf(RelayApiVersionError);
+    expect((old as RelayApiVersionError).update).toBe("app");
+    message = "relay-api-version-too-new";
+    const newer = await submit("submit-new");
+    expect(newer).toBeInstanceOf(RelayApiVersionError);
+    expect((newer as RelayApiVersionError).update).toBe("server");
+    await sessions.closeAll();
+  });
+
   it("claims only an unset relay identity and adopts an established identity", async () => {
     const { daemon, sessions, client } = await harness();
 
@@ -1473,6 +1495,31 @@ describe("EngineRelayClient", () => {
           }),
       }),
     ).resolves.toMatchObject({ endedShareIds: ["channel-revoked"] });
+    await sessions.closeAll();
+  });
+
+  it("reports each applied page of a shared-channel pull before a later page fails", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.channel.pull") return undefined;
+      pulls += 1;
+      if (pulls >= 2) {
+        throw new EngineRequestError(request.id, {
+          code: "OVERLOADED",
+          message: "relay unreachable",
+          retry: "no",
+        });
+      }
+      return { fetched: 1, applied: 1, refused: 0, skipped: 0, hasMore: true, nextCursor: pulls };
+    });
+    const { client, sessions } = await harness(daemon);
+    const onApplied = vi.fn();
+
+    await expect(
+      client.pullSharedChannel({ shareId: "share-channel", channelWireId: "wire-channel", onApplied }),
+    ).rejects.toThrow();
+    expect(pulls).toBe(2);
+    expect(onApplied).toHaveBeenCalledTimes(1);
     await sessions.closeAll();
   });
 

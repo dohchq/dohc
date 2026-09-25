@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { transform } from "esbuild";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { parseDatasetDefinition, type AppDatasetBinding } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
@@ -13,7 +13,6 @@ import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost } from "./dataset-host.ts";
 
-vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const read = (app: string, file: string) => readFileSync(new URL(`../../../examples/${app}/${file}`, import.meta.url), "utf8");
@@ -28,7 +27,8 @@ async function fixture(app = "fundraiser") {
   const declaration = JSON.parse(read(app, app === "fundraiser" ? "app.publish.json" : "app.binding.json"));
   const binding: AppDatasetBinding = declaration.dataset ?? declaration;
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
-  if (declaration.inputs) expect(declaration.inputs).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
+  // app.publish.json paths are relative to the app folder; the dataset's private sources stay out of them.
+  if (declaration.inputs) expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
   const directory = await mkdtemp(join(tmpdir(), "dohc-example-dataset-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE attachments(file_id TEXT PRIMARY KEY);");

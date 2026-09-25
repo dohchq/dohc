@@ -11,6 +11,7 @@ import {
   RELAY_FETCH_TIMEOUT_MS,
   SHARED_CHANNEL_SYNC_PASS_ROWS,
   syncJoinedSharedChannels,
+  type SyncJoinedSharedChannelsResult,
 } from "./sharedChannels";
 import { joinedChannelMatchesCredentials } from "./chatRelayIdentity";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
@@ -18,6 +19,25 @@ import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
 interface SharedChannelSyncState {
   operationLanes: Map<string, Promise<void>>;
   sharedChannelSyncCursor: string | null;
+}
+
+// What one pass did. Freshness callers read `unrefreshed`. The DM sync reads
+// `changed`, because only a pass that applied ops gives the cloud engine
+// follow-up work, and `failed`, so the renderer can hold its polls.
+export interface SharedChannelPassOutcome {
+  // Live rows this pass did not leave fresh.
+  unrefreshed: number;
+  // True when a pull applied new ops, including pages applied before a
+  // later failure.
+  changed: boolean;
+  // True when the pass stopped before its rows finished. A failed row does
+  // not count, because one failing share must not hold the others, and
+  // neither does work after the rows, such as bookmark projection.
+  failed: boolean;
+}
+
+function idlePass(unrefreshed: number): SharedChannelPassOutcome {
+  return { unrefreshed, changed: false, failed: false };
 }
 
 export function createDesktopSharedChannelSync<
@@ -66,12 +86,10 @@ export function createDesktopSharedChannelSync<
     console.info(message),
   );
 
-  // Resolves to the live rows this pass did not reach, so an awaited caller can
-  // say so in its own response.
-  function syncWorkspaceSharedChannels(
+  function runWorkspaceSharedChannelPass(
     workspaceId: string,
     priorityChannelWireId?: string,
-  ): Promise<number> {
+  ): Promise<SharedChannelPassOutcome> {
     return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       runInWorkspaceAuthorityLane(lease, "shared-channels", () =>
         runSharedChannelSyncPass(lease, priorityChannelWireId),
@@ -79,13 +97,29 @@ export function createDesktopSharedChannelSync<
     );
   }
 
-  function syncRendererWorkspaceSharedChannels(
-    operation: RendererOperation,
+  // Resolves to the live rows this pass did not reach, so an awaited caller can
+  // say so in its own response.
+  async function syncWorkspaceSharedChannels(
+    workspaceId: string,
     priorityChannelWireId?: string,
   ): Promise<number> {
+    return (await runWorkspaceSharedChannelPass(workspaceId, priorityChannelWireId)).unrefreshed;
+  }
+
+  function runRendererSharedChannelPass(
+    operation: RendererOperation,
+    priorityChannelWireId?: string,
+  ): Promise<SharedChannelPassOutcome> {
     return runInWorkspaceAuthorityLane(operation, "shared-channels", () =>
       runSharedChannelSyncPass(operation, priorityChannelWireId),
     );
+  }
+
+  async function syncRendererWorkspaceSharedChannels(
+    operation: RendererOperation,
+    priorityChannelWireId?: string,
+  ): Promise<number> {
+    return (await runRendererSharedChannelPass(operation, priorityChannelWireId)).unrefreshed;
   }
 
   // A pass triggered by a write must cover the share that was written, whatever
@@ -126,10 +160,10 @@ export function createDesktopSharedChannelSync<
   async function syncRendererSharedChannelsForChatTarget(
     operation: RendererOperation,
     target?: { channelId: string } | { threadId: string },
-  ): Promise<number> {
+  ): Promise<SharedChannelPassOutcome> {
     operation.assertCurrent();
     const workspace = operation.workspace;
-    if (!target) return syncRendererWorkspaceSharedChannels(operation);
+    if (!target) return runRendererSharedChannelPass(operation);
     let joinedChannel: JoinedSharedChannel | null;
     try {
       joinedChannel = await joinedSharedChannelForTarget({
@@ -140,10 +174,10 @@ export function createDesktopSharedChannelSync<
       });
       operation.assertCurrent();
     } catch {
-      return syncRendererWorkspaceSharedChannels(operation);
+      return runRendererSharedChannelPass(operation);
     }
-    if (!joinedChannel || joinedChannel.ended === true) return 0;
-    return syncRendererWorkspaceSharedChannels(
+    if (!joinedChannel || joinedChannel.ended === true) return idlePass(0);
+    return runRendererSharedChannelPass(
       operation,
       joinedChannel.channelWireId,
     );
@@ -164,7 +198,7 @@ export function createDesktopSharedChannelSync<
   async function runSharedChannelSyncPass(
     authority: AuthorityLease | Operation,
     priorityChannelWireId?: string,
-  ): Promise<number> {
+  ): Promise<SharedChannelPassOutcome> {
     const binding = "binding" in authority ? authority.binding : null;
     const operation: Operation | null =
       binding === null ? (authority as Operation) : null;
@@ -187,6 +221,9 @@ export function createDesktopSharedChannelSync<
     // and must say so rather than report a clean sweep. Seeded before the
     // credential work so a rejection there still knows the count.
     let liveRows = 0;
+    // What the rows reported, kept for the catch below: the registry write and
+    // bookmark projection after the rows can fail without undoing applied ops.
+    let progress: SyncJoinedSharedChannelsResult | null = null;
     try {
       authority.assertCurrent();
       const current = operation ? operation.workspace : findWorkspace(workspaceId);
@@ -208,7 +245,7 @@ export function createDesktopSharedChannelSync<
       const channels = registryOrder.filter((channel) => !channel.ended);
       if (!entry || channels.length === 0) {
         reportSharedChannelPassCoveredEverything(workspaceId);
-        return 0;
+        return idlePass(0);
       }
       liveRows = channels.length;
       await warmCredentialCache();
@@ -217,7 +254,7 @@ export function createDesktopSharedChannelSync<
       const syncCredentials = currentCredentials();
       // Signed out, or signed in to a server this workspace does not sync with:
       // the rows are joined and none of them got refreshed.
-      if (!syncCredentials?.relayUrl) return liveRows;
+      if (!syncCredentials?.relayUrl) return idlePass(liveRows);
       const relayUrl = syncCredentials.relayUrl;
       // A joined channel syncs only for the relay account that joined it.
       const matching = channels.filter((channel) =>
@@ -227,7 +264,7 @@ export function createDesktopSharedChannelSync<
       // — nothing was left behind by a bound, and nothing can be.
       if (matching.length === 0) {
         reportSharedChannelPassCoveredEverything(workspaceId);
-        return 0;
+        return idlePass(0);
       }
       liveRows = matching.length;
       const relay = {
@@ -254,6 +291,7 @@ export function createDesktopSharedChannelSync<
           const pulled = await daemonRelay.pullSharedChannel({
             shareId: input.shareId,
             channelWireId: input.channelWireId,
+            onApplied: input.onApplied,
           });
           assertRequestCurrent();
           return pulled;
@@ -268,6 +306,7 @@ export function createDesktopSharedChannelSync<
           return pushed;
         },
       });
+      progress = result;
       assertRequestCurrent();
       if (result.resumeAfterChannelWireId === null) {
         authority.state.sharedChannelSyncCursor = null;
@@ -311,15 +350,20 @@ export function createDesktopSharedChannelSync<
         await projectPendingChatBookmarksAfterPull(workspaceId);
         assertRequestCurrent();
       }
-      return unrefreshed;
+      return { unrefreshed, changed: result.changed, failed: false };
     } catch (error) {
       if (operation) assertRequestCurrent();
       console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
-      return liveRows;
+      return {
+        unrefreshed: liveRows,
+        changed: progress?.changed ?? false,
+        failed: progress === null,
+      };
     }
   }
 
   return {
+    runWorkspaceSharedChannelPass,
     syncWorkspaceSharedChannels,
     syncRendererWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget,

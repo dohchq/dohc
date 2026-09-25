@@ -42,7 +42,9 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean}
   const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
     relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(8), startHost, onError});
   cleanup.push(() => host.close());
-  const waitStarted = async (count: number) => vi.waitFor(() => {expect(onError).not.toHaveBeenCalled(); expect(starts).toHaveLength(count);}, {timeout: 3_000});
+  // The supervisor reconciles on timers and writes configuration files; a loaded
+  // gate host can take seconds for either.
+  const waitStarted = async (count: number) => vi.waitFor(() => {expect(onError).not.toHaveBeenCalled(); expect(starts).toHaveLength(count);}, {timeout: 10_000});
   const add = (path = "docs/b.md", objectId = "object-b") => {
     f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
       VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(scope.workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
@@ -60,7 +62,7 @@ it("stays unavailable until retained documents have a running native host", asyn
     expect(f.host.current()).toBeUndefined();
     expect(f.host.unavailable).toBe(true);
   } finally {finish.resolve();}
-  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
   expect(f.host.current()).toBeDefined();
   f.starts[0]!.controller.abort();
   expect(f.host.unavailable).toBe(true);
@@ -69,7 +71,7 @@ it("stays unavailable until retained documents have a running native host", asyn
 it("becomes available after reconciling an empty deployment without starting a daemon", async () => {
   const f = await fixture({empty: true});
   expect(f.host.unavailable).toBe(true);
-  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
   expect(f.startHost).not.toHaveBeenCalled();
 });
 
@@ -104,7 +106,7 @@ it("keeps the working daemon when the next configuration fails validation", asyn
   const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
   const original = f.storage.listServiceHostEnrollments.bind(f.storage);
   vi.spyOn(f.storage, "listServiceHostEnrollments").mockImplementation(() => original().map(row => ({...row, shareId: "x".repeat(513)})));
-  f.host.reconcile(); await vi.waitFor(() => expect(f.onError).toHaveBeenCalled(), {timeout: 3_000});
+  f.host.reconcile(); await vi.waitFor(() => expect(f.onError).toHaveBeenCalled(), {timeout: 10_000});
   expect(first.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeDefined();
 });
 
@@ -113,10 +115,10 @@ it("retries runtime checks without rescanning unchanged shares and rescans after
   const scans = vi.spyOn(f.storage, "scanServiceHostCandidateShares");
   const identity = vi.spyOn(f.storage, "verifyWorkspaceIdentity");
   f.host.reconcile();
-  await vi.waitFor(() => expect(identity).toHaveBeenCalled(), {timeout: 3_000});
+  await vi.waitFor(() => expect(identity).toHaveBeenCalled(), {timeout: 10_000});
   expect(scans).not.toHaveBeenCalled();
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
-  await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalled(), {timeout: 3_000});
+  await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalled(), {timeout: 10_000});
   expect(scans).toHaveBeenCalled();
   scans.mockClear();
   f.storage.enrollServiceHostDocument(f.input);
@@ -128,16 +130,20 @@ it.each([false, true])("clears a transient reconciliation failure after returnin
   const f = await fixture(); await f.waitStarted(1);
   if (empty) {
     f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
-    await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalledTimes(1), {timeout: 3_000});
+    await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalledTimes(1), {timeout: 10_000});
   }
   const current = f.host.current();
+  // The supervisor retries every 2 s, which can clear the failure before a poll
+  // sees it, so record availability when the failure is reported.
+  const unavailableAtError: boolean[] = [];
+  f.onError.mockImplementation(() => {unavailableAtError.push(f.host.unavailable);});
   const selection = vi.spyOn(f.storage, "listServiceHostEnrollments");
   selection.mockImplementationOnce(() => {throw new Error("Temporary enrollment read failure");});
   f.host.reconcile();
-  await vi.waitFor(() => expect(f.host.unavailable).toBe(true), {timeout: 3_000});
+  await vi.waitFor(() => expect(unavailableAtError).toEqual([true]), {timeout: 10_000});
   expect(f.onError).toHaveBeenCalledTimes(1);
   f.host.reconcile();
-  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
   expect(f.host.current()).toBe(current);
   expect(f.starts).toHaveLength(1);
   expect(f.starts[0]!.close).toHaveBeenCalledTimes(empty ? 1 : 0);
@@ -146,7 +152,7 @@ it.each([false, true])("clears a transient reconciliation failure after returnin
 it("pauses the final document without restarting it and closes owned daemons", async () => {
   const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
-  await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1), {timeout: 3_000});
+  await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1), {timeout: 10_000});
   expect(f.host.current()).toBeUndefined();
   expect(f.host.ready({workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId})).toBe(false);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);

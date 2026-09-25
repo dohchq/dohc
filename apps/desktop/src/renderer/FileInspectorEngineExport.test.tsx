@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { configure } from "@testing-library/dom";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,9 +18,6 @@ import { markdownToYDoc } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
-
-configure({ asyncUtilTimeout: 5_000 });
-vi.setConfig({ testTimeout: 15_000 });
 
 const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
@@ -108,7 +104,7 @@ describe("engine-mode export with no mounted serializer", () => {
 
     // The engine header is up (the document bound); the editor beneath it is
     // still suspended, so there is nothing to serialize the Y.Doc.
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
 
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -131,7 +127,7 @@ describe("engine-mode export with no mounted serializer", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     // The timeout notice is up and the document is read-only beside it.
-    await screen.findByTestId("engine-may-hold-document-notice", {}, { timeout: 5_000 });
+    await screen.findByTestId("engine-may-hold-document-notice");
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
@@ -155,7 +151,7 @@ describe("engine-mode export with no mounted serializer", () => {
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("engine-may-hold-document-notice", {}, { timeout: 5_000 });
+    await screen.findByTestId("engine-may-hold-document-notice");
     await user.click(screen.getByText("Try again"));
     await vi.waitFor(() =>
       expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull(),
@@ -187,7 +183,7 @@ describe("engine-mode export with no mounted serializer", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     // The document is on screen through the local branch while it opens.
-    await screen.findByTestId("document-menu-trigger", {}, { timeout: 5_000 });
+    await screen.findByTestId("document-menu-trigger");
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
@@ -205,15 +201,8 @@ describe("engine-mode export with no mounted serializer", () => {
 
     // No engine session: the file on disk IS the document, so the plain
     // editor's own serializer answers and the export must still work.
-    const toggle = await screen.findByTestId(
-      "markdown-edit-toggle",
-      {},
-      { timeout: 5_000 },
-    );
-    await vi.waitFor(
-      () => expect(toggle.hasAttribute("disabled")).toBe(false),
-      { timeout: 5_000 },
-    );
+    const toggle = await screen.findByTestId("markdown-edit-toggle");
+    await vi.waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 

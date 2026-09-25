@@ -826,8 +826,16 @@ impl EngineService {
                     .await?
             }
             "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
+            "automations.listClaims" => {
+                self.automations_list_claims(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.retry" => {
+                self.automations_retry(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.dispatch.requeueFailedTrigger" => {
@@ -941,6 +949,7 @@ mod tests {
             workspace: None,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({}),
         };
         let discovery = service.configured_live_hosts(&ctx, &request).unwrap();
@@ -1089,6 +1098,7 @@ mod tests {
                     workspace: None,
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: Value::Null,
                 },
             )
@@ -1111,6 +1121,8 @@ mod tests {
         const METHODS: &[&str] = &[
             "automations.claimNext",
             "automations.failures",
+            "automations.listClaims",
+            "automations.retry",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
@@ -1261,6 +1273,7 @@ mod tests {
                         workspace: None,
                         deadline_ms: None,
                         idempotency_key: None,
+                        progress: false,
                         params: json!({}),
                     },
                 )

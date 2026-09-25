@@ -18,6 +18,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import {
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
@@ -241,7 +242,7 @@ export interface WorkspaceEngineMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: "text" | "binary";
   byteLength?: number;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   author?: MomentAuthor;
   momentOrder: number;
   protected: boolean;
@@ -375,8 +376,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // state without them, falling back to device attribution — the same
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
-  // claim id plus its write ordinal), so a re-run handler's identical write
-  // dedupes engine-side.
+  // claim id, attempt, and write ordinal), so a retried request of the same
+  // write dedupes engine-side.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -1265,7 +1266,7 @@ function assertEngineWritablePath(
   // The disk-materialize boundary runs Check A + Check B (win32): a name that
   // cannot be written on this disk is refused here (and surfaced) while
   // classification/capture/store writes stayed permissive (Check A only).
-  const check = validateUserMaterializePath(path);
+  const check = validateUserMaterializePath(path, { platform: process.platform });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }

@@ -28,6 +28,10 @@ const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
     + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
+/// Every engine request to the relay names the relay API version this build
+/// speaks. Keep both equal to `packages/workspace-contracts/src/relayValues.ts`.
+const RELAY_API_VERSION_HEADER: &str = "x-dohc-api-version";
+const RELAY_API_VERSION: &str = "1";
 const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A canceled synchronous ureq read may live until its transport timeout;
 /// match the runtime's download concurrency so those readers stay bounded.
@@ -465,13 +469,25 @@ fn configured_agent(
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .https_only(!allow_insecure_loopback)
-        .max_redirects(0);
+        .max_redirects(0)
+        .middleware(name_relay_api_version);
     let builder = if let Some(tls_config) = tls_config {
         builder.tls_config(tls_config)
     } else {
         builder
     };
     builder.build().into()
+}
+
+fn name_relay_api_version(
+    mut request: ureq::http::Request<ureq::SendBody>,
+    next: ureq::middleware::MiddlewareNext,
+) -> Result<Response<Body>, ureq::Error> {
+    request.headers_mut().insert(
+        RELAY_API_VERSION_HEADER,
+        ureq::http::HeaderValue::from_static(RELAY_API_VERSION),
+    );
+    next.handle(request)
 }
 
 impl RelayTransport for HttpRelayTransport {
@@ -1020,6 +1036,8 @@ macro_rules! define_server_error_codes {
 
 define_server_error_codes! {
     "ambiguous_selector" => |_| RelayError::AmbiguousSelector,
+    "api_version_too_new" => |_| RelayError::ApiVersionTooNew,
+    "api_version_too_old" => |_| RelayError::ApiVersionTooOld,
     "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
     "bad_request" => |_| RelayError::BadRequest,
     "blob_missing" => |_| RelayError::BlobReferenceMissing,
@@ -1034,7 +1052,7 @@ define_server_error_codes! {
     "identity_required" => |_| RelayError::IdentityRequired,
     "internal_error" => |_| RelayError::ServerInternal,
     "invalid_access" => |_| RelayError::BadRequest,
-    "invalid_channel" => |_| RelayError::InvalidChannel,
+    "invalid_chat" => |_| RelayError::InvalidChannel,
     "invalid_path" => |_| RelayError::BadRequest,
     "invalid_version" => |_| RelayError::BadRequest,
     "key_envelope_not_found" => |_| RelayError::KeyEnvelopeMissing,
@@ -1043,6 +1061,9 @@ define_server_error_codes! {
     "link_read_rate_limited" => |_| RelayError::LinkReadRateLimited,
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
     "not_found" => unavailable,
+    "notice_list_full" => |_| RelayError::Conflict,
+    "notice_rate_limited" => |_| RelayError::HttpStatus(429),
+    "notice_refused" => |_| RelayError::Forbidden,
     "payload_too_large" => |_| RelayError::PayloadTooLarge,
     "presence_capacity" => |_| RelayError::PresenceCapacity,
     "quota_exceeded" => |_| RelayError::QuotaExceeded,
@@ -1365,6 +1386,17 @@ mod tests {
             map_server_code("dependents_changed", RequestContext::Share),
             RelayError::Conflict
         );
+    }
+
+    #[test]
+    fn relay_api_version_matches_the_typescript_contract() {
+        let contract = include_str!("../../../packages/workspace-contracts/src/relayValues.ts");
+        assert!(contract.contains(&format!(
+            "export const RELAY_API_VERSION_HEADER = \"{RELAY_API_VERSION_HEADER}\";"
+        )));
+        assert!(contract.contains(&format!(
+            "export const RELAY_API_VERSION = {RELAY_API_VERSION};"
+        )));
     }
 
     #[test]
