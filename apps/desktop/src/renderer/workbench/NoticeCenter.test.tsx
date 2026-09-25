@@ -520,7 +520,7 @@ describe("notice center", () => {
 
   it.each([
     ["app", "Update dohc to sync", "This server needs a newer version of dohc. Update dohc to sync again."],
-    ["server", "Server needs an update", "Ask the person who runs it to update it, then restart dohc."],
+    ["server", "Server needs an update", "Ask the person who runs it to update it. Then restart dohc."],
   ] as const)("says who must update when sync stopped on the relay API version (%s)", async (updateRequired, title, next) => {
     renderNotices({
       syncStatus: {

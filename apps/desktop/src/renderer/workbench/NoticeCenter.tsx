@@ -584,7 +584,7 @@ export function NoticeCenter(props: {
         body: `${RELAY_API_VERSION_CAUSE[update]} ${
           update === "app"
             ? "Update dohc to sync again."
-            : "Ask the person who runs it to update it, then restart dohc."
+            : "Ask the person who runs it to update it. Then restart dohc."
         } Your changes stay on this computer.`,
         Icon: CloudOff,
       });
