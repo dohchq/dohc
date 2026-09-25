@@ -766,14 +766,26 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
+        let has_origin = !req.origin_id.is_empty();
         let page = self.read_share_log(
             &req.share_id,
             req.cursor,
             MAX_PULL_OPS,
-            &[("channelWireId", req.channel_wire_id)],
+            &[
+                ("channelWireId", req.channel_wire_id),
+                ("originId", req.origin_id),
+            ],
         )?;
+        if has_origin && page.own_origin_id.as_ref().is_none_or(String::is_empty) {
+            return Err(RelayError::InvalidResponse);
+        }
         Ok(SharedChannelResponse {
-            ops: page.ops,
+            own_origin_id: page.own_origin_id,
+            ops: page
+                .ops
+                .into_iter()
+                .map(WireLogRow::into_share_envelope)
+                .collect(),
             next_cursor: page.next_cursor,
             has_more: page.has_more,
             push: None,
@@ -806,7 +818,11 @@ impl RelayTransport for HttpRelayTransport {
         let page =
             self.read_share_log(&req.share_id, req.cursor, req.limit.min(MAX_PULL_OPS), &[])?;
         Ok(ShareViewResponse {
-            ops: page.ops,
+            ops: page
+                .ops
+                .into_iter()
+                .map(WireLogRow::into_share_envelope)
+                .collect(),
             next_cursor: page.next_cursor,
             has_more: page.has_more,
         })
@@ -876,7 +892,7 @@ impl HttpRelayTransport {
         cursor: i64,
         limit: usize,
         extra_query: &[(&str, String)],
-    ) -> Result<ShareViewResponse, RelayError> {
+    ) -> Result<WireLogPage, RelayError> {
         let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
         query.extend_from_slice(extra_query);
         let url = self.share_url(share_id, "/log", &query);
@@ -887,15 +903,7 @@ impl HttpRelayTransport {
                 .call(),
             RequestContext::Share,
         )?;
-        Ok(ShareViewResponse {
-            ops: wire
-                .ops
-                .into_iter()
-                .map(WireLogRow::into_share_envelope)
-                .collect(),
-            next_cursor: wire.next_cursor,
-            has_more: wire.has_more,
-        })
+        Ok(wire)
     }
 }
 
@@ -1212,6 +1220,7 @@ struct WirePushResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogPage {
+    own_origin_id: Option<String>,
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,

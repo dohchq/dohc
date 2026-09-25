@@ -202,6 +202,7 @@ pub struct SharedChannelRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelResponse {
+    pub own_origin_id: Option<String>,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -1725,9 +1726,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPullOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id).map_err(local)?;
-        let own_echo = identity
-            .as_ref()
-            .map(|value| format!("share:{share_id}:{}", value.origin_id));
         let mut cursor = crate::read_share_cursor(
             store,
             workspace_id,
@@ -1746,6 +1744,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         let fetched = page.ops.len();
+        let own_echo = page.own_origin_id;
         let ops = page.ops;
         cursor = page.next_cursor;
 

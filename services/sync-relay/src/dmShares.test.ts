@@ -1,3 +1,4 @@
+import { namedShareOrigin } from "./relayLogInputs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import {
@@ -385,8 +386,8 @@ describe("DM grants over the relay", () => {
     const memberAuthored = memberOps.find(
       (op) => (op.payload as Record<string, unknown>).body === "hi alice",
     )!;
-    // Client-sequenced, namespaced per share — NOT MU-C3's hashed origin.
-    expect(memberAuthored.originId).toBe(`share:${shareId}:origin-member`);
+    // Client-sequenced, scoped to the authenticated member and replica.
+    expect(memberAuthored.originId).toBe(namedShareOrigin(shareId, MEMBER, "origin-member"));
     expect(memberAuthored.originSeq).toBe(0);
 
     // The OWNER's own bucket pull sees the member's op too (one log, many

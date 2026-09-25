@@ -231,6 +231,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             .unwrap_or(since);
         return TestResponse::json(json!({
             "ops": rows,
+            "ownOriginId": "relay:share-member:authenticated-origin",
             "nextCursor": next,
             "hasMore": false,
         }));
@@ -1745,7 +1746,6 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
     .await;
     {
         let mut state = relay.state.lock().expect("relay state");
-        let origin = state.local_origin_id.clone().expect("local origin");
         let channel = state
             .pushed_workspace_ops
             .iter()
@@ -1763,7 +1763,7 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
             vec![
                 share_row(
                     1,
-                    &format!("share:shared-channel:{origin}"),
+                    "relay:share-member:authenticated-origin",
                     400,
                     channel["opKind"].as_str().expect("kind"),
                     channel["payload"].clone(),
