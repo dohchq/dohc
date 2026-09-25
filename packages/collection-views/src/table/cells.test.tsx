@@ -9,6 +9,23 @@ import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSup
 
 afterEach(cleanup);
 
+it("keeps later relation choices across partial acknowledgments", async () => {
+  let nextId = 0;
+  const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
+  const relation: FieldDefinition = { name: "links", type: "relation", collection: "tasks", many: true };
+  const executor = vi.fn(async () => makeQueryResult(["a", "b", "c"].map(id => makeRecord(id, [indexedValue("title", id)]))));
+  const editor = (value: string[], acknowledgedWriteId: number) => <CellEditor
+    field={relation} indexed={indexedValue("links", value)} acknowledgedWriteId={acknowledgedWriteId}
+    emit={emit} close={() => {}} relationExecutor={executor} />;
+  const { rerender } = render(editor([], 0));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "a" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "b" }));
+  rerender(editor(["a"], 1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "b" }).checked).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: "c" }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(["a", "b", "c"]);
+});
+
 function field(name: string): FieldDefinition {
   const match = V1_FIELDS.find((entry) => entry.name === name);
   if (!match) throw new Error(`no test field named ${name}`);
@@ -521,7 +538,7 @@ describe("CellEditor", () => {
       collectionPath: "tasks",
       limit: 100,
     });
-    expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"]);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"], [["rec-a"]]);
   });
 
   it("trims a person edit and commits a whitespace-only one as null", () => {
