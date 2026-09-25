@@ -112,7 +112,10 @@ export interface CollectionAutomationsOptions {
   onFailuresChanged(): void;
   /** A step started or stopped waiting for a current editor: the hold notices re-read. */
   onHoldsChanged(): void;
-  /** The automations dohc read from the workspace changed: the ⚡ field marks re-read. */
+  /**
+   * The automations dohc read from the workspace changed, or a step's reach
+   * verdict did: the ⚡ field marks re-read.
+   */
   onAutomationsChanged(): void;
   onError(context: string, error: unknown): void;
   nowMs?: () => number;
@@ -721,8 +724,10 @@ export class CollectionAutomations {
 
   /**
    * Whether a run would get past the checks it makes before its first write,
-   * as far as this computer knows now: no step's reach verdict is stopped,
-   * and `writable` accepts every Collection a step names.
+   * as far as this computer knows now: no step's saved reach verdict is
+   * stopped or held, and `writable` accepts every Collection a step names.
+   * Verdicts are saved at every roster listing, and a change to one raises
+   * `onAutomationsChanged`.
    */
   private async canRun(
     automationId: string,
@@ -733,7 +738,9 @@ export class CollectionAutomations {
     const hash = definitionHash(automation);
     const steps = reachStepsOf(automation, collectionNamed(collectionPath), collectionNamed);
     for (const [step, reach] of steps.entries()) {
-      if (this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict === "stopped") return false;
+      // A stopped step fails the run, and a held one waits for a current editor.
+      const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
+      if (verdict === "stopped" || verdict === "held") return false;
       if ("collection" in reach && !(await writable(reach.collection.path))) return false;
     }
     return true;
@@ -781,6 +788,9 @@ export class CollectionAutomations {
           if (hash !== undefined && hash !== verdict.definitionHash) this.verdicts.delete(key);
         }
         await this.options.store.saveReachVerdicts([...this.verdicts.values()]);
+        // A step that stops, waits, or runs again changes which fields its
+        // automation sets.
+        this.options.onAutomationsChanged();
       }
       this.publishHolds();
       return result;

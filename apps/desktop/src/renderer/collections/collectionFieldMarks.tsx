@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { bridge } from "../bridge";
-import { Tooltip, useTooltip } from "../ui/useTooltip";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 
 // The ⚡ marks on fields that switched-on automations set. Main reads every
 // automations.yaml, so the renderer asks it for one Collection's marks. The

@@ -1403,5 +1403,17 @@ describe("Collection automations", () => {
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Stamp"] }]);
     await expect(w.executor.fieldMarks("Ledger")).resolves.toEqual([]);
     await expect(w.executor.fieldMarks("Nowhere")).resolves.toEqual([]);
+
+    // Ana's share ends. Bump's step now waits for a current editor, so it
+    // still writes nothing, and the marks hear that the verdict changed.
+    const changes = w.automationsChanged();
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    w.executor.rosterChanged();
+    const bumpHold = () => w.executor.holds().find((hold) => hold.automationName === "Bump");
+    await w.until(() => bumpHold() !== undefined && w.automationsChanged() > changes);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Stamp"] }]);
+    await w.executor.confirmReach(bumpHold()!);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Bump", "Stamp"] }]);
+    await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
   });
 });

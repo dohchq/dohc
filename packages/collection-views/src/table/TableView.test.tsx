@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableView } from "./TableView";
 import { indexedValue, makeRecord, makeSchema } from "../testSupport";
@@ -164,15 +164,30 @@ describe("field marks", () => {
     fireEvent.mouseLeave(header);
     expect(words.hidden).toBe(true);
 
-    fireEvent.focus(done);
+    // Focus that a pointer press gives, as when a click sorts the column, shows nothing.
+    fireEvent.pointerDown(done);
+    act(() => done.focus());
+    fireEvent.pointerUp(done);
+    expect(words.hidden).toBe(true);
+    act(() => done.blur());
+    act(() => done.focus());
     expect(words.hidden).toBe(false);
+    // Escape on the sort control closes the words and nothing around them.
     const outer = vi.fn();
     document.addEventListener("keydown", outer);
     fireEvent.keyDown(done, { key: "Escape" });
     document.removeEventListener("keydown", outer);
     expect(words.hidden).toBe(true);
     expect(outer).not.toHaveBeenCalled();
-    fireEvent.blur(done);
+    act(() => done.blur());
+
+    // Words the pointer opened close on Escape wherever focus is, and
+    // leaving focus does not close words the pointer holds open.
+    fireEvent.mouseEnter(header);
+    act(() => done.focus());
+    act(() => done.blur());
+    expect(words.hidden).toBe(false);
+    fireEvent.keyDown(document.body, { key: "Escape" });
     expect(words.hidden).toBe(true);
   });
 });

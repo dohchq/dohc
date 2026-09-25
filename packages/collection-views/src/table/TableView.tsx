@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -11,6 +11,7 @@ import type {
 import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
+import { Tooltip, useTooltip } from "../tooltip";
 import { CellEditor, FieldCell } from "./cells";
 
 /**
@@ -44,8 +45,8 @@ export interface CollectionOptionCreate {
 /**
  * A mark after a field's name in the header, such as the ⚡ of a field that
  * automations set. The host supplies the icon and its words; hovering the
- * header or focusing its sort control shows the words, and screen readers
- * hear them as the control's description.
+ * header or giving its sort control keyboard focus shows the words, and
+ * screen readers hear them as the control's description.
  */
 export interface TableFieldMark {
   icon: ReactNode;
@@ -108,10 +109,8 @@ interface EditingCell {
 }
 
 /**
- * One field's header: its name sorts the table. A mark's words show while
- * the pointer is over the header or its words, or its sort control has
- * focus, and Escape hides them. The state lives here, so showing the words
- * renders this header alone.
+ * One field's header: its name sorts the table. The tooltip state for a
+ * mark's words lives here, so showing them renders this header alone.
  */
 function FieldHeader(props: {
   name: string;
@@ -120,32 +119,20 @@ function FieldHeader(props: {
   onSort: () => void;
 }) {
   const { mark, sorted } = props;
-  const markId = useId();
-  const [open, setOpen] = useState(false);
+  const tooltip = useTooltip();
   return (
     <div
       role="columnheader"
       aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
       className="relative"
       style={{ width: COLUMN_WIDTH }}
-      {...(mark ? { onMouseEnter: () => setOpen(true), onMouseLeave: () => setOpen(false) } : {})}
+      {...(mark ? tooltip.hoverProps : {})}
     >
       <button
         type="button"
         className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
         onClick={props.onSort}
-        {...(mark
-          ? {
-              "aria-describedby": markId,
-              onFocus: () => setOpen(true),
-              onBlur: () => setOpen(false),
-              onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
-                if (event.key !== "Escape" || !open) return;
-                event.stopPropagation();
-                setOpen(false);
-              },
-            }
-          : {})}
+        {...(mark ? tooltip.focusProps : {})}
       >
         <span className="truncate">{props.name}</span>
         {mark ? (
@@ -159,14 +146,7 @@ function FieldHeader(props: {
           </span>
         ) : null}
       </button>
-      {mark ? (
-        // No gap between the header and its words, so the pointer can move onto them.
-        <span id={markId} role="tooltip" hidden={!open} className="absolute left-2 top-full z-20 pt-1">
-          <span className="dohc-popover block w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-[12px] font-normal text-ink">
-            {mark.label}
-          </span>
-        </span>
-      ) : null}
+      {mark ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
     </div>
   );
 }
