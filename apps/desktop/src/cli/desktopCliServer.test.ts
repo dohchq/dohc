@@ -49,6 +49,8 @@ function fixture(rootPath = resolve("cli-workspace")) {
     filePathForObjectId: vi.fn(async () => "notes.md"),
     listMoments: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listMoments"]>(),
     readMoment: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["readMoment"]>(),
+    listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
+      async () => ({ versions: [], activeVersionId: "main" })),
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
     method === WORKSPACE_METHOD.searchQueryChatMessagesGranular
@@ -194,7 +196,7 @@ describe("desktop CLI workspace context", () => {
     expect(f.capture.listMoments).toHaveBeenCalledWith({ limit: 4 });
     await context.listMoments({ limit: 4, objectId: "object-plan" });
     expect(f.capture.listMoments).toHaveBeenLastCalledWith({ limit: 4, objectId: "object-plan" });
-    const detail = { id: "detail", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
+    const detail = { id: "detail", versionId: "main", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
     f.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: detail })
       .mockResolvedValueOnce({ protected: true, moment: { id: "secret" } } as never).mockResolvedValueOnce(null);
     expect(await context.readMoment("visible")).toBe(detail);
@@ -245,6 +247,9 @@ describe("desktop CLI workspace context", () => {
         send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
 
       expect((await cli("history", "show", "journal")).stdout).toBe("dear diary");
+      // A change from a version that is not active reads as not found.
+      f.capture.listVersions.mockResolvedValueOnce({ versions: [], activeVersionId: "draft" });
+      expect(await cli("history", "show", "journal")).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: change not found: journal\n" });
       expect(await mcp("moment", { id: "journal" })).toMatchObject({ ok: true });
 
       await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');

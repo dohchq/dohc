@@ -54,7 +54,7 @@ interface DesktopCliServerDependencies<State> {
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment" | "listVersions"
     > | null;
     queueCloudSync(workspaceId: string): void;
   };
@@ -302,6 +302,8 @@ export function createDesktopCliServer<State>(
         const detail = await capture.readMoment(momentId);
         if (!detail || detail.protected) return null;
         const { moment } = detail;
+        // History reads come from the active version, as the list does.
+        if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
         const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
         const paths = [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])];
         return paths.every(admitted) ? moment : null;
