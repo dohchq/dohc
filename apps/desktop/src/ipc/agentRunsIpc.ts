@@ -36,6 +36,8 @@ export function createAgentRunsIpc<
   withEngineAdapter<Result>(workspace: EngineWorkspace, work: (adapter: Pick<VersionedLiveAdapter, "listAutomationFailures">) => Promise<Result>): Promise<Result | null>;
   acknowledgeWorkspaceAutomationFailure(workspaceId: string, automationId: string, generation: number): void;
   notifyAutomationFailuresChanged(workspaceId: string): void;
+  /** A Collection automation's name in its automations.yaml, or null. */
+  automationNameOf(workspaceId: string, automationId: string): string | null;
   requireEngineCapture(workspaceId: string, feature: "Chats"): Promise<{ workspace: Workspace }>;
   linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore, "ensureOpen">;
   agentDispatchStoreHandleFor(workspace: Workspace): { store: Pick<LiveAgentDispatchStoreHandle["store"], "runRecordsForThread"> };
@@ -88,7 +90,10 @@ export function createAgentRunsIpc<
             failures: unacknowledgedAutomationFailures(
               result?.failures ?? [],
               operation.workspace.automationFailureAcks,
-            ),
+            ).map((failure) => ({
+              ...failure,
+              name: dependencies.automationNameOf(input.workspaceId, failure.automationId),
+            })),
           });
         },
       );

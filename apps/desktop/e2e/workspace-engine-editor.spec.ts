@@ -13,6 +13,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -134,6 +135,16 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await page.getByTestId("markdown-source-toggle").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("markdown-editor")).toContainText(sentinel);
+
+    // History says how the typed sentence arrived. The settle names no
+    // author, so the row names the live edit and not a person.
+    await openHistoryView(page);
+    await expect(
+      page
+        .locator('[data-testid="engine-moment-open"][data-moment-path="notes/rich.md"]')
+        .first()
+        .getByTestId("engine-moment-source"),
+    ).toHaveText("Live edit");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -2,11 +2,11 @@ import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { ShareAccess, ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { OpenSharedView } from "./OpenSharedView";
+import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
@@ -57,7 +57,7 @@ export function ShareHandoffSurface(props: {
   onOpened: () => void;
   mountInto?: {
     workspaceId: string;
-    onMounted: (label: string) => void;
+    onMounted: (label: string, access: ShareAccess | null) => void;
   };
 } & ConnectionNoticeHost) {
   const shareId = props.status.status === "done" ? props.status.shareId : null;
@@ -88,8 +88,7 @@ export function ShareHandoffSurface(props: {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
           result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: result.share.access === "edit" && result.share.selector !== null &&
-              (result.share.selector.versionId === null || result.share.selector.versionId === "main") }
+            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: opensForLiveEditing(result.share) }
             : { kind: "missing", shareId },
         );
       })

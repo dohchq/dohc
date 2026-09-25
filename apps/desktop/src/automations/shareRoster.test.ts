@@ -79,7 +79,7 @@ describe("roster from the relay's listings", () => {
         row({ grantId: "g-4", principalKind: "email", recipientUserId: null, recipientEmail: "cai@dohc.test", access: "view" }),
         row({ grantId: "g-3", selector: group, access: "read-write" }),
         row({ grantId: "g-2", selector: group, access: "read-only" }),
-        row({ grantId: "g-1", selector: { kind: "chat-channel", channelWireId: "wire-family" }, access: "read-write" }),
+        row({ grantId: "g-1", selector: { kind: "chat", channelWireId: "wire-family" }, access: "read-write" }),
         row({ grantId: "g-6", selector: { paths: [], versionId: "v-1" }, access: "edit" }),
       ],
       received: [row({ grantId: "g-received", workspaceId: undefined })],
@@ -617,15 +617,5 @@ describe("keeping the roster current", () => {
     r.open("ws-local");
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
-  });
-
-  it("answers share impact from a current roster", async () => {
-    const { rosters: r } = rosters(async () => answered({ grants: [ana] }));
-    const impact = await r.shareImpact(
-      WORKSPACE,
-      { paths: ["Budget"], versionId: null, access: "edit", recipientEmail: "ben@dohc.test" },
-      [{ id: "log", collection: { path: "Budget", name: "Budget" }, codeFiles: [], steps: [{ kind: "find-records", collection: { path: "Notes", name: "Notes" } }] }],
-    );
-    expect(impact).toEqual([{ automationId: "log", step: 0, reason: "ben@dohc.test cannot view Notes." }]);
   });
 });

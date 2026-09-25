@@ -2,7 +2,7 @@
 
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
-use dohc_engine_domain::{COLLECTION_SCHEMA_FILENAME, DomainError};
+use dohc_engine_domain::{AutomationClaim, COLLECTION_SCHEMA_FILENAME, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
@@ -297,6 +297,9 @@ pub struct StoreCaptureSink {
     /// deterministic signal from the exact decision point, immune to the
     /// blip being over before any re-read could observe it.
     policy_held: std::cell::Cell<bool>,
+    /// Automation claims this run's captures and reconciliations inserted.
+    /// The driver announces them after the run.
+    automation_claims: std::cell::RefCell<Vec<AutomationClaim>>,
     /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -400,6 +403,7 @@ impl StoreCaptureSink {
             search_policy: snapshot,
             files_policy,
             policy_held: std::cell::Cell::new(false),
+            automation_claims: std::cell::RefCell::new(Vec::new()),
             secret_key: None,
             self_writes,
             provenance,
@@ -486,6 +490,11 @@ impl StoreCaptureSink {
         self.policy_held.get()
     }
 
+    /// Take the automation claims this run inserted so far.
+    pub(crate) fn take_automation_claims(&self) -> Vec<AutomationClaim> {
+        self.automation_claims.take()
+    }
+
     /// Refresh collection detection and record bindings after a clean capture
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
@@ -494,7 +503,7 @@ impl StoreCaptureSink {
             reason: "workspace root changed during capture",
             source: None,
         })?;
-        self.actor.reconcile_collections_blocking_guarded(
+        let reconciliation = self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -503,7 +512,11 @@ impl StoreCaptureSink {
             self.now_ms,
             Arc::new(NoFaults),
             root_guard,
-        )
+        )?;
+        self.automation_claims
+            .borrow_mut()
+            .extend(reconciliation.automation_claims);
+        Ok(reconciliation.changed_paths)
     }
 
     /// Check only the changed collection records offered by this capture
@@ -598,7 +611,12 @@ impl StoreCaptureSink {
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
-            Ok(_) => Ok(DomainIngest::Persisted),
+            Ok(result) => {
+                self.automation_claims
+                    .borrow_mut()
+                    .extend(result.automation_claims);
+                Ok(DomainIngest::Persisted)
+            }
             // The store's admission gate is stricter than the scan floor
             // (e.g. `..` substrings, byte-1 colons). A name the store refuses
             // is settled — retrying can never succeed, and one legal on-disk
@@ -1140,7 +1158,13 @@ impl StoreCaptureSink {
                 let mut outcomes = Vec::with_capacity(results.len());
                 for (result, (size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
-                        Ok(_) | Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                        Ok(result) => {
+                            self.automation_claims
+                                .borrow_mut()
+                                .extend(result.automation_claims);
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {

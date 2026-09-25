@@ -861,16 +861,34 @@ fn materialize_write_content(
     // NOTE: this read and the rename below are not atomic (no fs content-CAS);
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (see the module docs). The common case (an editor that wrote
-    // before the pipeline ran) IS caught here.
-    let current_now = if let Some(parent) = secret_parent.as_ref() {
-        parent.read_current(target_name.as_os_str(), target)?
-    } else {
-        read_current_no_follow(target)?
+    // before the pipeline ran) IS caught here. Each retry validates again after
+    // its backoff, including the final Windows exhaustion reattempt.
+    let mut validate_preimage = || {
+        let current = if let Some(parent) = secret_parent.as_ref() {
+            parent.read_current(target_name.as_os_str(), target)?
+        } else {
+            read_current_no_follow(target)?
+        };
+        if secret_root.is_some() && matches!(current, CurrentTarget::Oversized) {
+            return Err(MaterializeError::BlockedTarget);
+        }
+        Ok(preimage_matches(&job.preimage, &current))
     };
-    if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
-        return Err(MaterializeError::BlockedTarget);
-    }
-    if !preimage_matches(&job.preimage, &current_now) {
+    let replaced = if let Some(parent) = secret_parent.as_ref() {
+        replace_secret_with_bounded_retry(
+            parent,
+            tmp_name.as_os_str(),
+            target_name.as_os_str(),
+            &tmp,
+            target,
+            replacer,
+            backoff,
+            &mut validate_preimage,
+        )?
+    } else {
+        replace_with_bounded_retry(&tmp, target, replacer, backoff, &mut validate_preimage)?
+    };
+    if !replaced {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
         // is not lost; mark the job conflict (never silently replayed). The
@@ -899,22 +917,12 @@ fn materialize_write_content(
         return Ok(JobOutcome::Conflict);
     }
 
-    // Step 5: atomic replace with bounded retry, then make the rename itself
-    // durable by syncing the parent directory (POSIX), THEN mark complete — so a
+    // Make the completed replace durable by syncing the parent directory
+    // (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
     if let Some(parent) = secret_parent.as_ref() {
-        replace_secret_with_bounded_retry(
-            parent,
-            tmp_name.as_os_str(),
-            target_name.as_os_str(),
-            &tmp,
-            target,
-            replacer,
-            backoff,
-        )?;
         parent.sync(policy)?;
     } else {
-        replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
         sync_parent_dir(target.parent(), policy)?;
     }
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -2001,7 +2009,8 @@ fn resolve_replace_exhaustion(
     err: std::io::Error,
     target: &Path,
     _reattempt: &mut dyn FnMut() -> std::io::Result<()>,
-) -> Result<(), MaterializeError> {
+    _validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
         return Err(MaterializeError::FileLocked);
     }
@@ -2010,8 +2019,11 @@ fn resolve_replace_exhaustion(
         match probe_delete_open(target) {
             DeleteProbe::Contended => return Err(MaterializeError::FileLocked),
             DeleteProbe::Opened => {
+                if !_validate()? {
+                    return Ok(false);
+                }
                 return match _reattempt() {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(true),
                     Err(retry_err) if matches!(retry_err.raw_os_error(), Some(32) | Some(33)) => {
                         Err(MaterializeError::FileLocked)
                     }
@@ -2047,25 +2059,31 @@ fn is_transient_lock(err: &std::io::Error) -> bool {
 /// sharing violations it retries; on exhaustion it fails closed with
 /// [`MaterializeError::FileLocked`] and removes the temp, leaving the job
 /// pending for startup replay. A non-transient error surfaces immediately.
+/// Returns false without consuming the temp when the preimage changed.
 fn replace_with_bounded_retry(
     tmp: &Path,
     target: &Path,
     replacer: &dyn AtomicReplacer,
     backoff: &dyn ReplaceBackoff,
-) -> Result<(), MaterializeError> {
+    validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     let mut attempt = 0u32;
     loop {
+        if !validate()? {
+            return Ok(false);
+        }
         attempt += 1;
         match replacer.try_replace(tmp, target) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    match resolve_replace_exhaustion(err, target, &mut || {
-                        replacer.try_replace(tmp, target)
-                    }) {
-                        // The resolution's single reattempt landed the
-                        // replace: the temp was consumed by the rename.
-                        Ok(()) => return Ok(()),
+                    match resolve_replace_exhaustion(
+                        err,
+                        target,
+                        &mut || replacer.try_replace(tmp, target),
+                        validate,
+                    ) {
+                        Ok(replaced) => return Ok(replaced),
                         Err(error) => {
                             let _ = std::fs::remove_file(tmp); // best-effort cleanup
                             return Err(error);
@@ -2085,6 +2103,10 @@ fn replace_with_bounded_retry(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pinned paths and retry seams keep replacement and preimage checks testable"
+)]
 fn replace_secret_with_bounded_retry(
     parent: &SecretParentGuard,
     tmp_name: &OsStr,
@@ -2093,21 +2115,30 @@ fn replace_secret_with_bounded_retry(
     target: &Path,
     replacer: &dyn AtomicReplacer,
     backoff: &dyn ReplaceBackoff,
-) -> Result<(), MaterializeError> {
+    validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     let mut attempt = 0u32;
     loop {
+        if !validate()? {
+            return Ok(false);
+        }
         attempt += 1;
         let mut pinned_replace = || parent.rename(tmp_name, target_name, tmp, target);
         match replacer.try_replace_secret(tmp, target, &mut pinned_replace) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    match resolve_replace_exhaustion(err, target, &mut || {
-                        let mut pinned_replace =
-                            || parent.rename(tmp_name, target_name, tmp, target);
-                        replacer.try_replace_secret(tmp, target, &mut pinned_replace)
-                    }) {
-                        Ok(()) => return Ok(()),
+                    match resolve_replace_exhaustion(
+                        err,
+                        target,
+                        &mut || {
+                            let mut pinned_replace =
+                                || parent.rename(tmp_name, target_name, tmp, target);
+                            replacer.try_replace_secret(tmp, target, &mut pinned_replace)
+                        },
+                        validate,
+                    ) {
+                        Ok(replaced) => return Ok(replaced),
                         Err(error) => {
                             let _ = parent.remove_file(tmp_name, tmp);
                             return Err(error);
@@ -2226,6 +2257,7 @@ mod tests {
             &scratch.root.join("target.md"),
             &replacer,
             &NoBackoff,
+            &mut || Ok(true),
         );
         assert_eq!(
             replacer.attempts.load(Ordering::Relaxed),
@@ -2258,10 +2290,15 @@ mod tests {
             .open(&target)
             .expect("hold handle");
         let mut reattempts = 0u32;
-        let verdict = resolve_replace_exhaustion(denied(), &target, &mut || {
-            reattempts += 1;
-            Err(denied())
-        });
+        let verdict = resolve_replace_exhaustion(
+            denied(),
+            &target,
+            &mut || {
+                reattempts += 1;
+                Err(denied())
+            },
+            &mut || Ok(true),
+        );
         assert!(matches!(verdict, Err(MaterializeError::FileLocked)));
         assert_eq!(reattempts, 0, "an observed contention needs no reattempt");
         drop(holder);
@@ -2275,10 +2312,15 @@ mod tests {
         readonly.set_readonly(true);
         std::fs::set_permissions(&read_only, readonly).expect("set read-only");
         let mut reattempts = 0u32;
-        let verdict = resolve_replace_exhaustion(denied(), &read_only, &mut || {
-            reattempts += 1;
-            Err(denied())
-        });
+        let verdict = resolve_replace_exhaustion(
+            denied(),
+            &read_only,
+            &mut || {
+                reattempts += 1;
+                Err(denied())
+            },
+            &mut || Ok(true),
+        );
         assert!(matches!(verdict, Err(MaterializeError::Io { .. })));
         assert_eq!(reattempts, 1, "an open probe spends exactly one reattempt");
         std::fs::set_permissions(&read_only, original).expect("restore permissions");
@@ -2286,10 +2328,35 @@ mod tests {
         // The contender released between attempts: the reattempt lands.
         let freed = scratch.root.join("freed.md");
         std::fs::write(&freed, b"freed").expect("write freed target");
-        let verdict = resolve_replace_exhaustion(denied(), &freed, &mut || Ok(()));
+        let verdict =
+            resolve_replace_exhaustion(denied(), &freed, &mut || Ok(()), &mut || Ok(true));
         assert!(
             verdict.is_ok(),
             "a landed reattempt resolves the exhaustion"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exhausted_replace_rechecks_preimage_before_final_attempt() {
+        let scratch = Scratch::new("exhausted-retry-preimage");
+        let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"external edit").unwrap();
+        let mut attempted = false;
+        let replaced = resolve_replace_exhaustion(
+            std::io::Error::from_raw_os_error(5),
+            &target,
+            &mut || {
+                attempted = true;
+                Ok(())
+            },
+            &mut || Ok(false),
+        )
+        .unwrap();
+        assert!(!replaced);
+        assert!(
+            !attempted,
+            "the final attempt must not bypass the preimage check"
         );
     }
 
@@ -2338,6 +2405,7 @@ mod tests {
             &scratch.root.join("target.md"),
             &replacer,
             &NoBackoff,
+            &mut || Ok(true),
         );
         assert!(matches!(result, Err(MaterializeError::FileLocked)));
     }
@@ -2438,6 +2506,107 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .expect("enqueue materialization job");
+    }
+
+    struct ContendedOnce(AtomicUsize);
+
+    impl AtomicReplacer for ContendedOnce {
+        fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(std::io::Error::from(ErrorKind::PermissionDenied));
+            }
+            std::fs::rename(from, to)
+        }
+
+        fn try_replace_secret(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(std::io::Error::from(ErrorKind::PermissionDenied));
+            }
+            pinned_replace()
+        }
+    }
+
+    struct ExternalEditDuringBackoff(PathBuf);
+
+    impl ReplaceBackoff for ExternalEditDuringBackoff {
+        fn wait_before_retry(&self, failed_attempt: u32) {
+            assert_eq!(failed_attempt, 1);
+            std::fs::write(&self.0, b"external edit").expect("external editor saves");
+        }
+    }
+
+    #[test]
+    fn ordinary_replace_retry_preserves_external_edit() {
+        let scratch = Scratch::new("ordinary-retry-preimage");
+        let mut store = EngineStore::open(&scratch.db(), 1).expect("store");
+        enqueue_write_job(&mut store, "retry", "notes.md", b"intended", 1);
+        let job = store.load_materialization_job("retry").unwrap().unwrap();
+        let target = scratch.root.join("notes.md");
+        let outcome = materialize_one(
+            &store,
+            &scratch.root,
+            &job,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &ContendedOnce(AtomicUsize::new(0)),
+                backoff: &ExternalEditDuringBackoff(target.clone()),
+                now_ms: 2,
+                faults: &NoFaults,
+            },
+        )
+        .expect("materialize");
+        assert_eq!(outcome, JobOutcome::Conflict);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert_eq!(
+            std::fs::read(conflict_sibling(&target, "retry")).unwrap(),
+            b"intended"
+        );
+        assert_eq!(
+            store
+                .load_materialization_job("retry")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
+    }
+
+    #[test]
+    fn secret_replace_retry_preserves_external_edit() {
+        let scratch = Scratch::new("secret-retry-preimage");
+        let (store, job) = prepare_secret_job(&scratch, "secret-retry", ".env");
+        let target = scratch.root.join(".env");
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=intended",
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &ContendedOnce(AtomicUsize::new(0)),
+                backoff: &ExternalEditDuringBackoff(target.clone()),
+                now_ms: 2,
+                faults: &NoFaults,
+            },
+        )
+        .expect("materialize");
+        assert_eq!(outcome, JobOutcome::Conflict);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert!(!temp_sibling(&target, &job.job_id).exists());
+        assert!(!conflict_sibling(&target, &job.job_id).exists());
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
     }
 
     #[cfg(unix)]

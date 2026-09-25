@@ -38,7 +38,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
     for (const approved of approvedRoots) {
       // This is an exact capability-spelling check, not filesystem containment:
       // the approved root or requested workspace may not exist yet. The create
-      // path realpath-checks its existing parent before it writes.
+      // path separately resolves and validates its metadata directory.
       const prefix = approved.endsWith("/") ? approved : `${approved}/`;
       if (normalized === approved || normalized.startsWith(prefix)) {
         return true;

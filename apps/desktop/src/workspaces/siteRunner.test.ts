@@ -1089,6 +1089,7 @@ describe("startSiteDevServer", () => {
           url: handle.url,
           logs,
           exited: false,
+          generation: 0,
         }).success,
         later: GetSitePreviewLogsResult.safeParse({
           logs,

@@ -3,12 +3,12 @@ import type {
   JSONContent,
   MarkdownRendererHelpers,
 } from '@tiptap/core'
-import { getSchema } from '@tiptap/core'
+import { Extension, getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
-  escapeTableCellPipes,
+  preprocessTablePipes,
   renderTableToMarkdown,
   Table,
   TableCell,
@@ -229,27 +229,77 @@ function tableStart(src: string): number {
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
 
-// Finds the table under an annotation with marked's table rule and nothing
-// else. Lexing the rest of the document would re-enter this tokenizer for
-// every later annotation, and even a plain lexer would parse every block
-// after the table, so a run of annotations would cost quadratic time. GFM
-// rows are one line each, which Tiptap's raw reconstruction gets wrong when
-// a cell holds a pipe inside inline code.
-function tableUnderAnnotation(rest: string): Tokens.Table | undefined {
+// Finds the table at the start of `rest` with marked's table rule and nothing
+// else, and returns its lines as that rule read them. Lexing the rest of the
+// document would re-enter this tokenizer for every later table, and even a
+// plain lexer would parse every block after the table, so a run of tables
+// would cost quadratic time. GFM rows are one line each, which Tiptap's raw
+// reconstruction gets wrong when a cell holds a pipe inside inline code.
+//
+// The importer reads a table the way Tiptap's tokenizer does: first with the
+// pipes inside code spans escaped, up to the first blank line, and only when
+// that is no table, from the raw text with marked's own rule. The two can
+// count a row's cells differently, so this reads the same text.
+function leadingTable(rest: string): { table: Tokens.Table; lines: string[] } | undefined {
   const tokenizer = new Tokenizer()
   // The lexer gives the tokenizer its GFM rules and the inline queue the
   // table rule fills.
   tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
-  const table = tokenizer.table(rest)
-  if (table) return table
-  // A header cell with a pipe inside inline code needs Tiptap's escaping
-  // before marked can count its cells. Only that first line can change.
-  const newline = rest.indexOf('\n')
-  const header = newline < 0 ? rest : rest.slice(0, newline)
-  if (!header.includes('`') || !header.includes('|')) return undefined
-  const escaped = escapeTableCellPipes(header)
-  if (escaped === header) return undefined
-  return tokenizer.table(escaped + rest.slice(header.length))
+  const blank = rest.indexOf('\n\n')
+  const candidate = blank < 0 ? rest : rest.slice(0, blank)
+  const escaped = preprocessTablePipes(candidate)
+  for (const text of escaped === candidate ? [rest] : [escaped, rest]) {
+    const table = tokenizer.table(text)
+    // The header, the delimiter, and each row take one line.
+    if (table) return { table, lines: text.split('\n', 2 + table.rows.length) }
+  }
+  return undefined
+}
+
+// A table row's cells as marked splits them: at each unescaped pipe, without
+// the empty cells outside a leading or trailing pipe.
+function tableRowCells(row: string): string[] {
+  const cells: string[] = []
+  let start = 0
+  let backslashes = 0
+  for (let index = 0; index < row.length; index += 1) {
+    if (row[index] === '|' && backslashes % 2 === 0) {
+      cells.push(row.slice(start, index))
+      start = index + 1
+    }
+    backslashes = row[index] === '\\' ? backslashes + 1 : 0
+  }
+  cells.push(row.slice(start))
+  if (!cells[0]?.trim()) cells.shift()
+  if (cells.length > 0 && !cells.at(-1)?.trim()) cells.pop()
+  return cells
+}
+
+// The lines of the table at the start of `rest`, joined. marked drops the
+// cells of a row past its header's count, so a row whose extra cells hold
+// text ends the table instead, and that text stays in the document.
+// Otherwise a file, or a preserved source, could hold text its document
+// lacks.
+function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
+  const read = leadingTable(rest)
+  if (!read) return undefined
+  const { table, lines } = read
+  const raw = rest.split('\n', lines.length)
+  for (let row = 2; row < lines.length; row += 1) {
+    const extra = tableRowCells(lines[row]).slice(table.header.length)
+    if (extra.some(cell => cell.trim())) return { text: raw.slice(0, row).join('\n'), cut: true }
+  }
+  return { text: raw.join('\n'), cut: false }
+}
+
+// Only a line after the first that could be a delimiter row can start a
+// table, so ordinary blocks skip the table probe.
+const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
+function secondLine(src: string): string {
+  const first = src.indexOf('\n')
+  if (first < 0) return ''
+  const second = src.indexOf('\n', first + 1)
+  return src.slice(first + 1, second < 0 ? undefined : second)
 }
 
 export const DohcMarkdownTable = Table.extend({
@@ -258,27 +308,21 @@ export const DohcMarkdownTable = Table.extend({
     start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
     tokenize: (src, tokens, helpers) => {
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
-      if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
-      // The annotation belongs to the table that starts right after it. With
+      const prefix = annotation?.[0] ?? ''
+      const rest = src.slice(prefix.length)
+      const extent = annotation || TABLE_DELIMITER_RE.test(secondLine(rest))
+        ? leadingTableText(rest)
+        : undefined
+      if (!annotation && !extent?.cut) return tableTokenizer.tokenize(src, tokens, helpers)
+      // An annotation belongs to the table that starts right after it. With
       // no table there it stays an ordinary HTML comment for marked.
-      const rest = src.slice(annotation[0].length)
-      const extent = tableUnderAnnotation(rest)
       if (!extent) return undefined
-      // The header, the delimiter, and each row take one line.
-      let end = rest.length
-      for (let line = 2 + extent.rows.length, cursor = 0; line > 0; line -= 1) {
-        const newline = rest.indexOf('\n', cursor)
-        if (newline < 0) break
-        if (line === 1) end = newline
-        cursor = newline + 1
-      }
-      const text = rest.slice(0, end)
-      const table = helpers.blockTokens(text)[0]
+      const table = helpers.blockTokens(extent.text)[0]
       if (table?.type !== 'table') return undefined
       // The newline after the last row belongs to the table, as in marked.
-      const raw = annotation[0] + text + (end < rest.length ? '\n' : '')
+      const raw = prefix + extent.text + (extent.text.length < rest.length ? '\n' : '')
       const rowHeights: [number, number][] = []
-      for (const pair of annotation[1].split(',')) {
+      for (const pair of annotation?.[1].split(',') ?? []) {
         const [index, height] = pair.split(':').map(Number)
         if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
           rowHeights.push([index, height])
@@ -314,7 +358,26 @@ export const DohcMarkdownTable = Table.extend({
   },
 })
 
+// marked reads a link reference definition as a `def` token, which Tiptap
+// drops. The engine's fold keeps the line as paragraph text, and so does
+// this, so the person's line stays in the document and in the file. A link
+// that uses the definition still resolves, because marked collects it while
+// lexing.
+const MarkdownDefinition = Extension.create({
+  name: 'markdownDefinition',
+  markdownTokenName: 'def',
+  parseMarkdown: (token) => {
+    const text = (token.raw ?? '')
+      .replace(/\s+$/u, '')
+      .split('\n')
+      .map(line => line.trimStart())
+      .join('\n')
+    return text ? { type: 'paragraph', content: [{ type: 'text', text }] } : []
+  },
+})
+
 const extensions: AnyExtension[] = [
+  MarkdownDefinition,
   ...dohcMarkdownExtensions,
   StarterKit.configure({ orderedList: false }),
   MarkdownOrderedList,
@@ -325,8 +388,47 @@ const extensions: AnyExtension[] = [
   TableHeader,
   TableRow,
 ]
+// marked keeps a `def` token only for the first definition of a label and
+// discards a later one without a token. Each later one gets a numbered tag
+// that starts with `]`, which no reference can name, since a label cannot
+// start with an unescaped `]`. So marked keeps its token too, and the line
+// stays as text. The count lives with each lexer, so each tag costs one check.
+const repeatedDefinitions = new WeakMap<object, number>()
+//
+// Tiptap applies a link's destination and title to the link's text, so a
+// link with no text, as in `[](https://example.com "title")`, vanishes. The
+// engine's fold keeps it as text, and so does this: the link becomes an
+// `escape` token, which Tiptap keeps as literal text without decoding it.
+const emptyLinkProbe = new Tokenizer()
+emptyLinkProbe.lexer = new Lexer({ ...getDefaults(), tokenizer: emptyLinkProbe })
+const markdownParser = new Marked({
+  extensions: [{
+    name: 'dohcEmptyLink',
+    level: 'inline',
+    start: (src) => {
+      const at = src.indexOf('[](')
+      return at < 0 ? undefined : at
+    },
+    tokenizer: (src) => {
+      if (!src.startsWith('[](')) return undefined
+      const link = emptyLinkProbe.link(src)
+      return link && link.type === 'link' ? { type: 'escape', raw: link.raw, text: link.raw } : undefined
+    },
+  }],
+  tokenizer: {
+    def(src) {
+      const token = Tokenizer.prototype.def.call(this, src)
+      if (!token || !Object.hasOwn(this.lexer.tokens.links, token.tag)) return token
+      const count = (repeatedDefinitions.get(this.lexer) ?? 0) + 1
+      repeatedDefinitions.set(this.lexer, count)
+      token.tag = `]${count}`
+      return token
+    },
+  },
+})
+
 const markdownManager = new MarkdownManager({
-  marked: new Marked() as unknown as typeof marked,
+  marked: markdownParser as unknown as typeof marked,
   extensions,
   indentation: { style: 'space', size: 2 },
 })

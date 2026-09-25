@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RUNNER_SETTINGS,
+  DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
   RunnerSettings,
@@ -36,14 +37,18 @@ describe("desktop user settings model", () => {
     ).toBe(false);
   });
 
-  it("rejects the removed launch-behavior section instead of keeping a dual schema", () => {
-    const obsolete = {
-      ...DEFAULT_USER_SETTINGS,
-      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
-      general: { launchBehavior: "recent" },
-    };
-
-    expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
+  it("rejects removed sections instead of keeping a dual schema", () => {
+    for (const removed of [
+      { general: { launchBehavior: "recent" } },
+      { notifications: { updates: true, agentRuns: true } },
+    ]) {
+      const obsolete = {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+        ...removed,
+      };
+      expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
+    }
   });
 
   it("adds runner defaults to settings written before runner support", () => {
@@ -51,13 +56,13 @@ describe("desktop user settings model", () => {
       version: DEFAULT_USER_SETTINGS.version,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
     };
 
     expect(DesktopUserSettings.parse(legacySettings)).toEqual({
       ...legacySettings,
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
+      sidebar: DEFAULT_SIDEBAR_SETTINGS,
     });
   });
 
@@ -69,7 +74,6 @@ describe("desktop user settings model", () => {
         themeMode: "dark" as const,
       },
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
     };
 
@@ -104,7 +108,6 @@ describe("desktop user settings model", () => {
       version: 1 as const,
       appearance: DEFAULT_USER_SETTINGS.appearance,
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
     };
     expect(DesktopUserSettings.parse(legacy).profile).toEqual({});
@@ -250,7 +253,6 @@ describe("desktop user settings store", () => {
           themeMode: "dark",
         },
         editor: DEFAULT_USER_SETTINGS.editor,
-        notifications: DEFAULT_USER_SETTINGS.notifications,
       }),
     );
 
@@ -446,6 +448,41 @@ describe("desktop user settings store", () => {
     await writeFile(path, "{}");
     await ensureUserSettingsFile(root);
     expect(await readFile(path, "utf8")).toBe("{}");
+  });
+
+  it("keeps sidebar order, hidden views, and pins, and turns off only a list it cannot use", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    const pinned: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { order: ["sites", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] } },
+    };
+    await writeUserSettingsFile(root, pinned, DEFAULT_USER_SETTINGS);
+    expect((await readUserSettingsFile(root)).settings.sidebar).toEqual(pinned.sidebar);
+    const unpinned = { ...pinned, sidebar: { ...pinned.sidebar, pinnedApps: {} } };
+    await writeUserSettingsFile(root, unpinned, pinned);
+    expect((await readUserSettingsFile(root)).settings.sidebar.pinnedApps).toEqual({});
+
+    // One workspace's bad pin list turns off only that workspace's pins.
+    await writeFile(path, JSON.stringify({
+      sidebar: { pinnedApps: { "ws-a": ["report"], "ws-b": [""], "Not A Workspace": ["x"] } },
+    }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { sidebar: { pinnedApps: { "ws-a": ["report"] } } },
+      ignored: [
+        { key: "sidebar.pinnedApps.ws-b", reason: "invalid" },
+        { key: "sidebar.pinnedApps.Not A Workspace", reason: "invalid" },
+      ],
+    });
+
+    // A view this build does not have turns off the order, not the pins.
+    await writeFile(path, JSON.stringify({
+      sidebar: { order: ["files", "search"], hidden: [], pinnedApps: { "ws-a": ["report"] } },
+    }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { sidebar: { order: [], hidden: [], pinnedApps: { "ws-a": ["report"] } } },
+      ignored: [{ key: "sidebar.order", reason: "invalid" }],
+    });
   });
 
   it("refuses to read a symlinked user settings file", async () => {

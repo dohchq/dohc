@@ -1,9 +1,10 @@
-import { Sparkles } from "lucide-react";
+import { Sparkles, Zap } from "lucide-react";
 import { IDENTITY_HUES, type IdentityHue } from "../tokens";
 
 // One avatar for every chat surface: a person's initials on a tint of their
-// own hue, or the agent's sparkle in the olive voice. Sized by the caller;
-// 36px on a post, 28px on a comment, 18px in a strip.
+// own hue, the agent's sparkle in the olive voice, or an automation's bare
+// lightning mark, the same mark as the Automations button. Sized by the
+// caller; 36px on a post, 28px on a comment, 18px in a strip.
 
 const SIZES = {
   post: "size-9 text-[14px]",
@@ -54,11 +55,23 @@ function initials(name: string): string {
 
 export function ChatAvatar(props: {
   name: string;
-  kind: "human" | "agent";
+  kind: "human" | "agent" | "automation";
   size?: keyof typeof SIZES;
   className?: string;
 }) {
   const size = props.size ?? "post";
+  if (props.kind === "automation") {
+    // No border, fill, or identity color: an automation is not a person or an agent.
+    return (
+      <span
+        aria-hidden
+        title={props.name}
+        className={`inline-grid shrink-0 place-items-center text-muted ${SIZES[size]} ${props.className ?? ""}`}
+      >
+        <Zap size={ICON[size]} strokeWidth={1.9} aria-hidden />
+      </span>
+    );
+  }
   const agent = props.kind === "agent";
   return (
     <span

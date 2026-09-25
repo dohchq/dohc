@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { DatasetDescription, DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import type { DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { CollectionFieldsDialog, type CollectionFieldsDialogProps } from "./CollectionFieldsDialog";
 
@@ -11,7 +11,7 @@ const dataset: DatasetDescription = { datasetId: id(1), name: "People", revision
 function preparation(): DatasetMigrationPreparation {
   const revision: DatasetRevision = { datasetId: id(1), revision: 1, revisionSha256: dataset.revisionSha256, definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64),
     definition: { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js", operations: [{operationId:id(12),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}],
-      tables: [{ ...dataset.tables[0]!, sqlName: "people", primaryKey: "name", fields: [{ ...dataset.tables[0]!.fields[0]!, sqlColumn: "name",unique:true,required:true }] }] } };
+      tables: [{ ...dataset.tables[0]!, sqlName: "people", primaryKey: "name", fields: [{ ...datasetColumnFields(dataset.tables[0]!)[0]!, sqlColumn: "name",unique:true,required:true }] }] } };
   const next = structuredClone(revision); next.revision = 2; next.revisionSha256 = "e".repeat(64);
   next.definition.tables[0]!.fields.push({ fieldId: id(4), name: "Note", type: "text", required: false, unique: false, sqlColumn: "note" });
   const expected = { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: dataset.revisionSha256 };

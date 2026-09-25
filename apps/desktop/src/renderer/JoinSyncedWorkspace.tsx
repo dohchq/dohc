@@ -105,8 +105,9 @@ export function JoinSyncedWorkspace(props: {
       const message = ipcErrorMessage(cause).trim() || "Couldn't join the workspace.";
       if (/passphrase required to unlock synced secrets/i.test(message)) {
         setNeedsPassphrase(true);
+        setFolder(null);
         setError(
-          "This workspace has protected files. Enter the protected-file passphrase to join.",
+          `This workspace has protected files. Enter the protected-file passphrase. Files remain in ${folder}. Choose another empty folder to try again.`,
         );
       } else {
         setError(message);

@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
@@ -43,6 +44,7 @@ pub enum CollectionFieldType {
     Person,
     Relation,
     Url,
+    Button,
 }
 
 impl CollectionFieldType {
@@ -57,6 +59,7 @@ impl CollectionFieldType {
             "person" => Some(Self::Person),
             "relation" => Some(Self::Relation),
             "url" => Some(Self::Url),
+            "button" => Some(Self::Button),
             _ => None,
         }
     }
@@ -96,6 +99,10 @@ pub enum FieldDefinition {
     Url {
         name: String,
     },
+    /// Shows a button on each record. It stores no value.
+    Button {
+        name: String,
+    },
 }
 
 impl FieldDefinition {
@@ -110,7 +117,8 @@ impl FieldDefinition {
             | Self::MultiSelect { name, .. }
             | Self::Person { name }
             | Self::Relation { name, .. }
-            | Self::Url { name } => name,
+            | Self::Url { name }
+            | Self::Button { name } => name,
         }
     }
 }
@@ -219,6 +227,7 @@ reason_code!(CollectionSchemaReasonCode {
     UnknownFieldReference,
     SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
+    UnsupportedFieldReference,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +284,32 @@ pub struct CollectionPendingAdoptionPage {
 pub struct CollectionReconcileResult {
     pub adoptions: Vec<CollectionAdoptionCandidate>,
     pub relation_cleanups: Vec<CollectionRelationCleanupCandidate>,
+    /// Records this reconciliation bound into a Collection or unbound from
+    /// one. Which of them count as added or removed is the automation
+    /// claim's decision.
+    pub lifecycle: Vec<CollectionRecordLifecycle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionRecordLifecycleKind {
+    /// The record id is bound in this Collection now and was not before.
+    Added,
+    /// The record id was bound in this Collection and is not now.
+    Removed,
+}
+
+/// One record a reconciliation bound into or unbound from a Collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionRecordLifecycle {
+    pub kind: CollectionRecordLifecycleKind,
+    pub record_id: String,
+    pub collection_path: String,
+    pub object_id: String,
+    /// A removed record's last indexed values, `(field name, value JSON)`
+    /// in field-name order, read before the index drops them and only when
+    /// an automation wants removed records. An added record's values stay
+    /// in the index, so this is empty.
+    pub removed_fields: Vec<(String, String)>,
 }
 
 /// One dangling relation that needs an engine-authored frontmatter update.
@@ -338,6 +373,7 @@ reason_code!(FieldValueReasonCode {
     EmptyPersonId,
     InvalidRecordId,
     InvalidUrl,
+    ExpectedEmpty,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -866,7 +902,8 @@ fn parse_fields(
                     CollectionFieldType::Date => FieldDefinition::Date { name },
                     CollectionFieldType::Person => FieldDefinition::Person { name },
                     CollectionFieldType::Url => FieldDefinition::Url { name },
-                    _ => unreachable!("match arm only admits scalar Field types"),
+                    CollectionFieldType::Button => FieldDefinition::Button { name },
+                    _ => unreachable!("match arm only admits scalar and button Field types"),
                 });
             }
         }
@@ -874,10 +911,26 @@ fn parse_fields(
     fields
 }
 
+// A view sorts, groups, and dates by stored values, and a button stores none.
+fn value_field_reason_code(
+    name: &str,
+    field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
+) -> Option<CollectionSchemaReasonCode> {
+    if !field_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnknownFieldReference)
+    } else if button_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnsupportedFieldReference)
+    } else {
+        None
+    }
+}
+
 fn parse_field_reference(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Option<String> {
     let raw = raw?;
@@ -887,14 +940,10 @@ fn parse_field_reference(
     };
     if value.is_empty() {
         push_reason(reasons, CollectionSchemaReasonCode::EmptyValue, path);
-    } else if field_names.contains(value) {
-        return Some(value.to_owned());
+    } else if let Some(code) = value_field_reason_code(value, field_names, button_names) {
+        push_reason(reasons, code, path);
     } else {
-        push_reason(
-            reasons,
-            CollectionSchemaReasonCode::UnknownFieldReference,
-            path,
-        );
+        return Some(value.to_owned());
     }
     None
 }
@@ -903,6 +952,7 @@ fn parse_sort(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Vec<ViewSort> {
     let Some(raw) = raw else {
@@ -949,16 +999,10 @@ fn parse_sort(
             },
         };
         if let Some(field) = field {
-            if field_names.contains(field.as_str()) {
-                if let Some(direction) = direction {
-                    sort.push(ViewSort { field, direction });
-                }
-            } else {
-                push_reason(
-                    reasons,
-                    CollectionSchemaReasonCode::UnknownFieldReference,
-                    format!("{entry_path}/field"),
-                );
+            if let Some(code) = value_field_reason_code(&field, field_names, button_names) {
+                push_reason(reasons, code, format!("{entry_path}/field"));
+            } else if let Some(direction) = direction {
+                sort.push(ViewSort { field, direction });
             }
         }
     }
@@ -1032,6 +1076,11 @@ fn parse_views(
         return Vec::new();
     };
     let field_names: HashSet<&str> = fields.iter().map(FieldDefinition::name).collect();
+    let button_names: HashSet<&str> = fields
+        .iter()
+        .filter(|field| matches!(field, FieldDefinition::Button { .. }))
+        .map(FieldDefinition::name)
+        .collect();
     let mut view_names = HashSet::new();
     let mut views = Vec::new();
     for (index, view) in sequence.iter().enumerate() {
@@ -1087,12 +1136,14 @@ fn parse_views(
                 mapping_get(view, "groupBy"),
                 &format!("{path}/groupBy"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             sort: parse_sort(
                 mapping_get(view, "sort"),
                 &format!("{path}/sort"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             visible_fields: parse_visible_fields(
@@ -1105,6 +1156,7 @@ fn parse_views(
                 mapping_get(view, "dateField"),
                 &format!("{path}/dateField"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
         });
@@ -1193,7 +1245,7 @@ fn degraded_document(code: CollectionSchemaReasonCode) -> CollectionSchemaParseR
     }
 }
 
-fn parent_path(path: &str) -> &str {
+pub(crate) fn parent_path(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
@@ -2341,6 +2393,78 @@ pub struct ChangeAttribution {
 /// limit.
 pub const MAX_CHANGE_ATTRIBUTION_DEPTH: u32 = 64;
 
+/// The actor and attribution a moment's recorded author declares. An agent
+/// (`{kind: "agent", agentId, onBehalfOf}`) writes as itself at depth 0; an
+/// automation (`{kind: "automation", automationId, onBehalfOf, depth}`)
+/// writes as itself at its depth. Any other author, or none, declares
+/// neither, as a person's write does.
+pub fn moment_author_attribution(
+    author_json: Option<&str>,
+) -> (Option<String>, Option<ChangeAttribution>) {
+    let Some(author) = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok()) else {
+        return (None, None);
+    };
+    let text = |key: &str| {
+        author
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (actor, actor_kind, depth) = match author.get("kind").and_then(Value::as_str) {
+        Some("agent") => (text("agentId"), ChangeActorKind::Agent, 0),
+        Some("automation") => (
+            text("automationId"),
+            ChangeActorKind::Automation,
+            author
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map_or(0, |depth| {
+                    u32::try_from(depth)
+                        .unwrap_or(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                        .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                }),
+        ),
+        _ => return (None, None),
+    };
+    let Some(actor) = actor else {
+        return (None, None);
+    };
+    let attribution = ChangeAttribution {
+        actor_kind,
+        on_behalf_of: text("onBehalfOf"),
+        depth,
+    };
+    (Some(actor), Some(attribution))
+}
+
+/// The author a moment records for a write made by `actor` with
+/// `attribution`, the inverse of [`moment_author_attribution`]. A person's
+/// write, with no declared agent or automation, records none.
+pub fn moment_author_json(
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Option<String> {
+    let actor = actor_origin_id?;
+    let attribution = attribution?;
+    let on_behalf_of = attribution.on_behalf_of.as_deref()?;
+    let author = match attribution.actor_kind {
+        ChangeActorKind::Agent => serde_json::json!({
+            "kind": "agent",
+            "agentId": actor,
+            "onBehalfOf": on_behalf_of,
+        }),
+        ChangeActorKind::Automation => serde_json::json!({
+            "kind": "automation",
+            "automationId": actor,
+            "onBehalfOf": on_behalf_of,
+            "depth": attribution.depth,
+        }),
+        ChangeActorKind::Human => return None,
+    };
+    Some(author.to_string())
+}
+
 impl ChangeAttribution {
     /// Bounds every declared field. Both wire entry points (the engine's
     /// `ydoc.recordUpdate` params and the replicated `ydoc.update` payload)
@@ -2617,6 +2741,88 @@ pub fn index_collection_frontmatter_apply_in_tx(
         recorded_at_ms,
         fields: field_facts,
     }))
+}
+
+/// Index a bound record's frontmatter from a file written on this computer,
+/// for a record whose Y.Doc lineage holds no content to fold the write into:
+/// the file is then the only record of the write. The record's current
+/// index is the before side, so the diff also carries any earlier write the
+/// index missed. Writes field history, replaces the index, and returns the
+/// facts, exactly as a Y.Doc apply does. A body-only write reads the index
+/// and changes nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn index_collection_record_text_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+    author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    recorded_at_ms: i64,
+) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
+    if !is_collection_markdown_path(path) {
+        return Ok(None);
+    }
+    let Some((record_id, _, _)) = bound_record(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    // Frontmatter that does not parse leaves the record to reconcile.
+    let Some((after, provenance)) = markdown_frontmatter_json_with_provenance(text) else {
+        return Ok(None);
+    };
+    let mut before = serde_json::Map::new();
+    for (field_name, value_json) in
+        indexed_record_fields(conn, workspace_id, version_id, &record_id)?
+    {
+        let value = serde_json::from_str(&value_json)
+            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
+        before.insert(field_name, value);
+    }
+    let after_fields = after.as_object().map(|values| {
+        values
+            .iter()
+            .filter(|(field_name, _)| *field_name != RECORD_ID_FRONTMATTER_KEY)
+            .map(|(field_name, value)| (field_name.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>()
+    });
+    if collection_mappings_equal(Some(&before), after_fields.as_ref()) {
+        // Equal values can still validate differently (`estimate: .nan`
+        // against `estimate: ".nan"`). Reindex, without a change, when the
+        // file or the index flags a value.
+        let flagged_before: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM collection_record_fields \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                   AND validation_status='flagged')",
+                params![workspace_id, version_id, record_id],
+                |row| row.get(0),
+            )
+            .map_err(crate::DomainError::sql_corrupt)?;
+        if !flagged_before
+            && provenance.non_finite_fields.is_empty()
+            && provenance.unsupported_tag_fields.is_empty()
+        {
+            return Ok(None);
+        }
+    }
+    let before = Value::Object(before);
+    index_collection_frontmatter_apply_in_tx(
+        conn,
+        workspace_id,
+        version_id,
+        object_id,
+        &before,
+        &after,
+        &before,
+        &after,
+        Some(&provenance),
+        author_origin_id,
+        attribution,
+        None,
+        recorded_at_ms,
+    )
 }
 
 fn revalidate_collection_index_in_tx(
@@ -3549,6 +3755,46 @@ pub fn reconcile_collections_in_tx(
         });
     }
 
+    // Record ids bound per Collection before and after this pass. A record
+    // that leaves one Collection for another is removed from the first and
+    // added to the second. Removed values are read now, while the index
+    // still holds them.
+    let bound_before: HashSet<(&str, &str)> = existing
+        .iter()
+        .filter_map(|binding| {
+            let record_id = binding.record_id.as_deref()?;
+            Some((record_id, parent_path(&binding.file_path)))
+        })
+        .collect();
+    let bound_after: HashSet<(&str, &str)> = desired
+        .iter()
+        .filter_map(|binding| {
+            let record_id = binding.record_id.as_deref()?;
+            Some((record_id, binding.collection_path.as_str()))
+        })
+        .collect();
+    let mut lifecycle = Vec::new();
+    let removed_values_wanted = crate::automations::removed_records_wanted_in_tx(tx, workspace_id)?;
+    for binding in &existing {
+        let Some(record_id) = binding.record_id.as_deref() else {
+            continue;
+        };
+        let collection_path = parent_path(&binding.file_path);
+        if !bound_after.contains(&(record_id, collection_path)) {
+            lifecycle.push(CollectionRecordLifecycle {
+                kind: CollectionRecordLifecycleKind::Removed,
+                record_id: record_id.to_owned(),
+                collection_path: collection_path.to_owned(),
+                object_id: binding.object_id.clone(),
+                removed_fields: if removed_values_wanted {
+                    indexed_record_fields(tx, workspace_id, version_id, record_id)?
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+    }
+
     for binding in &desired {
         let Some(existing_binding) = existing_by_object_id.get(binding.object_id.as_str()) else {
             continue;
@@ -3679,12 +3925,50 @@ pub fn reconcile_collections_in_tx(
     )
     .map_err(crate::DomainError::sql_persist)?;
     revalidate_collection_index_in_tx(tx, workspace_id, version_id, &collection_schemas)?;
+    for binding in &desired {
+        let Some(record_id) = binding.record_id.as_deref() else {
+            continue;
+        };
+        if !bound_before.contains(&(record_id, binding.collection_path.as_str())) {
+            lifecycle.push(CollectionRecordLifecycle {
+                kind: CollectionRecordLifecycleKind::Added,
+                record_id: record_id.to_owned(),
+                collection_path: binding.collection_path.clone(),
+                object_id: binding.object_id.clone(),
+                removed_fields: Vec::new(),
+            });
+        }
+    }
     let relation_cleanups =
         dangling_relation_cleanups(tx, workspace_id, version_id, &present_malformed_record_ids)?;
     Ok(CollectionReconcileResult {
         adoptions,
         relation_cleanups,
+        lifecycle,
     })
+}
+
+/// One record's indexed field values, `(field name, value JSON)` in
+/// field-name order.
+pub(crate) fn indexed_record_fields(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+) -> Result<Vec<(String, String)>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT field_name, value_json FROM collection_record_fields \
+             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 ORDER BY field_name",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id, record_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
 }
 
 pub fn set_collection_adoption_state_in_tx(
@@ -4859,6 +5143,86 @@ fn cursor_after_predicate(
     format!("({})", branches.join(" OR "))
 }
 
+// A schema blob never changes, so its button names never go stale. The cache
+// starts over when it holds this many schemas.
+const MAX_CACHED_SCHEMA_BUTTONS: usize = 64;
+static SCHEMA_BUTTONS: LazyLock<Mutex<HashMap<String, Arc<HashSet<String>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// The collection's button field names. A filtered, sorted, or grouped page
+/// asks for them, so they are parsed once per schema blob, not once per page.
+fn collection_button_fields(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Arc<HashSet<String>>, crate::DomainError> {
+    let schema_sha256: String = conn
+        .query_row(
+            "SELECT s.blob_sha256 FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let cache = || {
+        SCHEMA_BUTTONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    };
+    if let Some(buttons) = cache().get(&schema_sha256) {
+        return Ok(Arc::clone(buttons));
+    }
+    let text: String = conn
+        .query_row(
+            "SELECT text FROM blobs WHERE sha256=?1",
+            params![schema_sha256],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let buttons = Arc::new(
+        parse_collection_schema(&text)
+            .schema
+            .fields
+            .into_iter()
+            .filter_map(|field| match field {
+                FieldDefinition::Button { name } => Some(name),
+                _ => None,
+            })
+            .collect::<HashSet<_>>(),
+    );
+    let mut cached = cache();
+    if cached.len() >= MAX_CACHED_SCHEMA_BUTTONS {
+        cached.clear();
+    }
+    cached.insert(schema_sha256, Arc::clone(&buttons));
+    Ok(buttons)
+}
+
+/// A button stores no value, so a query cannot filter, sort, or group by one.
+fn reject_button_field_references(
+    buttons: &HashSet<String>,
+    query: &CollectionQuery,
+) -> Result<(), crate::DomainError> {
+    let is_button = |name: &str| buttons.contains(name);
+    let reason = if query
+        .filter
+        .as_ref()
+        .is_some_and(|filter| is_button(&filter.field))
+    {
+        "collection query cannot filter by a button field"
+    } else if query.sort.iter().any(|sort| is_button(&sort.field)) {
+        "collection query cannot sort by a button field"
+    } else if query.group_by.as_deref().is_some_and(is_button) {
+        "collection query cannot group by a button field"
+    } else {
+        return Ok(());
+    };
+    Err(crate::DomainError::InvalidInput { reason })
+}
+
 /// Filter, sort, group, and optionally resolve relation labels from the active
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
@@ -4898,6 +5262,10 @@ pub fn query_collection_records(
     else {
         return Ok(None);
     };
+    if query.filter.is_some() || !query.sort.is_empty() || query.group_by.is_some() {
+        let buttons = collection_button_fields(conn, workspace_id, &version_id, collection_path)?;
+        reject_button_field_references(&buttons, query)?;
+    }
     register_collection_query_sql(conn)?;
     let mut parameters = vec![
         rusqlite::types::Value::Text(workspace_id.to_owned()),
@@ -5386,6 +5754,7 @@ pub fn validate_field_value(
                 validate_record_id(value, "")
             }
         }
+        FieldDefinition::Button { .. } => flagged(FieldValueReasonCode::ExpectedEmpty, ""),
     }
 }
 
@@ -5872,7 +6241,12 @@ mod tests {
                  CREATE TABLE collections(\
                    workspace_id TEXT, version_id TEXT, collection_path TEXT,\
                    schema_status TEXT NOT NULL, degradation_reasons_json TEXT NOT NULL,\
+                   schema_path TEXT NOT NULL,\
                    PRIMARY KEY (workspace_id, version_id, collection_path));\
+                 CREATE TABLE snapshots(\
+                   workspace_id TEXT, version_id TEXT, path TEXT, blob_sha256 TEXT NOT NULL,\
+                   PRIMARY KEY (workspace_id, version_id, path));\
+                 CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    collection_path TEXT, file_path TEXT, adoption_state TEXT NOT NULL,\
@@ -5881,7 +6255,8 @@ mod tests {
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    field_name TEXT, value_json TEXT NOT NULL,\
                    validation_status TEXT NOT NULL, validation_reason_json TEXT,\
-                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));",
+                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));\
+                 INSERT INTO blobs VALUES ('differential-schema', 'fields: []');",
             )
             .expect("differential schema");
         connection
@@ -5892,10 +6267,17 @@ mod tests {
             .expect("workspace row");
         connection
             .execute(
-                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]')",
+                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]', 'schema.yaml')",
                 [WORKSPACE, COLLECTION],
             )
             .expect("collection row");
+        // A filtered or sorted page reads the schema for its button fields.
+        connection
+            .execute(
+                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema')",
+                [WORKSPACE],
+            )
+            .expect("schema snapshot");
         let pool = differential_value_pool();
         let depth_reason = serde_json::to_string(&FieldValueReason {
             code: FieldValueReasonCode::ValueDepthExceeded,

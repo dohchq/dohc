@@ -14,7 +14,7 @@ use serde_json::Value;
 use serde_json::json;
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
-    method.starts_with("sync.")
+    (method.starts_with("sync.") && method != "sync.remoteChanges")
         || method.starts_with("share.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
@@ -283,6 +283,7 @@ impl EngineService {
             "sync.probe" => {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
+            "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }
@@ -315,6 +316,9 @@ impl EngineService {
             "share.proposal.submit" => {
                 Box::pin(self.share_proposal_submit(&ctx, request.workspace, request.params))
                     .await?
+            }
+            "share.direct.push" => {
+                Box::pin(self.share_direct_push(&ctx, request.workspace, request.params)).await?
             }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
@@ -644,6 +648,10 @@ impl EngineService {
                 self.chats_mentions_list_for_handle(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.messages.get" => {
+                self.chats_messages_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.messages.list" => {
                 self.chats_messages_list(&ctx, request.workspace, request.params)
                     .await?
@@ -838,6 +846,22 @@ impl EngineService {
                 self.automations_retry(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.release" => {
+                self.automations_release(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.press" => {
+                self.automations_press(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.claimSchedule" => {
+                self.automations_claim_schedule(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.scheduleMarks" => {
+                self.automations_schedule_marks(&ctx, request.workspace)
+                    .await?
+            }
             "chats.dispatch.requeueFailedTrigger" => {
                 self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
                     .await?
@@ -949,6 +973,7 @@ mod tests {
             workspace: None,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({}),
         };
         let discovery = service.configured_live_hosts(&ctx, &request).unwrap();
@@ -1097,6 +1122,7 @@ mod tests {
                     workspace: None,
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: Value::Null,
                 },
             )
@@ -1118,9 +1144,13 @@ mod tests {
     async fn listed_methods_are_registered_and_retired_methods_are_rejected() {
         const METHODS: &[&str] = &[
             "automations.claimNext",
+            "automations.claimSchedule",
             "automations.failures",
             "automations.listClaims",
+            "automations.press",
+            "automations.release",
             "automations.retry",
+            "automations.scheduleMarks",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
@@ -1174,6 +1204,7 @@ mod tests {
             "chats.follows.list",
             "chats.follows.set",
             "chats.mentions.listForHandle",
+            "chats.messages.get",
             "chats.messages.list",
             "chats.messages.send",
             "chats.reactions.list",
@@ -1219,6 +1250,7 @@ mod tests {
             "secrets.write",
             "share.channel.pull",
             "share.channel.push",
+            "share.direct.push",
             "share.proposal.submit",
             "share.view.pull",
             "share.view.recordIdentity",
@@ -1228,6 +1260,7 @@ mod tests {
             "sync.commitCursor",
             "sync.probe",
             "sync.pull",
+            "sync.remoteChanges",
             "sync.push",
             "sync.recoverOrigin",
             "versionedBinary.read",
@@ -1271,6 +1304,7 @@ mod tests {
                         workspace: None,
                         deadline_ms: None,
                         idempotency_key: None,
+                        progress: false,
                         params: json!({}),
                     },
                 )

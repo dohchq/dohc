@@ -6,6 +6,7 @@ import type { ErrorEnvelope } from "./ErrorEnvelope";
 import type { Event } from "./Event";
 import type { Hello } from "./Hello";
 import type { HelloAck } from "./HelloAck";
+import type { Progress } from "./Progress";
 import type { Request } from "./Request";
 import type { Response } from "./Response";
 
@@ -17,4 +18,4 @@ import type { Response } from "./Response";
  * accept the field being omitted. The generated TS types are therefore
  * `field?: T | null`.
  */
-export type Envelope = { "type": "hello" } & Hello | { "type": "helloAck" } & HelloAck | { "type": "request" } & Request | { "type": "response" } & Response | { "type": "error" } & ErrorEnvelope | { "type": "event" } & Event | { "type": "cancel" } & Cancel | { "type": "blobStart" } & BlobStart | { "type": "batch" } & Batch;
+export type Envelope = { "type": "hello" } & Hello | { "type": "helloAck" } & HelloAck | { "type": "request" } & Request | { "type": "response" } & Response | { "type": "error" } & ErrorEnvelope | { "type": "event" } & Event | { "type": "progress" } & Progress | { "type": "cancel" } & Cancel | { "type": "blobStart" } & BlobStart | { "type": "batch" } & Batch;

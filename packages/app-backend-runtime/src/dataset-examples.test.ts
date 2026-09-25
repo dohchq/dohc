@@ -27,7 +27,8 @@ async function fixture(app = "fundraiser") {
   const declaration = JSON.parse(read(app, app === "fundraiser" ? "app.publish.json" : "app.binding.json"));
   const binding: AppDatasetBinding = declaration.dataset ?? declaration;
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
-  if (declaration.inputs) expect(declaration.inputs).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
+  // app.publish.json paths are relative to the app folder; the dataset's private sources stay out of them.
+  if (declaration.inputs) expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
   const directory = await mkdtemp(join(tmpdir(), "dohc-example-dataset-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE attachments(file_id TEXT PRIMARY KEY);");
@@ -68,7 +69,7 @@ async function fixture(app = "fundraiser") {
   async function result(name: string, input: AppBackendJson = {}, context: Context = "friend", appId?: string) {
     return (await call(name, input, context, appId)).result as Result;
   }
-  const field = (table: string, column: string) => definition.tables.find(t => t.sqlName === table)!.fields.find(f => f.sqlColumn === column)!.fieldId;
+  const field = (table: string, column: string) => definition.tables.find(t => t.sqlName === table)!.fields.find(f => f.type !== "button" && f.sqlColumn === column)!.fieldId;
   return { host, db, scope, definition, revision, binding, operation, call, result, field };
 }
 

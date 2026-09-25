@@ -1,22 +1,28 @@
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Copy, Download, GitPullRequestArrow, LogIn, MessageSquare, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
   type AutomationFailureNotice,
+  type NoticeRow,
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
+import { RELAY_API_VERSION_CAUSE } from "@dohc/workspace-contracts/relay";
+import { SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
+import { relativeTime } from "../relativeTime";
 import type {
   AgentNotification,
   AgentNotificationKind,
 } from "./agentNotifications";
+import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
 
 type NoticeAction = {
   label: string;
@@ -58,6 +64,71 @@ export interface WorkspaceErrorNotice {
   seen: boolean;
 }
 
+// A notice sent to this person, as the shell resolved it on this computer.
+export interface SentNotice {
+  notice: NoticeRow;
+  // The folder that names the notice's Collection, when it comes from
+  // another workspace than this one.
+  folder: string | null;
+  // Open has somewhere to go, or something to say about why it cannot.
+  openable: boolean;
+}
+
+// Sent rows show this many at a time.
+export const SENT_NOTICE_PAGE = 50;
+
+// How long a toast for something finished or sent stays before it fades.
+const FADING_TOAST_MS = 6000;
+
+// The sender's shape: round for a person, a rounded square for an agent,
+// and the bare lightning mark for an automation, as in chat. Shape is
+// visual only; the screen reader hears who sent it.
+const SENDER_NAME = {
+  person: "From a person",
+  agent: "From an agent",
+  automation: "From an automation",
+} as const;
+function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
+  if (props.kind === null) {
+    return <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+  }
+  if (props.kind === "automation") {
+    return (
+      <span className="mt-0.5 shrink-0">
+        <Zap size={14} aria-hidden data-sender-shape="zap" className="text-muted" />
+        <span className="sr-only">{SENDER_NAME.automation}</span>
+      </span>
+    );
+  }
+  const person = props.kind === "person";
+  return (
+    <span className="mt-0.5 shrink-0">
+      <span
+        aria-hidden
+        data-sender-shape={person ? "round" : "square"}
+        className={`grid size-4 place-items-center border ${
+          person
+            ? "rounded-full border-line bg-panel-2 text-muted"
+            : "rounded-md border-agent/50 bg-bg text-agent"
+        }`}
+      >
+        {person ? <User size={10} aria-hidden /> : <Sparkles size={10} aria-hidden />}
+      </span>
+      <span className="sr-only">{SENDER_NAME[props.kind]}</span>
+    </span>
+  );
+}
+
+// A sent notice as one account's list showed it. Another account's notice
+// with the same id has another key.
+const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string =>
+  JSON.stringify([account, store, noticeId]);
+
+// Arrow keys move between rows; a row is any element marked with this.
+const NOTICE_ROW = "[data-notice-row]";
+const ROW_CLASS =
+  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
 // cap, and the failure reason the reaper records for a run that did not
 // finish. A chain stop is a flag on the failure, not a reason text.
@@ -70,20 +141,6 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-// Coarse relative time for the notice ledger. Recomputed on every render;
-// a 30s tick while the panel is open keeps labels honest between updates.
-function relativeTime(thenMs: number): string {
-  const elapsedMs = Math.max(0, Date.now() - thenMs);
-  const deltaMinutes = Math.floor(elapsedMs / 60_000);
-  if (deltaMinutes < 1) return "just now";
-  if (deltaMinutes < 60) return `${deltaMinutes}m ago`;
-  const deltaHours = Math.floor(deltaMinutes / 60);
-  if (deltaHours < 24) return `${deltaHours}h ago`;
-  return new Date(thenMs).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
 
 const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
   finished: CheckCircle2,
@@ -101,40 +158,115 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
   "login-required": "warning",
 };
 
+// A Collection automation's engine id is "collection:<collection path>#<id>".
+// Its definition lives in the Collection's automations.yaml, not in a plugin.
+export function collectionAutomationOf(
+  automationId: string,
+): { collection: string; id: string } | null {
+  if (!automationId.startsWith("collection:")) return null;
+  const rest = automationId.slice("collection:".length);
+  const hash = rest.lastIndexOf("#");
+  return hash > 0 ? { collection: rest.slice(0, hash), id: rest.slice(hash + 1) } : null;
+}
+
 // The title and body for one automation's failure notice: what happened,
 // why when the engine recorded a known reason, and the way forward. The two
 // engine-recorded reason codes get their own honest sentences; every other
 // error is the handler's own text. The copy must never claim the handler
 // threw when it did not run at all (chain-stopped) or did not finish
-// (reclaim-exhausted).
+// (reclaim-exhausted). A Collection automation's way forward is the
+// notice's Try again and Open automation, so its body only states what
+// happened; a plugin's names its source.
 function automationFailureCopy(failure: AutomationFailureNotice): {
   title: string;
   body: string;
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
+  const collection = collectionAutomationOf(failure.automationId);
+  const name = failure.name ?? collection?.id ?? failure.automationId;
+  const next = (step: string) => (collection ? "" : ` Open the plugin's source to ${step}.`);
   if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
         `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${failure.automationId}" did not run. Open the plugin's source to ` +
-        "shorten the chain.",
+        `"${name}" did not run.${next("shorten the chain")}`,
     };
   }
   if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
-      title: `Automation "${failure.automationId}" did not finish`,
-      body:
-        `${count}dohc stopped retrying a run that did not finish. ` +
-        "Open the plugin's source to check the handler.",
+      title: `Automation "${name}" did not finish`,
+      body: `${count}dohc stopped retrying a run that did not finish.${next("check the handler")}`,
     };
   }
   return {
-    title: `Automation "${failure.automationId}" failed`,
-    body: `${count}${sentence(failure.error)} Open the plugin's source to fix the handler.`,
+    title: `Automation "${name}" failed`,
+    body: `${count}${sentence(failure.error)}${next("fix the handler")}`,
   };
 }
+
+// One automation failure as a notice, for its row and its toast: the copy,
+// the report Copy puts on the clipboard, and the ways forward. A Collection
+// automation offers Try again, except after a chain stop, and Open
+// automation; a plugin's names its source in the body instead.
+function automationFailureNotice(
+  failure: AutomationFailureNotice,
+  handlers: {
+    onRetry: ((failure: AutomationFailureNotice) => void) | undefined;
+    onOpen: ((automationId: string) => void) | undefined;
+  },
+): Omit<Notice, "id"> {
+  const collection = collectionAutomationOf(failure.automationId) !== null;
+  const { onRetry, onOpen } = handlers;
+  return {
+    tone: "warning",
+    ...automationFailureCopy(failure),
+    timeMs: failure.updatedAtMs,
+    copyText: errorDetails([
+      ["Automation", failure.automationId],
+      ["Run", failure.claimId],
+      ["Error", failure.error],
+      ["Time", new Date(failure.updatedAtMs).toISOString()],
+    ]),
+    Icon: AlertTriangle,
+    actions: [
+      ...(collection && onOpen ? [{ label: "Open automation", onClick: () => onOpen(failure.automationId) }] : []),
+      ...(collection && !failure.chainStopped && onRetry ? [{ label: "Try again", onClick: () => onRetry(failure) }] : []),
+    ],
+  };
+}
+
+// The one notice for every step a narrower share stopped. It names each
+// automation it will dismiss, with its file, and who cannot reach what.
+function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
+  const automations = new Map<string, { name: string; file: string; reasons: Set<string> }>();
+  for (const stop of stops) {
+    const collection = collectionAutomationOf(stop.automationId)?.collection ?? stop.collection;
+    const entry = automations.get(stop.automationId) ??
+      { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
+    const who = stop.stoppedFor ?? "Someone you shared with";
+    entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
+    automations.set(stop.automationId, entry);
+  }
+  const [only] = automations.values();
+  if (automations.size === 1 && only) {
+    return {
+      title: `Automation "${only.name}" stopped`,
+      body: `${[...only.reasons].join(" ")} Open ${only.file} to change the step.`,
+    };
+  }
+  const named = [...automations.values()]
+    .map((entry) => `"${entry.name}" in ${entry.file}: ${[...entry.reasons].join(" ")}`);
+  return {
+    title: `${automations.size} automations stopped`,
+    body: `${named.join(" ")} Open each file to change its steps.`,
+  };
+}
+
+// The notice, and the ⚡ panel, when dohc cannot read which steps were allowed.
+export const AUTOMATION_HOLDS_UNREADABLE =
+  "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
 
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
@@ -257,10 +389,48 @@ export function NoticeCenter(props: {
     automationId: string,
     generation: number,
   ) => void;
+  // A Collection automation's failed run: run it again, or open the
+  // automation's runs in its Collection. A chain stop cannot run again.
+  onRetryAutomationFailure?: (failure: AutomationFailureNotice) => void;
+  onOpenAutomation?: (automationId: string) => void;
+  // A failure that arrived while the window was open, shown once as a
+  // toast. Closing it keeps its row.
+  automationFailureToast?: AutomationFailureNotice | null;
+  onHideAutomationFailureToast?: () => void;
+  // Automation steps that reach more now only because an editor left. Each
+  // waits for someone who can edit the Collection to allow it.
+  automationHolds?: readonly AutomationHoldNotice[];
+  onAllowAutomationHold?: (hold: AutomationHoldNotice) => void;
+  // dohc could not read which steps were allowed, so every automation waits.
+  automationHoldsUnreadable?: boolean;
+  onResetAutomationHolds?: () => void;
+  onRevealAutomationHolds?: () => void;
+  // Notices sent to this person, newest first. They follow this computer's
+  // own rows under their own heading.
+  sentNotices?: readonly SentNotice[];
+  // The newest sent notice that arrived while dohc was open. Its toast
+  // fades; the row stays.
+  sentNoticeToast?: SentNotice | null;
+  onHideSentNoticeToast?: () => void;
+  // The first list has not answered yet: the panel shows no "All clear".
+  sentNoticesLoading?: boolean;
+  // The signed-in account the sent notices belong to.
+  sentNoticesAccount?: string | null;
+  // Marks the notice read and opens it. Resolves to null once it opened, or
+  // to a sentence that says why it could not. Opens nothing once `signal`
+  // aborts.
+  onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
+  onDismissSentNotice?: (notice: NoticeRow) => void;
+  onReadAllSentNotices?: () => void;
+  // Automation steps a narrower share stopped, shown as one notice until
+  // someone dismisses it.
+  automationStops?: readonly AutomationStopNotice[];
+  onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
   const centerRef = useRef<HTMLDivElement | null>(null);
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
   }, [open]);
@@ -272,6 +442,73 @@ export function NoticeCenter(props: {
     const interval = setInterval(() => forceTick((n) => n + 1), 30_000);
     return () => clearInterval(interval);
   }, [open]);
+
+  const sentNotices = props.sentNotices ?? [];
+  const unreadSent = sentNotices.filter(({ notice }) => notice.readAtMs === null).length;
+  // Each opening starts at the newest page.
+  const [sentShown, setSentShown] = useState(SENT_NOTICE_PAGE);
+  // Why a sent notice could not open, shown on its row. Keyed by store and
+  // id, and cleared when the panel closes.
+  const [sentNotes, setSentNotes] = useState<ReadonlyMap<string, string>>(new Map());
+  // The Open on its way, if any. Closing the panel, dismissing that notice,
+  // or a newer Open cancels it, so a late answer opens nothing.
+  const opening = useRef<{ key: string; controller: AbortController } | null>(null);
+  const [openingKey, setOpeningKey] = useState<string | null>(null);
+  const cancelOpen = useCallback((key?: string) => {
+    if (!opening.current || (key !== undefined && opening.current.key !== key)) return;
+    opening.current.controller.abort();
+    opening.current = null;
+    setOpeningKey(null);
+  }, []);
+  useEffect(() => {
+    if (open) return;
+    cancelOpen();
+    setSentShown(SENT_NOTICE_PAGE);
+    setSentNotes(new Map());
+  }, [cancelOpen, open]);
+  // Another account's list: its Open and its row sentences go with it.
+  const sentAccount = props.sentNoticesAccount ?? null;
+  useEffect(() => {
+    cancelOpen();
+    setSentNotes(new Map());
+  }, [cancelOpen, sentAccount]);
+  const { onOpenSentNotice } = props;
+  const openSentNotice = useCallback(
+    async (notice: NoticeRow) => {
+      if (!onOpenSentNotice) return;
+      const key = sentKey(sentAccount, notice);
+      // A second Open of the same notice waits for the first.
+      if (opening.current?.key === key) return;
+      cancelOpen();
+      const controller = new AbortController();
+      opening.current = { key, controller };
+      setOpeningKey(key);
+      setSentNotes((current) => {
+        if (!current.has(key)) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+      let note: string | null;
+      try {
+        note = await onOpenSentNotice(notice, controller.signal);
+      } finally {
+        if (opening.current?.controller === controller) {
+          opening.current = null;
+          setOpeningKey(null);
+        }
+      }
+      if (controller.signal.aborted) return;
+      if (note === null) {
+        toggleRef.current?.focus({ preventScroll: true });
+        setOpen(false);
+        return;
+      }
+      setOpen(true);
+      setSentNotes((current) => new Map(current).set(key, note));
+    },
+    [cancelOpen, onOpenSentNotice, sentAccount],
+  );
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
   >(null);
@@ -283,7 +520,6 @@ export function NoticeCenter(props: {
     });
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
-  const toggleRef = useRef<HTMLButtonElement | null>(null);
 
   const readyUpdateKey =
     updateState?.status === "ready"
@@ -498,13 +734,53 @@ export function NoticeCenter(props: {
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
+    if (props.automationHoldsUnreadable) {
+      next.push({
+        id: "automation-holds-unreadable",
+        tone: "warning",
+        title: "Automations are waiting",
+        body: AUTOMATION_HOLDS_UNREADABLE,
+        Icon: AlertTriangle,
+        actions: [
+          ...(props.onResetAutomationHolds ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }] : []),
+          ...(props.onRevealAutomationHolds ? [{ label: "Open folder", onClick: props.onRevealAutomationHolds }] : []),
+        ],
+      });
+    }
+    for (const hold of props.automationHolds ?? []) {
+      const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
+      next.push({
+        id: `automation-hold-${hold.automationId}-${hold.step}`,
+        tone: "warning",
+        title: `Automation "${hold.automationName}" is waiting`,
+        body: hold.stoppedFor
+          ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
+          : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
+        Icon: AlertTriangle,
+        ...(props.onAllowAutomationHold
+          ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }
+          : {}),
+      });
+    }
+    const stops = props.automationStops ?? [];
+    if (stops.length > 0) {
+      next.push({
+        id: "automation-stops",
+        tone: "warning",
+        ...automationStopsCopy(stops),
+        Icon: AlertTriangle,
+        ...(props.onDismissAutomationStops
+          ? { onDismiss: () => props.onDismissAutomationStops?.(stops) }
+          : {}),
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
-        tone: "warning",
-        ...automationFailureCopy(failure),
-        timeMs: failure.updatedAtMs,
-        Icon: AlertTriangle,
+        ...automationFailureNotice(failure, {
+          onRetry: props.onRetryAutomationFailure,
+          onOpen: props.onOpenAutomation,
+        }),
         ...(props.onDismissAutomationFailure
           ? {
               onDismiss: () =>
@@ -572,6 +848,19 @@ export function NoticeCenter(props: {
           "Both copies are safe. Review the differences to choose what stays.",
         actions: [{ label: "Review", onClick: props.onOpenConflicts }],
         Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.updateRequired) {
+      const update = props.syncStatus.updateRequired;
+      next.push({
+        id: "relay-update-required",
+        tone: "warning",
+        title: UPDATE_REQUIRED_LABEL[update],
+        body: `${RELAY_API_VERSION_CAUSE[update]} ${
+          update === "app"
+            ? "Update dohc to sync again."
+            : "Ask the person who runs it to update it. Then restart dohc."
+        } Your changes stay on this computer.`,
+        Icon: CloudOff,
       });
     } else if (state === "cloud-disconnected") {
       next.push({
@@ -718,9 +1007,18 @@ export function NoticeCenter(props: {
     agentNotifications,
     props.agentActive,
     props.automationFailures,
+    props.automationHolds,
+    props.onAllowAutomationHold,
+    props.automationHoldsUnreadable,
+    props.onResetAutomationHolds,
+    props.onRevealAutomationHolds,
+    props.automationStops,
+    props.onDismissAutomationStops,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
+    props.onRetryAutomationFailure,
+    props.onOpenAutomation,
     props.workspaceErrors,
     props.onRetryWorkspaceError,
     props.onWorkspaceErrorAction,
@@ -756,7 +1054,9 @@ export function NoticeCenter(props: {
       allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
-  const count = notices.length + (recoveryRows.length > 0 ? 1 : 0);
+  // This computer's rows count while they stand; sent rows while unread.
+  const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0);
+  const count = localCount + unreadSent;
   // The newest error whose toast is still open. One at a time: the rest
   // wait in Notices with the count.
   const errorToast = useMemo(
@@ -766,11 +1066,75 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
+  const failureToast = useMemo(
+    () =>
+      props.automationFailureToast
+        ? automationFailureNotice(props.automationFailureToast, {
+            onRetry: props.onRetryAutomationFailure,
+            onOpen: props.onOpenAutomation,
+          })
+        : null,
+    [props.automationFailureToast, props.onRetryAutomationFailure, props.onOpenAutomation],
+  );
   useEffect(() => {
     if (errorToast?.tone !== "success" || !props.onHideWorkspaceError) return;
-    const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), 6000);
+    const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
     return () => clearTimeout(timer);
   }, [errorToast?.id, errorToast?.tone, props.onHideWorkspaceError]);
+  const sentToast = props.sentNoticeToast ?? null;
+  const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
+  const { onHideSentNoticeToast } = props;
+  useEffect(() => {
+    if (sentToastKey === null || !onHideSentNoticeToast) return;
+    const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [sentToastKey, onHideSentNoticeToast]);
+
+  // A row about to go takes focus to the next row, or the one before, or
+  // the panel, so the keyboard keeps its place in the list.
+  const focusPastRow = (element: Element) => {
+    const row = element.closest<HTMLElement>(NOTICE_ROW);
+    const rows = [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
+    const index = row ? rows.indexOf(row) : -1;
+    (rows[index + 1] ?? rows[index - 1] ?? centerRef.current)?.focus();
+  };
+  // Rows answer Enter and Delete while they hold focus themselves, not a
+  // control inside them.
+  const rowKeys = (actions: { open?: () => void; dismiss?: () => void }) =>
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key === "Enter" && actions.open) {
+        event.preventDefault();
+        actions.open();
+      } else if ((event.key === "Delete" || event.key === "Backspace") && actions.dismiss) {
+        event.preventDefault();
+        focusPastRow(event.currentTarget);
+        actions.dismiss();
+      }
+    };
+  const moveBetweenRows = (event: KeyboardEvent<HTMLElement>) => {
+    const rows = [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
+    if (rows.length === 0) return;
+    const current = document.activeElement?.closest<HTMLElement>(NOTICE_ROW) ?? null;
+    const index = current ? rows.indexOf(current) : -1;
+    const next = event.key === "ArrowDown"
+      ? rows[Math.min(index + 1, rows.length - 1)]
+      : rows[index < 0 ? rows.length - 1 : Math.max(index - 1, 0)];
+    event.preventDefault();
+    next?.focus();
+  };
+  const runLocalAction = (action: NoticeAction) => {
+    toggleRef.current?.focus({ preventScroll: true });
+    action.onClick();
+    setOpen(false);
+  };
+  // Enter on a row runs its first action that can run, as that button would.
+  const firstAction = (notice: Notice) => {
+    const action = notice.actions?.find((candidate) => !candidate.disabled);
+    return action ? () => runLocalAction(action) : undefined;
+  };
+  const sentShownRows = sentNotices.slice(0, sentShown);
+  const sentHidden = sentNotices.length - sentShownRows.length;
 
   return (
     <>
@@ -822,6 +1186,83 @@ export function NoticeCenter(props: {
                   type="button"
                   aria-label={errorToast.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
                   onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {sentToast ? (
+            <div
+              data-testid="sent-notice-toast"
+              role="status"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <SenderMark kind={sentToast.notice.senderKind} />
+              <span className="min-w-0 flex-1 break-words leading-snug">
+                {sentToast.notice.title}
+              </span>
+              {sentToast.openable && props.onOpenSentNotice ? (
+                <button
+                  type="button"
+                  data-testid="sent-notice-toast-open"
+                  onClick={() => {
+                    onHideSentNoticeToast?.();
+                    void openSentNotice(sentToast.notice);
+                  }}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  Open
+                </button>
+              ) : null}
+              {onHideSentNoticeToast ? (
+                <button
+                  type="button"
+                  aria-label="Close"
+                  onClick={onHideSentNoticeToast}
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {failureToast ? (
+            <div
+              data-testid="automation-failure-toast"
+              role="alert"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {failureToast.title}. {failureToast.body}
+              </span>
+              {(failureToast.actions ?? []).map((action) => (
+                <button
+                  key={action.label}
+                  type="button"
+                  onClick={() => {
+                    props.onHideAutomationFailureToast?.();
+                    action.onClick();
+                  }}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  {action.label}
+                </button>
+              ))}
+              <CopyDetailsButton
+                key={`${props.automationFailureToast?.automationId}:${props.automationFailureToast?.generation}`}
+                iconOnly
+                label="Copy error details"
+                data-testid="automation-failure-toast-copy"
+                details={() => failureToast.copyText ?? ""}
+              />
+              {props.onHideAutomationFailureToast ? (
+                <button
+                  type="button"
+                  aria-label="Dismiss automation notice"
+                  onClick={props.onHideAutomationFailureToast}
                   className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
                 >
                   <X size={12} aria-hidden />
@@ -960,6 +1401,10 @@ export function NoticeCenter(props: {
           aria-label="Notices"
           tabIndex={-1}
           onKeyDown={(event) => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              moveBetweenRows(event);
+              return;
+            }
             if (event.key !== "Escape" || event.defaultPrevented) return;
             event.preventDefault();
             event.stopPropagation();
@@ -973,22 +1418,43 @@ export function NoticeCenter(props: {
             <span className="font-semibold uppercase tracking-wide text-muted">
               Notices
             </span>
+            {unreadSent > 0 && props.onReadAllSentNotices ? (
+              <button
+                type="button"
+                data-testid="notice-center-read-all"
+                onClick={() => {
+                  centerRef.current?.focus();
+                  props.onReadAllSentNotices?.();
+                }}
+                className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
+              >
+                Mark all read
+              </button>
+            ) : null}
             {count > 0 ? (
               <span
                 data-testid="notice-center-count"
-                className="ml-auto rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
+                className={`${unreadSent > 0 && props.onReadAllSentNotices ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
               >
                 {count}
               </span>
             ) : null}
           </header>
-          {count === 0 ? (
-            <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
-              <Check size={14} aria-hidden />
-              All clear
-            </div>
+          {localCount === 0 && sentNotices.length === 0 ? (
+            // Nothing to say until the first list of sent notices answers.
+            props.sentNoticesLoading ? null : (
+              <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
+                <Check size={14} aria-hidden />
+                All clear
+              </div>
+            )
           ) : (
             <div className="min-h-0 max-h-80 overflow-y-auto">
+              {localCount > 0 ? (
+                <section data-testid="notice-group-local">
+                  <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
+                    On this computer
+                  </SectionLabel>
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
@@ -1010,7 +1476,13 @@ export function NoticeCenter(props: {
                 <li
                   key={notice.id}
                   data-testid={`notice-${notice.id}`}
-                  className="dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0"
+                  data-notice-row=""
+                  tabIndex={-1}
+                  onKeyDown={rowKeys({
+                    open: firstAction(notice),
+                    dismiss: notice.onDismiss,
+                  })}
+                  className={ROW_CLASS}
                 >
                   <notice.Icon
                     size={14}
@@ -1027,11 +1499,7 @@ export function NoticeCenter(props: {
                           key={action.label}
                           type="button"
                           disabled={action.disabled}
-                          onClick={() => {
-                            toggleRef.current?.focus({ preventScroll: true });
-                            action.onClick();
-                            setOpen(false);
-                          }}
+                          onClick={() => runLocalAction(action)}
                           className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50`}
                         >
                           {action.label}
@@ -1050,7 +1518,10 @@ export function NoticeCenter(props: {
                           type="button"
                           data-testid={`notice-${notice.id}-dismiss`}
                           aria-label="Dismiss notice"
-                          onClick={() => notice.onDismiss?.()}
+                          onClick={(event) => {
+                            focusPastRow(event.currentTarget);
+                            notice.onDismiss?.();
+                          }}
                           className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                         >
                           <X size={11} aria-hidden />
@@ -1072,6 +1543,114 @@ export function NoticeCenter(props: {
                 </li>
               ))}
             </ul>
+                </section>
+              ) : null}
+              {sentNotices.length > 0 ? (
+                <section
+                  data-testid="notice-group-sent"
+                  className={localCount > 0 ? "border-t border-line" : undefined}
+                >
+                  <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
+                    Sent to you
+                  </SectionLabel>
+                  <ul className="m-0 list-none p-0">
+                    {sentShownRows.map(({ notice, folder, openable }) => {
+                      const key = sentKey(sentAccount, notice);
+                      const unread = notice.readAtMs === null;
+                      const note = sentNotes.get(key);
+                      const busy = openingKey === key;
+                      const openNotice = openable && props.onOpenSentNotice
+                        ? () => void openSentNotice(notice)
+                        : undefined;
+                      const dismissNotice = props.onDismissSentNotice
+                        ? () => {
+                            cancelOpen(key);
+                            props.onDismissSentNotice?.(notice);
+                          }
+                        : undefined;
+                      return (
+                        <li
+                          key={key}
+                          data-testid={`sent-notice-${notice.noticeId}`}
+                          data-notice-row=""
+                          tabIndex={-1}
+                          onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
+                          className={ROW_CLASS}
+                        >
+                          <SenderMark kind={notice.senderKind} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span
+                                title={notice.title}
+                                className={`truncate text-[12px] ${unread ? "font-medium text-ink" : "text-muted"}`}
+                              >
+                                {notice.title}
+                              </span>
+                              {unread ? (
+                                <span data-testid={`sent-notice-${notice.noticeId}-unread`} className="shrink-0">
+                                  <span aria-hidden className="block size-1.5 rounded-full bg-accent" />
+                                  <span className="sr-only">Unread</span>
+                                </span>
+                              ) : null}
+                              {openNotice ? (
+                                <button
+                                  type="button"
+                                  data-testid={`sent-notice-${notice.noticeId}-open`}
+                                  aria-busy={busy || undefined}
+                                  onClick={openNotice}
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50"
+                                >
+                                  {busy ? "Opening…" : "Open"}
+                                </button>
+                              ) : null}
+                              {dismissNotice ? (
+                                <button
+                                  type="button"
+                                  data-testid={`sent-notice-${notice.noticeId}-dismiss`}
+                                  aria-label="Dismiss notice"
+                                  onClick={(event) => {
+                                    focusPastRow(event.currentTarget);
+                                    dismissNotice();
+                                  }}
+                                  className={`${openNotice ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                                >
+                                  <X size={11} aria-hidden />
+                                </button>
+                              ) : null}
+                            </div>
+                            {notice.body ? (
+                              <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
+                                {notice.body}
+                              </p>
+                            ) : null}
+                            <p className="m-0 mt-1 flex min-w-0 gap-2 font-mono text-[10px] text-subtle">
+                              <time dateTime={new Date(notice.createdAtMs).toISOString()}>
+                                {relativeTime(notice.createdAtMs)}
+                              </time>
+                              {folder ? <span className="truncate">{folder}</span> : null}
+                            </p>
+                            {note ? (
+                              <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
+                                {note}
+                              </p>
+                            ) : null}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {sentHidden > 0 ? (
+                    <button
+                      type="button"
+                      data-testid="sent-notices-more"
+                      onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
+                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                    >
+                      Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
+                    </button>
+                  ) : null}
+                </section>
+              ) : null}
             </div>
           )}
         </div>
@@ -1081,7 +1660,7 @@ export function NoticeCenter(props: {
         ref={toggleRef}
         type="button"
         data-testid="notice-center-toggle"
-        aria-label={count > 0 ? `Notices (${count})` : "Notices"}
+        aria-label={count > 0 ? `Notices, ${count} unread` : "Notices"}
         title="Notices"
         aria-expanded={open}
         aria-haspopup="dialog"

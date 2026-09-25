@@ -20,8 +20,10 @@ import {
 } from "../window/createMainWindow";
 import {
   createSitePreviewLifecycle,
+  START_CANCELLED_MESSAGE,
   type SitePreviewExecution,
 } from "./sitePreviewLifecycle";
+import { deferred } from "../testing/deferred";
 import type {
   SiteLogEntry,
   SiteProcessHandle,
@@ -1094,5 +1096,298 @@ describe("site preview lifecycle", () => {
     await expect(retry).resolves.toBeUndefined();
     expect(preview.stop).toHaveBeenCalledTimes(2);
     expect(lifecycle.status("workspace-1", "site").running).toBe(false);
+  });
+});
+
+describe("an app preview shown by more than one surface", () => {
+  type Result = { logs: SiteLogEntry[]; mode: string };
+
+  function surfaces() {
+    const notifyReplaced = vi.fn();
+    const lifecycle = createSitePreviewLifecycle<Result>({
+      allowOrigin: () => () => undefined,
+      notifyReplaced,
+    });
+    const handles: StaticSitePreview[] = [];
+    // A start waits here when a test holds it.
+    let gate: Promise<void> = Promise.resolve();
+    let failNext = false;
+    let failNextPrepare = false;
+    const firstPrepare = deferred();
+    const prepare = vi.fn(async (_isCurrent: () => boolean) => {
+      firstPrepare.resolve();
+      if (failNextPrepare) {
+        failNextPrepare = false;
+        throw new Error("no build script");
+      }
+      return async (): Promise<SitePreviewExecution<Result>> => {
+      await gate;
+      if (failNext) {
+        failNext = false;
+        throw new Error("build failed");
+      }
+      const handle = fakeStaticHandle(`http://127.0.0.1:${4200 + handles.length}/`);
+      handles.push(handle);
+      return { handle, result: { logs: [], mode: "" } };
+      };
+    });
+    const current = new Map<number, boolean>();
+    // What a surface is answered: its preview, or that a newer start
+    // replaced its own.
+    const answer = (
+      holderId: string,
+      input: { mode?: string; restart?: boolean; senderId?: number } = {},
+    ) => {
+      const senderId = input.senderId ?? 1;
+      current.set(senderId, true);
+      return lifecycle.acquire({
+        holderId,
+        senderId,
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        mode: input.mode ?? "static",
+        restart: input.restart ?? false,
+        isCurrent: () => current.get(senderId) === true,
+        prepare,
+      });
+    };
+    const show = async (...args: Parameters<typeof answer>) => {
+      const shown = await answer(...args);
+      if ("replaced" in shown) throw new Error("A newer start replaced this one.");
+      return shown;
+    };
+    const hide = (holderId: string) =>
+      lifecycle.release({
+        getActiveWorkspaceId: () => "workspace-1",
+        holderId,
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+      });
+    // A window closes: its session stops being current, and main lets go of
+    // what it showed.
+    const close = (senderId: number) => {
+      current.set(senderId, false);
+      lifecycle.cancelSender(senderId);
+    };
+    return {
+      lifecycle, handles, prepare, answer, show, hide, close, notifyReplaced,
+      hold: (value: Promise<void>) => { gate = value; },
+      failNextStart: () => { failNext = true; },
+      failNextPrepare: () => { failNextPrepare = true; },
+      // Settles once the first start reached preparation.
+      prepared: () => firstPrepare.promise,
+    };
+  }
+
+  it.each([["tab", "pin"], ["pin", "tab"]])("shares one preview when %s opens before %s, and stops it after both close", async (first, second) => {
+    const s = surfaces();
+    const shown = await s.show(first);
+    await expect(s.show(second)).resolves.toEqual(shown);
+    expect(s.prepare).toHaveBeenCalledOnce();
+
+    await s.hide(first);
+    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    await s.hide(second);
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+  });
+
+  it("keeps the preview when the pinned panel is switched away and back", async () => {
+    const s = surfaces();
+    await s.show("tab");
+    await s.show("pin");
+    await s.hide("pin");
+    await s.show("pin-again");
+    expect(s.prepare).toHaveBeenCalledOnce();
+    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+  });
+
+  it("starts once when two surfaces restore at the same time", async () => {
+    const s = surfaces();
+    const [tab, pin] = await Promise.all([s.show("tab"), s.show("pin")]);
+    expect(pin).toEqual(tab);
+    expect(s.prepare).toHaveBeenCalledOnce();
+  });
+
+  it.each([["pin", "tab", 1], ["tab", "pin", 2]])("tells the other surface when %s starts the preview again", async (restarting, other, otherSender) => {
+    const s = surfaces();
+    const first = await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    const restarted = await s.show(restarting, { senderId: restarting === "tab" ? 1 : 2, restart: true });
+    expect(restarted.generation).toBeGreaterThan(first.generation);
+    expect(restarted.url).toBe(s.handles[1]!.url);
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(otherSender, {
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      holderId: other,
+      generation: restarted.generation,
+      preview: restarted,
+    });
+    // Both still hold the new preview.
+    await s.hide(restarting);
+    expect(s.handles[1]!.stop).not.toHaveBeenCalled();
+    await s.hide(other);
+    expect(s.handles[1]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("moves every surface to a new mode, such as the build Share starts", async () => {
+    const s = surfaces();
+    await s.show("tab", { mode: "dev", senderId: 1 });
+    await s.show("pin", { mode: "dev", senderId: 1 });
+    const built = await s.show("pin", { mode: "build", restart: true, senderId: 1 });
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      generation: built.generation,
+      preview: expect.objectContaining({ url: s.handles[1]!.url }),
+    }));
+    // The tab asking for build now shares it instead of starting again.
+    await expect(s.show("tab", { mode: "build" })).resolves.toEqual(built);
+    expect(s.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the others their preview is gone when a restart fails after stopping it", async () => {
+    const s = surfaces();
+    await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    s.failNextStart();
+    await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("build failed");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      preview: null,
+    }));
+    // The surfaces still count: the last to let go stops what is left.
+    await s.hide("tab");
+    await s.hide("pin");
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+  });
+
+  it("answers a start another surface replaced as replaced, then moves that surface to the newer one", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const tab = s.answer("tab", { mode: "dev", senderId: 1 });
+    await s.prepared();
+    const pin = s.show("pin", { mode: "build", restart: true, senderId: 2 });
+    release.resolve();
+    await expect(tab).resolves.toEqual({ replaced: true });
+    const built = await pin;
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      generation: built.generation,
+      preview: built,
+    }));
+    // Whether the tab's start was cancelled or ran first, only the newer
+    // preview is left running.
+    for (const handle of s.handles) {
+      if (handle.url === built.url) expect(handle.stop).not.toHaveBeenCalled();
+      else expect(handle.stop).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("changes nothing for the others when a restart fails preparation", async () => {
+    const s = surfaces();
+    const shown = await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    s.failNextPrepare();
+    await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("no build script");
+    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    // Both surfaces still hold the preview that runs.
+    await s.hide("tab");
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    await s.hide("pin");
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("lets an older start finish normally when the newer one fails preparation first", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const tab = s.answer("tab", { mode: "dev", senderId: 1 });
+    await s.prepared();
+    // The tab's start is on its way when the pinned panel asks for a build
+    // that cannot be prepared.
+    s.failNextPrepare();
+    await expect(s.show("pin", { mode: "build", senderId: 2 })).rejects.toThrow("no build script");
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    release.resolve();
+    const shown = await tab;
+    if ("replaced" in shown) throw new Error("The tab's start was counted as replaced.");
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    // The tab is the one surface holding it, so letting go stops it.
+    await s.hide("tab");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("gives preparation a lifetime check that holds while any surface holding the start does", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    asked.catch(() => undefined);
+    const joined = s.show("pin", { senderId: 2 });
+    joined.catch(() => undefined);
+    await s.prepared();
+    const isCurrent = s.prepare.mock.calls[0]![0];
+    expect(isCurrent()).toBe(true);
+    s.close(1);
+    // Execution asks this after a build finishes; the pinned panel still
+    // holds the start.
+    expect(isCurrent()).toBe(true);
+    s.close(2);
+    expect(isCurrent()).toBe(false);
+    release.resolve();
+    await expect(joined).rejects.toThrow(START_CANCELLED_MESSAGE);
+  });
+
+  it("keeps a shared start alive when the window that asked first closes", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    const joined = s.show("pin", { senderId: 2 });
+    asked.catch(() => undefined);
+    s.close(1);
+    release.resolve();
+    const shown = await joined;
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    await s.hide("pin");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a shared start once every window holding it closes", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    const joined = s.show("pin", { senderId: 2 });
+    const cancelled = expect(joined).rejects.toThrow(START_CANCELLED_MESSAGE);
+    asked.catch(() => undefined);
+    s.close(1);
+    s.close(2);
+    release.resolve();
+    await cancelled;
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+  });
+
+  it("stops a preview only a closed window showed", async () => {
+    const s = surfaces();
+    await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    s.close(1);
+    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+    s.close(2);
+    // A later stop runs in the same lane, so once it answers the stop that
+    // closing the window queued has run.
+    await s.hide("nobody");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
 });

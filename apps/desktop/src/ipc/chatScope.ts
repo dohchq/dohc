@@ -32,7 +32,7 @@ export type ChatScope =
       access: ShareAccess | null;
       genericChatWritable: boolean;
       // The granter ended this share. The local copy stays readable and
-      // stops taking writes, exactly as an ended chat-channel grant does.
+      // stops taking writes, exactly as an ended chat grant does.
       ended: boolean;
     };
 

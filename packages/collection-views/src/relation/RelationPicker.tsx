@@ -6,6 +6,7 @@ import type {
   RelationFieldDefinition,
 } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
+import { useAcknowledgedSelection } from "../useAcknowledgedSelection";
 import { recordLabel } from "../recordLabel";
 
 const RELATION_PICKER_LIMIT = 100;
@@ -25,22 +26,18 @@ export interface RelationPickerProps {
    * Receives the standard cell value: one record id or null when the field
    * is single, the full id array when it is many.
    */
-  emit: (value: CollectionValue) => void;
+  acknowledgedWriteId: number;
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
+  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: () => void;
-}
-
-function selectedIds(value: CollectionValue): string[] {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) {
-    return value.filter((entry): entry is string => typeof entry === "string");
-  }
-  return [];
 }
 
 export function RelationPicker({
   field,
   value,
   executor,
+  acknowledgedWriteId,
+  subscribeToDiscardedWrites,
   emit,
   close,
 }: RelationPickerProps) {
@@ -88,17 +85,8 @@ export function RelationPicker({
     };
   }, [executor, field.collection]);
 
-  // Optimistic selection: the host applies emitted changes through a
-  // serialized write queue, so the `value` prop lags behind rapid toggles.
-  // Deriving each toggle from the prop would drop the previous one; derive
-  // from local state instead, reconciled whenever the prop catches up (the
-  // effect also covers a collection switch, which remounts via key upstream
-  // but must not carry a stale selection if it ever does not).
-  const propSelected = useMemo(() => selectedIds(value), [value]);
-  const [selected, setSelected] = useState(propSelected);
-  useEffect(() => {
-    setSelected(propSelected);
-  }, [propSelected]);
+  const ids = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  const { selected, select } = useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subscribeToDiscardedWrites, emit });
   const shown = useMemo(() => {
     if (records === null) return [];
     const needle = search.trim().toLowerCase();
@@ -158,8 +146,7 @@ export function RelationPicker({
                   const next = selected.includes(record.id)
                     ? selected.filter((id) => id !== record.id)
                     : [...selected, record.id];
-                  setSelected(next);
-                  emit(next);
+                  select(next);
                 }}
               />
               {recordLabel(record)}

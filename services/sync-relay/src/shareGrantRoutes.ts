@@ -69,7 +69,7 @@ export function createShareGrantRoutes(
   requireShareWorkspace: (share: { workspaceId: string }, workspaceId: string) => void,
   terminateLinkStreamsForGrant: ReturnType<typeof createLinkResponseStreams>["terminateLinkStreamsForGrant"],
   terminateLinkStreamsForShare: ReturnType<typeof createLinkResponseStreams>["terminateLinkStreamsForShare"],
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wake" | "wakeLog">,
   linkGrantBody: ReturnType<typeof createShareSummaries>["linkGrantBody"],
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
@@ -183,7 +183,7 @@ export function createShareGrantRoutes(
       if (!secret) throw notFound();
       terminateLinkStreamsForGrant(result.grant.grantId);
       discussionActivity.wake(share.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...linkGrantBody(result.grant),
@@ -248,7 +248,7 @@ export function createShareGrantRoutes(
       }
       if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
       discussionActivity.wake(share.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...linkGrantBody(result.grant),
@@ -288,7 +288,7 @@ export function createShareGrantRoutes(
       });
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...namedGrantTransitionBody(result.grant),
@@ -325,7 +325,7 @@ export function createShareGrantRoutes(
       });
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...namedGrantTransitionBody(result.grant),
@@ -375,13 +375,13 @@ export function createShareGrantRoutes(
         }
         terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
         return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
       }
       if (storage.revokeShare(route.shareId, nowMs())) {
         terminateLinkStreamsForShare(route.shareId);
         discussionActivity.wake(route.shareId);
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
       }
       return jsonResponse({ ok: true, shareId: route.shareId });
     }
@@ -521,7 +521,7 @@ export function createShareGrantRoutes(
 
     if (route.route === "shares-create" && request.method === "POST") {
       const input = await readJsonObject(request);
-      // Two grant kinds share one create surface: a chat-channel grant
+      // Two grant kinds share one create surface: a chat grant
       // (MU-C4, addressed by channelWireId + optional access) or the PR-18
       // path/version grant. The recipient addressing, pending-invite, and
       // anti-enumeration behavior below is identical for both.
@@ -547,16 +547,16 @@ export function createShareGrantRoutes(
           }
           const selector = groupValidation.selector;
           if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-            throw relayError("invalid_channel", "channel is not shareable");
+            throw relayError("invalid_chat", "chat is not shareable");
           }
           return { selector, access: accessValidation.access };
         }
         if (input.channelWireId !== undefined) {
-          // Fail closed on an ambiguous body: a chat-channel selector must not
+          // Fail closed on an ambiguous body: a chat selector must not
           // also carry a version selector. (A channel with paths is a group
           // share, handled above.)
           if (input.versionId !== undefined) {
-            throw relayError("ambiguous_selector", "a chat-channel share must not also carry versionId");
+            throw relayError("ambiguous_selector", "a chat share must not also carry versionId");
           }
           const chatValidation = validateChatChannelShareSelector({
             channelWireId: input.channelWireId,
@@ -570,7 +570,7 @@ export function createShareGrantRoutes(
           }
           const selector = chatValidation.selector;
           if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-            throw relayError("invalid_channel", "channel is not shareable");
+            throw relayError("invalid_chat", "chat is not shareable");
           }
           return { selector, access: accessValidation.access };
         }
@@ -603,7 +603,7 @@ export function createShareGrantRoutes(
         );
         if (recipientUserId === actor.userId) throw relayError("self_share");
         if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-          throw relayError("invalid_channel", "channel is not shareable");
+          throw relayError("invalid_chat", "chat is not shareable");
         }
         storage.createShare({
           share: {
@@ -659,7 +659,7 @@ export function createShareGrantRoutes(
       // Re-check after the asynchronous account lookup: a pre-provisioned
       // wire may have become an agent channel while this request was waiting.
       if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
-        throw relayError("invalid_channel", "channel is not shareable");
+        throw relayError("invalid_chat", "chat is not shareable");
       }
       storage.createShare({
         share: {
