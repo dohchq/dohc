@@ -53,10 +53,11 @@ pub enum IngestOutcome {
     /// on the next scan instead of reading as already-captured.
     NotOwned,
     /// A live document session holds a new file, and its own settle records
-    /// the content. The op is neither acknowledged nor failed: the manifest
-    /// keeps its prior entry, so a later scan offers the path again, and the
-    /// run stays clean. The capture driver asks for that scan once a session
-    /// releases its lease.
+    /// the content. The op is neither acknowledged nor failed, and the run
+    /// stays clean. The manifest drops any entry it had for the path, so every
+    /// later scan offers it again, even with bytes an earlier file there had.
+    /// The capture driver asks for that scan once a session releases its
+    /// lease.
     Deferred,
 }
 
@@ -122,7 +123,7 @@ pub struct CaptureApplyResult {
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
     /// Ingests the sink deferred to a live document session, in plan order.
-    /// They keep their prior manifest entry and do not degrade the run.
+    /// Their manifest entries are dropped, and they do not degrade the run.
     pub deferred_paths: Vec<String>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
