@@ -193,13 +193,14 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
   <head>
     <meta charset="utf-8">
     <title>Reading list</title>
-    <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./styles.css" id="sheet">
     <style>h1 { letter-spacing: 2px; }</style>
     <style media="print">main { color: rgb(255, 0, 0); }</style>
     <script type="application/json" id="config">{"heading":"Reading list"}</script>
-    <script>window.steps = ["head:" + JSON.parse(document.getElementById("config").textContent).heading + ":" + !!document.querySelector("main")];</script>
+    <script>window.steps = ["head:" + JSON.parse(document.getElementById("config").textContent).heading + ":" + !!document.querySelector("main") + ":" + !!document.getElementById("sheet")];
+      queueMicrotask(() => steps.push("microtask"));</script>
   </head>
-  <body class="shelf">
+  <body class="shelf" style="background-image: url(img/cover-2x.png)">
     <main>
       <h1>Reading list</h1>
       <div id="box"><script>steps.push("box:" + document.currentScript.parentElement.id + ":" + !!document.getElementById("books"));</script></div>
@@ -281,15 +282,15 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await expect(app.locator("main")).toHaveCSS("color", "rgb(1, 2, 3)");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toHaveCSS("letter-spacing", "2px");
     await expect.poll(() => app.getByRole("img", { name: "Cover", exact: true }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
-    // Each image is one blob URL that every reference shares.
-    const cover = await app.getByRole("img", { name: "Cover", exact: true }).getAttribute("src");
-    expect(cover).toMatch(/^blob:/);
-    await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", new RegExp(`^${cover!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} 1x, blob:\\S+ 2x$`));
+    await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", /^data:image\/png;base64,\S+ 1x, data:image\/png;base64,\S+ 2x$/);
+    await expect(app.locator("body")).toHaveCSS("background-image", /^url\("data:image\/png;base64,/);
     await expect(app.locator("main")).toHaveCSS("background-image", /^url\("data:image\/png;base64,/);
     // Under the published hash-only policy the page runs as in a tab: head content and its ids stay, each classic script
     // sees only what precedes it, a throw stops only its own script, and deferred and module scripts run in document order.
     await expect(app.locator("#config")).toHaveCount(1);
-    await expect(app.locator("#order")).toHaveText("head:Reading list:false box:box:false classic A B:true C");
+    // The browser parses the page itself: a microtask runs between two scripts, and each stylesheet keeps its id and place.
+    await expect(app.locator("#order")).toHaveText("head:Reading list:false:true microtask box:box:false classic A B:true C");
+    await expect(app.locator("#sheet")).toHaveJSProperty("tagName", "STYLE");
     await guest.screenshot({ path: info.outputPath("static-app-guest.png") });
     expect(shared.failures.filter(message => !/A broken (?:script|module) stops only itself\./.test(message))).toEqual([]);
   } finally {

@@ -95,7 +95,7 @@ describe("app without app.publish.json", () => {
 
   it("publishes its folder as a static page with no capabilities", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="App.JS"></script>',
+    page(h, { "app/index.html": '<!doctype html><link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="App.JS"></script>',
       "app/style.css": "h1 { color: red }", "app/App.JS": "document.title = 'Trip';", "app/notes.md": "# Notes", "app/dohc.json": "{}",
       "app/my notes.js": "", "other/index.html": "<p>Other</p>" });
     const { candidate, files } = await h.prepare();
@@ -103,7 +103,7 @@ describe("app without app.publish.json", () => {
     expect(candidate.entryPath).toBe("app/index.html");
     expect(candidate.capabilities).toEqual([]);
     expect(candidate.dependencies).toEqual(["app/App.JS", "app/index.html", "app/style.css"]);
-    expect(files.map(file => file.path)).toEqual(["bundle.css", "bundle.js", "page.json"]);
+    expect(files.map(file => file.path)).toEqual(["bundle.js", "page.json"]);
   });
 
   it("names the missing page before capturing anything", async () => {
@@ -115,13 +115,13 @@ describe("app without app.publish.json", () => {
 
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
+    page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
     await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<script type="module" src="main.ts"></script>', "app/main.ts": "import data from './data.json'; document.title = data.title;",
+    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import data from './data.json'; document.title = data.title;",
       "app/data.json": '{"title":"Trip"}', "app/package.json": "{}", "app/tsconfig.json": "{}", "app/dohc.json": "{}",
       "app/node_modules/x/index.js": "", "app/.cache/x.js": "" });
     const { candidate } = await h.prepare();
@@ -131,7 +131,7 @@ describe("app without app.publish.json", () => {
 
   it("names a linked file of a type the compiler does not take", async () => {
     const h = harness();
-    page(h, { "app/index.html": '<script type="module" src="main.ts"></script>', "app/main.ts": "import './notes.yaml';", "app/notes.yaml": "a: 1" });
+    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import './notes.yaml';", "app/notes.yaml": "a: 1" });
     await expect(h.prepare()).rejects.toThrow("app/main.ts imports ./notes.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml.");
   });
 });

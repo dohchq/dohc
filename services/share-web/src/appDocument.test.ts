@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
@@ -74,87 +74,52 @@ describe("compiled app document", () => {
   });
 
   describe("page record", () => {
-    const script = (run: number): AppPage["head"][number] => ({ tag: "script", attrs: [], children: [], run });
-    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ htmlAttributes: [["lang", "fr"]], bodyAttributes: [["class", "trip"]],
-      head: [{ tag: "title", attrs: [], children: ["Trip"] }, script(0)],
-      body: [{ tag: "main", attrs: [["id", "box"]], children: [script(1), { tag: "p", attrs: [["id", "after"]], children: ["After"] }] },
-        script(2), { comment: " end " }, script(3)],
-      scripts: ["window.log = ['head:' + !!document.body.firstChild];", "log.push('box:' + document.currentScript.parentElement.id + ':' + !!document.getElementById('after'));",
-        "throw new Error('stops only itself');", "log.push('last:' + !!document.getElementById('after'));"],
-      images: [], modules: 0, ...overrides });
-    const build = (value: unknown, bundle = "") => createAppDocument([file("bundle.js", bundle), file("page.json", JSON.stringify(value))], { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
+    const scripts = ["window.log = ['head:' + !!document.body];", "log.push('box:' + document.currentScript.parentElement.id + ':' + !!document.getElementById('after'));",
+      "throw new Error('stops only itself');", "log.push('last:' + !!document.getElementById('after'));"];
+    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ htmlAttributes: [["lang", "fr"], ["data-note", 'a "quoted" & value']],
+      head: `<title>Trip</title><script>${scripts[0]}</script>`,
+      body: `<body class="trip"><main id="box"><script>${scripts[1]}</script><p id="after">After</p></main><script>${scripts[2]}</script><!-- end --><script>${scripts[3]}</script></body>`,
+      scripts, ...overrides });
+    const build = (value: unknown, bundle = "window.registry = true;") =>
+      createAppDocument([file("bundle.js", bundle), file("page.json", JSON.stringify(value))], { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
 
-    it("builds the page node by node, running each classic script as its own hashed script where it stands", () => {
+    it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>window\.registry = true;<\/script><title>Trip<\/title>/);
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
-      expect(dom.window.document.documentElement.lang).toBe("fr");
+      expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
       expect(dom.window.document.title).toBe("Trip");
       expect(dom.window.document.body.className).toBe("trip");
       expect(dom.window.log).toEqual(["head:false", "box:box:false", "last:true"]);
-      expect(dom.window.document.body.innerHTML).toBe('<main id="box"><script>' + page().scripts[1] + '</script><p id="after">After</p></main>' +
-        `<script>${page().scripts[2]}</script><!-- end --><script>${page().scripts[3]}</script>`);
-      for (const text of page().scripts) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
-      dom.window.close();
-    });
-
-    it("keeps page text out of the HTML parser", () => {
-      const attack = "</script><script src=\"https://evil.test/a.js\"></script>";
-      const dom = new JSDOM(build(page({ head: [script(0)], body: [{ tag: "p", attrs: [["title", attack]], children: [attack] }],
-        scripts: [`window.value = ${JSON.stringify(attack)};`] })).html, { runScripts: "dangerously" });
-      expect(dom.window.value).toBe(attack);
-      expect(dom.window.document.querySelectorAll("script[src]")).toHaveLength(0);
-      expect(dom.window.document.querySelector("p")!.textContent).toBe(attack);
-      dom.window.close();
-    });
-
-    it("makes one blob URL for each image and shares it across every reference", async () => {
-      const png = "data:image/png;base64,iVBORw0KGgo=";
-      const uses = Array.from({ length: 50 }, (): AppPage["body"][number] => ({ tag: "img", attrs: [["src", [0]], ["srcset", [0, " 1x, ", 0, " 2x"]]], children: [] }));
-      // JSDOM has no URL.createObjectURL; the stub records each blob the loader makes.
-      const html = build(page({ head: [], body: uses, scripts: [], images: [png] })).html
-        .replace("</head>", "<script>window.blobs=[];URL.createObjectURL=blob=>'blob:test/'+(window.blobs.push(blob)-1)</script></head>");
-      const dom = new JSDOM(html, { runScripts: "dangerously" });
-      const window = dom.window as typeof dom.window & { blobs: Blob[] };
-      expect(window.blobs).toHaveLength(1);
-      expect([window.blobs[0]!.type, Buffer.from(await window.blobs[0]!.arrayBuffer()).toString("base64")]).toEqual(["image/png", "iVBORw0KGgo="]);
-      expect(new Set([...dom.window.document.querySelectorAll("img")].map(image => image.getAttribute("srcset")))).toEqual(new Set(["blob:test/0 1x, blob:test/0 2x"]));
-      dom.window.close();
-    });
-
-    it("keeps building the page when page markup names elements after document methods", () => {
-      const clobber = (name: string): AppPage["body"][number] => ({ tag: "img", attrs: [["name", name]], children: [] });
-      const dom = new JSDOM(build(page({ head: [], scripts: ["window.log = [!!document.getElementById('after')];"],
-        body: [clobber("createElement"), clobber("createElementNS"), clobber("createComment"), clobber("createTextNode"), clobber("readyState"),
-          { comment: " note " }, "text", { tag: "p", attrs: [["id", "after"]], children: [] }, { tag: "script", attrs: [], children: [], run: 0 }] })).html, { runScripts: "dangerously" });
-      expect(dom.window.log).toEqual([true]);
+      for (const text of [...scripts, "window.registry = true;"]) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
+      expect(output.scriptSources).toHaveLength(5);
       dom.window.close();
     });
 
     it.each([
       ["an unknown field", { ...page(), extra: true }],
-      ["a missing field", (() => { const { modules: _, ...rest } = page(); return rest; })()],
-      ["a script index past the scripts", page({ body: [script(9)] })],
-      ["an image index past the images", page({ body: [{ tag: "img", attrs: [["src", [0]]], children: [] }] })],
-      ["an image that is not a data URL", page({ images: ["https://example.test/a.png"] })],
-      ["an attribute name with a space", page({ bodyAttributes: [["on click", "x"]] })],
-      ["an unknown namespace", { ...page(), body: [{ tag: "x", ns: "xul", attrs: [], children: [] }] }],
+      ["a missing field", (() => { const { scripts: _, ...rest } = page(); return rest; })()],
+      ["a body that is not a <body> element", page({ body: "<p>no body</p>" })],
       ["a script that is not text", page({ scripts: [1 as unknown as string] })],
-      ["an attribute name the HTML parser would split", page({ body: [{ tag: "div", attrs: [["=x", ""]], children: [] }] })],
-      ["an element name that does not start with a letter", page({ body: [{ tag: "!--", attrs: [], children: [] }] })],
-      ["template content on another element", page({ body: [{ tag: "div", attrs: [], children: [], content: [] }] })],
-      ["template content on an SVG element", page({ body: [{ tag: "template", ns: "svg", attrs: [], children: [], content: [] }] })],
-      ["an image that is not base64 image data", page({ images: ["data:image/png,<svg>"] })],
+      ["an <html> attribute name that would split when parsed", page({ htmlAttributes: [["=x", ""]] })],
+      ["an <html> attribute name with a quote", page({ htmlAttributes: [['a"b', ""]] })],
       [`more than ${APP_PAGE_MAX_SCRIPTS} scripts`, page({ scripts: Array.from({ length: APP_PAGE_MAX_SCRIPTS + 1 }, (_, index) => `${index}`) })],
-      [`elements nested more than ${APP_PAGE_MAX_DEPTH} deep`, page({ body: [Array.from({ length: APP_PAGE_MAX_DEPTH + 1 }).reduce<AppPage["body"][number]>(child => ({ tag: "div", attrs: [], children: [child] }), "x")] })],
     ])("refuses a page record with %s", (_name, value) => {
       expect(() => build(value)).toThrow("Invalid app page.");
       expect(appPageProblem(value)).not.toBeNull();
     });
 
+    it.each(["var a = '</script>';", "var a = '<!--<script>';"])("refuses a page whose bundle.js would end its own <script> early: %s", bundle => {
+      expect(() => build(page(), bundle)).toThrow("Invalid app page.");
+    });
+
+    it("refuses a page with a separate bundle.css, since its CSS belongs in the page", () => {
+      expect(() => createAppDocument([file("bundle.js", ""), file("bundle.css", "p{}"), file("page.json", JSON.stringify(page()))], limits)).toThrow("Invalid app page.");
+    });
+
     it("says what is wrong in words that follow the page's name", () => {
       expect(appPageProblem(page())).toBeNull();
-      expect(appPageProblem(page({ body: [{ tag: "div", attrs: [["=x", ""]], children: [] }] }))).toBe('has an attribute named "=x". A published page cannot carry that name. Rename or remove the attribute.');
-      expect(appPageProblem(page({ body: [{ tag: "1x", attrs: [], children: [] }] }))).toBe('has an element named "1x". A published page cannot carry that name. Rename the element.');
+      expect(appPageProblem(page({ htmlAttributes: [["=x", ""]] }))).toBe('has an attribute named "=x" on <html>. A published page cannot carry that name. Rename or remove the attribute.');
     });
   });
 

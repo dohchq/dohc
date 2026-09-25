@@ -172,153 +172,177 @@ describe("closed app compiler", () => {
     const image = (path: string, bytes = png) => ({ path, bytes, sha256: hash(bytes) });
     const dataUrl = `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
     const page = (html: string, ...others: Array<{ path: string; bytes: Uint8Array; sha256: string }>) => compileClosedApp({ entryPath: "site/index.html", bounds,
-      inputs: [file("site/index.html", html), ...others] });
+      inputs: [file("site/index.html", /^<!doctype/i.test(html) ? html : `<!doctype html>${html}`), ...others] });
     const record = (result: Awaited<ReturnType<typeof compileClosedApp>>) => JSON.parse(new TextDecoder().decode(result.files.find(output => output.path === "page.json")!.bytes)) as AppPage;
     const require = createRequire(import.meta.url);
-    type Window = globalThis.Window & typeof globalThis & { log: string[]; errors: string[]; blobs: Blob[] };
+    type Window = globalThis.Window & typeof globalThis & { log: string[]; errors: string[]; __dohcPage: Record<string, (index: number) => void> };
     const { JSDOM } = require("jsdom") as { JSDOM: new (html: string, options: { runScripts: "dangerously" }) => { window: Window } };
-    /** Runs the published document in a DOM, as a guest's browser would load it, and waits until parsing ends. */
+    /**
+     * Parses the published document in a DOM, as a guest's browser would, and waits until parsing ends.
+     * JSDOM does not run module scripts, so runModules runs each module stub in document order, as a browser does after parsing.
+     */
     const open = async (result: Awaited<ReturnType<typeof compileClosedApp>>) => {
       const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
-      const dom = new JSDOM(document.html.replace("</head>", "<script>window.log=[];window.errors=[];window.blobs=[];window.addEventListener('error',e=>window.errors.push(e.message));" +
-        "URL.createObjectURL=blob=>'blob:test/'+(window.blobs.push(blob)-1)</script></head>"), { runScripts: "dangerously" });
+      const dom = new JSDOM(document.html.replace("<head>", "<head><script>window.log=[];window.errors=[];window.addEventListener('error',e=>window.errors.push(e.message))</script>"), { runScripts: "dangerously" });
       await vi.waitFor(() => expect(dom.window.document.readyState).not.toBe("loading"));
-      await new Promise(resolve => dom.window.setTimeout(resolve, 0));
-      return dom;
+      const runModules = () => {
+        for (const stub of [...dom.window.document.querySelectorAll('script[type="module"]')]) {
+          try { dom.window.eval(stub.textContent!); } catch (error) { dom.window.errors.push((error as Error).message); }
+        }
+      };
+      return { dom, window: dom.window, document: dom.window.document, runModules, html: document.html };
     };
 
-    it("builds the page in order, so each classic script sees only what precedes it and stands where it was written", async () => {
+    it("lets the browser parse the page, so each classic script runs where it stands", async () => {
       const result = await page(`<!doctype html><html lang="fr"><head><title>Trip</title>
         <script type="application/json" id="config">{"stop":"Kyoto"}</script>
-        <script>log.push("head:" + JSON.parse(document.getElementById("config").textContent).stop + ":" + !!document.getElementById("after"));</script></head>
-        <body class="trip"><div id="box"><script>log.push("parent:" + document.currentScript.parentElement.id + ":" + document.readyState);</script></div>
+        <link rel="stylesheet" href="theme.css" id="sheet" media="screen">
+        <style id="theme">p { margin: 0 }</style>
+        <script>log.push("head:" + JSON.parse(document.getElementById("config").textContent).stop + ":" + !!document.body + ":" + document.getElementById("sheet").media + ":" + !!document.getElementById("theme"));</script></head>
+        <body class="trip" style="background: url(map.png)"><div id="box"><script>log.push("parent:" + document.currentScript.parentElement.id + ":" + document.readyState + ":" + !!document.getElementById("after"));</script></div>
         <p id="after">After</p>
         <script src="data.js"></script>
+        <script>document.write('<p id="written">Written</p>');</script>
         <script>"use strict"; log.push((function () { return this; })() === undefined ? "strict" : "sloppy");</script>
         <script>throw new Error("first script fails");</script>
         <script>let stops = []; log.push("not reached");</script>
-        <script>log.push("after the failures:" + stops.length + ":" + !!document.getElementById("after"));</script>
-        <script nomodule>log.push("nomodule");</script></body></html>`,
-        file("site/data.js", "var stops = ['Tokyo'];"), file("site/unused.js", "throw new Error('unused')"));
+        <script>log.push("after the failures:" + stops.length + ":" + !!document.getElementById("written"));</script>
+        <script nomodule>window.legacy = true;</script></body></html>`,
+        file("site/data.js", "var stops = ['Tokyo'];"), file("site/theme.css", "h1 { color: red }"), image("site/map.png"), file("site/unused.js", "throw new Error('unused')"));
       expect(result.compiler.recipe).toBe("dohc-closed-app-v3");
       expect(result.files.map(output => output.path)).toEqual(["bundle.js", "page.json"]);
-      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/data.js", "site/index.html"]);
-      const dom = await open(result);
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/data.js", "site/index.html", "site/map.png", "site/theme.css"]);
+      // A browser that runs modules skips a nomodule script, so its text gets no hash and would not run.
+      expect(record(result).scripts).not.toContain("window.legacy = true;");
+      const { window, document } = await open(result);
       try {
-        const document = dom.window.document;
         expect(document.documentElement.lang).toBe("fr");
         expect(document.title).toBe("Trip");
         expect(document.body.className).toBe("trip");
-        expect(document.getElementById("config")!.textContent).toBe('{"stop":"Kyoto"}');
-        expect(dom.window.log).toEqual(["head:Kyoto:false", "parent:box:loading", "strict", "after the failures:1:true"]);
-        expect(dom.window.errors).toEqual([expect.stringContaining("first script fails"), expect.stringMatching(/stops/)]);
+        expect(document.body.getAttribute("style")).toBe(`background: url(${dataUrl})`);
+        expect(window.log).toEqual(["head:Kyoto:false:screen:true", "parent:box:loading:false", "strict", "after the failures:1:true"]);
+        expect(window.errors).toEqual([expect.stringContaining("first script fails"), expect.stringMatching(/stops/)]);
+        // Each stylesheet keeps its place, id, and media, and holds its compiled CSS.
+        const sheet = document.getElementById("sheet")!;
+        expect([sheet.tagName, sheet.parentElement!.tagName, sheet.getAttribute("media"), sheet.textContent]).toEqual(["STYLE", "HEAD", "screen", expect.stringContaining("color: red")]);
+        expect(document.getElementById("theme")!.textContent).toMatch(/margin: 0/);
         expect(document.querySelector("#box > script")).not.toBeNull();
         expect(document.body.lastElementChild!.hasAttribute("nomodule")).toBe(true);
-      } finally { dom.window.close(); }
+        // This test's log script, the data block, and the inline script; bundle.js removed itself.
+        expect(document.querySelectorAll("head > script")).toHaveLength(3);
+      } finally { window.close(); }
     });
 
-    // JSDOM does not run a script whose text is set after insertion, as browsers do for deferred scripts; the @apps e2e covers that order in Chromium.
-    it("runs module scripts in document order once parsing ends, each on its own, sharing imported modules", async () => {
-      const result = await page(`<script type="module">import { next } from "./shared.js"; log.push("A:" + next() + ":" + document.currentScript); throw new Error("A fails");</script>
-        <script defer src="b.js"></script>
-        <script type="module" src="c.js"></script>
+    it("runs deferred and module scripts from stubs at their places, in document order, each on its own", async () => {
+      const result = await page(`<script type="module">import { next } from "./shared.js"; log.push("A:" + next()); throw new Error("A fails");</script>
+        <script defer id="b" data-step="2" src="b.js"></script>
+        <script type="module" src="c.js" id="c"></script>
+        <script async src="d.js"></script>
         <p id="end"></p>`,
         file("site/shared.js", "let count = 0; export const next = () => ++count;"),
-        file("site/b.js", "log.push('B:' + document.readyState + ':' + document.currentScript.hasAttribute('defer'));"),
-        file("site/c.js", "import { next } from './shared.js'; log.push('C:' + next() + ':' + !!document.getElementById('end'));"));
-      expect(record(result)).toMatchObject({ modules: 2, scripts: [expect.stringContaining("'B:'")] });
-      // Scripts before any content land in <head>, as a browser parses them.
-      expect(record(result).head.filter(node => typeof node === "object" && "tag" in node && node.tag === "script"))
-        .toEqual([expect.objectContaining({ module: 0, children: [] }), expect.objectContaining({ defer: 0, attrs: [["defer", ""]] }), expect.objectContaining({ module: 1, attrs: [["type", "module"]] })]);
-      const dom = await open(result);
+        file("site/b.js", "var fromB = true; log.push('B:' + document.currentScript.id + ':' + document.currentScript.dataset.step + ':' + document.currentScript.hasAttribute('defer'));"),
+        file("site/c.js", "import { next } from './shared.js'; log.push('C:' + next() + ':' + !!document.getElementById('end') + ':' + fromB);"),
+        file("site/d.js", "log.push('D');"));
+      const { window, document, runModules } = await open(result);
       try {
-        await vi.waitFor(() => expect(dom.window.log).toHaveLength(2));
-        expect(dom.window.log).toEqual(["A:1:null", "C:2:true"]);
-        expect(dom.window.errors).toEqual([expect.stringContaining("A fails")]);
-      } finally { dom.window.close(); }
+        // The first script is this test's own log; bundle.js removed itself.
+        const scripts = () => [...document.scripts].slice(1);
+        expect(scripts().map(script => [script.getAttribute("type"), script.id, script.textContent])).toEqual([
+          ["module", "", "__dohcPage.module(0);"], ["dohc-deferred-0", "b", expect.stringContaining("fromB")], ["module", "", "__dohcPage.defer(0);"],
+          ["module", "c", "__dohcPage.module(1);"], ["dohc-deferred-1", "", "log.push('D');"], ["module", "", "__dohcPage.defer(1);"]]);
+        expect(document.querySelector('script[async][type="module"]')).not.toBeNull();
+        runModules();
+        expect(window.log).toEqual(["A:1", "B:b:2:true", "C:2:true:true", "D"]);
+        expect(window.errors).toEqual([expect.stringContaining("A fails")]);
+        // Each deferred script now stands where it was written, with its attributes, and its stub is gone.
+        expect(scripts().map(script => script.getAttribute("type") ?? script.id)).toEqual(["module", "b", "module", ""]);
+      } finally { window.close(); }
     });
 
-    it("keeps each stylesheet's media condition", async () => {
-      const result = await page('<link rel="stylesheet" href="print.css" media="print"><style media="(min-width: 600px)">p { color: blue }</style><style>p { margin: 0 }</style>',
-        file("site/print.css", "body { color: red }"));
-      const css = new TextDecoder().decode(result.files[0]!.bytes);
-      expect(css).toMatch(/@media print {\s*body {\s*color: red;/);
-      expect(css).toMatch(/@media \(min-width: 600px\) {\s*p {\s*color: blue;/);
-      expect(css).toMatch(/}\s*}\s*(?:\/\*[^*]*\*\/\s*)?p {\s*margin: 0;/);
+    it("runs deferred scripts even when page markup names elements after document methods", async () => {
+      const { window, runModules } = await open(await page(`<img name="querySelector" alt=""><form name="createElement"><input name="attributes"></form>
+        <script>Element.prototype.replaceWith = null; Node.prototype.textContent = null;</script><script defer src="late.js"></script>`,
+        file("site/late.js", "log.push('late');")));
+      try {
+        runModules();
+        expect(window.log).toEqual(["late"]);
+      } finally { window.close(); }
     });
 
-    it("embeds each local image once and shares one blob URL across its references", async () => {
-      const result = await page(`<img alt="a" src="map.png"><img alt="b" srcset="map.png 1x, img/Big.PNG 2x" src="https://example.test/remote.png">
+    it("pins every script's hash in the page's security policy, and puts the policy before any page markup", async () => {
+      const result = await page('<html data-x="a&quot;b"><head><meta name="description" content="first"><script>window.one = 1;</script></head><body><script src="two.js"></script><template><script>window.three = 3;</script></template></body>',
+        file("site/two.js", "window.two = 2;"));
+      const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
+      const pinned = (text: string) => `'sha256-${createHash("sha256").update(text).digest("base64")}'`;
+      expect(document.scriptSources).toEqual(expect.arrayContaining([pinned("window.one = 1;"), pinned("window.two = 2;"), pinned("window.three = 3;")]));
+      expect(document.html).toMatch(/^<!doctype html><html data-x="a&quot;b"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ('sha256-[A-Za-z0-9+/=]+' ?)+;[^"]*"><script>/);
+      expect(document.html.indexOf("Content-Security-Policy")).toBeLessThan(document.html.indexOf('name="description"'));
+      expect(document.html).not.toMatch(/unsafe-inline'[^;]*script|strict-dynamic|unsafe-eval/);
+    });
+
+    it("embeds local images as data URLs from src, srcset, poster, style attributes, SVG, and template content", async () => {
+      const result = await page(`<html style="background: url('map.png')"><img alt="a" src="map.png"><img alt="b" srcset="map.png 1x, img/Big.PNG 2x" src="https://example.test/remote.png">
         <picture><source srcset="map.png"><img alt="c" src="//cdn.example.test/x.png"></picture><video poster="map.png" src="https://example.test/v.mp4"></video>
         <div style="background: url('img/Big.PNG')"></div><svg><image href="map.png"/><use xlink:href="#icon"/></svg>
         <template><img alt="d" src="map.png"><script>window.fromTemplate = true;</script></template>`, image("site/map.png"), image("site/img/Big.PNG"));
       expect(result.dependencyLock.map(input => input.path)).toEqual(["site/img/Big.PNG", "site/index.html", "site/map.png"]);
-      expect(record(result).images).toEqual([dataUrl, dataUrl]);
       expect(record(result).scripts).toEqual(["window.fromTemplate = true;"]);
-      const dom = await open(result);
+      const { window, document } = await open(result);
       try {
-        const document = dom.window.document;
-        expect(dom.window.blobs.map(blob => [blob.type, blob.size])).toEqual([["image/png", png.byteLength], ["image/png", png.byteLength]]);
-        expect(Buffer.from(await dom.window.blobs[0]!.arrayBuffer())).toEqual(Buffer.from(png));
-        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe("blob:test/0");
-        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe("blob:test/0 1x, blob:test/1 2x");
+        expect(document.documentElement.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
+        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe(dataUrl);
+        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe(`${dataUrl} 1x, ${dataUrl} 2x`);
         expect(document.querySelector("img[alt=b]")!.getAttribute("src")).toBe("https://example.test/remote.png");
-        expect(document.querySelector("source")!.getAttribute("srcset")).toBe("blob:test/0");
+        expect(document.querySelector("source")!.getAttribute("srcset")).toBe(dataUrl);
         expect(document.querySelector("img[alt=c]")!.getAttribute("src")).toBe("//cdn.example.test/x.png");
-        expect(document.querySelector("video")!.getAttribute("poster")).toBe("blob:test/0");
-        expect(document.querySelector("div")!.getAttribute("style")).toBe("background: url('blob:test/1')");
-        expect(document.querySelector("image")!.getAttribute("href")).toBe("blob:test/0");
+        expect(document.querySelector("video")!.getAttribute("poster")).toBe(dataUrl);
+        expect(document.querySelector("div")!.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
+        expect(document.querySelector("image")!.getAttribute("href")).toBe(dataUrl);
         expect(document.querySelector("use")!.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("#icon");
         const template = document.querySelector("template")!.content;
-        expect(template.querySelector("img")!.getAttribute("src")).toBe("blob:test/0");
+        expect(template.querySelector("img")!.getAttribute("src")).toBe(dataUrl);
         expect(template.querySelector("script")!.textContent).toBe("window.fromTemplate = true;");
-        expect((dom.window as unknown as { fromTemplate?: boolean }).fromTemplate).toBeUndefined();
-      } finally { dom.window.close(); }
+        expect((window as unknown as { fromTemplate?: boolean }).fromTemplate).toBeUndefined();
+      } finally { window.close(); }
     });
 
-    it("keeps building the page after page markup or scripts replace document methods", async () => {
-      const dom = await open(await page(`<img name="createElement" alt="clobber"><form name="createComment"><input name="appendChild"><input name="setAttribute" value="x"></form>
-        <script>document.createElement = () => { throw new Error("replaced"); }; document.createTextNode = null; Node.prototype.appendChild = null;</script>
-        <!-- note --><p id="later" title="kept">Later</p><script>log.push("ran:" + document.getElementById("later").title)</script>`));
+    it("keeps attributes that only the HTML parser accepts, such as @click and =x", async () => {
+      const { window, document } = await open(await page('<button @click="open = true" :class="{ on: open }" =x="1">Go</button>'));
       try {
-        expect(dom.window.log).toEqual(["ran:kept"]);
-        expect(dom.window.errors).toEqual([]);
-        expect(dom.window.document.querySelectorAll("form input")).toHaveLength(2);
-      } finally { dom.window.close(); }
-    });
-
-    it("keeps attributes the DOM methods refuse, such as @click", async () => {
-      const dom = await open(await page('<button @click="open = true" :class="{ on: open }" x-on:keydown.enter="go()">Go</button>'));
-      try {
-        const button = dom.window.document.querySelector("button")!;
-        expect([...button.attributes].map(attribute => [attribute.name, attribute.value])).toEqual([["@click", "open = true"], [":class", "{ on: open }"], ["x-on:keydown.enter", "go()"]]);
-      } finally { dom.window.close(); }
+        expect([...document.querySelector("button")!.attributes].map(attribute => [attribute.name, attribute.value])).toEqual([["@click", "open = true"], [":class", "{ on: open }"], ["=x", "1"]]);
+      } finally { window.close(); }
     });
 
     it("resolves links from the first local <base> outside templates and removes only its address", async () => {
       const result = await page('<template><base href="wrong/"></template><base href="assets/" target="_blank"><link rel="stylesheet" href="style.css"><img alt="m" src="map.png">',
         file("site/assets/style.css", "h1 { color: blue }"), image("site/assets/map.png"));
       expect(result.dependencyLock.map(input => input.path)).toEqual(["site/assets/map.png", "site/assets/style.css", "site/index.html"]);
-      const dom = await open(result);
+      const { window, document } = await open(result);
       try {
-        const bases = dom.window.document.querySelectorAll("base");
+        const bases = document.querySelectorAll("base");
         expect(bases).toHaveLength(1);
         expect([...bases[0]!.attributes].map(attribute => attribute.name)).toEqual(["target"]);
-        expect(dom.window.document.querySelector("template")!.content.querySelector("base")!.getAttribute("href")).toBe("wrong/");
-      } finally { dom.window.close(); }
+        expect(document.querySelector("template")!.content.querySelector("base")!.getAttribute("href")).toBe("wrong/");
+      } finally { window.close(); }
     });
 
     it(`refuses a page with more than ${APP_PAGE_MAX_SCRIPTS} scripts and names it`, async () => {
-      await expect(page("<script>1</script>".repeat(APP_PAGE_MAX_SCRIPTS))).resolves.toBeTruthy();
-      await expect(page("<script>1</script>".repeat(APP_PAGE_MAX_SCRIPTS + 1))).rejects.toThrow(`site/index.html has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
+      const scripts = (count: number) => Array.from({ length: count }, (_, index) => `<script>${index}</script>`).join("");
+      await expect(page(scripts(APP_PAGE_MAX_SCRIPTS))).resolves.toBeTruthy();
+      await expect(page(scripts(APP_PAGE_MAX_SCRIPTS + 1))).rejects.toThrow(`site/index.html has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
     });
 
     it("names the largest image when embedded images make the page too large", async () => {
       const big = Uint8Array.from({ length: 30_000 }, (_, index) => index % 251);
-      const small = { entryPath: "site/index.html", inputs: [file("site/index.html", '<img src="big.png"><img srcset="big.png 2x"><img src="map.png">'), image("site/big.png", big), image("site/map.png")] };
+      const small = { entryPath: "site/index.html", inputs: [file("site/index.html", '<!doctype html><img src="big.png"><img src="map.png">'), image("site/big.png", big), image("site/map.png")] };
       await expect(compileClosedApp({ ...small, bounds: { ...bounds, maxOutputBytes: 100_000 } })).resolves.toBeTruthy();
       await expect(compileClosedApp({ ...small, bounds: { ...bounds, maxOutputBytes: 100_000, maxOutputFileBytes: 20_000 } }))
         .rejects.toThrow("site/index.html is 40 KB once its images are embedded. A published page can be at most 20 KB. The largest image is site/big.png (30 KB). Use smaller images.");
+    });
+
+    it("refuses a page without a doctype, which a tab would show in quirks mode", async () => {
+      await expect(compileClosedApp({ entryPath: "site/index.html", bounds, inputs: [file("site/index.html", "<p>No doctype</p>")] }))
+        .rejects.toThrow("site/index.html has no <!doctype html>, so a browser shows it in quirks mode. Published apps always use standards mode. Add <!doctype html> as its first line.");
     });
 
     it.each([
@@ -330,30 +354,32 @@ describe("closed app compiler", () => {
       ['<img srcset="missing.png 2x">', "site/index.html links missing.png, which is not in the app."],
       ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
       ['<link rel="stylesheet" href="app.css" disabled>', "site/index.html links the stylesheet app.css as disabled. Published apps apply every stylesheet."],
-      ['<style media="print; } body { color: red">p{}</style>', 'site/index.html gives a <style> the media condition "print; } body { color: red", which published apps cannot carry.'],
       ['<video src="intro.mp4"></video>', "site/index.html links intro.mp4 as audio or video. Published apps cannot include local audio or video."],
       ['<iframe src="other.html"></iframe>', "site/index.html embeds other.html in <iframe>. Published apps cannot embed other pages or files."],
       ['<iframe srcdoc="<p>hi</p>"></iframe>', "site/index.html embeds a page with <iframe srcdoc>. Published apps cannot embed other pages."],
       ['<svg><script>alert(1)</script></svg>', "site/index.html has a <script> inside <svg>. Published apps run only HTML scripts. Move the script out of the SVG."],
       ['<template><script src="app.js"></script></template>', 'site/index.html has a <script src="app.js"> inside <template>. Published apps can run only inline scripts from templates.'],
       ['<base href="https://example.test/">', "site/index.html sets its base address to https://example.test/. Remove the <base> element"],
-      ['<button onclick="go()">Go</button>', "site/index.html has an onclick attribute. Published apps cannot run inline event handlers. Attach the handler in a script."],
+      ['<button onclick="go()">Go</button>', "site/index.html has an onclick attribute on <button>. Published apps cannot run inline event handlers. Attach the handler in a script."],
+      ['<body onload="init()">', "site/index.html has an onload attribute on <body>. Published apps cannot run inline event handlers."],
+      ['<html onclick="go()">', "site/index.html has an onclick attribute on <html>."],
+      ['<html =x="1">', 'site/index.html has an attribute named "=x" on <html>. A published page cannot carry that name. Rename or remove the attribute.'],
+      ['<div style="background: url(missing.png)"></div>', "site/index.html links missing.png, which is not in the app."],
       ["<script>import('./app.js')</script>", 'A script in site/index.html imports a module. Load it with <script type="module"> instead.'],
       ["<script>let = ;</script>", "A script in site/index.html is not valid JavaScript"],
-      ["<script>document.write('<p>hi</p>')</script>", "A script in site/index.html calls document.write. Published apps cannot write markup where a script stands."],
-      ['<script defer src="app.js"></script>', "site/app.js calls document.writeln."],
+      ['<script src="close.js"></script>', 'site/close.js contains </script> or <!-- with <script>, which would end the script early in the page. Split the text, for example "<" + "/script>".'],
+      ['<script defer src="app.js"></script>', "site/app.js calls document.writeln after the page has loaded, which would replace the page. Add the elements with DOM methods instead."],
+      ["<template><script>document.write('x')</script></template>", "A script in a template in site/index.html calls document.write after the page has loaded"],
       ['<script type="module">window.document.write("x")</script>', "A module script in site/index.html calls document.write. Published apps cannot write markup into the page."],
       ['<script type="module">import "./secret.ts"</script>', "site/index.html imports ./secret.ts, which is not in the app. Add the file, or list it in app.publish.json."],
       ['<script type="module">import "./data.yaml"</script>', "site/index.html imports ./data.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml."],
       ["<frameset></frameset>", "site/index.html uses <frameset>. Published apps need a page with a <body>."],
-      ["<div =x>hi</div>", 'site/index.html has an attribute named "=x". A published page cannot carry that name. Rename or remove the attribute.'],
-      ["<div a\u00a0b>hi</div>", `site/index.html has an attribute named ${JSON.stringify("a\u00a0b")}. A published page cannot carry that name.`],
     ])("refuses %s and names the file", async (html, message) => {
-      await expect(page(html, file("site/app.js", "document.writeln('x')"), file("site/app.css", "p{}"))).rejects.toThrow(message);
+      await expect(page(html, file("site/app.js", "document.writeln('x')"), file("site/app.css", "p{}"), file("site/close.js", "var s = '</script>';"))).rejects.toThrow(message);
     });
 
     it("accepts the same forms when the files are in the app", async () => {
-      const result = await page('<script src="app.js"></script><link rel="stylesheet" href="app.css"><img src="map.png"><img srcset="map.png 2x"><script type="module">import "./secret.ts"</script><template><script>1</script></template><svg><image href="map.png"/></svg>',
+      const result = await page('<script src="app.js"></script><link rel="stylesheet" href="app.css"><img src="map.png"><img srcset="map.png 2x"><script type="module">import "./secret.ts"</script><template><script>1</script></template><svg><image href="map.png"/></svg><script>document.write("<p>ok</p>")</script>',
         file("site/app.js", "window.app = 1;"), file("site/app.css", "p{}"), image("site/map.png"), file("site/secret.ts", "export const secret: number = 1;"));
       expect(result.dependencyLock.map(input => input.path)).toEqual(["site/app.css", "site/app.js", "site/index.html", "site/map.png", "site/secret.ts"]);
     });

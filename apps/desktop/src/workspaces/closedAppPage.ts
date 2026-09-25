@@ -1,40 +1,51 @@
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
-import { defaultTreeAdapter, parse as parseHtml, type DefaultTreeAdapterTypes } from "parse5";
-import { APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, APP_PAGE_MODULES_GLOBAL, appPageProblem, type AppPage, type AppPageAttribute, type AppPageElement, type AppPageNode, type AppPageValue } from "@dohc/app-browser/document";
+import { defaultTreeAdapter, parse as parseHtml, serialize, serializeOuter, type DefaultTreeAdapterTypes } from "parse5";
+import { APP_PAGE_MAX_SCRIPTS, appPageProblem, type AppPage } from "@dohc/app-browser/document";
 
 type Element = DefaultTreeAdapterTypes.Element;
-type Node = DefaultTreeAdapterTypes.ChildNode;
+type ParentNode = DefaultTreeAdapterTypes.ParentNode;
 
-/** esbuild namespace for a page's inline styles, module scripts, and the stylesheet that imports them all. */
+/** esbuild namespace for a page's inline styles and module scripts. */
 export const pageNamespace = "dohc-app-page";
-/** The page's stylesheets in document order, with their media conditions. */
-export const pageStyles = "dohc-page:styles.css";
-/** Resolved captured files the entry and the page stylesheet import, never user code. */
+/** Resolved captured files the generated entry names as stylesheet entries or module scripts. */
 export const pageInput = "dohc-input:";
+/** The global bundle.js defines for the page's module and deferred-script stubs. */
+const pageGlobal = "__dohcPage";
+/** Chromium's HTML parser stops nesting elements here. */
+const maxDepth = 512;
 
-/** An HTML entry compiled into a page record, plus the module source esbuild bundles into bundle.js and bundle.css. */
+/**
+ * An HTML entry compiled for the browser to parse natively inside the sandboxed
+ * frame. Each classic script stays a parser-inserted inline script where it
+ * stood, so script order, microtask checkpoints, document.currentScript, and
+ * document.write behave as in a tab. Module scripts and deferred scripts become
+ * inline module stubs at their original positions that call into bundle.js.
+ */
 export interface ClosedAppPage {
-  page: AppPage;
-  /** The entry module: imports the page stylesheet and hands each module script to the loader, unevaluated. */
+  /** The generated bundle.js entry: the module registry and the deferred-script runner. */
   module: string;
-  /** Inline style and module script bodies, and the page stylesheet, by specifier. */
+  /** Inline style and module script bodies, by specifier. */
   inline: ReadonlyMap<string, { contents: string; loader: "css" | "js" }>;
+  /** esbuild entries for the page's stylesheets, in the order finish() takes their CSS. */
+  stylesheets: readonly string[];
   /** The directory inline modules and styles resolve their imports from. */
   base: string;
   /** Captured files the page uses outside esbuild: classic scripts and embedded images, with their sizes. */
   used: ReadonlyMap<string, number>;
   /** Embedded images by path. */
   images: ReadonlyMap<string, number>;
+  /** Fills each stylesheet with its compiled CSS, adds CSS that module scripts import, and returns the page record. */
+  finish(stylesheets: readonly string[], moduleCss: string): AppPage;
 }
 
-const spaces = { html: "http://www.w3.org/1999/xhtml", svg: "http://www.w3.org/2000/svg", math: "http://www.w3.org/1998/Math/MathML" };
-const attributeSpaces: Record<string, "xlink" | "xml" | "xmlns"> = {
-  "http://www.w3.org/1999/xlink": "xlink", "http://www.w3.org/XML/1998/namespace": "xml", "http://www.w3.org/2000/xmlns/": "xmlns" };
+const spaces = { html: "http://www.w3.org/1999/xhtml", svg: "http://www.w3.org/2000/svg" };
 const imageTypes = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"], [".avif", "image/avif"]]);
 const javascriptType = /^(?:text\/(?:javascript|ecmascript|jscript|x-javascript|x-ecmascript)|application\/(?:javascript|ecmascript))$/i;
 const remote = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/;
 const publishableName = /^[A-Za-z0-9_@./-]+$/;
+// Link-only attributes a stylesheet loses when it becomes a <style> element.
+const linkOnly = new Set(["href", "rel", "crossorigin", "integrity", "referrerpolicy", "as", "fetchpriority", "hreflang", "type", "sizes", "imagesrcset", "imagesizes", "blocking"]);
 const text = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 const attribute = (element: Element, name: string) => element.attrs.find(attr => attr.name === name && !attr.namespace)?.value;
 const textOf = (element: Element) => element.childNodes.map(child => defaultTreeAdapter.isTextNode(child) ? child.value : "").join("");
@@ -46,6 +57,11 @@ const kinds = {
   image: { test: [...imageTypes.keys()], words: "an image", allowed: "a PNG, JPEG, GIF, WebP, or AVIF" },
 } as const;
 
+/** Script text that would end or re-escape its <script> element when placed inline. */
+export function unsafeInlineScript(source: string): boolean {
+  return /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
+}
+
 /** Null marks a data block, which stays in the page as inert markup. */
 function scriptKind(element: Element): "classic" | "module" | "skip" | null {
   const type = attribute(element, "type")?.trim() ?? "";
@@ -54,10 +70,7 @@ function scriptKind(element: Element): "classic" | "module" | "skip" | null {
   return attribute(element, "nomodule") === undefined ? "classic" : "skip";
 }
 
-/**
- * A published page builds its document from a script, so document.write
- * cannot place markup where the script stands. Returns the call it finds.
- */
+/** Finds a document.write or document.writeln call, which only a parser-inserted script can use as written. */
 export function documentWrite(program: unknown): string | null {
   const pending: unknown[] = [program];
   while (pending.length) {
@@ -78,8 +91,8 @@ export function documentWrite(program: unknown): string | null {
   return null;
 }
 
-/** A classic script runs as written; the build only checks that it parses, loads no module, and does not write the document. */
-function classicScript(source: string, label: string): string {
+/** A classic script runs as written; the build checks that it parses, loads no module, and, when it runs late, writes no markup. */
+function classicScript(source: string, label: string, late: boolean): string {
   let program;
   try { program = parseScript(source, { ecmaVersion: "latest", sourceType: "script" }); }
   catch (error) { throw new Error(`${label} is not valid JavaScript: ${(error as Error).message}.`); }
@@ -93,8 +106,8 @@ function classicScript(source: string, label: string): string {
       else pending.push(child);
     }
   }
-  const write = documentWrite(program);
-  if (write) throw new Error(`${label} calls ${write}. Published apps cannot write markup where a script stands. Add the elements with DOM methods instead.`);
+  const write = late && documentWrite(program);
+  if (write) throw new Error(`${label} calls ${write} after the page has loaded, which would replace the page. Add the elements with DOM methods instead.`);
   return source;
 }
 
@@ -119,39 +132,62 @@ function srcset(value: string): Array<{ url: string; descriptor: string }> {
   return candidates;
 }
 
-/** Joins value parts, merging adjacent text, and keeps a plain string when no image is embedded. */
-function joined(parts: Array<string | number>): AppPageValue {
-  const merged: Array<string | number> = [];
-  for (const part of parts) {
-    if (typeof part === "string" && typeof merged.at(-1) === "string") merged[merged.length - 1] += part;
-    else if (part !== "") merged.push(part);
-  }
-  return merged.every(part => typeof part === "string") ? merged.join("") : merged;
+/** The registry bundle.js runs first in <head>: module entries by index, and a runner for deferred classic scripts. */
+function registry(modules: readonly string[]): string {
+  return `const modules = [${modules.map(specifier => `() => require(${JSON.stringify(specifier)})`).join(", ")}];
+// Page markup can name elements after document members, so take the DOM methods before any page node exists.
+const apply = Reflect.apply, own = (type, name, kind = "value") => Object.getOwnPropertyDescriptor(type.prototype, name)[kind];
+const querySelector = own(Document, "querySelector"), createElement = own(Document, "createElement");
+const attributes = own(Element, "attributes", "get"), setAttribute = own(Element, "setAttribute"), replaceWith = own(Element, "replaceWith");
+const nextElement = own(Element, "nextElementSibling", "get"), remove = own(Element, "remove");
+const getText = own(Node, "textContent", "get"), setText = own(Node, "textContent", "set");
+const page = document, self = page.currentScript;
+globalThis.${pageGlobal} = {
+  module(index) { modules[index](); },
+  // A deferred script waits as an inert placeholder; its module stub, right after it, turns it into a live script.
+  defer(index) {
+    const placeholder = apply(querySelector, page, ['script[type="dohc-deferred-' + index + '"]']);
+    if (!placeholder) return;
+    const stub = apply(nextElement, placeholder, []), script = apply(createElement, page, ["script"]);
+    for (const { name, value } of apply(attributes, placeholder, [])) if (name !== "type") try { apply(setAttribute, script, [name, value]); } catch {}
+    apply(setText, script, [apply(getText, placeholder, [])]);
+    apply(replaceWith, placeholder, [script]);
+    if (stub) apply(remove, stub, []);
+  },
+};
+if (self) apply(remove, self, []);
+`;
 }
 
 /** Compiles captured bytes only. Remote scripts and stylesheets stay out, as they do for script entries. */
 export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, { bytes: Uint8Array }>): ClosedAppPage {
   const document = parseHtml(text(inputs.get(entry)!.bytes));
-  const scripts: string[] = [], modules: string[] = [], styles: string[] = [], images: string[] = [];
-  const imageIndex = new Map<string, number>(), used = new Map<string, number>(), embedded = new Map<string, number>();
+  if (document.mode === "quirks") throw new Error(`${entry} has no <!doctype html>, so a browser shows it in quirks mode. Published apps always use standards mode. Add <!doctype html> as its first line.`);
+  const scripts = new Set<string>(), modules: string[] = [], stylesheets: string[] = [], styleElements: Element[] = [];
+  const dataUrls = new Map<string, string>(), used = new Map<string, number>(), embedded = new Map<string, number>();
   const inline = new Map<string, { contents: string; loader: "css" | "js" }>();
+  let deferred = 0;
   const outside = (value: string) => `${entry} loads ${value} from outside the app. Save a copy in the app folder and link to that instead.`;
   const root = document.childNodes.find(defaultTreeAdapter.isElementNode);
   const head = root?.childNodes.find((node): node is Element => defaultTreeAdapter.isElementNode(node) && node.tagName === "head");
   const body = root?.childNodes.find((node): node is Element => defaultTreeAdapter.isElementNode(node) && node.tagName === "body");
   if (!root || !head || !body) throw new Error(`${entry} uses <frameset>. Published apps need a page with a <body>.`);
 
+  // Every element in document order, with whether it sits in inert template content. Iterative, so depth cannot exhaust the stack.
+  const elements: Array<{ element: Element; inTemplate: boolean }> = [];
+  const pending: Array<{ element: Element; inTemplate: boolean; depth: number }> = [{ element: root, inTemplate: false, depth: 1 }];
+  while (pending.length) {
+    const next = pending.pop()!;
+    if (next.depth > maxDepth) throw new Error(`${entry} nests elements more than ${maxDepth} levels deep. Browsers stop nesting there. Flatten the markup.`);
+    elements.push(next);
+    const template = next.element.namespaceURI === spaces.html && next.element.tagName === "template";
+    const parent: ParentNode = template ? defaultTreeAdapter.getTemplateContent(next.element as DefaultTreeAdapterTypes.Template) : next.element;
+    const children = parent.childNodes.filter(defaultTreeAdapter.isElementNode);
+    for (const element of children.reverse()) pending.push({ element, inTemplate: next.inTemplate || template, depth: next.depth + 1 });
+  }
+
   // The first <base href> outside template content sets the page's base address.
-  const findBase = (parent: Element): Element | undefined => {
-    for (const node of parent.childNodes) {
-      if (!defaultTreeAdapter.isElementNode(node) || node.namespaceURI !== spaces.html || node.tagName === "template") continue;
-      if (node.tagName === "base" && attribute(node, "href") !== undefined) return node;
-      const found = findBase(node);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  const baseElement = findBase(root);
+  const baseElement = elements.find(({ element, inTemplate }) => !inTemplate && element.namespaceURI === spaces.html && element.tagName === "base" && attribute(element, "href") !== undefined)?.element;
   let base = posix.dirname(entry);
   if (baseElement) {
     const href = attribute(baseElement, "href")!.trim();
@@ -176,93 +212,67 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     used.set(path, inputs.get(path)!.bytes.byteLength);
     return path;
   };
-  /** A remote, data, blob, or fragment image stays as written; a local one is embedded once and referenced by number. */
-  const image = (value: string): string | number => {
+  /** A remote, data, blob, or fragment image stays as written; a local one becomes a data URL. */
+  const image = (value: string): string => {
     if (/^(?:https?:|data:|blob:|#|\/\/)/i.test(value.trim()) || value.trim() === "") return value;
     const path = local(value, "image");
-    if (!imageIndex.has(path)) {
-      imageIndex.set(path, images.length);
+    if (!dataUrls.has(path)) {
       embedded.set(path, inputs.get(path)!.bytes.byteLength);
-      images.push(`data:${imageTypes.get(extension(path))};base64,${Buffer.from(inputs.get(path)!.bytes).toString("base64")}`);
+      dataUrls.set(path, `data:${imageTypes.get(extension(path))};base64,${Buffer.from(inputs.get(path)!.bytes).toString("base64")}`);
     }
-    return imageIndex.get(path)!;
-  };
-  const cssImages = (value: string): AppPageValue => {
-    const parts: Array<string | number> = [];
-    let last = 0;
-    for (const match of value.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
-      const url = match[2]!, start = match.index + match[0].indexOf(url, 4);
-      parts.push(value.slice(last, start), image(url));
-      last = start + url.length;
-    }
-    return joined([...parts, value.slice(last)]);
+    return dataUrls.get(path)!;
   };
   const addScript = (source: string) => {
-    if (scripts.length >= APP_PAGE_MAX_SCRIPTS) throw new Error(`${entry} has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
-    return scripts.push(source) - 1;
+    scripts.add(source);
+    if (scripts.size > APP_PAGE_MAX_SCRIPTS) throw new Error(`${entry} has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
   };
-  const media = (element: Element, label: string) => {
-    const condition = attribute(element, "media")?.trim() ?? "";
-    if (/[;{}"'\\]/.test(condition)) throw new Error(`${entry} gives ${label} the media condition "${condition}", which published apps cannot carry. Use a plain media query.`);
-    return condition.toLowerCase() === "all" ? "" : condition;
+  const setAttribute = (element: Element, name: string, value: string) => {
+    const existing = element.attrs.find(attr => attr.name === name && !attr.namespace);
+    if (existing) existing.value = value; else element.attrs.push({ name, value });
   };
-  const attributes = (element: Element): AppPageAttribute[] => element.attrs
-    .map(attr => {
-      const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
-      const space = attr.namespace ? attributeSpaces[attr.namespace] : undefined;
-      return space ? [name, attr.value, space] : [name, attr.value];
-    });
-  const setValue = (rows: AppPageAttribute[], name: string, value: AppPageValue) => {
-    const row = rows.find(([candidate, , space]) => candidate === name && !space);
-    if (row) row[1] = value;
+  const removeAttribute = (element: Element, name: string) => { element.attrs = element.attrs.filter(attr => attr.name !== name || attr.namespace); };
+  const setText = (element: Element, value: string) => {
+    for (const child of [...element.childNodes]) defaultTreeAdapter.detachNode(child);
+    if (value) defaultTreeAdapter.insertText(element, value);
+  };
+  /** A captured script file, checked so it can sit inline in the page. */
+  const scriptFile = (path: string, late: boolean) => {
+    const source = classicScript(text(inputs.get(path)!.bytes), path, late);
+    if (unsafeInlineScript(source)) throw new Error(`${path} contains </script> or <!-- with <script>, which would end the script early in the page. Split the text, for example "<" + "/script>".`);
+    return source;
+  };
+  const stub = (call: string, async: boolean): Element => {
+    const element = defaultTreeAdapter.createElement("script", spaces.html as DefaultTreeAdapterTypes.Element["namespaceURI"], [{ name: "type", value: "module" }, ...(async ? [{ name: "async", value: "" }] : [])]);
+    defaultTreeAdapter.insertText(element, call);
+    addScript(call);
+    return element;
   };
 
-  const convert = (nodes: readonly Node[], depth: number, inTemplate: boolean): AppPageNode[] => {
-    if (depth > APP_PAGE_MAX_DEPTH) throw new Error(`${entry} nests elements more than ${APP_PAGE_MAX_DEPTH} levels deep. Browsers stop nesting there. Flatten the markup.`);
-    const out: AppPageNode[] = [];
-    for (const node of nodes) {
-      if (defaultTreeAdapter.isTextNode(node)) { out.push(node.value); continue; }
-      if (defaultTreeAdapter.isCommentNode(node)) { out.push({ comment: node.data }); continue; }
-      if (!defaultTreeAdapter.isElementNode(node)) continue;
-      const element = convertElement(node, depth, inTemplate);
-      if (element) out.push(element);
-    }
-    return out;
-  };
-  const convertElement = (element: Element, depth: number, inTemplate: boolean): AppPageElement | null => {
+  for (const { element, inTemplate } of elements) {
     const tag = element.tagName;
     const handler = element.attrs.find(attr => /^on/i.test(attr.name));
-    if (handler) throw new Error(`${entry} has an ${handler.name} attribute. Published apps cannot run inline event handlers. Attach the handler in a script.`);
-    const html = element.namespaceURI === spaces.html;
-    const ns = element.namespaceURI === spaces.svg ? "svg" as const : element.namespaceURI === spaces.math ? "math" as const : undefined;
-    if (!html && tag === "script") throw new Error(`${entry} has a <script> inside <${ns}>. Published apps run only HTML scripts. Move the script out of the SVG.`);
-    const attrs = attributes(element);
+    if (handler) throw new Error(`${entry} has an ${handler.name} attribute on <${tag}>. Published apps cannot run inline event handlers. Attach the handler in a script.`);
     const style = attribute(element, "style");
-    if (style !== undefined) setValue(attrs, "style", cssImages(style));
-    const record = (extra: Partial<AppPageElement> = {}, skip: readonly string[] = []): AppPageElement => {
-      const kept = skip.length ? attrs.filter(([name, , space]) => space || !skip.includes(name)) : attrs;
-      const content = html && tag === "template" ? convert(defaultTreeAdapter.getTemplateContent(element as DefaultTreeAdapterTypes.Template).childNodes, depth + 1, true) : undefined;
-      return { tag, ...(ns ? { ns } : {}), attrs: kept, children: convert(element.childNodes, depth + 1, inTemplate), ...(content ? { content } : {}), ...extra };
-    };
-    if (!html) {
+    if (style !== undefined) setAttribute(element, "style", style.replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (_, quote: string, url: string) => `url(${quote}${image(url)}${quote})`));
+    if (element.namespaceURI !== spaces.html) {
+      if (tag === "script") throw new Error(`${entry} has a <script> inside <svg>. Published apps run only HTML scripts. Move the script out of the SVG.`);
       if (tag === "image" || tag === "use" || tag === "feImage") {
-        for (const row of attrs) if ((row[0] === "href" || row[0] === "xlink:href") && typeof row[1] === "string") row[1] = joined([image(row[1])]);
+        for (const attr of element.attrs) if (attr.name === "href") attr.value = image(attr.value);
       }
-      return record();
+      continue;
     }
-    // Links already resolve from the page's base; only the first base counts, and the policy refuses a base address.
-    if (tag === "base" && !inTemplate) return record({}, ["href"]);
+    // Links already resolve from the page's base, and the policy refuses a base address.
+    if (tag === "base" && !inTemplate) { removeAttribute(element, "href"); continue; }
     if (tag === "script") {
       const kind = scriptKind(element), src = attribute(element, "src");
+      if (kind === null) continue;
       if (inTemplate) {
-        if (kind === null) return record();
         if (src !== undefined) throw new Error(`${entry} has a <script src="${src}"> inside <template>. Published apps can run only inline scripts from templates.`);
-        // A template script runs when app code inserts a copy, so its text is hashed like any other script.
-        addScript(classicScript(textOf(element), `A script in a template in ${entry}`));
-        return record();
+        // A template script runs when app code inserts a copy, after the page has loaded.
+        if (kind === "classic") addScript(classicScript(textOf(element), `A script in a template in ${entry}`, true));
+        continue;
       }
-      if (kind === null) return record();
-      if (kind === "skip") return { ...record({}, ["src"]), children: [] };
+      if (kind === "skip") { removeAttribute(element, "src"); continue; }
       if (kind === "module") {
         if (modules.length >= APP_PAGE_MAX_SCRIPTS) throw new Error(`${entry} has more than ${APP_PAGE_MAX_SCRIPTS} module scripts. Import them from one module instead.`);
         if (src === undefined) {
@@ -270,34 +280,63 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
           inline.set(key, { contents: textOf(element), loader: "js" });
           modules.push(key);
         } else modules.push(`${pageInput}${local(src, "module")}`);
-        return { ...record({ module: modules.length - 1 }, ["src"]), children: [] };
+        // The element stays where it was, as an inline module that runs its bundled code.
+        removeAttribute(element, "src");
+        setText(element, `${pageGlobal}.module(${modules.length - 1});`);
+        addScript(textOf(element));
+        continue;
       }
-      if (src === undefined) return { ...record({ run: addScript(classicScript(textOf(element), `A script in ${entry}`)) }), children: [] };
+      if (src === undefined) {
+        const source = textOf(element);
+        if (source) addScript(classicScript(source, `A script in ${entry}`, false));
+        continue;
+      }
       const path = local(src, "script");
-      const source = classicScript(text(inputs.get(path)!.bytes), path);
-      const later = attribute(element, "defer") !== undefined || attribute(element, "async") !== undefined;
-      return { ...record(later ? { defer: addScript(source) } : { run: addScript(source) }, ["src"]), children: [] };
+      const async = attribute(element, "async") !== undefined;
+      removeAttribute(element, "src");
+      if (!async && attribute(element, "defer") === undefined) {
+        // A parser-inserted inline script runs exactly where the external one did.
+        const source = scriptFile(path, false);
+        setText(element, source);
+        addScript(source);
+        continue;
+      }
+      // A deferred or async script waits as an inert placeholder; a module stub after it runs it when a browser would.
+      const source = scriptFile(path, true);
+      setText(element, source);
+      addScript(source);
+      setAttribute(element, "type", `dohc-deferred-${deferred}`);
+      const siblings = element.parentNode!.childNodes, after = siblings[siblings.indexOf(element) + 1];
+      const runner = stub(`${pageGlobal}.defer(${deferred});`, async);
+      if (after) defaultTreeAdapter.insertBefore(element.parentNode!, runner, after); else defaultTreeAdapter.appendChild(element.parentNode!, runner);
+      deferred++;
+      continue;
     }
+    // Template stylesheets stay as written; their images are still embedded below.
     if (tag === "style" && !inTemplate) {
       const type = attribute(element, "type")?.trim().toLowerCase();
-      if (type && type !== "text/css") return record();
+      if (type && type !== "text/css") continue;
       const key = `dohc-page:${inline.size}.css`;
       inline.set(key, { contents: textOf(element), loader: "css" });
-      const condition = media(element, "a <style>");
-      styles.push(`@import ${JSON.stringify(key)}${condition ? ` ${condition}` : ""};`);
-      return null;
+      stylesheets.push(key);
+      styleElements.push(element);
+      continue;
     }
     const rel = tag === "link" ? (attribute(element, "rel") ?? "").toLowerCase().split(/\s+/) : [];
     if (rel.includes("stylesheet") && !rel.includes("alternate") && !inTemplate) {
       const href = attribute(element, "href") ?? "";
       if (attribute(element, "disabled") !== undefined) throw new Error(`${entry} links the stylesheet ${href} as disabled. Published apps apply every stylesheet. Remove the link or its disabled attribute.`);
-      const condition = media(element, `the stylesheet ${href}`);
-      styles.push(`@import ${JSON.stringify(`${pageInput}${local(href, "stylesheet")}`)}${condition ? ` ${condition}` : ""};`);
-      return null;
+      stylesheets.push(`${pageInput}${local(href, "stylesheet")}`);
+      // The stylesheet stays where it was, with its id, media, and other attributes, as a <style> element.
+      const replacement = defaultTreeAdapter.createElement("style", element.namespaceURI, element.attrs.filter(attr => attr.namespace || !linkOnly.has(attr.name)));
+      defaultTreeAdapter.insertBefore(element.parentNode!, replacement, element);
+      defaultTreeAdapter.detachNode(element);
+      styleElements.push(replacement);
+      continue;
     }
     const parent = element.parentNode && defaultTreeAdapter.isElementNode(element.parentNode) ? element.parentNode.tagName : "";
-    const mediaElement = tag === "video" || tag === "audio" || tag === "track" || (tag === "source" && parent !== "picture");
-    if (mediaElement) {
+    const media = tag === "video" || tag === "audio" || tag === "track" || (tag === "source" && parent !== "picture");
+    if (media) {
       const src = attribute(element, "src");
       if (src !== undefined && !/^(?:https?:|data:|blob:)/i.test(src.trim())) throw new Error(`${entry} links ${src} as audio or video. Published apps cannot include local audio or video. Link to a copy on another site.`);
     }
@@ -306,30 +345,31 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
       const value = attribute(element, name)?.trim();
       if (value && value !== "about:blank") throw new Error(`${entry} embeds ${value} in <${tag}>. Published apps cannot embed other pages or files.`);
     }
-    if (tag === "img" || (tag === "input" && attribute(element, "type")?.toLowerCase() === "image") || (tag === "source" && !mediaElement)) {
+    if (tag === "img" || (tag === "input" && attribute(element, "type")?.toLowerCase() === "image") || (tag === "source" && !media)) {
       const src = attribute(element, "src");
-      if (src !== undefined) setValue(attrs, "src", joined([image(src)]));
+      if (src !== undefined) setAttribute(element, "src", image(src));
     }
     const poster = tag === "video" ? attribute(element, "poster") : undefined;
-    if (poster !== undefined) setValue(attrs, "poster", joined([image(poster)]));
+    if (poster !== undefined) setAttribute(element, "poster", image(poster));
     const set = tag === "img" || tag === "source" ? attribute(element, "srcset") : undefined;
-    if (set !== undefined) {
-      setValue(attrs, "srcset", joined(srcset(set).flatMap(({ url, descriptor }, index) =>
-        [index ? ", " : "", image(url), descriptor ? ` ${descriptor}` : ""])));
-    }
-    return record();
-  };
+    if (set !== undefined) setAttribute(element, "srcset", srcset(set).map(({ url, descriptor }) => descriptor ? `${image(url)} ${descriptor}` : image(url)).join(", "));
+  }
 
-  const page: AppPage = {
-    htmlAttributes: attributes(root), bodyAttributes: attributes(body),
-    head: convert(head.childNodes, 1, false), body: convert(body.childNodes, 1, false),
-    scripts, images, modules: modules.length,
+  const finish = (css: readonly string[], moduleCss: string): AppPage => {
+    for (const [index, element] of styleElements.entries()) setText(element, css[index] ?? "");
+    // CSS that module scripts import lands last in <head>, as a bundler injects it.
+    if (moduleCss) {
+      const element = defaultTreeAdapter.createElement("style", spaces.html as DefaultTreeAdapterTypes.Element["namespaceURI"], []);
+      defaultTreeAdapter.insertText(element, moduleCss);
+      defaultTreeAdapter.appendChild(head, element);
+    }
+    const page: AppPage = {
+      htmlAttributes: root.attrs.map(attr => [attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name, attr.value]),
+      head: serialize(head), body: serializeOuter(body), scripts: [...scripts],
+    };
+    const problem = appPageProblem(page);
+    if (problem) throw new Error(`${entry} ${problem}`);
+    return page;
   };
-  // The app document refuses a record this check refuses, so the page is refused here, by name, before it is published.
-  const problem = appPageProblem(JSON.parse(JSON.stringify(page)));
-  if (problem) throw new Error(`${entry} ${problem}`);
-  if (styles.length) inline.set(pageStyles, { contents: styles.join("\n"), loader: "css" });
-  const module = (styles.length ? `import ${JSON.stringify(pageStyles)};\n` : "") +
-    `globalThis.${APP_PAGE_MODULES_GLOBAL} = [${modules.map(specifier => `() => require(${JSON.stringify(specifier)})`).join(", ")}];`;
-  return { page, module, inline, base, used, images: embedded };
+  return { module: registry(modules), inline, stylesheets, base, used, images: embedded, finish };
 }

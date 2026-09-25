@@ -6,7 +6,7 @@ import { join, posix } from "node:path";
 import { parse } from "acorn";
 import * as esbuild from "esbuild";
 import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
-import { compileClosedAppPage, documentWrite, pageInput, pageNamespace, pageStyles } from "./closedAppPage.ts";
+import { compileClosedAppPage, documentWrite, pageInput, pageNamespace, unsafeInlineScript } from "./closedAppPage.ts";
 
 export interface ClosedAppInput {
   path: string;
@@ -95,6 +95,17 @@ async function assertScript(source: string, loader: esbuild.Loader, pageLabel?: 
 const size = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 const acceptedTypes = new Set([...scriptLoaders.keys(), ".json", ".css", ...passiveExtensions]);
 
+/** A page publishes bundle.js and page.json; its stylesheets and module CSS go into the page, where the browser parses them. */
+function pageOutputs(page: NonNullable<ReturnType<typeof compileClosedAppPage>>, built: ReadonlyMap<string, Uint8Array>, entry: string) {
+  const css = (name: string) => { const bytes = built.get(name); return bytes ? text(bytes) : ""; };
+  const sheets = page.stylesheets.map((_, index) => css(`page-style-${index}.css`));
+  const bundle = built.get("bundle.js")!;
+  if (unsafeInlineScript(text(bundle))) throw new Error(`The module scripts in ${entry} contain <!-- together with <script>, which would end the page's script early. Split one of the strings.`);
+  const known = new Set(["bundle.js", "bundle.css", ...page.stylesheets.map((_, index) => `page-style-${index}.css`)]);
+  if ([...built.keys()].some(name => !known.has(name))) throw new Error("Unexpected app compiler output.");
+  return [{ path: "bundle.js", bytes: bundle }, { path: "page.json", bytes: new TextEncoder().encode(JSON.stringify(page.finish(sheets, css("bundle.css")))) }];
+}
+
 /** A #fragment or a passive data URL written in a stylesheet stays as written. */
 function writtenAsIs(imported: { kind: string; path: string; external?: boolean }): boolean {
   return imported.external === true && imported.kind === "url-token" &&
@@ -165,17 +176,23 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
   const directory = await mkdtemp(join(tmpdir(), "dohc-app-compiler-"));
   try {
     const result = await esbuild.build({
-      absWorkingDir: directory, entryPoints: [entry], outfile: "bundle.js", bundle: true,
+      // A page's stylesheets are their own entries, so each keeps its place and identity in the page.
+      absWorkingDir: directory, entryPoints: [{ in: entry, out: "bundle" }, ...(page?.stylesheets ?? []).map((sheet, index) => ({ in: sheet, out: `page-style-${index}` }))],
+      outdir: "out", bundle: true,
       write: false, metafile: true, platform: "browser", format: "iife", target: "es2022",
       tsconfigRaw, ...scriptOptions, sourcemap: false, legalComments: "none", logLevel: "silent",
       logOverride: { "unsupported-dynamic-import": "error", "unsupported-require-call": "error", "empty-import-meta": "error" },
       plugins: [{ name: "dohc-closed-inputs", setup(build) {
         build.onResolve({ filter: /.*/ }, args => {
-          if (args.kind === "entry-point") return { path: canonicalPath(args.path), namespace };
+          if (args.kind === "entry-point") {
+            if (page?.inline.has(args.path)) return { path: args.path, namespace: pageNamespace };
+            if (page && args.path.startsWith(pageInput) && inputs.has(args.path.slice(pageInput.length))) return { path: args.path.slice(pageInput.length), namespace };
+            return { path: canonicalPath(args.path), namespace };
+          }
           const inPage = args.namespace === pageNamespace;
           const importer = inPage ? entry : args.importer;
-          // Only the generated entry and page stylesheet name inline sources and resolved files; page code cannot.
-          const generated = page && ((args.namespace === namespace && args.importer === entry) || (inPage && args.importer === pageStyles));
+          // Only the generated entry names inline sources and resolved files; page code cannot.
+          const generated = page && args.namespace === namespace && args.importer === entry;
           if (generated && page.inline.has(args.path)) return { path: args.path, namespace: pageNamespace };
           if (generated && args.path.startsWith(pageInput) && inputs.has(args.path.slice(pageInput.length))) return { path: args.path.slice(pageInput.length), namespace };
           if (args.namespace !== namespace && !inPage) return { errors: [{ text: `${importer} imports ${args.path}, which is outside the app.` }] };
@@ -230,8 +247,8 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
       if (key.startsWith(namespace + ":")) locked.add(key.slice(namespace.length + 1));
     }
     const dependencyLock = [...locked].sort().map(path => ({ path, sha256: inputs.get(path)!.sha256, byteLength: inputs.get(path)!.bytes.byteLength }));
-    const outputs = [...result.outputFiles.map(file => ({ path: posix.basename(file.path.replaceAll("\\", "/")), bytes: file.contents })),
-      ...(page ? [{ path: "page.json", bytes: new TextEncoder().encode(JSON.stringify(page.page)) }] : [])];
+    const built = new Map(result.outputFiles.map(file => [posix.basename(file.path.replaceAll("\\", "/")), file.contents]));
+    const outputs = page ? pageOutputs(page, built, entry) : [...built].map(([path, bytes]) => ({ path, bytes }));
     const outputBytes = outputs.reduce((total, output) => total + output.bytes.byteLength, 0);
     const oversized = outputs.find(output => output.bytes.byteLength > maxOutputFileBytes);
     if (outputBytes > maxOutputBytes || oversized) {

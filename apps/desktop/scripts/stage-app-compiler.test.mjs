@@ -65,10 +65,12 @@ test("installed compiler runs electron-builder resources after relocation and ch
     assert.match(Buffer.from(result.files[1].bytes).toString(), /installed/);
     await assert.rejects(compile(request, bounds, AbortSignal.abort()), { reason: "cancelled" });
     const pageBounds = { ...bounds, maxOutputBytes: 16384 };
-    const page = await compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<link rel="stylesheet" href="style.css"><p>page</p>')), file("style.css", style)] }, pageBounds);
-    assert.deepEqual(page.files.map(file => file.path), ["bundle.css", "bundle.js", "page.json"]);
-    assert.deepEqual(JSON.parse(Buffer.from(page.files[2].bytes).toString()).body, [{ tag: "p", attrs: [], children: ["page"] }]);
-    await assert.rejects(compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<script src="missing.js"></script>'))] }, pageBounds),
+    const page = await compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<!doctype html><link rel="stylesheet" href="style.css"><p>page</p>')), file("style.css", style)] }, pageBounds);
+    assert.deepEqual(page.files.map(file => file.path), ["bundle.js", "page.json"]);
+    const record = JSON.parse(Buffer.from(page.files[1].bytes).toString());
+    assert.equal(record.body, "<body><p>page</p></body>");
+    assert.match(record.head, /^<style>[\s\S]*color: green[\s\S]*<\/style>$/);
+    await assert.rejects(compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<!doctype html><script src="missing.js"></script>'))] }, pageBounds),
       { message: "index.html links missing.js, which is not in the app. Add the file or fix the link." });
   } finally {
     for (const [key, value] of original) {
