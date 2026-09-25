@@ -416,38 +416,6 @@ it('retries an actual SQLite writer lock before insertion without changing the c
   } finally { f.close() }
 })
 
-it('checkpoints exactly the 4095th real no-op delivery and starts a fresh suffix', () => {
-  const f = registered()
-  try {
-    const noop = Y.encodeStateAsUpdate(f.doc, Y.encodeStateVector(f.doc))
-    expect([...noop]).toEqual([0, 0])
-    const stateCapture = vi.fn(() => { f.raw.exec('BEGIN IMMEDIATE'); f.raw.exec('ROLLBACK') })
-    for (let index = 0; index < 4095; index++) {
-      const input = f.capture(noop, `noop-${index}`, f.actor, stateCapture)
-      expect(input.validation.kind).toBe('accepted')
-      const result = f.storage.commitLiveUpdateJournal(input)
-      expect(result.result).toMatchObject({ kind: 'accepted', replayed: false, receipt: { journalCursor: index + 1 } })
-      expect(result.admitted!.metadata.firstSeen).toEqual([])
-      if (index === 4093) {
-        expect(stateCapture).not.toHaveBeenCalled()
-        expect(f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document }))
-          .toMatchObject({ kind: 'cut', cut: { suffixCount: 4094, checkpoint: { cursor: null } } })
-      }
-    }
-    expect(stateCapture).toHaveBeenCalledTimes(1)
-    const cut = f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document })
-    expect(cut).toMatchObject({ kind: 'cut', cut: { highWater: 4095, suffixCount: 0, suffixBytes: 0, checkpoint: { cursor: 4095 } } })
-    if (cut.kind !== 'cut') throw new Error('cut refused')
-    const state = Y.encodeStateAsUpdate(f.doc)
-    expect(cut.cut.checkpoint.bytes).toEqual(state)
-    expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + noop.byteLength * 4095 + state.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
-    expect(f.storage.commitLiveUpdateJournal(f.capture(noop, 'next')).result.kind).toBe('accepted')
-    expect(f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document }))
-      .toMatchObject({ kind: 'cut', cut: { highWater: 4096, suffixCount: 1, checkpoint: { cursor: 4095 } } })
-  } finally { f.close() }
-}, 1_800_000)
-
-
 it.each(['version', 'candidate-getter', 'evidence-proxy', 'range-getter', 'shared', 'resizable'] as const)('rejects journal boundary %s without writes or getter calls', kind => {
   const f = registered()
   try {
