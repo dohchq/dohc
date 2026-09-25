@@ -46,6 +46,7 @@ export const DEFINITION_CHANGED_ERROR =
   "This automation changed after this run began. Try again to run the new version from the start.";
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
+export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
 export const COMPACTED_RUN_ERROR =
   "This run failed too long ago for dohc to finish it. Change the records by hand, or wait for the automation's next run.";
 
@@ -105,6 +106,11 @@ export type ClaimRuns =
   | { unreadable: true }
   | {
       unreadable: false;
+      /**
+       * A person started to undo a run of the claim, under any definition. Its
+       * keys and record ids are spent, so the claim never runs again.
+       */
+      undo: boolean;
       /** A run that finished, under any definition. The claim needs only its settle. */
       done: StoredRun | null;
       /** The run this definition continues. */
@@ -127,6 +133,7 @@ export async function runsForClaim(
   const live = runs.filter((run) => !run.superseded);
   return {
     unreadable: false,
+    undo: runs.some((run) => run.undo !== null),
     done: live.find((run) => run.outcome?.state === "done") ?? null,
     current: live.find((run) => run.definitionHash === hash) ?? null,
     // A run is saved only once its plan is ready to write, so any saved run
@@ -148,6 +155,8 @@ export async function runCollectionAutomation(
   // It finished before this computer could settle the claim, whatever the
   // automation says now.
   if (done !== null) return { kind: "done" };
+  // Undo spent its keys and record ids, whoever asks to run it again.
+  if (runs.undo) return failed(UNDONE_RUN_ERROR);
   // Running another definition from the start could repeat the changes the
   // earlier one made. A person has to choose that with Try again.
   if (current === null && changedSince !== null) return failed(DEFINITION_CHANGED_ERROR);
@@ -205,6 +214,7 @@ export async function runCollectionAutomation(
       applied: [],
       created: [],
       superseded: false,
+      undo: null,
       settled: false,
       compacted: false,
       outcome: null,
