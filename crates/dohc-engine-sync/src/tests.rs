@@ -798,7 +798,12 @@ impl RelayTransport for PagedShareRelay {
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
-        if let Some(error) = self.blob_upload_errors.lock().expect("upload errors").pop_front() {
+        if let Some(error) = self
+            .blob_upload_errors
+            .lock()
+            .expect("upload errors")
+            .pop_front()
+        {
             return Err(error);
         }
         self.proposal_calls
