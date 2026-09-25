@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -997,6 +997,30 @@ describe("collection authoring", () => {
     );
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
   });
+
+  it("lists a button field but never offers it as a new field type or a board group", async () => {
+    const bridge = makeBridge([selectRecord()], {
+      ...SELECT_SCHEMA,
+      fields: [...SELECT_SCHEMA.fields, { name: "Mark paid", type: "button" }],
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    const fields = screen.getByTestId("collection-fields-dialog");
+    expect(within(fields).getByText("Mark paid")).toBeDefined();
+    expect(within(fields).getByText("Button")).toBeDefined();
+    const types = within(screen.getByLabelText<HTMLSelectElement>("Field type")).getAllByRole("option");
+    expect(types.map((option) => option.getAttribute("value"))).not.toContain("button");
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireEvent.click(screen.getByTestId("collection-views-button"));
+    fireEvent.change(screen.getByLabelText("View kind"), {
+      target: { value: "board" },
+    });
+    const groups = within(await screen.findByLabelText("Group by")).getAllByRole("option");
+    expect(groups.map((option) => option.getAttribute("value"))).toEqual(["", "title", "status"]);
+  });
 });
 
 const CHECKBOX_SCHEMA: CollectionSchema = {
@@ -1328,6 +1352,31 @@ describe("record click-through", () => {
 
     fireEvent.click(await screen.findByRole("listitem", { name: "Plan" }));
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
+  });
+
+  it("shows a table, not a board, when the board groups by a button", async () => {
+    const parsed = parseCollectionSchema([
+      "fields:",
+      "  title:",
+      "    type: text",
+      "  Mark paid:",
+      "    type: button",
+      "views:",
+      "  - name: Board",
+      "    kind: board",
+      "    groupBy: Mark paid",
+    ].join("\n"));
+    expect(parsed.schema.views[0]?.groupBy).toBeNull();
+    const bridge = makeBridge([record("rec-1", "Plan")], parsed.schema, {
+      groups: [{ value: null, records: [record("rec-1", "Plan")] }],
+    });
+    renderPage(bridge);
+
+    expect(await screen.findByRole("grid")).toBeDefined();
+    expect(screen.queryByRole("list")).toBeNull();
+    expect(bridge.queryCollectionRecords.mock.calls.map(([params]) => params)).not.toContainEqual(
+      expect.objectContaining({ groupBy: expect.anything() }),
+    );
   });
 
   it("opens the record's file from a calendar event", async () => {

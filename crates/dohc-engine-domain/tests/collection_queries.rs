@@ -3045,6 +3045,136 @@ fn collection_query_refuses_more_than_eight_sort_clauses() {
 }
 
 #[test]
+fn button_field_keeps_a_stray_value_flagged_and_refuses_filter_sort_and_group() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "invoices/collection.yaml",
+        "fields:\n  Title:\n    type: text\n  Mark paid:\n    type: button\n",
+        2,
+    )
+    .expect("invoice schema");
+    write_text(
+        &mut store,
+        "invoices/twelve.md",
+        &format!("---\nid: {FIRST_TASK_ID}\nTitle: Invoice 12\nMark paid: true\n---\n"),
+        3,
+    )
+    .expect("invoice record");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile invoices");
+
+    let result = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "invoices",
+                &CollectionQuery {
+                    sort: vec![CollectionSort {
+                        field: "Title".into(),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("query invoices")
+        .expect("invoice collection");
+    assert_eq!(result.collection.status, CollectionSchemaStatus::Valid);
+    let stray = result.records[0]
+        .values
+        .iter()
+        .find(|value| value.field == "Mark paid")
+        .expect("the stray value is kept");
+    assert_eq!(stray.value, json!(true));
+    assert_eq!(
+        serde_json::to_value(&stray.validation).expect("serialize validation"),
+        json!({ "status": "flagged", "reason": { "code": "expected-empty", "path": "" } })
+    );
+
+    let refused = |query: CollectionQuery| {
+        store
+            .read_with(|conn| query_collection_records(conn, WORKSPACE_ID, "invoices", &query))
+            .expect_err("a button field has no value to query")
+    };
+    let filter = refused(CollectionQuery {
+        filter: Some(CollectionFilter {
+            field: "Mark paid".into(),
+            operator: CollectionFilterOperator::Equals,
+            value: json!(true),
+        }),
+        ..CollectionQuery::default()
+    });
+    assert!(matches!(
+        filter,
+        DomainError::InvalidInput {
+            reason: "collection query cannot filter by a button field"
+        }
+    ));
+    let sort = refused(CollectionQuery {
+        sort: vec![CollectionSort {
+            field: "Mark paid".into(),
+            direction: ViewSortDirection::Desc,
+        }],
+        ..CollectionQuery::default()
+    });
+    assert!(matches!(
+        sort,
+        DomainError::InvalidInput {
+            reason: "collection query cannot sort by a button field"
+        }
+    ));
+    let group = refused(CollectionQuery {
+        group_by: Some("Mark paid".into()),
+        ..CollectionQuery::default()
+    });
+    assert!(matches!(
+        group,
+        DomainError::InvalidInput {
+            reason: "collection query cannot group by a button field"
+        }
+    ));
+
+    // Button names are cached by schema content, so a changed schema is
+    // read again: once Mark paid is text, a sort on it works.
+    write_text_for_object(
+        &mut store,
+        "invoices/collection.yaml",
+        "fields:\n  Title:\n    type: text\n  Mark paid:\n    type: text\n",
+        "object-2",
+        "moment-4",
+        4,
+    )
+    .expect("invoice schema without the button");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile the changed schema");
+    store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "invoices",
+                &CollectionQuery {
+                    sort: vec![CollectionSort {
+                        field: "Mark paid".into(),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("a text field sorts")
+        .expect("invoice collection");
+}
+
+#[test]
 fn get_record_history_is_bounded_and_newest_first() {
     let (_scratch, mut store) = seeded_store();
     let seeded = store
