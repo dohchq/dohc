@@ -1,5 +1,6 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import type { CrashReportSource } from "../ipc/bridgeContract";
 import { ERROR_CODES, ERROR_NAMES, SIGNALS, SYSCALLS, WIRE_CODES } from "./crashReportValues";
 
@@ -51,32 +52,25 @@ const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], str
 
 export const VALUE_WITHHELD = "<withheld>";
 
-// The engine supervisor's messages (engineDaemonLifecycle.ts). A matching
-// message is written again from this list, with only its numbers, a
-// window in minutes or milliseconds, and a known signal name carried over.
-// Nothing else from the error's own text reaches the report, whoever
-// threw it.
-const n = (value: string | undefined) => String(Number(value));
-const windowText = (value: string | undefined) => {
-  const match = /^(\d+)(ms| minutes?)$/.exec(value ?? "");
-  return match ? `${n(match[1])}${match[2]}` : "a window";
-};
-const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) => string]> = [
-  [/^Rust engine daemon exited unexpectedly with (?:code (-?\d+)|code unknown|signal (\w+))\.$/, (m) =>
-    `Rust engine daemon exited unexpectedly with ${
-      m[1] !== undefined ? `code ${n(m[1])}` : m[2] !== undefined ? `signal ${SIGNALS.has(m[2]) ? m[2] : VALUE_WITHHELD}` : "code unknown"
-    }.`],
-  [/^Rust engine restart limit exceeded after (\d+) attempts\.$/, (m) =>
-    `Rust engine restart limit exceeded after ${n(m[1])} attempts.`],
-  [/^The Rust engine crashed again after (\d+) restarts in the last ([\w ]+)\. The limit is (\d+) restarts per [\w ]+\. dohc stopped restarting it\.$/, (m) =>
-    `The Rust engine crashed again after ${n(m[1])} restarts in the last ${windowText(m[2])}. The limit is ${n(m[3])} restarts per ${windowText(m[2])}. dohc stopped restarting it.`],
-  [/^The Rust engine went silent on (\d+) launches: (\d+) probes in a row expired after (\d+)ms each with no frame of any kind from the engine\. The limit is (\d+) wedges with no traffic in between\. dohc stopped restarting it\.$/, (m) =>
-    `The Rust engine went silent on ${n(m[1])} launches: ${n(m[2])} probes in a row expired after ${n(m[3])}ms each with no frame of any kind from the engine. The limit is ${n(m[4])} wedges with no traffic in between. dohc stopped restarting it.`],
-  [/^The Rust engine is running but sent nothing: (\d+) probes in a row expired after (\d+)ms each with no frame of any kind from the engine\. The limit is (\d+) probes with no traffic\. dohc is restarting it\.$/, (m) =>
-    `The Rust engine is running but sent nothing: ${n(m[1])} probes in a row expired after ${n(m[2])}ms each with no frame of any kind from the engine. The limit is ${n(m[3])} probes with no traffic. dohc is restarting it.`],
+// Only real supervisor errors reach these templates. desktopEngine.ts uses
+// engineDaemonLifecycle.ts's default counters and timeouts, so keep those
+// exact values. Other configurations are withheld. Exit codes can be signed
+// or unsigned 32-bit values on Windows; signal names come from a fixed list.
+const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) => string | null]> = [
+  [/^Rust engine daemon exited unexpectedly with (?:code (-?\d+)|code unknown|signal (\w+))\.$/, (m) => {
+    const code = Number(m[1]);
+    if (m[1] !== undefined && (!Number.isInteger(code) || code < -2_147_483_648 || code > 4_294_967_295)) return null;
+    return `Rust engine daemon exited unexpectedly with ${
+      m[1] !== undefined ? `code ${code}` : m[2] !== undefined ? `signal ${SIGNALS.has(m[2]) ? m[2] : VALUE_WITHHELD}` : "code unknown"
+    }.`;
+  }],
   [/^Rust engine \S+ returned an invalid result\.$/, () => "Rust engine request returned an invalid result."],
-  [/^Rust engine \S+ timed out after (\d+)ms\.$/, (m) => `Rust engine request timed out after ${n(m[1])}ms.`],
+  [/^Rust engine \S+ timed out after 5000ms\.$/, () => "Rust engine request timed out after 5000ms."],
   ...[
+    "Rust engine restart limit exceeded after 3 attempts.",
+    "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
+    "The Rust engine went silent on 2 launches: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 2 wedges with no traffic in between. dohc stopped restarting it.",
+    "The Rust engine is running but sent nothing: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 3 probes with no traffic. dohc is restarting it.",
     "Rust engine failed its startup handshake.",
     "Rust engine exited during its startup handshake.",
     "Rust engine exited during its startup health check.",
@@ -171,7 +165,7 @@ function errorLines(error: unknown, codeFrame: (frame: string) => string, withSt
 // and the engine attach, each only when it is on a known list.
 function errorSummary(error: Error): string {
   const name = ERROR_NAMES.has(error.name) ? error.name : VALUE_WITHHELD;
-  const message = (name === "EngineDaemonUnavailableError" ? engineMessage(error.message) : null) ?? MESSAGE_WITHHELD;
+  const message = (error instanceof EngineDaemonUnavailableError ? engineMessage(error.message) : null) ?? MESSAGE_WITHHELD;
   const fields = error as Error & { code?: unknown; wireCode?: unknown; syscall?: unknown };
   const known = (value: unknown, values: ReadonlySet<string>) =>
     typeof value === "string" && values.has(value) ? value : VALUE_WITHHELD;

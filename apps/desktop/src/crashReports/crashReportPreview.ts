@@ -1,9 +1,10 @@
 import { rm, writeFile } from "node:fs/promises";
 
 /**
- * The file View report opens in a text editor. It lives only while main's
- * dialog asks: it is removed when the dialog ends, when the report is
- * dismissed, and at startup, so the text never outlives the report.
+ * The file View report opens in a text editor. Cleanup is best-effort when
+ * the dialog ends, when the report is dismissed, and at startup. Deletion
+ * failures are logged and swallowed; a crash can leave the file until a
+ * later startup removes it.
  * It sits in dohc's user data folder, which only this user can read on
  * Windows, and it is created new with owner-only permissions elsewhere.
  */

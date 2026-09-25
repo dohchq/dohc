@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import type { CrashEvent, CrashFacts } from "./crashReport";
@@ -76,9 +77,7 @@ function store(endpoint: URL | null, onChanged: () => void = () => undefined) {
 }
 
 function engineError(code: number): Error {
-  return Object.assign(new Error(`Rust engine daemon exited unexpectedly with code ${code}.`), {
-    name: "EngineDaemonUnavailableError",
-  });
+  return new EngineDaemonUnavailableError(`Rust engine daemon exited unexpectedly with code ${code}.`);
 }
 
 const EVERY_KIND: CrashEvent[] = [

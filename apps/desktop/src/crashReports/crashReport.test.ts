@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import {
   CRASH_EVENT_MAX_CHARS,
@@ -107,22 +108,67 @@ describe("crash report messages", () => {
   });
 
   it("writes an engine message again from its template, never from the error's own words", () => {
-    const engineError = (message: string) => Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" });
+    const engineError = (message: string) => new EngineDaemonUnavailableError(message);
     expect(mainError(engineError(
       "The Rust engine crashed again after 10 restarts in the last Acme merger plans. The limit is 10 restarts per Acme merger plans. dohc stopped restarting it.",
     ))).toContain(
-      "The Rust engine crashed again after 10 restarts in the last a window. The limit is 10 restarts per a window. dohc stopped restarting it.",
+      "EngineDaemonUnavailableError: <message withheld>",
     );
     expect(mainError(engineError("Rust engine daemon exited unexpectedly with signal ACMEPLANS.")))
       .toContain("Rust engine daemon exited unexpectedly with signal <withheld>.");
     expect(mainError(engineError("Rust engine acme.merger.plans timed out after 5000ms.")))
       .toContain("EngineDaemonUnavailableError: Rust engine request timed out after 5000ms.");
     expect(mainError(engineError(
-      "The Rust engine crashed again after 3 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
+      "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
     ))).toContain("in the last 10 minutes. The limit is 10 restarts per 10 minutes.");
     // A class that is not the supervisor's keeps no message, even a template.
     expect(mainError(Object.assign(new Error("Rust engine restart limit exceeded after 3 attempts."), { name: "TypeError" })))
       .toContain("TypeError: <message withheld>");
+  });
+
+  it("withholds supervisor messages from spoofed names, including causes", () => {
+    for (const attempts of ["3", "15551234567"]) {
+      const message = `Rust engine restart limit exceeded after ${attempts} attempts.`;
+      const spoof = Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" });
+      for (const error of [spoof, new EngineDaemonUnavailableError("Rust engine failed its startup handshake.", { cause: spoof })]) {
+        const text = formatCrashEvent({ kind: "engine", error, stage: "stopped" }, FACTS, codeFrame);
+        expect(text).toContain("EngineDaemonUnavailableError: <message withheld>");
+        expect(text).not.toContain(message);
+        expect(text).not.toContain("15551234567");
+      }
+    }
+  });
+
+  it("keeps only the desktop supervisor's configured numbers", () => {
+    const messages = [
+      "Rust engine restart limit exceeded after 3 attempts.",
+      "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
+      "The Rust engine went silent on 2 launches: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 2 wedges with no traffic in between. dohc stopped restarting it.",
+      "The Rust engine is running but sent nothing: 3 probes in a row expired after 45000ms each with no frame of any kind from the engine. The limit is 3 probes with no traffic. dohc is restarting it.",
+      "Rust engine request timed out after 5000ms.",
+    ];
+    for (const message of messages) {
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+      for (const match of message.matchAll(/\d+/g)) {
+        for (const invalid of ["0", "15551234567", "9".repeat(400)]) {
+          const changed = message.slice(0, match.index) + invalid + message.slice(match.index + match[0].length);
+          const text = mainError(new EngineDaemonUnavailableError(changed));
+          expect(text).toContain("EngineDaemonUnavailableError: <message withheld>");
+          expect(text).not.toContain(changed);
+        }
+      }
+    }
+  });
+
+  it("bounds supervisor exit codes to signed or unsigned 32-bit integers", () => {
+    for (const code of [-2147483648, -1073741819, 0, 101, 4294967295]) {
+      const message = `Rust engine daemon exited unexpectedly with code ${code}.`;
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+    }
+    for (const code of ["-2147483649", "4294967296", "15551234567", "1.5", "9".repeat(400)]) {
+      const message = `Rust engine daemon exited unexpectedly with code ${code}.`;
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain("EngineDaemonUnavailableError: <message withheld>");
+    }
   });
 
   it("keeps an engine refusal's code", () => {
@@ -132,7 +178,7 @@ describe("crash report messages", () => {
 
   it("keeps the engine supervisor's messages, which are fixed templates", () => {
     const engineError = (message: string, cause?: unknown) =>
-      Object.assign(new Error(message, cause === undefined ? undefined : { cause }), { name: "EngineDaemonUnavailableError" });
+      new EngineDaemonUnavailableError(message, cause === undefined ? undefined : { cause });
     const exit = engineError("Rust engine daemon exited unexpectedly with code 101.");
     const terminal = engineError("Rust engine restart limit exceeded after 3 attempts.", exit);
     const text = formatCrashEvent({ kind: "engine", error: terminal, stage: "stopped" }, { ...FACTS, packaged: false }, codeFrame);
