@@ -82,10 +82,6 @@ export const DesktopUserSettings = z.object({
     lineWrap: z.boolean(),
     spellcheck: z.boolean(),
   }).strict(),
-  notifications: z.object({
-    updates: z.boolean(),
-    agentRuns: z.boolean(),
-  }).strict(),
   runner: RunnerSettings.default(DEFAULT_RUNNER_SETTINGS),
 }).strict().refine((settings) => !settings.runner.enabled || Boolean(settings.profile.agentName), {
   message: "Enter an agent name before enabling dispatch.",
@@ -104,10 +100,6 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
     fontSize: 15,
     lineWrap: true,
     spellcheck: true,
-  },
-  notifications: {
-    updates: true,
-    agentRuns: true,
   },
   runner: DEFAULT_RUNNER_SETTINGS,
 };

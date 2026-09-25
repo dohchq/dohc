@@ -5986,7 +5986,23 @@ export const NoticeRef = z.object({
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
-export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+// The signed-in account a list shows, the same key cloudSessionChanged
+// carries, or null when nobody is signed in.
+const NoticeAccountKey = z.string().min(1).max(8_192).nullable();
+export const ListNoticesResult = z.object({
+  account: NoticeAccountKey,
+  notices: z.array(NoticeRow),
+});
+export const NOTICE_MARK_BATCH_MAX = 500;
+// One notice as it opens or is dismissed, or every unread one for "Mark all
+// read", in batches. Account rows are marked only while the account the
+// list showed is still signed in.
+export const MarkNoticesPayload = z.object({
+  account: NoticeAccountKey,
+  mark: z.enum(["read", "dismissed"]),
+  notices: z.array(NoticeRef).min(1).max(NOTICE_MARK_BATCH_MAX),
+});
+export type MarkNoticesPayload = z.infer<typeof MarkNoticesPayload>;
 export const NoticesChangedEvent = z.undefined();
 
 export const noticeOperations = {
@@ -5994,13 +6010,9 @@ export const noticeOperations = {
     channel: "desktop:list-notices",
     payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
   },
-  readNotice: {
-    channel: "desktop:read-notice",
-    payload: NoticeRef, guard: "trusted-sender",
-  },
-  dismissNotice: {
-    channel: "desktop:dismiss-notice",
-    payload: NoticeRef, guard: "trusted-sender",
+  markNotices: {
+    channel: "desktop:mark-notices",
+    payload: MarkNoticesPayload, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
