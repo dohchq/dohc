@@ -271,8 +271,9 @@ export function SettingsDialog(props: {
       applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
       setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
     }
-  }, [markSaved, markSaving, userResult]);
+  }, [markSaved, markSaving, props.onError, userResult]);
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -326,9 +327,10 @@ export function SettingsDialog(props: {
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(ipcErrorMessage(cause));
+        props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
       }
     },
-    [markSaved, markSaving, props.workspaceId, workspaceResult],
+    [markSaved, markSaving, props.onError, props.workspaceId, workspaceResult],
   );
 
   // Zoom goes through main's one serialized mutation instead of a full-file
@@ -371,8 +373,9 @@ export function SettingsDialog(props: {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
     }
-  }, [markSaved, markSaving]);
+  }, [markSaved, markSaving, props.onError]);
 
   const resetWorkspaceSettings = useCallback(async () => {
     const requestId = workspaceSaveRequestRef.next();
@@ -400,8 +403,9 @@ export function SettingsDialog(props: {
       }
       setSaveState("error");
       setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
     }
-  }, [markSaved, markSaving, props.workspaceId]);
+  }, [markSaved, markSaving, props.onError, props.workspaceId]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateBusy("check");

@@ -123,7 +123,7 @@ describe("error words", () => {
       cause: "Dataset operation expired while waiting for a worker.",
     });
     for (const internal of [
-      "The dataset worker stopped. Reopen it from the journal.",
+      "Dataset workers are busy. Retry this operation.",
       "Dataset host is closed.",
       "Dataset access is not permitted.",
       "Materialization is truncated.",
@@ -143,6 +143,10 @@ describe("error words", () => {
         "desktop:dataset",
       ],
       ["Status uses custom rules. Update dataset/operations.ts, then choose Review source change.", "desktop:dataset"],
+      ...["Materialization", "Checkpoint", "Dataset operation", "Dataset host", "Invalid dataset"].map((field) => [
+        `${field} uses custom rules in Edit. Update Dataset host/operations.ts, then choose Review source change.`,
+        "desktop:dataset",
+      ] as const),
     ] as const) {
       expect(readError(acrossIpc(new Error(message), channel)).words, message).toBe(message);
     }
