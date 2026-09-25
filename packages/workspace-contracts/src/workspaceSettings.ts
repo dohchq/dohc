@@ -63,10 +63,10 @@ export const WorkspaceSettings = Schema.Struct({
   agents: WorkspaceAgentsSettings,
   sites: WorkspaceSitesSettings,
   privacy: WorkspacePrivacySettings,
-  // Defaulted, not required: the top-level schema is .strict() and a failed
-  // parse silently resets the whole file, so settings written before this
-  // group existed must keep parsing as-is. Controls where pasted/uploaded
-  // attachments (images/files) are saved,
+  // Defaulted, not required, so settings written before this group existed
+  // keep parsing as-is. The desktop reader turns off only a key it does not
+  // know or cannot decode, never the whole file. Controls where
+  // pasted/uploaded attachments (images/files) are saved,
   // modeled on Obsidian's "Default location for new attachments":
   //   per-document  — a subfolder next to the document (`<folder>/x.png`)
   //   global-folder — one folder at the workspace root (`../<folder>/x.png`)

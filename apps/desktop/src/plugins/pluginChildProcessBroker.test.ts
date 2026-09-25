@@ -1101,7 +1101,6 @@ describe("PluginChildProcessBroker command children", () => {
         }),
       ).resolves.toEqual({ code: 7, reason: "exited" });
     },
-    20_000,
   );
 
   it(
@@ -1161,6 +1160,8 @@ describe("PluginChildProcessBroker command children", () => {
               (data as PluginChildProcessOutput).text.includes("echo:ping"),
           ),
         "the child's answer on stdout",
+        // The child's first output includes its startup on a loaded gate.
+        20_000,
       );
 
       await fixture.broker.invoke(
@@ -1175,7 +1176,6 @@ describe("PluginChildProcessBroker command children", () => {
         }),
       ).resolves.toEqual({ code: 0, reason: "exited" });
     },
-    20_000,
   );
 
   it(
@@ -1218,7 +1218,7 @@ describe("PluginChildProcessBroker command children", () => {
       const grandchildPid = await until(async () => {
         const pid = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
         return pid > 0 ? pid : undefined;
-      }, "the grandchild to record its pid");
+      }, "the grandchild to record its pid", 20_000);
       expect(spawned.pid).toBeGreaterThan(0);
       expect(isAlive(grandchildPid)).toBe(true);
 
@@ -1255,7 +1255,6 @@ describe("PluginChildProcessBroker command children", () => {
         }),
       ).rejects.toThrow("No executable exists at that path.");
     },
-    20_000,
   );
 
   it(
@@ -1292,7 +1291,6 @@ describe("PluginChildProcessBroker command children", () => {
           "`shell: true`: the child receives split and expanded tokens, and this exact array never comes back.",
       ).toBe(JSON.stringify(args));
     },
-    20_000,
   );
 
   it("refuses a whole command line in place of an executable name", async () => {

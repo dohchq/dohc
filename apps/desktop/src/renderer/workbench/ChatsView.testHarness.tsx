@@ -390,9 +390,10 @@ beforeEach(() => {
   // mockImplementation stay exactly as they were.
   vi.stubGlobal("dohcDesktop", {
     ...bridgeMock,
-    syncDms: async (payload: { workspaceId: string; openChannelId?: string }) => ({
+    syncDms: async (payload: { workspaceId: string; openChannelId?: string; poll?: boolean }) => ({
       pending: [],
       declined: [],
+      failed: false,
       ...(await bridgeMock.syncDms(payload)),
     }),
     listChatChannelShares: async (payload: {

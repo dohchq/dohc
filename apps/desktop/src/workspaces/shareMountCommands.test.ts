@@ -584,7 +584,7 @@ describe("share mount commands", () => {
 
     await expect(
       commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
-    ).rejects.toThrow("shared chat channel");
+    ).rejects.toThrow("shared group");
     expect(h.events).toEqual(["credentials", "preflight"]);
   });
 

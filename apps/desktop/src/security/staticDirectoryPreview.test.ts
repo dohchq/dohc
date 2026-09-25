@@ -2,11 +2,6 @@ import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// Serving a directory is real filesystem and socket work, honest work a busy
-// machine stretches. Same 15s deadline the site runner's suite measured
-// its way to.
-vi.setConfig({ testTimeout: 15_000 });
 import { createTestScratch } from "../workspaces/testTemp";
 import { startStaticDirectoryPreview } from "./staticDirectoryPreview";
 

@@ -40,6 +40,24 @@ _Avoid_: link (that is a body link), backlink
 A named way to render a Collection, such as a table, board, or calendar. Available views depend on the Collection; the current view is local state.
 _Avoid_: dashboard (see App), layout
 
+**Notice**:
+One item in a person's Notices: a problem or finished task on this computer, or something sent to that person, such as a mention or an automation's message. Items sent to a person reach all of their computers.
+_Avoid_: notification (for the item), inbox, alert
+
+**Automation**:
+A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of those people can reach.
+_Avoid_: workflow, zap, plugin automation
+
+**Personal step**:
+A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
+_Avoid_: private step, owner step
+
+### Chat
+
+**Group**:
+A named space with members where people and agents post, chat, or both.
+_Avoid_: channel, room, space. An editor group is the split pane, not a Group.
+
 ### Sharing
 
 **Share**:
@@ -51,11 +69,11 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also change a shared Collection's schema and automations, create Collections in a shared folder, and send change proposals. A Group or direct message grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:
-A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access, and owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
+A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access. A named recipient with Edit also changes a shared Collection's schema and automations directly, and creates Collections in a shared folder. Owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
 _Avoid_: pull request, patch, suggestion
 
 **Share code**:

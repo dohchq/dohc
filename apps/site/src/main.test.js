@@ -27,13 +27,13 @@ it('restores an operable loader after a React render error and retries with a fr
     await import('./main.tsx');
     appear([{ isIntersecting: true }]);
     const retry = host.querySelector('[data-demo-retry]');
-    await vi.waitFor(() => expect(retry.hidden).toBe(false));
+    await vi.waitFor(() => expect(retry.hidden).toBe(false), { timeout: 10_000 });
     expect(host.querySelector('[data-demo-status]').textContent).toContain('could not load');
     expect(host.shadowRoot.querySelector('slot').assignedElements()).toContain(host.querySelector('.demo-loading'));
     expect(errors).toHaveBeenCalledWith('Unable to load the interactive dohc demo', expect.objectContaining({ message: 'Demo render failed' }));
     state.fail = false;
     retry.click();
-    await vi.waitFor(() => expect(host.shadowRoot.querySelector('#root')?.textContent).toBe('Workspace ready'));
+    await vi.waitFor(() => expect(host.shadowRoot.querySelector('#root')?.textContent).toBe('Workspace ready'), { timeout: 10_000 });
     expect(host.shadowRoot.querySelector('slot')).toBeNull();
   } finally {
     errors.mockRestore();

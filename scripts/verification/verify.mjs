@@ -81,12 +81,13 @@ export async function postgres(output, command = run) {
   };
   listen();
   try {
-    const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -h 127.0.0.1 -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
+    // A fresh postgres:17-alpine needed 54 s for its first initdb on Windows. Failed checks inside the start period do not count toward the retries.
+    const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -h 127.0.0.1 -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "--health-start-period", "90s", "--health-start-interval", "1s", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
     const returnedId = result.stdout.trim();
     if (!/^[a-f0-9]{64}$/.test(returnedId)) throw new Error(`Docker returned no container ID. Inspect container ${name}.`);
     id = returnedId;
     checkCancellation();
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + 120_000;
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Verification Postgres did not become healthy.");

@@ -7,10 +7,14 @@ import {
   YdocLiveAdapter,
   type EngineTransport,
 } from "@dohc/workspace-engine-client";
-import { EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
 
@@ -19,6 +23,7 @@ import { createTestScratch } from "./testTemp";
 // itself has to carry the height. This drives the daemon's real open, record,
 // settle, close, and reopen path: no Electron, no pointer, no timing.
 const engine = requireEngineBinaryOrSkip();
+const daemonWork = { timeout: REAL_DAEMON_DEADLINE_MS };
 const WORKSPACE_ID = "ydoc-table-row-height";
 const PATH = "table.md";
 const TABLE = [
@@ -42,7 +47,7 @@ function tableRow(doc: Y.Doc, index: number): Y.XmlElement {
 
 it("keeps a resized row and an external cell edit across a settled close and reopen", async () => {
   const root = await createTestScratch("dohc-ydoc-table-row-height-");
-  const lifecycle = new EngineDaemonLifecycle({
+  const lifecycle = createRealDaemonLifecycle({
     command: engine.require(),
     maxRestarts: 0,
   });
@@ -73,7 +78,7 @@ it("keeps a resized row and an external cell edit across a settled close and reo
     await writeFile(file, original, "utf8");
     await capture.flush();
     const versionId = (await capture.listVersions()).activeVersionId;
-    await expect.poll(() => headText(versionId)).toBe(original);
+    await expect.poll(() => headText(versionId), daemonWork).toBe(original);
     const settled = `# Sizes\n\n<!-- dohc:table row-heights=1:84 -->\n${TABLE}`;
 
     await sessions.run(workspace, async (binding) => {
@@ -90,7 +95,7 @@ it("keeps a resized row and an external cell edit across a settled close and reo
       // The desktop settles a while after an edit and closes later. A close
       // whose settle is still landing on disk keeps the lineage instead.
       await session.settle();
-      await expect.poll(() => readFile(file, "utf8")).toBe(settled);
+      await expect.poll(() => readFile(file, "utf8"), daemonWork).toBe(settled);
       await session.close();
       adapter.dispose();
     });
@@ -98,7 +103,7 @@ it("keeps a resized row and an external cell edit across a settled close and reo
     // Somebody edits the closed file outside dohc and keeps the comment.
     const edited = settled.replace("apples", "plums ");
     await writeFile(file, edited, "utf8");
-    await expect.poll(() => headText(versionId)).toBe(edited);
+    await expect.poll(() => headText(versionId), daemonWork).toBe(edited);
 
     await sessions.run(workspace, async (binding) => {
       const adapter = new YdocLiveAdapter(binding.client as EngineTransport);
@@ -123,4 +128,4 @@ it("keeps a resized row and an external cell edit across a settled close and reo
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
   }
-});
+}, REAL_DAEMON_TEST_TIMEOUT_MS);
