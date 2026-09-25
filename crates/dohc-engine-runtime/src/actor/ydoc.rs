@@ -785,6 +785,30 @@ impl ActorHandle {
         .await
     }
 
+    /// For each open editor, given as its document and the lineage it is
+    /// bound to, whether its resync would drain pulled updates into it.
+    pub async fn ydoc_sessions_behind(
+        &self,
+        sessions: Vec<(DocKey, String)>,
+        token: CancellationToken,
+    ) -> Result<Vec<bool>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let mut behind = Vec::with_capacity(sessions.len());
+            for (key, lineage_claim_id) in &sessions {
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
+                behind.push(dohc_engine_sync::live_session_has_drainable_deferred_ydoc(
+                    store,
+                    key,
+                    lineage_claim_id,
+                )?);
+            }
+            Ok(behind)
+        })
+        .await
+    }
+
     /// Test evidence seam: observe the actor-local writer cache without
     /// exposing it through the product protocol.
     #[doc(hidden)]

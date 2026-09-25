@@ -48,7 +48,7 @@ export function createNamedShareTransportRoutes(
   ) => () => void,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
 ) {
   return async function respondToNamedShareTransport(
     request: Request,
@@ -263,7 +263,7 @@ export function createNamedShareTransportRoutes(
         ),
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
       }
       return jsonResponse({
         ok: true,

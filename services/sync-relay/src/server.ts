@@ -595,7 +595,7 @@ export function createSyncRelayHandler({
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
-    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes}});
+    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes},discussionActivity});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -827,7 +827,10 @@ export function createSyncRelayHandler({
       }
 
       if (route.route === "log" || route.route === "log-coordinate") {
-        return await respondToWorkspaceReplication(request, route, actor);
+        return await respondToWorkspaceReplication(request, route, actor, undefined, async () => {
+          const current = await resolveActor(request, route.workspaceId);
+          if (current.userId !== actor.userId) throw notFound();
+        });
       }
 
       throw relayError("method_not_allowed");

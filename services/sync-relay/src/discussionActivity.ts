@@ -21,6 +21,17 @@ export class DiscussionActivityCapacityError extends Error {
   }
 }
 
+// Readers of one workspace log wait in two groups, each with its own group
+// cap, so accountless readers of a shared link cannot use up the capacity
+// the owner's devices wait in.
+export function linkLogWaitGroup(workspaceId: string): string {
+  return `log:${workspaceId}`;
+}
+
+export function ownerLogWaitGroup(workspaceId: string): string {
+  return `owner-log:${workspaceId}`;
+}
+
 // This hub is only a bounded wake signal. SQLite owns revisions and activity
 // data, so losing this object on restart cannot invalidate a saved watermark.
 export class DiscussionActivityHub {
@@ -48,6 +59,12 @@ export class DiscussionActivityHub {
 
   wake(shareId: string): void {
     this.waiters.wake(shareId, undefined);
+  }
+
+  /** The workspace log changed: wakes its link readers and its owner's devices. */
+  wakeLog(workspaceId: string): void {
+    this.waiters.wake(linkLogWaitGroup(workspaceId), undefined);
+    this.waiters.wake(ownerLogWaitGroup(workspaceId), undefined);
   }
 
   stats(): { shares: number; waiters: number } {

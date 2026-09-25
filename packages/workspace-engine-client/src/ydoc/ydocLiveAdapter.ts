@@ -719,7 +719,7 @@ export class YdocAdapterSession {
     edit: YdocLocalTextEdit,
     options?: ApplyLocalUpdateOptions,
   ): Promise<YdocRecordUpdateResult | undefined> {
-    this.assertOpen();
+    this.assertRecordable();
     const text = this.doc.getText(edit.root);
     const current = text.toString();
     assertTextEditIsValid(current, edit);
@@ -743,7 +743,7 @@ export class YdocAdapterSession {
     seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
     const operation = this.recordChain.then(async () => {
-      this.assertOpen();
+      this.assertRecordable();
       try {
         return await this.requestRecordUpdate(update, options, seedUpdate);
       } catch (refusal) {
@@ -864,7 +864,7 @@ export class YdocAdapterSession {
     // tracked, so a caller never has to know whether one is owed.
     if (!this.engineMissingLocalState) return Promise.resolve();
     const operation = this.recordChain.then(async () => {
-      this.assertOpen();
+      this.assertRecordable();
       const durableState = await this.requestResyncState();
       if (durableState.lineageClaimId !== this.lineageClaimId) {
         throw new YdocAdapterError(
@@ -968,8 +968,12 @@ export class YdocAdapterSession {
   }
 
   async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
-    this.assertOpen();
+    this.assertRecordable();
     await this.recordChain;
+    // A resync request that landed while the journal drained is waited out,
+    // not reported as a failed save: the settle must not write text this
+    // editor has not shown yet, and the resync shows it.
+    await this.resyncIfNeeded();
     this.assertOpen();
     if (this.ownerDraft) {
       await this.resendMissingState();
@@ -1077,8 +1081,13 @@ export class YdocAdapterSession {
     if (this.staleError !== null) {
       // A gap/generation event observed while already stale is still an
       // event whose update this doc missed — the in-flight resync must run
-      // one more pass rather than resetting the baseline past it.
-      this.droppedWhileStale = true;
+      // one more pass rather than resetting the baseline past it. With no
+      // resync in flight, the last one failed, and this request retries it.
+      if (this.resyncPending === null) {
+        void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+      } else {
+        this.droppedWhileStale = true;
+      }
       return;
     }
     this.staleError = error;
@@ -1271,7 +1280,7 @@ export class YdocAdapterSession {
     options?: ApplyLocalUpdateOptions,
     seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
-    this.assertOpen();
+    this.assertRecordable();
     const capture: LocalRecordCapture = {
       options,
       before: snapshotDocUtf16(this.doc),
@@ -1314,6 +1323,16 @@ export class YdocAdapterSession {
   }
 
   private assertOpen(): void {
+    this.assertRecordable();
+    if (this.staleError !== null) throw this.staleError;
+  }
+
+  // A pending resync does not stop an ordinary session from journaling. The
+  // engine appends a local update only to the lineage the session holds, so
+  // the resync merges both sides. A keystroke refused here would instead tear
+  // the session down and rebuild it. An owner draft still waits, because its
+  // append names the draft revision the resync renews.
+  private assertRecordable(): void {
     if (this.closed) {
       throw new YdocAdapterError(
         "session-closed",
@@ -1321,7 +1340,7 @@ export class YdocAdapterSession {
       );
     }
     if (this.quarantinedError !== null) throw this.quarantinedError;
-    if (this.staleError !== null) throw this.staleError;
+    if (this.ownerDraft !== undefined && this.staleError !== null) throw this.staleError;
   }
 }
 
