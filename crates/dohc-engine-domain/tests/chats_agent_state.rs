@@ -27,6 +27,7 @@ fn start(
     chats
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: thread.to_owned(),
@@ -60,6 +61,7 @@ fn send(
     chats
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread.to_owned(),
                 message_id: message.to_owned(),

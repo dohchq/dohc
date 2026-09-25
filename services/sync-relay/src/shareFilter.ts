@@ -898,6 +898,9 @@ const SERVED_CHAT_FIELDS = {
     "parentMessageId",
     "body",
     "createdAtMs",
+    // An automation's chain depth, so a chain stops across computers. The
+    // automation and its Collection path never leave the author's computer.
+    "chainDepth",
   ],
   "chat.reaction.set": [
     "reactionId",

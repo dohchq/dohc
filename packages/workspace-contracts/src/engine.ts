@@ -588,9 +588,27 @@ export type ChatChannelKind = "channel" | "dm" | "agent";
 /// What a group holds: posts, one running chat, or both.
 export type ChatChannelType = "posts" | "chat" | "both";
 
+// An automation posts only through the automation executor, which names
+// itself with `ChatMessageAutomationInput`. Only people and agents react.
 type ChatActor =
   | { kind: "human"; displayName: string }
-  | { kind: "agent"; displayName: string };
+  | { kind: "agent"; displayName: string }
+  | { kind: "automation"; displayName: string };
+
+// The automation executor's claim on a message it writes. Stays on this computer.
+export interface ChatMessageAutomationInput {
+  // `collection:<collection path>#<automation id>`.
+  automationId: string;
+  // One more than the depth of the change that triggered the automation.
+  chainDepth: number;
+}
+
+// Which automation wrote a message on this computer. A message another
+// computer's automation wrote has an automation author but no `automation`.
+interface ChatMessageAutomation {
+  automationId: string;
+  collectionPath: string;
+}
 
 interface LinkedChatFileRef {
   objectId: WorkspaceObjectId;
@@ -677,6 +695,7 @@ export interface ChannelThreadSummary {
     authorUserId?: string;
     createdAtMs: number;
     bodySnippet: string;
+    automation?: ChatMessageAutomation;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
@@ -734,6 +753,7 @@ export interface ChatMessage {
   origin?: "cli";
   body: string;
   createdAtMs: number;
+  automation?: ChatMessageAutomation;
   attachments: ChatAttachment[];
 }
 
@@ -764,7 +784,7 @@ type ChatReactionState = "added" | "removed";
 // reaction ("<User>" / "<Agent>") without a separate lookup.
 interface ChatReactionAuthor {
   authorId: string;
-  kind: ChatActor["kind"];
+  kind: "human" | "agent";
   displayName: string;
 }
 
@@ -917,9 +937,15 @@ export interface LinkedChatStore {
   // The fast composer path: thread + first message land in one transaction so
   // a failed send can never strand an empty thread. Title is optional — an
   // untitled thread displays its first-message snippet (the anti-forum rule).
+  // The automation executor names the thread and message ids, its idempotency
+  // key, and itself, so a retried step replays the recorded message.
   startChannelThread(input: {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
+    threadId?: ChatThreadId;
+    messageId?: ChatMessageId;
+    idempotencyKey?: string;
+    automation?: ChatMessageAutomationInput;
     title?: string;
     lane?: ChatThreadLane;
     author: ChatActor;
@@ -970,6 +996,9 @@ export interface LinkedChatStore {
   sendMessage(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
+    messageId?: ChatMessageId;
+    idempotencyKey?: string;
+    automation?: ChatMessageAutomationInput;
     author: ChatActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
