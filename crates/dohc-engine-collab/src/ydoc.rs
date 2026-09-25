@@ -543,20 +543,61 @@ impl Ydoc {
         if source == canonical_projection {
             return Some(source);
         }
+        self.source_reproduces(&source, canonical_projection, true)
+            .then_some(source)
+    }
+
+    /// The exact Markdown source for a settle into the local workspace, where
+    /// `local_text` is the file's current snapshot. A source whose body is
+    /// that file's body keeps its bytes even when a Markdown reader would see
+    /// structure the engine's reader keeps as text, such as a nested list:
+    /// the body is already the person's file, so settling it writes no bytes
+    /// the file did not hold. Without this, a frontmatter-only engine edit
+    /// rewrote such a body. The source must still rebuild the document. Try
+    /// [`Ydoc::preserved_markdown_source`] first; this admits more.
+    pub fn locally_preserved_markdown_source(
+        &self,
+        canonical_projection: &str,
+        local_text: &str,
+    ) -> Option<String> {
+        let reference = self.markdown_source_reference()?;
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return None;
+        }
+        let source = self.markdown_source(&reference)?;
+        let body = |markdown: &'_ str| {
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+                .map_or(markdown.len(), |(_, body)| body.len())
+        };
+        let (source_body, local_body) = (body(&source), body(local_text));
+        (source[source.len() - source_body..] == local_text[local_text.len() - local_body..]
+            && self.source_reproduces(&source, canonical_projection, false))
+        .then_some(source)
+    }
+
+    /// Whether `source` rebuilds a document that projects
+    /// `canonical_projection`, under the importer's reading or the fold's.
+    /// With `reads_alike`, each text block must also read as its projection
+    /// does; see [`markdown_reads_alike`].
+    fn source_reproduces(
+        &self,
+        source: &str,
+        canonical_projection: &str,
+        reads_alike: bool,
+    ) -> bool {
         [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
             .any(|reading| {
                 let staged = Ydoc::wire();
                 self.copy_tagged_frontmatter_to(&staged);
                 staged
-                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, &source, reading)
+                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
                     .is_ok()
                     && staged
                         .project_richdoc()
                         .is_ok_and(|projection| projection == canonical_projection)
-                    && markdown_reads_alike(&source, canonical_projection, reading)
+                    && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
             })
-            .then_some(source)
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -6853,6 +6894,47 @@ mod projection_tests {
                 .collect();
             assert_eq!(references, vector.references, "{:?}", vector.text);
         }
+    }
+
+    #[test]
+    fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
+        // The fold reads the nested item as text, so a reader of the source
+        // sees structure the document lacks.
+        let file = "---\nid: rec\n---\n\n- parent\n  - nested\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)
+            .expect("richdoc rewrite");
+        let canonical = witness_source(&doc, file);
+        assert_eq!(doc.preserved_markdown_source(&canonical), None);
+        // The file on disk holds that body, so a local settle keeps it, also
+        // under other frontmatter.
+        for local in [
+            file,
+            "---\nid: rec\nrelated: old\n---\n\n- parent\n  - nested\n",
+        ] {
+            assert_eq!(
+                doc.locally_preserved_markdown_source(&canonical, local)
+                    .as_deref(),
+                Some(file),
+                "{local:?}"
+            );
+        }
+        // Any other body is dropped.
+        for local in ["---\nid: rec\n---\n\n- parent\n", "Hello\n"] {
+            assert_eq!(
+                doc.locally_preserved_markdown_source(&canonical, local),
+                None,
+                "{local:?}"
+            );
+        }
+        // A source that does not rebuild the document is dropped, even when
+        // the file holds it.
+        let forged = "---\nid: rec\n---\n\nHidden\n";
+        witness_source(&doc, forged);
+        assert_eq!(
+            doc.locally_preserved_markdown_source(&canonical, forged),
+            None
+        );
     }
 
     #[test]
