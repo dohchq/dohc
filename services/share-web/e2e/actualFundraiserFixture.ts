@@ -8,6 +8,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
+import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
 import { APP_PUBLICATION_LIMITS, prepareOwnerAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
 import { openSyncRelayStorage } from "../../sync-relay/src/storage";
 import type { StorageContext } from "../../sync-relay/src/storage/context";
@@ -37,21 +38,13 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     manifestBytes = Buffer.from(JSON.stringify(manifest));
   }
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
-  for (const path of manifest.inputs as string[]) sources.set(path, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/${path}`, import.meta.url)));
+  // app.publish.json paths are relative to the app folder.
+  for (const path of manifest.inputs as string[]) sources.set(`fundraiser/${path}`, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/fundraiser/${path}`, import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
       async resolveDatasetRevision() { return revision; },
-      adapter: {
-        async captureSourceMetadata({workspaceId,versionId,paths}) {
-          const files = [...paths].sort().map(path => {
-            const bytes=sources.get(path);if(!bytes)throw Error(`Missing captured source ${path}`);
-            return {path,objectId:path,contentKind:"text" as const,sha256:sha(bytes),byteLength:bytes.byteLength,latestMomentId:"fixture-source"};
-          });
-          return {workspaceId,versionId,files,totalBytes:files.reduce((n,f)=>n+f.byteLength,0),sourceDigest:sha(JSON.stringify(["dohc-source-capture-v1",workspaceId,versionId,files]))};
-        },
-        async hydrateCapturedSources(capture) { return capture.files.map(file=>({path:file.path,sha256:file.sha256,bytes:Uint8Array.from(sources.get(file.path)!)})); },
-      },
+      adapter: sourceCaptureAdapter(sources),
     });
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;

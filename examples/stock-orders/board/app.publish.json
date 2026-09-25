@@ -1,9 +1,9 @@
 {
-  "entryPath": "stock-orders/board.ts",
+  "entryPath": "../board.ts",
   "inputs": [
-    "stock-orders/board.ts",
-    "stock-orders/client.ts",
-    "stock-orders/frontend.css"
+    "../board.ts",
+    "../client.ts",
+    "../frontend.css"
   ],
   "packageMap": {},
   "dataset": {
