@@ -5033,8 +5033,9 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
     assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
     engine
         .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])?;
-            Ok::<_, rusqlite::Error>(())
+            tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
         })
         .unwrap();
     next.origin_seq = 1;
