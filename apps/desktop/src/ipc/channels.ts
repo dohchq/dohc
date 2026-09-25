@@ -54,6 +54,7 @@ export const WORKBENCH_MENU_COMMANDS = [
   "install-update",
   "settings",
   "toggle-theme",
+  "unpin-app",
 ] as const;
 
 export const PLUGIN_PIPELINE_STATUSES = [
@@ -189,6 +190,7 @@ export const CHANNELS = {
   startSitePreview: "desktop:start-site-preview",
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
+  sitePreviewReplaced: "desktop:site-preview-replaced",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",
@@ -352,6 +354,7 @@ export const CHANNELS = {
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
   reloadUserSettings: "desktop:reload-user-settings",
+  setAppPinned: "desktop:set-app-pinned",
   getUserSettingsFilePath: "desktop:get-user-settings-file-path",
   openUserSettingsFile: "desktop:open-user-settings-file",
   openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",

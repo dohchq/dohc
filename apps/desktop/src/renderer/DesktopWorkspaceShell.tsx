@@ -64,7 +64,10 @@ import {
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
 import { useAgentSetup } from "./shell/useAgentSetup";
-import type { DesktopUserSettings } from "../settings/userSettings";
+import {
+  DEFAULT_SIDEBAR_SETTINGS,
+  type DesktopUserSettings,
+} from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { useCloudPresence } from "./shell/useCloudPresence";
@@ -230,7 +233,12 @@ import {
   parsePluginPanelTabPath,
   parsePluginViewId,
   parsePluginWebAppTabPath,
+  appViewId,
   clearPluginView,
+  keepActiveViewAfterRailChange,
+  keepActiveViewShown,
+  parseAppViewId,
+  sidebarViews,
   pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
@@ -249,13 +257,17 @@ import {
   toggleChats,
   toggleFolderExpanded,
   togglePinned,
-  toggleSidebar,
+  toggleSidebarOnRail,
   VIEW_IDS,
+  type ActivityViewId,
   type EditorGroup,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import { ChatsPanel, type ChatsPanelTab } from "./workbench/ChatsPanel";
+import { usePinnedApps } from "./workbench/pinnedApps";
+import { pinnedAppsFor } from "../settings/pinnedApps";
+import { ipcErrorMessage } from "./ipcError";
 import { createFirstAppFiles } from "./workbench/createFirstApp";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
@@ -1119,6 +1131,15 @@ export function DesktopWorkspaceShell(props: {
         : [],
     [pluginCatalogLoad],
   );
+  const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
+  const railViews = useMemo(() => sidebarViews(sidebarSettings), [sidebarSettings]);
+  const pinnedRoots = useMemo(
+    () => pinnedAppsFor(props.userSettings?.settings, workspaceId),
+    [props.userSettings, workspaceId],
+  );
+  const pinnedApps = usePinnedApps(workspaceId, pinnedRoots);
+  const selectedAppRoot = parseAppViewId(wb.activeView);
+  const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
   // A shared view can never write the workspace (assertWritableWorkspace
   // refuses on the share's presence alone), so every plugin command
   // invoked from one is a dead click regardless of which plugin or command
@@ -1141,10 +1162,12 @@ export function DesktopWorkspaceShell(props: {
   // saying which view the user is looking at.
   const sidePanelTitle = isViewId(wb.activeView)
     ? activityViewLabel(wb.activeView)
-    : (selectedPluginViewState?.status === "ready" ||
-        selectedPluginViewState?.status === "off"
-      ? selectedPluginViewState.title
-      : "Plugin view");
+    : selectedApp !== null
+      ? selectedApp.label
+      : selectedPluginViewState?.status === "ready" ||
+          selectedPluginViewState?.status === "off"
+        ? selectedPluginViewState.title
+        : "Plugin view";
 
   // An uninstalled plugin leaves no selection behind. Only a loaded list can
   // say a plugin is gone — before it lands, the selection stands, so a restart
@@ -1153,6 +1176,76 @@ export function DesktopWorkspaceShell(props: {
     if (selectedPluginViewState?.status !== "absent") return;
     mutateWb(clearPluginView);
   }, [selectedPluginViewState?.status, mutateWb]);
+
+  // Every view on the rail, in its order: dohc's own, plugin views, pinned
+  // apps.
+  const railOrder = useMemo<readonly ActivityViewId[]>(
+    () => [
+      ...railViews,
+      ...railPluginViews.map((view) => view.viewId),
+      ...pinnedRoots.map(appViewId),
+    ],
+    [pinnedRoots, railPluginViews, railViews],
+  );
+  const railOrderRef = useRef(railOrder);
+  railOrderRef.current = railOrder;
+  // When the person hides the selected view or unpins the selected app, the
+  // selection moves to a view on the rail. Any other change to the rail,
+  // such as hiding another view, reordering, or pinning, leaves it alone, and
+  // so does a link or command that opens a hidden view. When the settings
+  // first arrive, a selection the rail does not show moves once; before that
+  // it stands, so a restart keeps the view that was open.
+  const railKey = railOrder.join("\0");
+  const settingsLoaded = props.userSettings !== null;
+  const previousRailRef = useRef<readonly ActivityViewId[] | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const previous = previousRailRef.current;
+    const rail = railOrderRef.current;
+    previousRailRef.current = rail;
+    mutateWb((state) =>
+      previous === null
+        ? keepActiveViewShown(state, rail)
+        : keepActiveViewAfterRailChange(state, previous, rail));
+  }, [mutateWb, railKey, settingsLoaded]);
+  // Toggling the side panel open shows a view on the rail, never a hidden one.
+  const toggleSidePanel = useCallback(
+    () => mutateWb((state) => toggleSidebarOnRail(state, railOrderRef.current)),
+    [mutateWb],
+  );
+
+  // A pin is a personal setting. Main applies each pin to the file as it is
+  // now, so two quick pins both land; the root hears the save through the
+  // settings broadcast, and the sidebar follows.
+  const setAppPinned = useCallback(
+    async (appRoot: string, pinned: boolean): Promise<void> => {
+      try {
+        await bridge().setAppPinned({ workspaceId, appRoot, pinned });
+      } catch (error) {
+        reportShellError(
+          pinned ? "dohc could not pin this app." : "dohc could not unpin this app.",
+          new Error(ipcErrorMessage(error)),
+          () => void setAppPinned(appRoot, pinned),
+        );
+      }
+    },
+    [reportShellError, workspaceId],
+  );
+  const showPinnedAppMenu = useCallback(
+    async (appRoot: string) => {
+      try {
+        const command = await bridge().showWorkbenchMenu({
+          workspaceId,
+          context: "pinned-app",
+          path: appRoot,
+        });
+        if (command === "unpin-app") await setAppPinned(appRoot, false);
+      } catch (error) {
+        reportShellError("Could not open the workbench menu.", error);
+      }
+    },
+    [reportShellError, setAppPinned, workspaceId],
+  );
 
   useEffect(
     () =>
@@ -2233,6 +2326,11 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [openFile],
+  );
+  // Opens an app of this workspace in its tab, as Apps does.
+  const openAppTab = useCallback(
+    (siteRoot: string) => openPathWithHeading(siteTabPath(siteRoot)),
+    [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
     (path: string) => {
@@ -3539,7 +3637,7 @@ export function DesktopWorkspaceShell(props: {
         mutateWb(toggleChats);
       } else if (key === "b") {
         event.preventDefault();
-        mutateWb(toggleSidebar);
+        toggleSidePanel();
       } else if (key === "w") {
         // CommandOrControl+W closes the tab. Close Window keeps the separate
         // CommandOrControl+Shift+W native accelerator.
@@ -3558,6 +3656,7 @@ export function DesktopWorkspaceShell(props: {
     mutateWb,
     openSettings,
     reportShellError,
+    toggleSidePanel,
     undoForEditor,
   ]);
 
@@ -3629,7 +3728,7 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "toggle-sidebar",
         label: "Toggle sidebar",
-        run: () => mutateWb(toggleSidebar),
+        run: toggleSidePanel,
       },
       {
         id: "close-tab",
@@ -3660,6 +3759,7 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle chats panel",
         run: () => mutateWb(toggleChats),
       },
+      // Every view of dohc's, hidden from the rail or not: a command opens it.
       ...VIEW_IDS.map((view) => ({
         id: `show-${view}`,
         label: `View: ${activityViewLabel(view)}`,
@@ -3672,6 +3772,11 @@ export function DesktopWorkspaceShell(props: {
         id: `show-${view.viewId}`,
         label: `View: ${view.title}`,
         run: () => mutateWb((state) => setView(state, view.viewId)),
+      })),
+      ...pinnedApps.map((app) => ({
+        id: `show-${appViewId(app.root)}`,
+        label: `View: ${app.label}`,
+        run: () => mutateWb((state) => setView(state, appViewId(app.root))),
       })),
       ...pluginCommandItems.map((entry) => ({
         id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
@@ -3771,7 +3876,9 @@ export function DesktopWorkspaceShell(props: {
     [
       activeDocumentPath,
       railPluginViews,
+      pinnedApps,
       pluginCommandItems,
+      toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -4530,7 +4637,7 @@ export function DesktopWorkspaceShell(props: {
         agentActive={agentActive}
         primarySidebar={{
           visible: wb.sidebarVisible,
-          onToggle: () => mutateWb(toggleSidebar),
+          onToggle: toggleSidePanel,
         }}
         chatsSidebar={{
           visible: wb.chatsVisible,
@@ -4748,8 +4855,11 @@ export function DesktopWorkspaceShell(props: {
       <div className="flex min-h-0 flex-1">
         <ActivityBar
           workspaceId={workspaceId}
+          views={railViews}
           activeView={wb.activeView}
           pluginViews={railPluginViews}
+          pinnedApps={pinnedApps}
+          onPinnedAppMenu={(appRoot) => void showPinnedAppMenu(appRoot)}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
           searchResultCount={
@@ -4876,6 +4986,8 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="apps" />}>
                 <LazyAppsView
                   workspaceId={workspaceId}
+                  pinnedApps={pinnedRoots}
+                  onSetPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
                   onCreateFirstApp={createFirstApp}
@@ -4891,6 +5003,24 @@ export function DesktopWorkspaceShell(props: {
                 activePluginDirectoryName={activePluginDetails?.directoryName ?? null}
                 onOpenDetails={openPluginDetailsTab}
               />
+            ) : selectedAppRoot !== null ? (
+              // The same sealed preview an app's tab runs: a sandboxed frame
+              // on a dohc loopback server, with no dohc bridge.
+              <Suspense fallback={<PanelLoading label="app" />}>
+                <LazySitePreviewPage
+                  key={selectedAppRoot}
+                  variant="panel"
+                  onOpenApp={openAppTab}
+                  onUnpin={() => void setAppPinned(selectedAppRoot, false)}
+                  workspaceId={workspaceId}
+                  reportError={reportShellError}
+                  siteRoot={selectedAppRoot}
+                  sharedView={!!shareView}
+                  onShareSite={(target) =>
+                    setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
+                  }
+                />
+              </Suspense>
             ) : selectedPluginViewState?.status === "ready" ? (
               <Suspense fallback={<PanelLoading label="plugin panel" />}>
                 <LazyPluginPanelPage
@@ -5296,6 +5426,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     reportError={reportShellError}
+                    onOpenApp={openAppTab}
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onShareSite={(target) =>

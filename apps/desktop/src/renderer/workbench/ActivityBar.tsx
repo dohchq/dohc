@@ -10,8 +10,9 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { PluginActivityView } from "./pluginActivityViews";
+import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
 import { PluginIcon } from "./PluginIcon";
-import { VIEW_IDS, type ActivityViewId, type ViewId } from "./workbenchState";
+import { appViewId, type ActivityViewId, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
 // workbench. Ported a11y/active patterns from the retired web ActivityBar
@@ -55,6 +56,7 @@ function RailButton(props: {
   // Numeric badge seam (Phase E5.0: search results count while showing).
   count?: number;
   onClick?: () => void;
+  onContextMenu?: () => void;
   // A node, not a component: dohc's views draw a lucide glyph and a plugin's
   // view draws its own icon file.
   icon: ReactNode;
@@ -105,6 +107,14 @@ function RailButton(props: {
       aria-label={props.label}
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
+      onContextMenu={
+        props.onContextMenu
+          ? (event) => {
+              event.preventDefault();
+              props.onContextMenu?.();
+            }
+          : undefined
+      }
       className={className}
     >
       {content}
@@ -118,6 +128,8 @@ function RailButton(props: {
 
 export function ActivityBar(props: {
   workspaceId: string;
+  // dohc's own views the person keeps in the sidebar, in their order.
+  views: readonly ViewId[];
   activeView: ActivityViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
@@ -126,6 +138,9 @@ export function ActivityBar(props: {
   // The views plugins contribute, after dohc's own. A plugin that is gone or
   // turned off contributes none, so its button leaves the rail with it.
   pluginViews: readonly PluginActivityView[];
+  // Apps pinned in this workspace, after the plugin views.
+  pinnedApps?: readonly PinnedApp[];
+  onPinnedAppMenu?: (appRoot: string) => void;
   onSelectView: (view: ActivityViewId) => void;
   onOpenCloud?: () => void;
   onOpenSettings?: () => void;
@@ -141,7 +156,7 @@ export function ActivityBar(props: {
       {/* The view list scrolls, so enough contributed views never push the
           Cloud and Settings buttons off the rail. */}
       <div inert={props.viewsDisabled || undefined} className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
-        {VIEW_IDS.map((view) => (
+        {props.views.map((view) => (
           <RailButton
             key={view}
             testId={`activity-${view}`}
@@ -172,6 +187,31 @@ export function ActivityBar(props: {
             }
           />
         ))}
+        {(props.pinnedApps ?? []).map((app) => {
+          const viewId = appViewId(app.root);
+          return (
+            <RailButton
+              key={viewId}
+              testId="activity-pinned-app"
+              label={app.label}
+              active={props.sidebarVisible && props.activeView === viewId}
+              onClick={() => props.onSelectView(viewId)}
+              onContextMenu={
+                props.onPinnedAppMenu ? () => props.onPinnedAppMenu?.(app.root) : undefined
+              }
+              // The app's initial tells pinned apps apart; its title is the
+              // button's name and tooltip.
+              icon={
+                <span
+                  aria-hidden
+                  className="grid size-[18px] place-items-center rounded-md border-[1.5px] border-current text-[11px] font-semibold leading-none"
+                >
+                  {pinnedAppInitial(app.label)}
+                </span>
+              }
+            />
+          );
+        })}
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         <RailButton

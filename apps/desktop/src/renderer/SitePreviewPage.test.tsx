@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { Profiler } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  SitePreviewReplacedEvent,
+  StartSitePreviewAnswer,
   GetSitePreviewLogsResult,
   SitePackageInfo,
   SitePackagePayload,
@@ -12,6 +14,13 @@ import type {
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
 import { deferred } from "../testing/deferred";
+
+// These wait on async bridge answers and userEvent settles. On a loaded
+// machine they can take longer than Testing Library's 1000 ms default, and a
+// wait that gives up first fails a test that was about to pass. Every wait
+// here runs until the condition holds, within the test's own budget.
+configure({ asyncUtilTimeout: 10_000 });
+vi.setConfig({ testTimeout: 20_000 });
 
 function readyShare(
   entryPath: string,
@@ -53,19 +62,28 @@ const workspaceSettingsResult = {
 const bridgeMock = {
   getSitePackage: vi.fn(async (_payload: SitePackagePayload): Promise<SitePackageInfo | null> => site),
   getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
-  startSitePreview: vi.fn(async (): Promise<StartSitePreviewResult> => ({
+  startSitePreview: vi.fn(async (_payload: { holderId: string }): Promise<StartSitePreviewAnswer> => ({
     siteRoot: "report",
     mode: "static" as const,
     url: "http://127.0.0.1:49152/",
     logs: [],
     exited: false,
+    generation: 1,
   })),
   getSitePreviewLogs: vi.fn(
     async (): Promise<GetSitePreviewLogsResult> => ({ logs: [], exited: false }),
   ),
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
+  onSitePreviewReplaced: vi.fn((listener: (event: SitePreviewReplacedEvent) => void) => {
+    replacedListeners.add(listener);
+    return () => { replacedListeners.delete(listener); };
+  }),
 };
+const replacedListeners = new Set<(event: SitePreviewReplacedEvent) => void>();
+function replace(event: SitePreviewReplacedEvent) {
+  act(() => { for (const listener of replacedListeners) listener(event); });
+}
 
 describe("SitePreviewPage", () => {
   beforeEach(() => {
@@ -77,6 +95,210 @@ describe("SitePreviewPage", () => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it("runs a pinned app in the side panel inside the same sandbox as its tab", async () => {
+    const tab = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    const tabFrame = await screen.findByTestId("site-preview-frame");
+    const tabAttributes = ["sandbox", "referrerpolicy", "src"].map((name) => tabFrame.getAttribute(name));
+    tab.unmount();
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" variant="panel" />);
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
+    expect(["sandbox", "referrerpolicy", "src"].map((name) => frame.getAttribute(name)))
+      .toEqual(tabAttributes);
+    // The side panel's header already names the folder.
+    expect(screen.getByText("Report")).toBeTruthy();
+    expect(screen.queryByText("report")).toBeNull();
+  });
+
+  it("shares a running preview when it opens, and starts again when the person picks a mode", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await screen.findByTestId("site-preview-frame");
+    expect(bridgeMock.startSitePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "static", restart: false }),
+    );
+    await user.click(screen.getByTestId("site-preview-options"));
+    await user.click(screen.getByTestId("site-preview-static"));
+    expect(bridgeMock.startSitePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "static", restart: true }),
+    );
+    // One surface keeps one name, so main counts it once.
+    const [first, second] = bridgeMock.startSitePreview.mock.calls.map(([payload]) => payload.holderId);
+    expect(second).toBe(first);
+  });
+
+  it("offers Unpin in a pinned panel whose folder no longer holds an app", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce(null);
+    const onUnpin = vi.fn();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" variant="panel" onUnpin={onUnpin} />);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Unpin" }));
+    expect(onUnpin).toHaveBeenCalledOnce();
+  });
+
+  it("follows a preview another surface started again, and ignores an older one", async () => {
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(new URL(frame.getAttribute("src") ?? "").port).toBe("49152");
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    const next = (generation: number, port: number): SitePreviewReplacedEvent => ({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation,
+      preview: { siteRoot: "report", mode: "build", url: `http://127.0.0.1:${port}/`, logs: [], exited: false, generation },
+    });
+
+    replace(next(3, 49160));
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49160");
+    expect(screen.getByTestId("site-preview-mode").textContent).toBe("Build");
+    // An older start, or one meant for another surface, changes nothing.
+    replace(next(2, 49170));
+    replace({ ...next(4, 49180), holderId: "another-surface" });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49160");
+
+    // A restart that failed after stopping the preview leaves nothing to show.
+    replace({ ...next(5, 49190), preview: null });
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.getByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
+  });
+
+  it("keeps starting, with no error, when another surface replaced its start, then follows the newer one", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({ replaced: true });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    expect(await screen.findByText("Starting static preview…")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-error")).toBeNull();
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 4,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:49184/", logs: [], exited: false, generation: 4 },
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49184");
+    expect(screen.queryByText("Starting static preview…")).toBeNull();
+  });
+
+  describe("a Share build another view replaced", () => {
+    const needsBuild: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      scripts: { build: "vite build" },
+      shareManifest: noRunnableArtifact,
+    };
+    const built: SitePackageInfo = { ...needsBuild, shareManifest: readyShare("report/dist/index.html") };
+
+    // Shares "report" once and answers the notice's Try again.
+    async function shareReplaced() {
+      bridgeMock.getSitePackage.mockImplementation(async (payload) =>
+        payload.path !== "report" ? null
+          : payload.effectivePreviewMode === "build" ? built : needsBuild);
+      const reportError = vi.fn();
+      const onShareSite = vi.fn();
+      const onOpenApp = vi.fn();
+      const page = (siteRoot: string) => (
+        <SitePreviewPage
+          workspaceId="ws-sites"
+          siteRoot={siteRoot}
+          onShareSite={onShareSite}
+          reportError={reportError}
+          onOpenApp={onOpenApp}
+        />
+      );
+      const view = render(page("report"));
+      await screen.findByTestId("site-preview-frame");
+      bridgeMock.startSitePreview.mockResolvedValueOnce({ replaced: true });
+      await userEvent.setup().click(screen.getByTestId("site-preview-share"));
+      await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
+      const [message, error, retry] = reportError.mock.calls[0]!;
+      expect(message).toBe(
+        "dohc did not share this app. Another view started its preview again before the build finished.",
+      );
+      expect(error).toBeNull();
+      expect(onShareSite).not.toHaveBeenCalled();
+      return { view, page, retry: retry as () => void, onShareSite, onOpenApp };
+    }
+
+    afterEach(() => {
+      bridgeMock.getSitePackage.mockImplementation(async () => site);
+    });
+
+    it("says so through the shell, and Try again shares from the same page", async () => {
+      const shared = await shareReplaced();
+      await act(async () => { shared.retry(); });
+      await waitFor(() => expect(shared.onShareSite).toHaveBeenCalledOnce());
+      expect(shared.onOpenApp).not.toHaveBeenCalled();
+    });
+
+    it("opens the app instead when the page moved to another app", async () => {
+      const shared = await shareReplaced();
+      shared.view.rerender(shared.page("other"));
+      await screen.findByText("App not detected");
+      const starts = bridgeMock.startSitePreview.mock.calls.length;
+      await act(async () => { shared.retry(); });
+      expect(shared.onOpenApp).toHaveBeenCalledExactlyOnceWith("report");
+      expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(starts);
+      expect(shared.onShareSite).not.toHaveBeenCalled();
+    });
+
+    it("opens the app instead when the page closed, and starts nothing", async () => {
+      const shared = await shareReplaced();
+      shared.view.unmount();
+      const starts = bridgeMock.startSitePreview.mock.calls.length;
+      await act(async () => { shared.retry(); });
+      expect(shared.onOpenApp).toHaveBeenCalledExactlyOnceWith("report");
+      expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(starts);
+      expect(shared.onShareSite).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does not remember the mode of an answer a newer preview already replaced", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, kind: "package", scripts: { dev: "vite" } });
+    const own = deferred<StartSitePreviewAnswer>();
+    bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledOnce());
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    // The pinned panel builds the app before this tab's dev start answers.
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 5,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:49185/", logs: [], exited: false, generation: 5 },
+    });
+    await act(async () => {
+      own.resolve({ siteRoot: "report", mode: "dev", url: "http://127.0.0.1:49183/", logs: [], exited: false, generation: 3 });
+      await own.promise;
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49185");
+    expect(window.localStorage.getItem("dohc.site-preview-mode.v1:ws-sites:report")).not.toBe("dev");
+  });
+
+  it("never paints its own older answer over a newer preview another surface started", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await screen.findByTestId("site-preview-frame");
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    const own = deferred<StartSitePreviewAnswer>();
+    bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
+    await user.click(screen.getByTestId("site-preview-options"));
+    await user.click(screen.getByTestId("site-preview-static"));
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 7,
+      preview: { siteRoot: "report", mode: "static", url: "http://127.0.0.1:49177/", logs: [], exited: false, generation: 7 },
+    });
+    await act(async () => {
+      own.resolve({ siteRoot: "report", mode: "static", url: "http://127.0.0.1:49166/", logs: [], exited: false, generation: 6 });
+      await own.promise;
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49177");
   });
 
   it("starts the best available preview automatically and embeds the local URL", async () => {
@@ -101,6 +323,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
   });
@@ -118,6 +342,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -127,6 +352,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "dev",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -144,6 +371,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -153,6 +381,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -179,6 +409,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "build",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -197,6 +429,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -207,6 +440,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "build",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -261,6 +496,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -295,6 +532,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
@@ -319,6 +558,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -357,6 +598,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: sharedRoot,
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -564,6 +807,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
       exited: false,
+      generation: 1,
     });
     bridgeMock.getSitePreviewLogs.mockResolvedValueOnce({
       logs: [
@@ -609,6 +853,7 @@ describe("SitePreviewPage", () => {
         },
       ],
       exited: true,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -637,12 +882,13 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
       exited: false,
+      generation: 1,
     });
     bridgeMock.getSitePreviewLogs.mockReturnValueOnce(exitedLogs.promise);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByTestId("site-preview-frame");
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalled(),
     );
     await act(async () => {
@@ -690,6 +936,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "report ready", at: 1 }],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -697,6 +944,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
         exited: false,
+        generation: 1,
       });
     bridgeMock.getSitePreviewLogs
       .mockReturnValueOnce(pendingLogs.promise)
@@ -711,7 +959,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByText("Logs"));
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalledTimes(1),
     );
 
@@ -749,6 +997,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "ready", at: 1 }],
         exited: false,
+        generation: 1,
       });
       // Every poll returns a content-equal but reference-DIFFERENT ring: only
       // the sameLogs bailout keeps the previous state and skips the commit.
@@ -807,6 +1056,7 @@ describe("SitePreviewPage", () => {
           { stream: "stdout", text: "ready", at: 1 },
         ],
         exited: false,
+        generation: 1,
       });
       // At the ring cap a new chunk shifts the interior while the length stays
       // pinned, and multi-line chunks share one `at` — length plus last entry
@@ -977,6 +1227,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -984,6 +1235,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const onShareSite = vi.fn();
     const user = userEvent.setup();
@@ -997,7 +1249,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-share"));
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
 
     view.rerender(
       <SitePreviewPage
@@ -1050,6 +1302,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -1057,6 +1310,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const user = userEvent.setup();
     const view = render(
@@ -1069,7 +1323,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-share"));
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
 
     view.rerender(
       <SitePreviewPage
@@ -1103,7 +1357,7 @@ describe("SitePreviewPage", () => {
       .mockResolvedValueOnce(replacementSite);
 
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(1));
 
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
     await screen.findByText("Replacement");
@@ -1138,10 +1392,11 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49999/",
         logs: [],
         exited: false,
+        generation: 1,
       });
 
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(1));
 
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
     const frame = await screen.findByTestId("site-preview-frame");
@@ -1154,6 +1409,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       });
       await pendingStart.promise;
     });
@@ -1266,6 +1522,7 @@ describe("SitePreviewPage", () => {
       url: "https://example.com/preview",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1285,6 +1542,7 @@ describe("SitePreviewPage", () => {
       url: "https://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1301,6 +1559,7 @@ describe("SitePreviewPage", () => {
       url: "http://user:pass@127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1315,9 +1574,12 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     view.unmount();
 
+    // The page lets go under the name it started with.
+    const started = bridgeMock.startSitePreview.mock.calls[0]![0];
     expect(bridgeMock.stopSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
       siteRoot: "report",
+      holderId: started.holderId,
     });
   });
 
@@ -1359,6 +1621,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "report",
@@ -1366,13 +1629,14 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-static"));
-    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("site-preview-stop"));
 
     expect(await screen.findByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
@@ -1395,6 +1659,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "ready", at: 1 }],
         exited: false,
+        generation: 1,
       })
       .mockRejectedValueOnce(new Error("Replacement preview failed"));
     const user = userEvent.setup();
@@ -1430,6 +1695,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49153/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 
@@ -1439,6 +1705,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "replacement",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -1463,6 +1731,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49153/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 

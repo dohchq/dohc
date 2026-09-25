@@ -30,6 +30,7 @@ const settingsRequests = [
   [CHANNELS.getUserSettings, undefined],
   [CHANNELS.reloadUserSettings, undefined],
   [CHANNELS.setUserSettings, settingsPayload],
+  [CHANNELS.setAppPinned, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
   [CHANNELS.resetUserSettings, undefined],
   [CHANNELS.getUserSettingsFilePath, undefined],
   [CHANNELS.openUserSettingsFile, undefined],
@@ -106,6 +107,7 @@ async function harness() {
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, notifyRenderer, openPath,
+    knownWorkspaceIds: () => [...entries.keys()],
   });
   capability.registerSettingsIpcHandlers();
   const firstGroup = [...handlers.keys()];
@@ -399,6 +401,21 @@ describe("registered settings IPC", () => {
     });
     expect(h.scanWorkspace).not.toHaveBeenCalled();
     expect(h.refreshDispatchTray).toHaveBeenCalledTimes(3);
+  });
+
+  it("applies two quick pins to the file one after the other, so both land", async () => {
+    const h = await harness();
+    const [first, second] = await Promise.all([
+      h.invoke(CHANNELS.setAppPinned, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }),
+      h.invoke(CHANNELS.setAppPinned, { workspaceId: "workspace-a", appRoot: "budget", pinned: true }),
+    ]);
+    expect(first).toMatchObject({ settings: { sidebar: { pinnedApps: { "workspace-a": ["apps/trip"] } } } });
+    expect(second).toMatchObject({ settings: { sidebar: { pinnedApps: { "workspace-a": ["apps/trip", "budget"] } } } });
+    await h.invoke(CHANNELS.setAppPinned, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: false });
+    await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toMatchObject({
+      settings: { sidebar: { pinnedApps: { "workspace-a": ["budget"] } } },
+    });
+    expect(h.broadcastUserSettings).toHaveBeenCalledTimes(3);
   });
 
   it("opens this workspace's settings file through the workspace that asked", async () => {
