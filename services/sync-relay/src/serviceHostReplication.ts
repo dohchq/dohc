@@ -1,14 +1,13 @@
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
 import {createWorkspaceReplicationRoutes} from "./workspaceReplicationRoutes";
 import {createWorkspaceBlobRoutes} from "./workspaceBlobRoutes";
-import {DiscussionActivityHub} from "./discussionActivity";
 import type {SyncRelayStorage} from "./storage";
 import {errorResponse, notFound} from "./errors";
 
 /** This credential enters only ordinary replication, never an account resolver or share route. */
 export function createServiceHostReplication(options: {storage: SyncRelayStorage; key: Uint8Array; namespace: string}) {
-  // This path parks no reads: with no capacity, a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, new DiscussionActivityHub({maxTotalWaiters: 0}));
+  // It passes no session reauthentication, so a held log read answers at once.
+  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}});
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   return async (request: Request): Promise<Response> => {
     try {

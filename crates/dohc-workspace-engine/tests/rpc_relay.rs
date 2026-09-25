@@ -852,12 +852,22 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
     let path = "notes/shared.md";
     let relay = FakeRelay::start(RelayState::default());
 
-    // Device B starts the document and pushes it.
+    // Device B is signed in and synced before it starts the document, as a
+    // desktop is. It then starts the document and pushes it.
     let b_scratch = ScratchDir::new().expect("device B scratch");
     let b_transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let b = open_uncaptured_workspace(&b_transport, &b_scratch, &relay, workspace_id).await;
     let mut b_id = 1;
     seed_main(&b_transport, &b, &mut b_id, workspace_id).await;
+    seed_sync_identity(&b_transport, &b, &mut b_id).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
     let b_session = call(
         &b_transport,
         &b,
@@ -884,7 +894,6 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         record(b_doc.plaintext_insert(0, "Starting together.")),
     )
     .await;
-    seed_sync_identity(&b_transport, &b, &mut b_id).await;
     call(
         &b_transport,
         &b,
@@ -955,10 +964,24 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
     .await;
     publish_pushed_ops(&relay, workspace_id, &b_scratch);
     pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let asked = vec![json!({ "sessionId": a_session, "resyncRequired": true })];
     assert_eq!(
         resync_requests(&mut events),
-        vec![json!({ "sessionId": a_session, "resyncRequired": true })],
+        asked,
         "the pull must ask the idle editor for the edit it parked"
+    );
+
+    // The request is lost: with no receiver the engine drops events, as it
+    // does when the event queue is full. The next pull applies nothing and
+    // still asks, because the edit is still parked.
+    drop(events);
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let mut events = a_service.events().subscribe();
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    assert_eq!(
+        resync_requests(&mut events),
+        asked,
+        "a pull that applies nothing must ask again while the edit stays parked"
     );
 
     // The resync the request asks for carries B's edit to the editor.
@@ -981,10 +1004,7 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         .expect("apply resync state");
     assert_eq!(shown.plaintext_string(), "Starting together. Typed on B.");
 
-    // The resync drained what was parked, so a pull that applies B's next,
-    // unrelated change asks nothing.
-    push_unrelated_change(&b_transport, &b, &mut b_id, workspace_id, "after-resync").await;
-    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+    // The resync drained what was parked, so the next pull asks nothing.
     pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
     assert_eq!(resync_requests(&mut events), Vec::<Value>::new());
 }

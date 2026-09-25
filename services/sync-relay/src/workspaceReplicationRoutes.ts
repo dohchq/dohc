@@ -67,6 +67,10 @@ export function createWorkspaceReplicationRoutes(
     route: WorkspaceReplicationRoute,
     actor: { userId: string },
     guard: () => void = () => {},
+    // Resolves the caller's session again, and rejects when it no longer
+    // authenticates as `actor`. A held log read awaits it after every wait.
+    // Without it, the read does not wait.
+    reauthenticate?: () => Promise<void>,
   ): Promise<Response> {
     guard();
     if (route.route === "bootstrap" && request.method === "GET") {
@@ -163,11 +167,14 @@ export function createWorkspaceReplicationRoutes(
       const since = Math.max(requestedSince, epochLogFloor);
       const hold = url.searchParams.get("hold");
       if (hold !== null) {
+        const holdMs = parseLogHold(hold);
         return await waitForLogChange(request, route.workspaceId, actor.userId, {
           identity,
           requestedSince,
           since,
-          holdMs: parseLogHold(hold),
+          ...(reauthenticate === undefined
+            ? { holdMs: 0, reauthenticate: async () => {} }
+            : { holdMs, reauthenticate }),
           guard,
         });
       }
@@ -239,8 +246,7 @@ export function createWorkspaceReplicationRoutes(
 
   // A held read tells a device when its log has an op past `since`, so an
   // idle device can pull only when there is something to pull. It answers
-  // only `hasMore` and never serves an op: a session revoked while its read
-  // was parked learns that the log changed, never what changed. `hold` is an
+  // only `hasMore` and never serves an op. `hold` is an
   // upper bound. The relay answers at once when the log already has an op,
   // and also when its parked reads are at capacity, so a device must not
   // read an early empty answer as a promise to hold the next one.
@@ -254,6 +260,7 @@ export function createWorkspaceReplicationRoutes(
       since: number;
       holdMs: number;
       guard: () => void;
+      reauthenticate: () => Promise<void>;
     },
   ): Promise<Response> {
     let since = input.since;
@@ -276,8 +283,10 @@ export function createWorkspaceReplicationRoutes(
         if (!(error instanceof DiscussionActivityCapacityError)) throw error;
         break;
       }
-      // The read was authorized before it parked. Authorize it again, and
-      // re-read the epoch floor, before it answers or parks again.
+      // The read was authenticated and authorized before it parked. Check
+      // both again, and re-read the epoch floor, before it answers or parks
+      // again: a session revoked during the wait learns nothing.
+      await input.reauthenticate();
       input.guard();
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
       since = Math.max(

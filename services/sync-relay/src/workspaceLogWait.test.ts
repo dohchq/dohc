@@ -5,12 +5,14 @@ import {
   linkLogWaitGroup,
 } from "./discussionActivity";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
+import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import {
   appendLog,
   claimWorkspace,
   closeTestStorages,
   json,
   request,
+  resolveTestActor,
   testHandler,
   testStorage,
 } from "./testing";
@@ -69,9 +71,54 @@ describe("held device log reads", () => {
 
   it("answers with no change once the hold passes", async () => {
     const { h, activity } = await ownedLog();
-    const response = await h(request("owner", "/sync/workspace/log?since=1&hold=20"));
-    expect(await json(response)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false });
-    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+    vi.useFakeTimers();
+    try {
+      let answered = false;
+      const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000")).finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(activity.stats().waiters).toBe(1);
+      expect(answered).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await json(await held)).toEqual({ ok: true, ops: [], nextCursor: 1, hasMore: false });
+      expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells a session revoked during the hold nothing about the log", async () => {
+    const revoked = new Set<string>();
+    const storage = await testStorage();
+    const activity = new DiscussionActivityHub();
+    const h = testHandler(storage, {
+      discussionActivity: activity,
+      resolveActor: (incoming, workspaceId) => {
+        const bearer = incoming.headers.get("authorization") ?? "";
+        if (revoked.has(bearer)) throw new UnauthorizedError();
+        return resolveTestActor(incoming, workspaceId);
+      },
+    });
+    await claimWorkspace(h, "owner", "workspace");
+    await appendLog(h, "owner", "workspace", [firstOp]);
+    // The desktop's session, and another device of the same account.
+    const desktop = new Request("http://relay.test/sync/workspace/log?since=1&hold=30000", {
+      headers: { authorization: "Bearer user:owner", "x-dohc-relay-client-ip": "192.0.2.10" },
+    });
+    const held = h(desktop);
+    await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
+    revoked.add("Bearer user:owner");
+    storage.appendLogBatch({
+      workspaceId: "workspace",
+      originId: "origin-b",
+      ops: [{ ...firstOp, payloadJson: "{}" }],
+    });
+    activity.wakeLog("workspace");
+    const response = await held;
+    expect(response.status).toBe(401);
+    expect(await response.text()).not.toContain("hasMore");
+    expect(activity.stats().waiters).toBe(0);
   });
 
   it("releases the parked read when the device goes away", async () => {

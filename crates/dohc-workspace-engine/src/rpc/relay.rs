@@ -615,13 +615,16 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
-        // Only an applied envelope can park an edit for an open editor.
-        if let RelayOperationOutcome::Sync(
-            SyncPassOutcome::Complete { applied, .. }
-            | SyncPassOutcome::CrashedAfterApply { applied, .. },
-        ) = &outcome
-            && *applied > 0
-        {
+        // Every terminal page asks, whether or not it applied anything: an
+        // earlier request may have been dropped, and the parked updates are the
+        // debt, which only the editor's resync clears.
+        if matches!(
+            &outcome,
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                has_more: false,
+                ..
+            })
+        ) {
             self.notify_editors_behind(ctx, &open).await;
         }
         let pending = match &outcome {
@@ -661,9 +664,10 @@ impl EngineService {
     /// and only that editor's resync, settle, or close drains it. Ask each open
     /// editor of this workspace with parked updates it can take to resync, so
     /// an idle editor shows another device's edits. The request is advisory
-    /// like every event: the parked updates stay durable, and the next pull
-    /// that applies anything asks again. A failed check therefore does not
-    /// fail the committed pull.
+    /// like every event, and the event queue drops it when full. The parked
+    /// updates stay durable until the resync drains them, so the next pull asks
+    /// again, including a pull that applies nothing. A failed check therefore
+    /// does not fail the committed pull.
     async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()

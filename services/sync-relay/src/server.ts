@@ -795,7 +795,10 @@ export function createSyncRelayHandler({
       }
 
       if (route.route === "log" || route.route === "log-coordinate") {
-        return await respondToWorkspaceReplication(request, route, actor);
+        return await respondToWorkspaceReplication(request, route, actor, undefined, async () => {
+          const current = await resolveActor(request, route.workspaceId);
+          if (current.userId !== actor.userId) throw notFound();
+        });
       }
 
       throw relayError("method_not_allowed");
