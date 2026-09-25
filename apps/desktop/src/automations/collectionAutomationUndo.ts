@@ -49,6 +49,9 @@ function changesOf(runs: readonly StoredRun[]): { added: Map<string, string>; re
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
+    // A record is listed as created before its fields are written, so one a
+    // run stopped after creating is still found.
+    for (const created of run.created) added.set(created.recordId, created.path);
     for (const { writes } of run.applied) {
       for (const write of writes) {
         if (write.kind === "created") added.set(write.recordId, write.path);

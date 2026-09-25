@@ -971,6 +971,24 @@ describe("Collection automations", () => {
     expect(finished).toMatchObject({ undone: true });
   });
 
+  it("moves a record to the trash that a run created before it stopped setting its fields", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The task's fields land, the record is created, then its fields cannot be set.
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    const added = [...w.records.values()].find((record) => record.collection === "Log")!;
+
+    const trashed: string[] = [];
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async (path) => {
+      trashed.push(path);
+    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0 });
+    expect(trashed).toEqual([added.path]);
+  });
+
   it("undoes what a run did under the definition a person started it over from", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
