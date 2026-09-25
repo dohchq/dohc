@@ -54,7 +54,7 @@ function fakeSession(options: { settleError?: Error } = {}): {
     get initialUpdate() {
       return Y.encodeStateAsUpdate(doc);
     },
-    applyLocalUpdate(
+    async applyLocalUpdate(
       update: Uint8Array,
       onArmed?: () => void,
       applyOptions?: {

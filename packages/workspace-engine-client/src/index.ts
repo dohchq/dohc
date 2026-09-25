@@ -10,6 +10,7 @@ export {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,

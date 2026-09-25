@@ -170,6 +170,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
             return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
         }
+        RuntimeError::Collab(CollabError::IdempotencyKeyReused) => {
+            return WireError::new(ErrorCode::InvalidParams, "idempotency-key-reuse-mismatch");
+        }
         RuntimeError::Relay(RelayError::ApiVersionTooOld) => {
             return WireError::new(
                 ErrorCode::ProtocolVersionUnsupported,
@@ -413,6 +416,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::MissingDependencies
         | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
+        | CollabError::IdempotencyKeyReused
         | CollabError::OwnerOutboxFrozen
         | CollabError::RestoreFenced
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
@@ -669,6 +673,10 @@ mod tests {
             reason: "test corrupt lineage".to_owned(),
         }));
         assert_eq!(corrupt.code, ErrorCode::Internal);
+
+        let reused = map_runtime(RuntimeError::Collab(CollabError::IdempotencyKeyReused));
+        assert_eq!(reused.code, ErrorCode::InvalidParams);
+        assert_eq!(reused.message, "idempotency-key-reuse-mismatch");
 
         let storage =
             dohc_engine_storage::StorageError::persist_public(rusqlite::Error::InvalidQuery);

@@ -1713,6 +1713,7 @@ async function daemonDeathCapture(
     generation: number;
     lineage: "present" | "absent";
     durableUpdates: Uint8Array[];
+    journalKeys: Array<string | null>;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1733,6 +1734,8 @@ async function daemonDeathCapture(
     generation: 0,
     lineage: "present" as "present" | "absent",
     durableUpdates: [] as Uint8Array[],
+    // The idempotency key each journal write carried, null for none.
+    journalKeys: [] as Array<string | null>,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1841,11 +1844,12 @@ async function daemonDeathCapture(
       // is asserted on directly instead; see `state.reportedLineage`.
       lineage: reportLineage(),
       evict: async () => undefined,
-      async applyLocalUpdate(update) {
+      async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
         Y.applyUpdate(doc, update);
         state.durableUpdates.push(update);
+        state.journalKeys.push(applyOptions?.idempotencyKey ?? null);
       },
       async settleNow() {
         if (!state.daemonAlive) throw transportDeath();
@@ -1956,6 +1960,46 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   // And the session is honestly live again, not still reported dead.
   expect(outcomes.at(-1)).toBe(true);
 
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("journals a keyed write on a dead session under its own key once the daemon is back", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-keyed-",
+    "ydoc-death-keyed",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-keyed",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(rendererDoc.getText("plainText").length, "KEYED");
+  await session.applyLocalUpdate(
+    Y.encodeStateAsUpdate(rendererDoc, before),
+    undefined,
+    { idempotencyKey: "claim/1/0" },
+  );
+
+  // The revive replays the outage text without a key; the keyed write
+  // follows as its own journal write, under its own key.
+  expect(state.generation).toBe(2);
+  expect(state.journalKeys).toEqual([null, "claim/1/0"]);
+  expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -4240,9 +4284,13 @@ it("a delete landing after a settle's write but before its late onSettled callba
   const settleGate = new Promise<void>((resolve) => {
     releaseSettled = resolve;
   });
+  // A clock that moves on every read, so the delete below lands strictly
+  // after the session opened even when both fall in one real millisecond.
+  let clockMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-settle-clear-race-",
     {
+      now: () => ++clockMs,
       wrapProvider: (base) => async (openOptions) => {
         const inner = await base(openOptions);
         let token = 0;

@@ -993,3 +993,51 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     request.method === YDOC_METHOD.recordUpdate &&
     (request.params as { actorOriginId?: string }).actorOriginId === "claude-code")).toBe(true);
 });
+
+it("refuses a reused idempotency key with other content, and none of that content lands", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const keyedWrite = (text: string) => {
+    const scratch = new Y.Doc();
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
+    const before = Y.encodeStateVector(scratch);
+    typeIntoBody(scratch, text);
+    return session.applyLocalUpdate(
+      Y.encodeStateAsUpdate(scratch, before),
+      undefined,
+      { idempotencyKey: "claim/1/0" },
+    );
+  };
+  await keyedWrite("First attempt.");
+  await session.settleNow();
+
+  const refused = expect(keyedWrite("Changed retry.")).rejects.toThrow(
+    "idempotency-key-reuse-mismatch",
+  );
+  await session.settleNow();
+  await refused;
+
+  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Changed retry.");
+  const journal = new Y.Doc();
+  for (const update of ydoc.recordedUpdates) Y.applyUpdate(journal, update);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(journal))).not.toContain("Changed retry.");
+  expect(captureErrors).toEqual([]);
+
+  // The session still takes ordinary writes, and they land beside the first.
+  session.applyLocalUpdate((() => {
+    const scratch = new Y.Doc();
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
+    const before = Y.encodeStateVector(scratch);
+    typeIntoBody(scratch, "Next edit.");
+    return Y.encodeStateAsUpdate(scratch, before);
+  })());
+  await session.settleNow();
+  const settled = await readFile(join(root, PATH), "utf8");
+  expect(settled).toContain("First attempt.");
+  expect(settled).toContain("Next edit.");
+  expect(settled).not.toContain("Changed retry.");
+  await session.close({ settle: false });
+});

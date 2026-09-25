@@ -288,7 +288,9 @@ export async function setCollectionRecordFields(
       }
       let armed = false;
       const actorOriginId = actorOriginIdFor(input.author);
-      session.applyLocalUpdate(
+      // Rejects when the engine already recorded this idempotency key with
+      // other content: none of this change was recorded, so nothing settles.
+      await session.applyLocalUpdate(
         update,
         () => {
           armed = true;

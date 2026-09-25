@@ -1271,7 +1271,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const doc = markdownToYDoc(markdown);
       return providerSession({
         doc,
-        applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
+        applyLocalUpdate: vi.fn(async (update: Uint8Array, onArmed?: () => void) => {
           trace.push("apply");
           Y.applyUpdate(doc, update);
           onArmed?.();

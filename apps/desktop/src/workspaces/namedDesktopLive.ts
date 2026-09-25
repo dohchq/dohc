@@ -103,6 +103,7 @@ export function createNamedDesktopLiveCapture(options: {
           if (session.state().status === "live" && session.state().pendingUpdates === 0) {
             for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted);
           }
+          return Promise.resolve();
         },
         async readArtifactAsset() { throw new Error("Shared Markdown has no live artifact assets."); },
         async close() {

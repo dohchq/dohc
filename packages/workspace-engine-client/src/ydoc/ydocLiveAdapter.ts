@@ -9,6 +9,7 @@ import {
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -747,6 +748,9 @@ export class YdocAdapterSession {
       try {
         return await this.requestRecordUpdate(update, options, seedUpdate);
       } catch (refusal) {
+        // Recovery would resend this content under the same key, which the
+        // engine refuses again. The caller must hear the refusal itself.
+        if (isIdempotencyKeyReuseRefusal(refusal)) throw refusal;
         try {
           return await this.recoverCanonicalState(update, options);
         } catch (recoveryFailure) {

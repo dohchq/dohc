@@ -41,6 +41,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
@@ -377,7 +378,9 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
-  // write dedupes engine-side.
+  // write dedupes engine-side. When the engine already recorded that key with
+  // other content, the returned promise rejects with its refusal and nothing
+  // of the update reaches the document. It never rejects for anything else.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -386,7 +389,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
     },
-  ): void;
+  ): Promise<void>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
@@ -2246,7 +2249,7 @@ export function createWorkspaceEngineCapture(
         // it, leaving the document on "Saving…" with nothing left to arm
         // another settle). #514, and its two review rounds.
         const armed = announceOnce(onArmed);
-        void append(async () => {
+        const applied = append(async () => {
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
           // The renderer has already accepted this update, so the canonical doc
@@ -2254,7 +2257,8 @@ export function createWorkspaceEngineCapture(
           // A daemon generation is rebuilt around that text, never instead of
           // it: dropping the update here is exactly how visible typing vanished
           // once a generation died.
-          if (current === null) {
+          const keyed = applyOptions?.idempotencyKey !== undefined;
+          if (current === null && !keyed) {
             Y.applyUpdate(doc, update);
             // The revive replays the canonical doc — this update included —
             // into the new generation. It announces the update when that
@@ -2262,7 +2266,15 @@ export function createWorkspaceEngineCapture(
             await reviveDeadSession(doc, armed);
             return;
           }
+          // A revive replay carries no idempotency key, so a keyed update
+          // waits for the revived generation and journals under its key.
+          if (current === null) await reviveDeadSession(doc);
+          if (current === null) throw closedError();
           const generation = current;
+          // The generation applies the update to its doc before the journal
+          // answers, and that doc can be the canonical doc itself. Keep the
+          // state a refused key must return to.
+          const beforeKeyed = keyed ? Y.encodeStateAsUpdate(doc) : null;
           try {
             // The provider journals and arms its settle synchronously inside
             // this call, so the update is covered from here. Announce it before
@@ -2281,6 +2293,24 @@ export function createWorkspaceEngineCapture(
               canonicalLineageClaimId = generation.lineageClaimId;
             }
           } catch (error) {
+            // The engine recorded none of this update, so the document must
+            // not keep it either. Restore the canonical doc to its state
+            // before the update, rebuild the generation from it, and hand the
+            // refusal to the caller that chose the key. The renderer never
+            // received this update, so it needs no replacement.
+            if (beforeKeyed !== null && isIdempotencyKeyReuseRefusal(error)) {
+              if (canonicalDoc === doc) {
+                const restored = new Y.Doc();
+                Y.applyUpdate(restored, beforeKeyed);
+                canonicalDoc = restored;
+              }
+              await rebind(generation, { releaseBeforeOpen: true }).catch(
+                (rebindError: unknown) => {
+                  onError(`Y.Doc rebind of ${input.path}`, rebindError);
+                },
+              );
+              throw error;
+            }
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.
             //
@@ -2318,7 +2348,11 @@ export function createWorkspaceEngineCapture(
               onReplayArmed: armed,
             });
           }
-        }).catch((error: unknown) => {
+        });
+        // The key's refusal belongs to the caller that chose the key. Every
+        // other failure is the session's, reported here as before.
+        return applied.catch((error: unknown) => {
+          if (isIdempotencyKeyReuseRefusal(error)) throw error;
           onError(`Y.Doc local update of ${input.path}`, error);
         });
       },
