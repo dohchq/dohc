@@ -289,7 +289,7 @@ export function MentionText(props: {
           aria-label={`Open ${fileToken.path}${
             fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
           }`}
-          className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
+          className={`${className} cursor-pointer hover:bg-hover hover:text-ink`}
           title={fileToken.text}
           onClick={() =>
             props.onOpenPath?.(

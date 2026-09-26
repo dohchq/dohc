@@ -379,7 +379,7 @@ const TreeRow = memo(function TreeRow(props: {
             : props.active
               ? "bg-selected text-ink"
               : props.selected
-                ? "bg-selected/60 text-ink"
+                ? "bg-selected/85 text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
       >

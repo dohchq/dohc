@@ -94,8 +94,8 @@ describe("WCAG AA contrast, both modes", () => {
             expect(contrast(palette[mode][fg], fill), `${fg} on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
           }
           expect(contrast(fill, palette[mode][surface]), `${state} on ${surface} (${mode})`).toBeGreaterThanOrEqual(state === "hover" ? 1.04 : 1.1);
-          // Search halves both fills so its opaque match chip keeps 3:1.
-          const searchFill = mix(palette[mode].ink, palette[mode][surface], amount * 0.5);
+          // Search uses full hover and 80% selected, and its opaque match chip keeps 3:1 on both.
+          const searchFill = mix(palette[mode].ink, palette[mode][surface], amount * (state === "hover" ? 1 : 0.8));
           expect(contrast(palette[mode].match, searchFill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
       }

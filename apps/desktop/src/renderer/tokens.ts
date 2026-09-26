@@ -54,7 +54,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // ink text on it at AA (4.38:1) — see the contrast test below. The
     // graphite accent stays the only structural accent; this token means
     // exactly one thing: "your match".
-    match: "#3a7ee9",
+    match: "#397be4",
     success: "#38684e",
     warning: "#8a6420",
     danger: "#a6402c",
