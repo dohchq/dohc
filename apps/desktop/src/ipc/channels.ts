@@ -225,7 +225,7 @@ export const CHANNELS = {
   noticesChanged: "desktop:notices-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
-  chatDispatchUnavailable: "desktop:chat-dispatch-unavailable",
+  chatDispatchNotices: "desktop:chat-dispatch-notices",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",

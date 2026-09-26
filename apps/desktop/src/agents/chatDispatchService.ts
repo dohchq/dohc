@@ -1,3 +1,4 @@
+import type { ChatDispatchNotice } from "../ipc/bridgeContract";
 import { configuredRunnerCommand } from "./agentToolCatalog";
 import { NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
@@ -25,8 +26,7 @@ import {
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
-// How a run ended, as its notice says it. Each matches the note the run
-// leaves in its thread.
+// How a run ended, as its notice says it.
 type RunOutcome =
   | "finished" | "no-reply" | "timed-out" | "failed" | "not-started" | "restarted" | "quit" | "stopped";
 
@@ -138,16 +138,11 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
   ): Promise<void | (() => Promise<void>)>;
-  authorizeServiceNote(
-    workspace: ChatDispatchWorkspace,
-    threadId: string,
-    verifiedUserId: string | undefined,
-  ): Promise<boolean>;
   // The thread names the chat target, so a shared-channel push can cover the
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
-  onNoRunner?(workspace: ChatDispatchWorkspace, reason: "disabled" | "unconfigured"): void;
+  onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth.
   setRunAttribution(
@@ -448,74 +443,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return join(options.stateDir(), "run-logs", `${RUN_ID_LOG_TOKEN}.log`);
   }
 
-  async function sendAgentMessage(
-    workspace: ChatDispatchWorkspace,
-    threadId: string,
-    body: string,
-    runId?: string,
-    dispatchRequest?: AgentDispatchRequestOptions,
-  ): Promise<string | null> {
-    const identity = await options.identityFor(workspace, { threadId });
-    if (
-      !(await options.authorizeServiceNote(
-        workspace,
-        threadId,
-        identity.verifiedUserId,
-      ))
-    ) {
-      reportError(
-        new Error(
-          `Skipped an agent service note that cannot be shared from thread ${threadId}.`,
-        ),
-      );
-      return null;
-    }
-    const message = await options.chatStoreFor(workspace).sendMessage({
-      workspaceId: workspace.workspaceId,
-      threadId,
-      author: {
-        kind: "agent",
-        displayName: identity.displayName,
-      },
-      authorOwnerDisplayName: identity.ownerDisplayName,
-      ...(identity.verifiedUserId
-        ? { authorUserId: identity.verifiedUserId }
-        : {}),
-      body,
-    });
-    if (runId) {
-      try {
-        await options.dispatchStoreFor(workspace).recordRunMessage(
-          {
-            workspaceId: workspace.workspaceId,
-            messageId: message.id,
-            runId,
-          },
-          dispatchRequest,
-        );
-      } catch {
-        // The report itself is authoritative; a provenance chip is optional.
-      }
-    }
-    options.onMessagePosted(workspace, threadId);
-    return message.id;
-  }
-
-  async function agentNoteAlreadyExists(
-    workspace: ChatDispatchWorkspace,
-    threadId: string,
-    body: string,
-  ): Promise<boolean> {
-    const messages = await options.chatStoreFor(workspace).listMessages({
-      workspaceId: workspace.workspaceId,
-      threadId,
-    });
-    return messages.some(
-      (message) => message.author.kind === "agent" && message.body === body,
-    );
-  }
-
-  async function postFailureNote(
+  async function reportRunFailure(
     workspace: ChatDispatchWorkspace,
     run: AgentRunRecord,
     body: string,
@@ -526,15 +454,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       durableDispatchRequest,
     );
     if (current?.failureNotePosted) return;
-    if (!(await agentNoteAlreadyExists(workspace, run.threadId, body))) {
-      await sendAgentMessage(
-        workspace,
-        run.threadId,
-        body,
-        run.runId,
-        durableDispatchRequest,
-      );
-    }
+    options.onDispatchNotice?.(workspace, {
+      reason: "run-failed", threadId: run.threadId, runId: run.runId,
+      logPath: actualLogPath(run.runId, run.logPath), message: body,
+    });
     await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
   }
 
@@ -601,10 +524,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         }
         if (intent.exitCode !== 0) {
-          await postFailureNote(
+          await reportRunFailure(
             live.workspace,
             live.claim.run,
-            `⚠ Agent run failed (exit ${intent.exitCode}). Open the run chip for details.`,
+            `Agent run failed (exit ${intent.exitCode}). Copy details for the run’s log path.`,
           ).catch(reportError);
         } else if (linkedMessages?.length === 0) {
           if (
@@ -619,10 +542,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             );
             scheduleRecoveryScan(live.workspace);
           } else {
-            await postFailureNote(
+            await reportRunFailure(
               live.workspace,
               live.claim.run,
-              "⚠ Agent run produced no reply. Open the run chip for details.",
+              "Agent run produced no reply. Copy details for the run’s log path.",
             ).catch(reportError);
           }
         }
@@ -672,10 +595,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.killEscalation,
     );
     const dispatch = options.dispatchStoreFor(live.workspace);
-    await postFailureNote(
+    await reportRunFailure(
       live.workspace,
       live.claim.run,
-      `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
+      `Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Copy details for the run’s log path.`,
     ).catch(reportError);
     try {
       await oweRunNotice(live.workspace, live.claim.run.runId);
@@ -811,10 +734,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reportError(error);
       }
     }
-    await postFailureNote(
+    await reportRunFailure(
       workspace,
       claim.run,
-      "⚠ Agent run failed to start. Open the run chip for details.",
+      "Agent run failed to start. Check the runner in Settings → Agents & MCP.",
     ).catch(reportError);
     await oweRunNotice(workspace, claim.run.runId);
     await options.dispatchStoreFor(workspace).failRun({
@@ -983,7 +906,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (failedCount > 0) notifyRunUpdated(workspace);
         if (failedCount === 0) continue;
         try {
-          options.onNoRunner?.(workspace, command ? "disabled" : "unconfigured");
+          options.onDispatchNotice?.(workspace, {
+            reason: "no-runner", threadId,
+            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents & MCP.`,
+          });
         } catch (error) {
           reportError(error);
         }
@@ -1065,18 +991,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         notifyRunUpdated(workspace);
         try {
-          await sendAgentMessage(
-            workspace,
-            candidate.threadId,
-            "⏸ Agent dispatch paused for this thread (budget exceeded). Use Resume in this thread to continue.",
-          );
-        } catch (error) {
-          await dispatch.setThreadDispatchPaused({
-            workspaceId: workspace.workspaceId,
-            threadId: candidate.threadId,
-            paused: false,
+          options.onDispatchNotice?.(workspace, {
+            reason: "budget-paused", threadId: candidate.threadId,
+            message: "Agent dispatch paused after 10 runs in 10 minutes. Open the thread and choose Resume to continue.",
           });
-          throw error;
+        } catch (error) {
+          reportError(error);
         }
         continue;
       }
@@ -1206,10 +1126,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         durableDispatchRequest,
       );
       if (linked.length === 0 && !claim.run.failureNotePosted) {
-        await postFailureNote(
+        await reportRunFailure(
           workspace,
           claim.run,
-          "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
+          "Agent run failed (app restarted during run). Copy details for the run’s log path.",
         ).catch(reportError);
       }
       await oweRunNotice(workspace, claim.run.runId);
@@ -1256,12 +1176,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!recovery.run.failureNotePosted) {
         const restarted =
           recovery.run.failureReason === "app restart during run";
-        await postFailureNote(
+        await reportRunFailure(
           workspace,
           recovery.run,
           restarted
-            ? "⚠ Agent run failed (app restarted during run). Open the run chip for details."
-            : "⚠ Agent run failed (app quit during run). Open the run chip for details.",
+            ? "Agent run failed (app restarted during run). Copy details for the run’s log path."
+            : "Agent run failed (app quit during run). Copy details for the run’s log path.",
         ).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
@@ -1309,10 +1229,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             durableDispatchRequest,
           );
         if (linked.length === 0) {
-          await postFailureNote(
+          await reportRunFailure(
             workspace,
             recovery.run,
-            "⚠ Agent run produced no reply. Open the run chip for details.",
+            "Agent run produced no reply. Copy details for the run’s log path.",
           );
         }
         pendingNoReplyChecks.delete(key);
@@ -1457,10 +1377,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.terminalDurable = true;
       await settleRunNotice(live.workspace, live.claim.run.runId);
       try {
-        await postFailureNote(
+        await reportRunFailure(
           live.workspace,
           live.claim.run,
-          "⏹ Agent run stopped.",
+          "Agent run stopped. Copy details for the run’s log path.",
         );
       } catch (error) {
         reportError(error);

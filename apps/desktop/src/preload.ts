@@ -49,8 +49,9 @@ import {
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
+  chatDispatchNoticeOperations,
   ScheduleHostChangedEvent,
-  ChatDispatchUnavailableEvent,
+  ChatDispatchNoticesEvent,
   workspaceSearchOperations,
   workspaceVersionOperations,
   parseWorkspaceActivityEventForIpc,
@@ -613,12 +614,13 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),
   ...operationBridge(scheduleHostOperations, invoke),
+  ...operationBridge(chatDispatchNoticeOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
-  onChatDispatchUnavailable: (listener) =>
-    onEvent(CHANNELS.chatDispatchUnavailable, ChatDispatchUnavailableEvent, listener),
+  onChatDispatchNotices: (listener) =>
+    onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

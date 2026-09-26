@@ -478,7 +478,9 @@ function makeBaseBridge(
     writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
-    onChatDispatchUnavailable: vi.fn(() => () => {}),
+    onChatDispatchNotices: vi.fn(() => () => {}),
+    registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
+    dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
       settings: {
         ...DEFAULT_USER_SETTINGS,

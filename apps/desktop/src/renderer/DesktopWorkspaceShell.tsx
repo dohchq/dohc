@@ -783,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     hideShellError,
     reportShellError,
     reportShellFailure,
+    clearKind,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -799,7 +800,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
-  useChatDispatchNotices(workspaceId, reportShellFailure);
+  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
