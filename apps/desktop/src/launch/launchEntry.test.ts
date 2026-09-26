@@ -28,7 +28,7 @@ function fixture(options: {
       return { unfinished: options.unfinished ?? 0, checked: checkedPass !== null && checkedPass === options.pass };
     }),
     loadMain: vi.fn(options.loadMain ?? (async () => { log.push("main"); })),
-    reportFailure: vi.fn((_error: unknown) => { log.push("report"); }),
+    reportFailure: vi.fn(async (_error: unknown) => { log.push("report"); }),
     checkForUpdate: vi.fn(async (failure: LaunchFailure) => {
       log.push(`check:${failure}`);
       if (options.handled instanceof Error) throw options.handled;
@@ -71,7 +71,7 @@ describe("launch entry", () => {
         acquireLock: () => (holder === null || holder === name ? ((holder = name), true) : false),
         beginLaunch: (path, checkedPass) => (record = openLaunchMarker(path, "1.0.0", checkedPass, disk)),
         loadMain: async () => { await options.afterLoad?.(() => record?.finish()); },
-        reportFailure: vi.fn(),
+        reportFailure: vi.fn(async () => undefined),
         checkForUpdate: async () => { await options.duringCheck?.(); return false; },
         quit: vi.fn(),
         relaunchChecked: () => { pass = record!.grantCheckedRelaunch(); holder = null; },

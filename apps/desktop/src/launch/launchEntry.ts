@@ -42,7 +42,9 @@ export async function runLaunchEntry(dependencies: {
   // whether the pass the launch carries matched the marker's.
   beginLaunch(path: string, checkedPass: string | null): { unfinished: number; checked: boolean };
   loadMain(): Promise<unknown>;
-  reportFailure(error: unknown): void;
+  // Awaited before the check, so the report is kept even if the check ends
+  // the process.
+  reportFailure(error: unknown): Promise<void>;
   // Resolves true when the check owns the exit: a restart into an update,
   // or a quit it already made.
   checkForUpdate(failure: LaunchFailure): Promise<boolean>;
@@ -76,7 +78,7 @@ export async function runLaunchEntry(dependencies: {
     await dependencies.loadMain();
     return { recovery: null };
   } catch (error) {
-    dependencies.reportFailure(error);
+    await dependencies.reportFailure(error);
     return { recovery: recover("startup") };
   }
 }

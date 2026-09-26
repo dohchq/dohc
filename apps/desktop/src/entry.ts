@@ -17,8 +17,17 @@ await runLaunchEntry({
   beginLaunch: (path, checkedPass) => beginLaunch(path, app.getVersion(), checkedPass),
   // Awaited, so main's pre-ready work runs before Electron is ready.
   loadMain: () => import("./main"),
-  reportFailure: (error) => {
+  reportFailure: async (error) => {
     console.error("[desktop] Desktop main failed to load:", error);
+    // Main never set up its crash report store, so the entry keeps this one.
+    // Loaded only now; if the module the failure broke is shared with it, the
+    // log above is all that remains.
+    try {
+      const { recordMainLoadFailure } = await import("./launch/recordMainLoadFailure");
+      recordMainLoadFailure(error);
+    } catch (recordError) {
+      console.error("[desktop] Could not keep a crash report:", recordError);
+    }
     const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
     dialog.showErrorBox(
       "dohc failed to start",
