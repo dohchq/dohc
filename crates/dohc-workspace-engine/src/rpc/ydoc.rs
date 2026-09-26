@@ -206,6 +206,9 @@ struct YdocOpenResult {
     path: String,
     content_kind: &'static str,
     lineage: &'static str,
+    /// The resumed lineage holds updates its workspace file may not: the client
+    /// settles it before it reports the document saved.
+    unsettled: bool,
     lineage_claim_id: Option<String>,
     /// Whether this device claimed the lineage from its own unclaimed
     /// history. A client that opened the lineage unclaimed keeps its document
@@ -930,6 +933,7 @@ impl EngineService {
             } else {
                 "absent"
             },
+            unsettled: state.unsettled,
             lineage_claim_id: state.lineage_claim_id.clone(),
             lineage_originated_here: state.lineage_originated_here,
             head: if state.head_blob_sha256.is_some() {

@@ -1917,6 +1917,32 @@ function testSyncTimingOverrides(): {
   };
 }
 
+// Test-only settle seams for the crash spec. The debounce holds an edit
+// unsettled until the spec kills the app, instead of racing the kill. The
+// gate holds a reopened document's recovery settle while its file exists,
+// so the spec can watch the document before and after the write. Ignored
+// outside DOHC_DESKTOP_TEST like every other DOHC_TEST_* seam.
+function testCaptureSeams(): {
+  settleDebounceMs?: number;
+  openSettleGate?: () => Promise<void>;
+} {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {};
+  const debounce = Number(process.env.DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS);
+  const gate = process.env.DOHC_TEST_YDOC_OPEN_SETTLE_GATE;
+  return {
+    ...(Number.isFinite(debounce) && debounce > 0 ? { settleDebounceMs: debounce } : {}),
+    ...(gate
+      ? {
+          openSettleGate: async () => {
+            while (existsSync(gate)) {
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+          },
+        }
+      : {}),
+  };
+}
+
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
@@ -2021,6 +2047,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
+      testCaptureSeams(),
     ),
   // One settled batch, two readers: the approval pipeline, and the plugins
   // that subscribed to a prefix of it. Neither changes the batch.

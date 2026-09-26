@@ -355,6 +355,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   | "head"
   | "lineage"
+  // Read once, here: the open settles an unsettled lineage itself.
+  | "unsettled"
   | "applyLocalUpdate"
   | "close"
   // Deliberately not handed out. An evict takes a daemon session away without
@@ -655,6 +657,11 @@ export interface WorkspaceEngineCaptureOptions {
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
   createId?: () => string;
+  // Test seams, set only by the desktop's DOHC_TEST_* switches. How long an
+  // edit waits before its settle (omitted uses the provider's default), and a
+  // gate the open-time settle of an unsettled document waits on.
+  settleDebounceMs?: number;
+  openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
@@ -1856,7 +1863,8 @@ export function createWorkspaceEngineCapture(
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
     // The first generation's answers to "does the entered version have a
-    // snapshot for this path" and "did the daemon resume durable CRDT state".
+    // snapshot for this path", "did the daemon resume durable CRDT state", and
+    // "does that state hold updates the file may not".
     // Reported out because the absent-head contract (see
     // `WorkspaceEngineCapture.openYDocSession`) is decided by the caller, not
     // here: later generations reopen an already-admitted document.
@@ -1864,6 +1872,7 @@ export function createWorkspaceEngineCapture(
     session: RestartSafeYDocSession;
     head: "present" | "absent";
     lineage: "existing" | "absent";
+    unsettled: boolean;
   }> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -2016,6 +2025,9 @@ export function createWorkspaceEngineCapture(
             versionId: input.versionId,
             path: input.path,
             seedAbsentLineage,
+            ...(options.settleDebounceMs !== undefined
+              ? { settleDebounceMs: options.settleDebounceMs }
+              : {}),
             // A reopen must find the object this session opened. If the path
             // now names another object, refuse rather than replay this
             // document into it.
@@ -2443,6 +2455,7 @@ export function createWorkspaceEngineCapture(
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
+    const openedUnsettled = current.unsettled;
 
     // Journals one local update on this session's chain. `decide` runs when
     // the update's turn comes and reads the canonical doc as it stands then,
@@ -2717,6 +2730,7 @@ export function createWorkspaceEngineCapture(
       session: restartSafeSession,
       head: openedHead,
       lineage: openedLineage,
+      unsettled: openedUnsettled,
     };
   }
 
@@ -3532,6 +3546,9 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
+        // How many settles this session has started, so the open can tell a
+        // refusal before its settle started from that settle's own failure.
+        let settleStarts = 0;
         const settleClaims = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
@@ -3698,6 +3715,7 @@ export function createWorkspaceEngineCapture(
         // session's commands in order, so an update already sent is in the
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number, generation: number) => {
+          settleStarts += 1;
           settleClaims.set(settleId(token, generation), updatesSeen);
           settleStartedAtMs.set(settleId(token, generation), now());
           reportSaveState("settling", token);
@@ -3740,7 +3758,7 @@ export function createWorkspaceEngineCapture(
           reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;
-        const { session, head, lineage } = await openRestartSafeRustYDocSession({
+        const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -3804,9 +3822,10 @@ export function createWorkspaceEngineCapture(
         // version fence:
         //
         // - A live entry for the path takes the debt. Opening a document
-        //   settles nothing by itself, so the live session's settle is asked
-        //   for explicitly. An open cannot interleave with a chain task, which
-        //   is what makes the check authoritative.
+        //   settles only a lineage the engine reports unsettled, so the live
+        //   session's settle is asked for explicitly. An open cannot
+        //   interleave with a chain task, which is what makes the check
+        //   authoritative.
         // - A workspace on another version drops it with a trace. Reopening
         //   the captured version here would run outside the fence and could
         //   write the old version's projection over the active one. Nothing
@@ -4578,8 +4597,10 @@ export function createWorkspaceEngineCapture(
         // settle:false close of that dirty lineage would be refused and strand
         // the lease. Read here, on the capture chain, so no version op can land
         // between the version binding above and this check.
+        let absentHeadDisk: AbsentHeadDiskState | null = null;
         if (head === "absent") {
           const disk = await absentHeadDiskState(rootPath, input.path);
+          absentHeadDisk = disk;
           // Three rules, IN THIS ORDER. They used to be tangled into one
           // condition, and the order is the whole correctness argument:
           //
@@ -4691,9 +4712,30 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
-        // A retained document can reopen over an outside edit. Check the file
-        // without settling: opening a document must not trigger a write retry.
-        if (head === "present" && lineage === "existing") {
+        // The editor's first save state, decided before it can show Saved.
+        //
+        // A document can open over an outside edit: write nothing and report
+        // the error. A lineage the engine calls unsettled holds updates its
+        // file may not (a crash between an edit and its settle, or remote
+        // updates drained at this open): settle it now, and say "settling"
+        // before this open returns, so the editor reads Saving… from its
+        // first frame until the file has the text.
+        const settleOnOpen = (): void => {
+          reportSaveState("settling", 0);
+          const startsBefore = settleStarts;
+          void (async () => {
+            await options.openSettleGate?.();
+            return await session.settleNow();
+          })().catch((error: unknown) => {
+            // A settle that started reports its own outcome. One refused
+            // before it started (a removal under way, a closed session, a
+            // failed revive) reports nothing, so close the "settling" above.
+            if (settleStarts === startsBefore) {
+              reportSaveState(settleFailureSaveState(error), 0);
+            }
+          });
+        };
+        if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
           try {
@@ -4708,10 +4750,24 @@ export function createWorkspaceEngineCapture(
             // A failed read does not prove drift. Keep the existing state and
             // let the next ordinary settle report a retryable read failure.
           }
-          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
-            // The retained Y.Doc text is not a History moment yet, so the
-            // existing error state is the honest recovery surface. It carries
-            // no settle token because this report did not come from a settle.
+          if (drifted) {
+            if (updatesSeen === openingUpdates && lastSettledSha === null) {
+              // The retained Y.Doc text is not a History moment yet, so the
+              // existing error state is the honest recovery surface. It carries
+              // no settle token because this report did not come from a settle.
+              reportSaveState("error", 0);
+            }
+          } else if (unsettled) {
+            settleOnOpen();
+          }
+        } else if (lineage === "existing") {
+          // A crash-kept draft of a file capture never recorded. Its text is
+          // only in the lineage. Over the empty file New File leaves, settling
+          // writes it. A missing file, or content capture cannot reach, is not
+          // this draft's to overwrite, so the draft stays unsaved and says so.
+          if (absentHeadDisk === "empty") {
+            if (unsettled) settleOnOpen();
+          } else {
             reportSaveState("error", 0);
           }
         }

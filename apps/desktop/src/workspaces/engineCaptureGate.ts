@@ -1,5 +1,6 @@
 import {
   createWorkspaceEngineCapture,
+  type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import type {
   WorkspaceCaptureDecision,
@@ -20,6 +21,7 @@ export function captureForWorkspace(
   },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
+  testSeams: Pick<WorkspaceEngineCaptureOptions, "settleDebounceMs" | "openSettleGate"> = {},
 ): WorkspaceCaptureDecision {
   // A shared view never gets a recorder: it is fed exclusively by
   // the share's filtered pull, and a watcher would re-journal materialized
@@ -38,6 +40,7 @@ export function captureForWorkspace(
       // must be user-visible, not console-only.
       onCaptureOutcome: hooks.onCaptureOutcome,
       rustEngineSessions,
+      ...testSeams,
     }),
   };
 }

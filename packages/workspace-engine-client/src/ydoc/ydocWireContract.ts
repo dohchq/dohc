@@ -134,6 +134,9 @@ const OpenResultSchema = mutableStruct({
   // CRDT state. Only both absent means the session has neither source.
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
+  // The resumed lineage holds updates its workspace file may not. Always
+  // false when the lineage is absent.
+  unsettled: Schema.Boolean,
   artifactAssets: Schema.optionalKey(Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema))),
   seedContent: Schema.optionalKey(Schema.String),
   // The Yjs client the seed of seedContent is built under. The engine derives

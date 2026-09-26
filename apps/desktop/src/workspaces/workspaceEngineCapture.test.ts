@@ -1259,6 +1259,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
@@ -1308,6 +1309,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -1365,7 +1367,8 @@ describe("workspaceEngineCapture batch capture", () => {
         // an absent `head` would silently disable the absent-head refusal for
         // every drift case here.
         head: "present" as const,
-        lineage: "existing" as const,
+        // A fresh document: an existing lineage would settle once at open.
+        lineage: "absent" as const,
         evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
@@ -1403,6 +1406,76 @@ describe("workspaceEngineCapture batch capture", () => {
   }
 
   const EDITOR_TEXT = "typed in dohc\n";
+
+  // The open says "settling" before its settle runs. A settle refused before
+  // it starts reports nothing of its own, so the open closes that report.
+  it("replaces the open-time Saving… when the settle is refused before it starts", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async () =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            throw new Error("refused before the settle started");
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toEqual(["settling", "error"]));
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("reports the open-time settle's own failure once", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            const failure = new Error("the settle started and failed");
+            options.onSettleStart?.(1);
+            options.onSettleError?.(failure, 1);
+            throw failure;
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toContain("error"));
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(states).toEqual(["settling", "settling", "error"]);
+  });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -3058,6 +3131,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           get artifactAssets() {
             return activeAssets;
           },
@@ -3489,6 +3563,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             return "absent" as const;
           },
           lineage: "absent" as const,
+          unsettled: false,
           evict: async () => {
             evicts += 1;
           },

@@ -133,6 +133,9 @@ export interface EngineYdocProviderSession {
   // daemon deliberately resurrects, and its CRDT rows are the only copy of
   // those edits.
   readonly lineage: "existing" | "absent";
+  // The resumed lineage holds updates its workspace file may not, so the
+  // consumer settles it before it reports the document saved.
+  readonly unsettled: boolean;
   // `armSettle: false` journals the update without scheduling a settle, for
   // a replay the file must not receive until the person edits again.
   applyLocalUpdate(
@@ -378,6 +381,7 @@ export async function openEngineYdocProviderSession(
     path: session.path,
     head: session.head,
     lineage: session.lineage,
+    unsettled: session.unsettled,
 
     applyLocalUpdate(update, applyOptions) {
       if (closed) {

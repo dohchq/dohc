@@ -343,6 +343,9 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     )
     .await;
     assert_eq!(retry["lineage"], "existing");
+    // The settle above wrote the drawing, so its resumed lineage is not ahead
+    // of the file and the reopen has nothing to settle.
+    assert_eq!(retry["unsettled"], false);
     assert_eq!(retry["objectId"], opened["objectId"]);
     assert_eq!(retry["artifactAssets"], opened["artifactAssets"]);
     call(
@@ -1316,6 +1319,73 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     );
 }
 
+// A drawing the open seeded from its file holds nothing the file lacks, so a
+// reopen after a crash settles nothing and leaves the file alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seeded_drawing_reopens_with_nothing_to_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "box", "type": "rectangle", "version": 1, "versionNonce": 1,
+            "isDeleted": false, "x": 0, "y": 0, "width": 10, "height": 10, "index": "a0"
+        }],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("scene");
+    write_file(
+        scratch.path(),
+        "drawings/seeded.excalidraw",
+        artifact.as_bytes(),
+    );
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-reopen", 90).await;
+    let open = |id: u64| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "drawings/seeded.excalidraw",
+                "contentKind": "scene",
+                "seedFromArtifact": true
+            }),
+        )
+    };
+    let seeded = open(91).await;
+    assert_eq!(seeded["unsettled"], false);
+    // No settle and no close: the lineage stays, as a crash leaves it.
+    call(
+        &transport,
+        &handle,
+        92,
+        "ydoc.evict",
+        json!({ "sessionId": seeded["sessionId"] }),
+    )
+    .await;
+    let reopened = open(93).await;
+    assert_eq!(reopened["lineage"], "existing");
+    assert_eq!(reopened["unsettled"], false);
+    call(
+        &transport,
+        &handle,
+        94,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("drawings/seeded.excalidraw")).expect("file"),
+        artifact
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1388,6 +1458,8 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         )
     };
     let (opened, initial) = open(78).await;
+    // This open seeded the drawing from its file, so nothing is ahead of it.
+    assert_eq!(opened["unsettled"], false);
     let fold_opened = |update: &[u8]| {
         let doc = Ydoc::wire();
         doc.apply(update).expect("scene update applies");

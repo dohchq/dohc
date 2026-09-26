@@ -52,6 +52,9 @@ pub struct YdocOpenState {
     pub head_blob_sha256: Option<String>,
     pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
+    /// The lineage existed before this open and holds updates its workspace
+    /// file may not. False for a lineage this open created or seeded.
+    pub unsettled: bool,
     pub lineage_claim_id: Option<String>,
     /// See [`dohc_engine_sync::lineage_originated_here`].
     pub lineage_originated_here: bool,
@@ -1360,6 +1363,16 @@ fn seed_scene_from_artifact_on_store(
         now_ms,
         |tx, _, _update_sha| {
             created_moment_ids.clear();
+            // The drawing's file is the artifact this seed imported, so the
+            // lineage is not ahead of it until another update lands.
+            tx.execute(
+                "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(|error| CollabError::Corrupt {
+                reason: format!("scene seed settle record failed: {error}"),
+            })?;
             let version_is_active: bool = tx
                 .query_row(
                     "SELECT ?2 = COALESCE( \
@@ -1558,7 +1571,7 @@ pub(super) fn ydoc_open_state_on_store(
             )
             .map_err(StorageError::persist_public)?;
             tx.execute(
-                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![key.workspace_id, key.version_id, key.object_id, now_ms],
             )
             .map_err(StorageError::persist_public)?;
@@ -1616,6 +1629,9 @@ pub(super) fn ydoc_open_state_on_store(
     let mut lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
+    // Read before a scene seed below: a lineage this open seeds from its file
+    // is not ahead of it.
+    let unsettled = lineage_existing && !ydoc_file_holds_head(store, &key, head.as_ref())?;
     let mut seed_materialization_jobs = Vec::new();
     if drain_deferred
         && expected_key_matches
@@ -1766,6 +1782,7 @@ pub(super) fn ydoc_open_state_on_store(
         regime,
         initial_update,
         lineage_existing,
+        unsettled,
         lineage_claim_id,
         lineage_originated_here,
         restore_generation,
@@ -2042,6 +2059,91 @@ pub struct YdocAppend {
     /// subscribed automation, committed in the append's own transaction. The
     /// service emits `automation.claimed` for each, post-commit.
     pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+}
+
+/// Whether every update in this lineage is in the version head, and no write
+/// of that head to its path is outstanding, so an open has nothing to settle.
+/// This reads the store only: it does not look at the file on disk, which the
+/// desktop checks against the head at open. Every condition must hold, and any
+/// doubt answers no:
+/// - a settle, a seed, or a write of the head recorded the current update
+///   sequence;
+/// - the version head is what that write produced, or, for a drawing, the
+///   artifact its only update imported at open;
+/// - no write to the path is pending, and the newest one did not fail over
+///   this head's bytes.
+fn ydoc_file_holds_head(
+    store: &EngineStore,
+    key: &DocKey,
+    head: Option<&dohc_engine_domain::TextSnapshot>,
+) -> Result<bool, RuntimeError> {
+    let Some(head) = head else {
+        return Ok(false);
+    };
+    let holds: Option<bool> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT d.settled_update_seq IS d.head_update_seq \
+               AND (COALESCE(d.last_settled_sha, d.seed_source_sha256) IS ?4 \
+                    OR (d.content_kind = 'scene' AND d.last_settled_sha IS NULL \
+                        AND d.seed_source_sha256 IS NULL \
+                        AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0)) \
+               AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                     WHERE j.workspace_id IN (?1, '') AND j.target_path = ?5 \
+                       AND j.status = 'pending') \
+               AND COALESCE((SELECT j.status = 'conflict' AND j.content_sha256 = ?4 \
+                     FROM materialization_jobs j \
+                     WHERE j.workspace_id IN (?1, '') AND j.target_path = ?5 \
+                     ORDER BY j.created_at_ms DESC, j.rowid DESC LIMIT 1), 0) = 0 \
+             FROM ydoc_docs d \
+             WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                head.blob_sha256,
+                head.path
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StorageError::persist_public)
+    })?;
+    Ok(holds == Some(true))
+}
+
+/// Record that the workspace file holds this lineage up to its current head,
+/// for a settle that proved it without writing. An open that finds the two
+/// still equal knows the lineage is not ahead of its file.
+fn record_file_holds_head(
+    store: &mut EngineStore,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let (head, settled): (i64, Option<i64>) = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT head_update_seq, settled_update_seq FROM ydoc_docs \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StorageError::persist_public)
+    })?;
+    if settled == Some(head) {
+        return Ok(());
+    }
+    let recorded = store.write_with(faults, |tx| {
+        tx.execute(
+            "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+        )
+        .map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(recorded, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(())
 }
 
 fn ydoc_settle_disk_preimage(
@@ -2430,7 +2532,7 @@ pub(super) fn ydoc_settle_on_store(
                     // refuses UnsettledClose instead of pruning.
                     let cleared = store.write_with(faults, |tx| {
                         tx.execute(
-                            "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                            "UPDATE ydoc_docs SET last_settled_sha = NULL, settled_update_seq = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                             params![key.workspace_id, key.version_id, key.object_id, now_ms],
                         )
                         .map_err(StorageError::persist_public)?;
@@ -2478,6 +2580,10 @@ pub(super) fn ydoc_settle_on_store(
         == Some(projected_sha.as_str())
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        if matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
+        {
+            record_file_holds_head(store, key, faults)?;
+        }
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
                 let id = audit.record_in_tx(
@@ -2532,6 +2638,7 @@ pub(super) fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        record_file_holds_head(store, key, faults)?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -2675,8 +2782,11 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(|error| {
                 dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
             })?;
+        // The projection was taken from the doc at the current head, and this
+        // actor is the store's only writer, so the head has not moved since.
         tx.execute(
-            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
+             settled_update_seq = head_update_seq \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
@@ -2803,7 +2913,7 @@ pub(super) fn ydoc_settle_on_store(
             let compensated = store.write_with(faults, |tx| {
                 tx.execute(
                     "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, \
-                     updated_at_ms = ?6 \
+                     settled_update_seq = NULL, updated_at_ms = ?6 \
                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                     params![
                         key.workspace_id,
