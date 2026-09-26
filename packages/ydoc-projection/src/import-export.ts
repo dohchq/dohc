@@ -16,16 +16,6 @@ import {
   TableRow,
 } from '@tiptap/extension-table'
 import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskList } from '@tiptap/extension-list'
-import * as yaml from 'js-yaml'
-import {
-  CORE_SCHEMA,
-  defineMappingTag,
-  defineScalarTag,
-  defineSequenceTag,
-  floatCoreTag,
-  intCoreTag,
-  NOT_RESOLVED,
-} from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -39,97 +29,27 @@ import {
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import {
+  FRONTMATTER_SOURCE_META_KEY,
+  frontmatterBlockFor,
+  recordFrontmatterSourceItems,
+  writtenFrontmatterKeys,
+  isFrontmatterMap,
+  normalizeFrontmatterValue,
+  orderFrontmatter,
+  parseFrontmatter,
+} from './frontmatter.js'
 
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
-const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_SCHEMA_VERSION = 1
 const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
-const TAGGED_FRONTMATTER_PREFIX_META_KEY = 'dohcTaggedFrontmatterPrefix'
-const TAGGED_FRONTMATTER_BASELINE_META_KEY = 'dohcTaggedFrontmatterBaseline'
-const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
-const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
-const MIN_YDOC_INTEGER = -(1n << 63n)
-const MAX_YDOC_INTEGER = (1n << 63n) - 1n
-
-function hasValidIntegerSeparators(source: string): boolean {
-  for (
-    let index = source.indexOf('_');
-    index !== -1;
-    index = source.indexOf('_', index + 1)
-  ) {
-    const previous = source[index - 1]
-    const next = source[index + 1]
-    if (
-      previous === undefined
-      || next === undefined
-      || !/[\dA-Fa-f]/u.test(previous)
-      || !/[\dA-Fa-f]/u.test(next)
-    ) {
-      return false
-    }
-  }
-  return true
-}
-
-const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
-  implicit: true,
-  implicitFirstChars: ['-', '+', ...'0123456789'],
-  resolve: (source, isExplicit, tagName) => {
-    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED
-    const normalizedSource = source.replaceAll('_', '')
-    if (
-      intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED
-    ) {
-      return NOT_RESOLVED
-    }
-    let magnitude = normalizedSource
-    let sign = 1n
-    if (magnitude[0] === '-' || magnitude[0] === '+') {
-      if (magnitude[0] === '-') sign = -1n
-      magnitude = magnitude.slice(1)
-    }
-    const integer = sign * BigInt(magnitude)
-    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) {
-      throw new Error('frontmatter integer exceeds the Y.Doc int64 domain')
-    }
-    if (integer >= -MAX_SAFE_INTEGER && integer <= MAX_SAFE_INTEGER) {
-      return integer === 0n && sign < 0n ? -0 : Number(integer)
-    }
-    return integer
-  },
-  identify: value =>
-    typeof value === 'bigint'
-    || (typeof value === 'number'
-      && Number.isSafeInteger(value)
-      && !Object.is(value, -0)),
-  represent: value => value.toString(),
-})
-const losslessFloatTag = defineScalarTag('tag:yaml.org,2002:float', {
-  implicit: true,
-  implicitFirstChars: floatCoreTag.implicitFirstChars,
-  resolve: floatCoreTag.resolve,
-  identify: value =>
-    typeof value === 'number'
-    && (!Number.isSafeInteger(value) || Object.is(value, -0)),
-  represent: value => {
-    const represented = floatCoreTag.represent(value)
-    return Number.isInteger(value) && !represented.includes('.')
-      ? `${represented}.0`
-      : represented
-  },
-})
-const losslessFrontmatterSchema = CORE_SCHEMA.withTags(
-  losslessIntegerTag,
-  losslessFloatTag,
-)
-
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.
   // The importer represents those tags as text, so normalize them before the
@@ -440,27 +360,22 @@ export function markdownToYDoc(
   markdown: string,
   options: { clientID?: number } = {},
 ): Y.Doc {
-  const {
-    meta,
-    body,
-    taggedFrontmatterPrefix,
-    taggedFrontmatterBaseline,
-  } = parseFrontmatter(markdown)
+  const usesCrlf = markdown.includes('\r\n')
+  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf)
   const doc = new Y.Doc()
   if (options.clientID !== undefined) doc.clientID = options.clientID
-  const usesCrlf = markdown.includes('\r\n')
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
   writeMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
     ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
-    ...(taggedFrontmatterPrefix === undefined
+    ...(frontmatterSource === undefined
       ? {}
-      : {
-          [TAGGED_FRONTMATTER_PREFIX_META_KEY]: taggedFrontmatterPrefix,
-          [TAGGED_FRONTMATTER_BASELINE_META_KEY]: taggedFrontmatterBaseline,
-        }),
+      : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
   })
+  if (frontmatterSource !== undefined) {
+    recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD))
+  }
 
   const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
@@ -664,25 +579,20 @@ function restoreParseSentinels(
 }
 
 export function plainTextToYDoc(markdown: string): Y.Doc {
-  const {
-    meta,
-    body,
-    taggedFrontmatterPrefix,
-    taggedFrontmatterBaseline,
-  } = parseFrontmatter(markdown)
+  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, false)
   const doc = new Y.Doc()
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
   writeMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
     contentKind: PLAIN_TEXT_CONTENT_KIND,
-    ...(taggedFrontmatterPrefix === undefined
+    ...(frontmatterSource === undefined
       ? {}
-      : {
-          [TAGGED_FRONTMATTER_PREFIX_META_KEY]: taggedFrontmatterPrefix,
-          [TAGGED_FRONTMATTER_BASELINE_META_KEY]: taggedFrontmatterBaseline,
-        }),
+      : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
   })
+  if (frontmatterSource !== undefined) {
+    recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD))
+  }
   doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
 
   return doc
@@ -698,30 +608,13 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
   )
 
-  const taggedPrefix = internalMeta.get(TAGGED_FRONTMATTER_PREFIX_META_KEY)
-  const taggedBaseline = internalMeta.get(TAGGED_FRONTMATTER_BASELINE_META_KEY)
-  if (
-    typeof taggedPrefix === 'string'
-    && typeof taggedBaseline === 'string'
-    && frontmatterYaml(frontmatter) === taggedBaseline
-  ) {
-    const parsed = parseFrontmatter(taggedPrefix)
-    if (
-      FM_RE.test(taggedPrefix)
-      && /^(?:\r?\n)*$/u.test(parsed.body)
-      && frontmatterYaml(parsed.meta) === taggedBaseline
-    ) {
-      return `${taggedPrefix}${restoreLineEndings(body)}`
-    }
-  }
-
-  if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
-
-  const yamlFrontmatter = frontmatterYaml(frontmatter)
-
-  return restoreLineEndings(
-    `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`,
-  )
+  return `${frontmatterBlockFor(
+    frontmatter,
+    internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
+    body,
+    usesCrlf ? '\r\n' : '\n',
+    writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), internalMeta),
+  )}${restoreLineEndings(body)}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
@@ -1389,130 +1282,9 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function parseFrontmatter(src: string): {
-  meta: Record<string, unknown>
-  body: string
-  taggedFrontmatterPrefix?: string
-  taggedFrontmatterBaseline?: string
-} {
-  const match = FM_RE.exec(src)
-  if (!match) return { meta: {}, body: src }
-
-  const [, raw, rest] = match
-  let meta: Record<string, unknown> = {}
-  if (isEmptyFrontmatter(raw ?? '')) return { meta, body: rest ?? '' }
-  try {
-    const {
-      value: parsed,
-      hasUnsupportedTag,
-    } = loadFrontmatterWithUnsupportedTags(raw ?? '')
-    if (parsed == null) return { meta: {}, body: src }
-    if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
-    meta = parsed
-    if (hasUnsupportedTag) {
-      const body = rest ?? ''
-      const leadingSeparator = /^(?:\r?\n)*/u.exec(body)?.[0] ?? ''
-      return {
-        meta,
-        body: body.slice(leadingSeparator.length),
-        taggedFrontmatterPrefix: `${
-          src.slice(0, src.length - body.length)
-        }${leadingSeparator}`,
-        taggedFrontmatterBaseline: frontmatterYaml(meta),
-      }
-    }
-  } catch {
-    return { meta: {}, body: src }
-  }
-  return { meta, body: rest ?? '' }
-}
-
 /** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
 export function startsWithFrontmatter(markdown: string): boolean {
-  return parseFrontmatter(markdown).body !== markdown
-}
-
-function loadFrontmatterWithUnsupportedTags(raw: string): {
-  value: unknown
-  hasUnsupportedTag: boolean
-} {
-  let hasUnsupportedTag = false
-  const markUnsupported = (): void => {
-    hasUnsupportedTag = true
-  }
-  const unsupportedScalarTag = defineScalarTag('', {
-    matchByTagPrefix: true,
-    resolve: source => {
-      markUnsupported()
-      return source
-    },
-  })
-  const unsupportedSequenceTag = defineSequenceTag('', {
-    matchByTagPrefix: true,
-    create: () => {
-      markUnsupported()
-      return [] as unknown[]
-    },
-    addItem: (values, value) => {
-      values.push(value)
-    },
-  })
-  const unsupportedMappingTag = defineMappingTag('', {
-    matchByTagPrefix: true,
-    create: () => {
-      markUnsupported()
-      return nullPrototypeRecord()
-    },
-    addPair: (mapping, key, value) => {
-      const normalizedKey = String(key)
-      mapping[normalizedKey] = value
-      return ''
-    },
-    has: (mapping, key) => Object.hasOwn(mapping, String(key)),
-    keys: mapping => Object.keys(mapping),
-    get: (mapping, key) => mapping[String(key)],
-  })
-  const schema = losslessFrontmatterSchema.withTags(
-    unsupportedScalarTag,
-    unsupportedSequenceTag,
-    unsupportedMappingTag,
-  )
-  return {
-    // Public values allow depth 128; YAML also counts the root mapping,
-    // terminal value, and one speculative compact-node parse.
-    value: normalizeFrontmatterValue(yaml.load(raw, { schema, maxDepth: 131 })),
-    hasUnsupportedTag,
-  }
-}
-
-function nullPrototypeRecord(): Record<string, unknown> {
-  return Object.create(null) as Record<string, unknown>
-}
-
-function normalizeFrontmatterValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue)
-  if (!isFrontmatterMap(value)) return value
-
-  const normalized = nullPrototypeRecord()
-  for (const key of Object.keys(value).sort()) {
-    normalized[key] = normalizeFrontmatterValue(value[key])
-  }
-  return normalized
-}
-
-function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false
-  }
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function isEmptyFrontmatter(raw: string): boolean {
-  return raw.split(/\r?\n/).every((line) => {
-    const trimmed = line.trim()
-    return !trimmed || trimmed.startsWith('#')
-  })
+  return parseFrontmatter(markdown, false).body !== markdown
 }
 
 function writeMap(
@@ -1614,28 +1386,4 @@ function mapToObject(
       yFrontmatterValueToPlain(child),
     ] as const).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
   )
-}
-
-function orderFrontmatter(
-  frontmatter: Record<string, unknown>,
-): Record<string, unknown> {
-  const ordered = nullPrototypeRecord()
-
-  for (const key of FRONTMATTER_PRIORITY_KEYS) {
-    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]
-  }
-
-  for (const key of Object.keys(frontmatter).sort()) {
-    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key]
-  }
-
-  return ordered
-}
-
-export function frontmatterYaml(frontmatter: Record<string, unknown>): string {
-  return yaml.dump(orderFrontmatter(frontmatter), {
-    schema: losslessFrontmatterSchema,
-    lineWidth: -1,
-    sortKeys: false,
-  })
 }

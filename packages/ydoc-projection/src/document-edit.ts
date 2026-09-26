@@ -3,8 +3,8 @@ import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirro
 import * as Y from 'yjs'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import { escapeHighlightMarkdown } from './dohc-markdown-extensions.js'
+import { frontmatterYaml } from './frontmatter.js'
 import {
-  frontmatterYaml,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,

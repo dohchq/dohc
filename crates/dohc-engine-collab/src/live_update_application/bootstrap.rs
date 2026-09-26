@@ -255,6 +255,11 @@ mod tests {
         bytes: Vec<u8>,
         markdown: String,
         registration_accepted: bool,
+        #[serde(default)]
+        projection_refused: bool,
+        /// The frontmatter block as written, which the settle must keep.
+        #[serde(default)]
+        kept_frontmatter: Option<String>,
     }
     fn vectors() -> Vec<Vector> {
         serde_json::from_str(include_str!(
@@ -1018,29 +1023,76 @@ mod tests {
             assert_eq!(receipt.local_head_sequence, 0);
         }
     }
+    /// The relay projects each baseline it admits, and the host writes the
+    /// bytes it bootstraps. For an exact, stale, or forged source witness the
+    /// two must be the same bytes, and a forged source is never among them.
+    #[test]
+    fn bootstrap_writes_the_bytes_the_relay_projected_for_each_source_witness() {
+        let rows: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-public.json"
+        ))
+        .unwrap();
+        for row in rows.into_iter().filter(|row| row["accepted"] == true) {
+            let vector = Vector {
+                name: row["name"].as_str().unwrap().into(),
+                bytes: serde_json::from_value(row["bytes"].clone()).unwrap(),
+                markdown: row["markdown"].as_str().unwrap().into(),
+                registration_accepted: true,
+                kept_frontmatter: None,
+                projection_refused: false,
+            };
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            assert!(
+                matches!(result, Ok(BootstrapResult::Bootstrapped(_))),
+                "{}: {result:?}",
+                vector.name
+            );
+            let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+            assert_eq!(text, vector.markdown, "{}", vector.name);
+            assert!(!text.contains("Foreign"), "{}", vector.name);
+        }
+    }
     #[test]
     fn owner_source_bootstrap_preserves_valid_lexical_markdown() {
-        let source: Value = serde_json::from_str(include_str!(
+        let original: Value = serde_json::from_str(include_str!(
             "../../tests/owner-source/owner-source-seed.json"
         ))
         .unwrap();
-        let vector = Vector {
-            name: "original-owner-source".into(),
-            bytes: serde_json::from_value(source["bytes"].clone()).unwrap(),
-            markdown: source["markdown"].as_str().unwrap().into(),
-            registration_accepted: true,
-        };
-        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
-        assert!(matches!(
-            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
-            BootstrapResult::Bootstrapped(_)
-        ));
-        let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
-        assert_eq!(text, vector.markdown);
-        assert_ne!(text, source["canonical"].as_str().unwrap());
+        let lexical: serde_json::Map<String, Value> = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-lexical.json"
+        ))
+        .unwrap();
+        let seeds = std::iter::once(("original-owner-source".to_owned(), original)).chain(lexical);
+        let mut failures = Vec::new();
+        for (name, source) in seeds {
+            let vector = Vector {
+                name,
+                bytes: serde_json::from_value(source["bytes"].clone()).unwrap(),
+                markdown: source["markdown"].as_str().unwrap().into(),
+                registration_accepted: true,
+                kept_frontmatter: None,
+                projection_refused: false,
+            };
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            if !matches!(result, Ok(BootstrapResult::Bootstrapped(_))) {
+                failures.push(format!("{}: {result:?}", vector.name));
+                continue;
+            }
+            let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+            assert_eq!(text, vector.markdown, "{}", vector.name);
+            assert_ne!(
+                text,
+                source["canonical"].as_str().unwrap(),
+                "{}",
+                vector.name
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
-    fn shared_projections_preserve_tagged_prefix_and_change_fallback() {
+    fn shared_projections_keep_written_frontmatter_or_refuse() {
         let mut mismatches = Vec::new();
         for vector in vectors() {
             if !vector.registration_accepted && vector.name.starts_with("public-frontmatter-") {
@@ -1048,7 +1100,25 @@ mod tests {
             }
             let doc = Ydoc::wire();
             doc.apply(&vector.bytes).unwrap();
+            if vector.projection_refused {
+                assert!(
+                    matches!(
+                        doc.project(ContentKind::Richdoc),
+                        Err(CollabError::FrontmatterEditRefused)
+                    ),
+                    "{}",
+                    vector.name
+                );
+                continue;
+            }
             let actual = doc.project(ContentKind::Richdoc).unwrap().content;
+            if let Some(kept) = &vector.kept_frontmatter {
+                assert!(
+                    actual.starts_with(kept.as_str()),
+                    "{} rewrote its frontmatter",
+                    vector.name
+                );
+            }
             if actual != vector.markdown {
                 mismatches.push(format!(
                     "{}: actual={actual:?}; expected={:?}",
@@ -1085,7 +1155,7 @@ mod tests {
     fn admitted_baselines_commit_atomically_and_replay_after_reopen() {
         for vector in vectors()
             .into_iter()
-            .filter(|vector| vector.registration_accepted)
+            .filter(|vector| vector.registration_accepted && !vector.projection_refused)
         {
             let (dir, mut store, mut cache, owner, handle) = fixture(&vector);
             assert_eq!(
@@ -1189,6 +1259,8 @@ mod tests {
             bytes: doc.plaintext_insert(1, "b"),
             markdown: String::new(),
             registration_accepted: false,
+            kept_frontmatter: None,
+            projection_refused: false,
         };
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&pending);
         assert_eq!(
@@ -1201,6 +1273,8 @@ mod tests {
             bytes: doc.encode_full_state(),
             markdown: String::new(),
             registration_accepted: false,
+            kept_frontmatter: None,
+            projection_refused: false,
         };
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&nonpublic);
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());

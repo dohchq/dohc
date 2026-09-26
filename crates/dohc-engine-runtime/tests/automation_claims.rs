@@ -262,7 +262,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         .await
         .expect("subscribe field-filtered automation");
 
-    let edit = doc.frontmatter_set("status", "done");
+    let edit = doc.frontmatter_set("status", "done").unwrap();
     let append = handle
         .ydoc_record_update(
             key.clone(),
@@ -396,7 +396,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     // A change already at the chain depth cap runs nothing: the automation
     // gets a failed `chain-stopped` claim instead of a pending one, so the
     // stop reaches the owner's failure surface.
-    let capped = doc.frontmatter_set("status", "capped");
+    let capped = doc.frontmatter_set("status", "capped").unwrap();
     let at_cap = handle
         .ydoc_record_update(
             key.clone(),
@@ -446,7 +446,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             PATH.to_owned(),
             ContentKind::Richdoc,
             Regime::LocalOnly,
-            doc.frontmatter_set("priority", "high"),
+            doc.frontmatter_set("priority", "high").unwrap(),
             None,
             Some(ChangeAttribution {
                 actor_kind: ChangeActorKind::Human,

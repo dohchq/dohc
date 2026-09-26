@@ -2792,7 +2792,11 @@ mod tests {
         };
 
         let source = Ydoc::wire();
-        let owner_edit = event("owner-edit", 1, source.frontmatter_set("status", "done"));
+        let owner_edit = event(
+            "owner-edit",
+            1,
+            source.frontmatter_set("status", "done").unwrap(),
+        );
         let ApplicationResult::Applied(_, returned) =
             apply(&mut store, &mut cache, &handle, owner_edit.clone())
         else {
@@ -2817,7 +2821,11 @@ mod tests {
         assert!(returned.is_empty());
         assert_eq!(claims(&store).len(), 1, "a replayed frame claims nothing");
 
-        let mut guest_edit = event("guest-edit", 2, source.frontmatter_set("status", "late"));
+        let mut guest_edit = event(
+            "guest-edit",
+            2,
+            source.frontmatter_set("status", "late").unwrap(),
+        );
         guest_edit.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
             principal_id: "guest-1".into(),
             grant_id: "grant-1".into(),
@@ -2897,7 +2905,7 @@ mod tests {
                 })
                 .unwrap()
         };
-        let stamped = source.frontmatter_set("status", "stamped");
+        let stamped = source.frontmatter_set("status", "stamped").unwrap();
         let delivery = own_draft(&mut store, "own-stamp", &stamped);
         let mut accepted = event(&delivery, 4, stamped);
         accepted.metadata.accepted.received_at_ms = 30;
@@ -2908,7 +2916,7 @@ mod tests {
             "the host's own draft keeps its automation author and depth"
         );
         // The same bytes under another delivery are not that draft.
-        let restamped = source.frontmatter_set("status", "restamped");
+        let restamped = source.frontmatter_set("status", "restamped").unwrap();
         own_draft(&mut store, "own-restamp", &restamped);
         let mut elsewhere = event("elsewhere", 5, restamped);
         elsewhere.metadata.accepted.received_at_ms = 40;
