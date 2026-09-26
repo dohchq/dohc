@@ -473,12 +473,12 @@ describe("invokePluginSdkHost", () => {
       expect.objectContaining({
         recordPath: "tasks/one.md",
         author: automationAuthor,
-        idempotencyKey: "claim-7/2/0",
+        idempotencyKeyPrefix: "claim-7/2/0",
       }),
       expect.objectContaining({
         collectionPath: "tasks",
         author: automationAuthor,
-        idempotencyKey: "claim-7/2/1",
+        idempotencyKeyPrefix: "claim-7/2/1",
       }),
     ]);
     // A plugin handler has no stable step identity, so its create does not

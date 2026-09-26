@@ -579,11 +579,10 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
-    // The capture path declares no attribution: every column reads null, so
-    // an unattributed write is distinguishable from a defaulted one.
-    assert_eq!(authored_edit["actorKind"], json!(null));
-    assert_eq!(authored_edit["onBehalfOf"], json!(null));
-    assert_eq!(authored_edit["depth"], json!(null));
+    // Capture preserves the declared agent author at depth zero.
+    assert_eq!(authored_edit["actorKind"], json!("agent"));
+    assert_eq!(authored_edit["onBehalfOf"], json!("local"));
+    assert_eq!(authored_edit["depth"], json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

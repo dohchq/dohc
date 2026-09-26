@@ -4271,6 +4271,7 @@ mod tests {
             snapshot,
             moment,
             deduped: false,
+            automation_claims: Vec::new(),
         });
         result.binary_write = None::<BinaryResolveWrite>;
 

@@ -149,6 +149,31 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it("marks each property an automation sets, and names the automations to keyboard and screen reader users", async () => {
+    const user = userEvent.setup();
+    render(
+      <PropertiesPanel
+        body={"---\nid: rec-1\nStatus: Done\nFinished on: 2026-09-25\n---\n"}
+        onChange={vi.fn()}
+        fieldMarks={new Map([["Finished on", ["Stamp the finish date", "Tidy"]]])}
+      />,
+    );
+    const marks = screen.getAllByTestId("automation-field-mark");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest('[data-testid="property-row"]')?.querySelector("input")?.value).toBe("Finished on");
+    const mark = screen.getByRole("img", { name: "Automation" });
+    const words = document.getElementById(mark.getAttribute("aria-describedby") ?? "")!;
+    expect(words.textContent).toBe('"Stamp the finish date" and "Tidy" set this field');
+    expect(words.hidden).toBe(true);
+    // The mark follows its property's name in the tab order, and its words show on focus.
+    await user.click(screen.getByDisplayValue("Finished on"));
+    await user.tab();
+    expect(document.activeElement).toBe(mark);
+    expect(words.hidden).toBe(false);
+    await user.keyboard("{Escape}");
+    expect(words.hidden).toBe(true);
+  });
+
   it("hides the reserved icon key from the user property rows", () => {
     render(
       <PropertiesPanel

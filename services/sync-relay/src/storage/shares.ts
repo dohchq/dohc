@@ -55,6 +55,12 @@ export function createShare(storage: StorageContext, input: {
     storage.tx(() => {
       insertShare(storage, input.share);
       insertShareGrant(storage, input.grant);
+      // A named grant tells its person the share arrived. The waiting row
+      // commits with the grant, so a crash cannot lose the notice, and an
+      // email grant waits until an account claims it.
+      storage.db.prepare(
+        "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
+      ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
     });
   }
 

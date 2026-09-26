@@ -1,3 +1,4 @@
+import type { WatcherEvent } from "@dohc/workspace-core";
 import type { createChatDispatchService } from "../agents/chatDispatchService";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { PluginWorkspaceRuntimes } from "../plugins/pluginWorkspaceRuntimes";
@@ -25,6 +26,7 @@ export interface DesktopWorkspaceCallbacksDependencies<State> {
     current(workspaceId: string): Pick<WatcherRuntime, "handleWatcherEvents"> | undefined;
   };
   readonly chatDispatchService: Pick<ReturnType<typeof createChatDispatchService>, "scanWorkspace">;
+  collectionAutomationsOf(state: State): { handleWatcherEvents(events: readonly WatcherEvent[]): void };
 }
 
 export function createDesktopWorkspaceCallbacks<State>(
@@ -85,10 +87,11 @@ export function createDesktopWorkspaceCallbacks<State>(
   }
 
   const onWatcherBatch: NonNullable<WorkspaceActivityOptions["onWatcherBatch"]> = (workspace, events) => {
-    withWorkspaceAttachment(workspace, () =>
+    withWorkspaceAttachment(workspace, (lease) => {
+      dependencies.collectionAutomationsOf(lease.state).handleWatcherEvents(events);
       dependencies.pluginWorkspaceRuntimes.current(workspace.workspaceId)
-        ?.handleWatcherEvents(events),
-    );
+        ?.handleWatcherEvents(events);
+    });
   };
 
   return { withWorkspaceAttachment, withWorkspaceAttachmentAsync, createRelayOnChange, onWatcherBatch };

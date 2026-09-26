@@ -41,6 +41,8 @@ export const DatasetSchemaChange = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("renameField"), tableId: identity, fieldId: identity, name: z.string().trim().min(1).max(128) }).strict(),
   z.object({ kind: z.literal("changeField"), tableId: identity, fieldId: identity,
     type: z.enum(["text", "number", "checkbox", "date", "select", "multi-select", "url", "attachment", "relation"]), required: z.boolean() }).strict(),
+  // A button runs an automation on a record. It stores nothing, so adding one changes no SQL.
+  z.object({ kind: z.literal("addButton"), tableId: identity, name: z.string().trim().min(1).max(128) }).strict(),
   z.object({ kind: z.literal("addField"), tableId: identity, field: z.object({ name: z.string().trim().min(1).max(128),
     type: z.enum(["text", "number", "checkbox", "date", "select", "multi-select", "url", "attachment"]), required: z.boolean(), unique: z.boolean(),
     default: json.optional(), options: z.array(z.string().min(1).max(128)).min(1).max(100).optional() }).strict() }).strict(),

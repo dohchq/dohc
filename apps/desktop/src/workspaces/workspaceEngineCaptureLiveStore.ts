@@ -20,6 +20,7 @@ import {
   DaemonRefusalError,
   VersionedLiveAdapter,
   type AgentAuthor,
+  type WriteAuthor,
   type CollectionPendingAdoptionCursor,
   type CollectionPendingAdoptionsPage,
   type ConflictFileState,
@@ -247,6 +248,14 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   if (author.kind === "named") {
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+  }
+  if (author.kind === "automation") {
+    return {
+      kind: "automation",
+      automationId: author.automationId,
+      onBehalfOf: author.onBehalfOf,
+      depth: author.depth,
+    };
   }
   return {
     kind: "agent",
@@ -533,8 +542,18 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   };
 }
 
-function adapterAuthor(author: MomentAuthor): AgentAuthor {
-  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public and named authorship can only arrive through relay replication.");
+// A file write's author. A public or named author arrives only through
+// relay replication, never from this computer.
+function adapterAuthor(author: MomentAuthor): WriteAuthor {
+  if (author.kind === "automation") {
+    return { kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth };
+  }
+  return captureAuthor(author);
+}
+
+// The author capture stamps on this computer's own edits: an agent run only.
+function captureAuthor(author: MomentAuthor): AgentAuthor {
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Only an agent run can author captured edits.");
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -1336,7 +1355,7 @@ export function createCaptureLiveStores(
     },
 
     async setCaptureAuthor(author: MomentAuthor | null) {
-      const desired = author === null ? null : adapterAuthor(author);
+      const desired = author === null ? null : captureAuthor(author);
       await runMutation(async (adapter) => {
         await adapter.setCaptureAuthor(desired);
       });

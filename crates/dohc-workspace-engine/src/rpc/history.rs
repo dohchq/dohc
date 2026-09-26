@@ -198,6 +198,24 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .is_some_and(|generation| generation >= 1);
         return if valid { value } else { corrupt() };
     }
+    if object.get("kind").and_then(Value::as_str) == Some("automation") {
+        let text = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+        };
+        let valid = object.len() == 4
+            && text("automationId")
+            && text("onBehalfOf")
+            && object
+                .get("depth")
+                .and_then(Value::as_u64)
+                .is_some_and(|depth| {
+                    depth <= u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH)
+                });
+        return if valid { value } else { corrupt() };
+    }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
     let nonempty = |key: &str| {
         object
@@ -405,6 +423,20 @@ mod relay_author_tests {
     fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
         let author = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
         assert_eq!(parsed_moment_author(&author.to_string()), author);
+        let automation = json!({
+            "kind": "automation",
+            "automationId": "collection:tasks#stamp",
+            "onBehalfOf": "local",
+            "depth": 1,
+        });
+        assert_eq!(parsed_moment_author(&automation.to_string()), automation);
+        assert_eq!(
+            parsed_moment_author(
+                &json!({"kind":"automation", "automationId":"a", "onBehalfOf":"local"}).to_string()
+            ),
+            json!({"corrupt":true}),
+            "an automation author names its depth"
+        );
         for malformed in [
             json!({"kind":"public", "principalId":"holder"}),
             json!({"kind":"public", "principalId":"", "grantId":"grant"}),

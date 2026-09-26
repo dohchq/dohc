@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
@@ -34,8 +35,9 @@ import { createFile } from "./workspaceFiles";
 //
 // Both writes are safe to run again. A field that already holds the
 // requested value is not written, so a re-run journals only what still
-// differs, under the new attempt's idempotency key. A create given a record
-// id returns that record when it already exists.
+// differs. Each changed field journals as its own update, so a caller that
+// names its writes gives every field its own idempotency key. A create given
+// a record id returns that record when it already exists.
 
 // The live document field the desktop writes; one name for one thing
 // (CollectionPage.tsx uses the same constant).
@@ -60,7 +62,7 @@ export interface CollectionRecordEditAdapter {
 
 /** Workspace-scoped authority the caller (main) supplies. The SDK/MCP caller never sees it. */
 export interface CollectionRecordEditContext {
-  capture: Pick<WorkspaceEngineCapture, "openYDocSession">;
+  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredTextFile">;
   workspaceRoot: string;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
@@ -84,13 +86,20 @@ export interface SetCollectionRecordFieldsInput {
   fields: Record<string, unknown>;
   author: ChangeAuthor;
   /**
-   * The wire idempotency key for this write's one journaled update. An
-   * automation run passes its claim id, its attempt, and its write ordinal:
-   * a retried request of one attempt cannot journal the write twice, and a
-   * new attempt never reuses an earlier attempt's key. Omitted, the session
-   * generates a per-update key as every other edit does.
+   * Names this write for the engine's idempotency check. Each changed field
+   * journals under "<prefix>/<field>", so a repeated request cannot journal
+   * a field twice. Omitted, the session generates a key per update as every
+   * other edit does.
    */
-  idempotencyKey?: string;
+  idempotencyKeyPrefix?: string;
+  /**
+   * The value each named field should hold before this write. A field whose
+   * current value is neither this nor the requested value changed since the
+   * caller read it: the write leaves it as it is and reports it in `kept`.
+   * An automation resuming a step that may already have landed passes the
+   * values it planned from.
+   */
+  expectedBefore?: Record<string, unknown>;
 }
 
 export interface SetCollectionRecordFieldsResult {
@@ -101,6 +110,8 @@ export interface SetCollectionRecordFieldsResult {
    * shows it. Fields that already held the requested value are absent.
    */
   replaced: Record<string, unknown>;
+  /** The current value of each field `expectedBefore` left as it is. */
+  kept: Record<string, unknown>;
 }
 
 export interface CreateCollectionRecordInput {
@@ -109,8 +120,10 @@ export interface CreateCollectionRecordInput {
   name: string;
   fields?: Record<string, unknown>;
   author: ChangeAuthor;
-  /** See SetCollectionRecordFieldsInput.idempotencyKey (applies to the field seed). */
-  idempotencyKey?: string;
+  /** See SetCollectionRecordFieldsInput (applies to the field seed). */
+  idempotencyKeyPrefix?: string;
+  /** See SetCollectionRecordFieldsInput (applies to the field seed). */
+  expectedBefore?: Record<string, unknown>;
   /**
    * The id of the record to create, from derivedRecordId, for a caller with
    * a stable step identity. When a record with this id is already in the
@@ -216,11 +229,36 @@ export function derivedRecordId(seed: string): string {
 }
 
 /**
+ * The update that sets one frontmatter field over `doc`'s state. It is
+ * computed on a scratch replica, exactly like the renderer editor: the
+ * session journals a local edit from its doc's update event, so transacting
+ * on the session's own doc would change state without journaling.
+ */
+function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Array {
+  const scratch = new Y.Doc();
+  try {
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+    const captured: { update?: Uint8Array } = {};
+    scratch.on("update", (encoded: Uint8Array) => {
+      captured.update = encoded;
+    });
+    // Setting a map key always emits an update.
+    patchFrontmatter(scratch, new Map([[field, value]]));
+    if (captured.update === undefined) throw new Error(`Setting "${field}" produced no update.`);
+    return captured.update;
+  } finally {
+    scratch.destroy();
+  }
+}
+
+/**
  * Sets frontmatter fields on one record through the record's live engine
- * Y.Doc session: open, skip every field that already holds the requested
- * value, transact the rest in one transaction with the author-derived
- * actorOriginId, settle so the write is durable and the .md is on disk,
- * release. When no field changes, nothing is journaled or settled. Throws on
+ * Y.Doc session: open, then for each field at its turn on the session's
+ * chain, skip it when it already holds the requested value (or, with
+ * `expectedBefore`, anything but the expected one), else journal it as one
+ * update with the author-derived actorOriginId; settle so the writes are
+ * durable and the .md is on disk, release. When no field changes, nothing
+ * is journaled or settled. Throws on
  * refusal (invalid path, engine off, the record's doc session held live
  * elsewhere).
  *
@@ -254,71 +292,61 @@ export async function setCollectionRecordFields(
     // The caller can end while the session opens (an automation run's
     // deadline); a write must not land after that.
     throwIfAborted(context.signal);
-    // The update is computed on a scratch replica, exactly like the renderer
-    // editor: the session journals a local edit from its doc's update event,
-    // so transacting on the session's own doc would change state without
-    // journaling, and re-applying the same update afterwards would journal
-    // nothing (Yjs re-apply is a no-op).
-    const scratch = new Y.Doc();
-    try {
-      Y.applyUpdate(scratch, session.initialUpdate);
-      const frontmatter = scratch.getMap(FRONTMATTER_FIELD);
-      // Field names are the caller's, so "__proto__" must stay a plain key.
-      const replaced: Record<string, unknown> = Object.create(null);
-      const changed = entries.filter(([field, value]) => {
-        const current = frontmatter.get(field);
-        const currentValue =
-          (current instanceof Y.AbstractType ? current.toJSON() : current) ??
-          null;
-        if (isDeepStrictEqual(currentValue, value)) return false;
-        replaced[field] = currentValue;
-        return true;
-      });
-      if (changed.length === 0) {
-        // Every field already holds its value; nothing to journal or settle.
-        return { path: input.recordPath, replaced };
-      }
-      if (frontmatterEditsRefused(scratch)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
-      // Setting a map key always emits an update, so the transaction assigns it.
-      let update!: Uint8Array;
-      const captureUpdate = (encoded: Uint8Array): void => {
-        update = encoded;
-      };
-      scratch.on("update", captureUpdate);
-      try {
-        patchFrontmatter(scratch, new Map(changed));
-      } finally {
-        scratch.off("update", captureUpdate);
-      }
-      let armed = false;
-      const actorOriginId = actorOriginIdFor(input.author);
-      session.applyLocalUpdate(
-        update,
+    // Field names are the caller's, so "__proto__" must stay a plain key.
+    const replaced: Record<string, unknown> = Object.create(null);
+    const kept: Record<string, unknown> = Object.create(null);
+    const expected = input.expectedBefore;
+    const actorOriginId = actorOriginIdFor(input.author);
+    let armed = 0;
+    // Each field is compared and written at its own turn on the session's
+    // chain, against the canonical doc as it stands then, so a change that
+    // arrived after the session opened is compared, not overwritten.
+    const journaled = await Promise.all(entries.map(([field, value]) =>
+      session.applyDecidedLocalUpdate(
+        (doc) => {
+          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+          const currentValue =
+            (current instanceof Y.AbstractType ? current.toJSON() : current) ??
+            null;
+          if (isDeepStrictEqual(currentValue, value)) return null;
+          if (
+            expected !== undefined &&
+            Object.hasOwn(expected, field) &&
+            !isDeepStrictEqual(currentValue, expected[field] ?? null)
+          ) {
+            kept[field] = currentValue;
+            return null;
+          }
+          if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+          replaced[field] = currentValue;
+          return frontmatterUpdate(doc, field, value);
+        },
         () => {
-          armed = true;
+          armed += 1;
         },
         {
           ...(actorOriginId === undefined ? {} : { actorOriginId }),
           attribution: attributionFor(input.author),
-          ...(input.idempotencyKey === undefined
+          ...(input.idempotencyKeyPrefix === undefined
             ? {}
-            : { idempotencyKey: input.idempotencyKey }),
+            : { idempotencyKey: `${input.idempotencyKeyPrefix}/${field}` }),
         },
+      )));
+    const updates = journaled.filter(Boolean).length;
+    // Every field already held its value, or someone else's: nothing to settle.
+    if (updates === 0) return { path: input.recordPath, replaced, kept };
+    // settleNow queues on the same session chain as the updates above, so
+    // it observes the journaled edits; it throws when the settle cannot
+    // commit.
+    await session.settleNow({
+      summary: `Updated ${recordBasename(input.recordPath)}`,
+    });
+    if (armed !== updates) {
+      throw new Error(
+        `The engine session did not accept the field change for ${input.recordPath}.`,
       );
-      // settleNow queues on the same session chain as the update above, so it
-      // observes the journaled edit; it throws when the settle cannot commit.
-      await session.settleNow({
-        summary: `Updated ${recordBasename(input.recordPath)}`,
-      });
-      if (!armed) {
-        throw new Error(
-          `The engine session did not accept the field change for ${input.recordPath}.`,
-        );
-      }
-      return { path: input.recordPath, replaced };
-    } finally {
-      scratch.destroy();
     }
+    return { path: input.recordPath, replaced, kept };
   } finally {
     await session.close();
   }
@@ -376,6 +404,7 @@ export async function createCollectionRecord(
             context,
             `${input.collectionPath}/${name}.md`,
             requestedId,
+            input.author,
           ),
         )
       : { path: existingPath, recordId: requestedId };
@@ -385,9 +414,12 @@ export async function createCollectionRecord(
         recordPath: path,
         fields: Object.fromEntries(entries),
         author: input.author,
-        ...(input.idempotencyKey === undefined
+        ...(input.idempotencyKeyPrefix === undefined
           ? {}
-          : { idempotencyKey: input.idempotencyKey }),
+          : { idempotencyKeyPrefix: input.idempotencyKeyPrefix }),
+        ...(input.expectedBefore === undefined
+          ? {}
+          : { expectedBefore: input.expectedBefore }),
       });
     } catch (error) {
       // The record exists by now: name it, so the caller reconciles instead
@@ -435,28 +467,44 @@ function recordIdFromBytes(bytes: Uint8Array): string {
  * Writes the record file with only its id in the frontmatter, so the
  * record's id is known before adoption. A taken name refuses, unless the
  * file there carries the same id.
+ *
+ * An added record's claim takes its author and chain depth from the moment
+ * that created the file. So an automation's record is written through the
+ * engine with the automation as the moment's author: without it, an
+ * automation that adds a record to its own Collection would trigger itself
+ * at depth 0 without end.
  */
 async function createRecordFile(
   context: CollectionRecordEditContext,
   requestedPath: string,
   recordId: string,
+  author: ChangeAuthor,
 ): Promise<string> {
+  const text = `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`;
   try {
+    if (author.kind === "automation") {
+      await context.capture.writeAuthoredTextFile(
+        join(context.workspaceRoot, requestedPath),
+        text,
+        author,
+        { createOnly: true, signal: context.signal },
+      );
+      return requestedPath;
+    }
     return await withStaleSensitiveWorkspaceOperation(
       context.workspaceRoot,
       async () =>
-        await createFile(
-          context.workspaceRoot,
-          requestedPath,
-          `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`,
-          { exclusive: true },
-        ),
+        await createFile(context.workspaceRoot, requestedPath, text, {
+          exclusive: true,
+        }),
     );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  if ((await fileRecordId(context, requestedPath)) === recordId) {
-    return requestedPath;
+    const existing = await fileRecordId(context, requestedPath).catch(
+      () => undefined,
+    );
+    // Nothing is there: the create itself failed.
+    if (existing === undefined) throw error;
+    if (existing === recordId) return requestedPath;
   }
   throw new Error(`${requestedPath} already exists. Choose another record name.`);
 }

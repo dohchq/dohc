@@ -52,7 +52,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
-    ) -> Result<Vec<String>, RuntimeError> {
+    ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
         let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
@@ -83,7 +83,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<Vec<String>, RuntimeError> {
+    ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = None;
         self.run(move |store, cache| {
             reconcile_collections_on_store(
@@ -683,6 +683,17 @@ fn cleanup_collection_relation_on_store(
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
 
+/// What one collection reconciliation changed.
+#[derive(Debug, Default)]
+pub struct CollectionReconciliation {
+    /// Workspace paths the reconciliation rewrote: record id adoptions and
+    /// relation cleanups.
+    pub changed_paths: Vec<String>,
+    /// Automation claims for the records it added or removed on this
+    /// computer, committed with the bindings. The caller announces them.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reconcile_collections_on_store(
     store: &mut EngineStore,
@@ -696,15 +707,25 @@ fn reconcile_collections_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<Vec<String>, RuntimeError> {
+) -> Result<CollectionReconciliation, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     validate_workspace_root(root_dir, root_guard)?;
-    let reconciliation = match store.write_with(faults, |tx| {
-        reconcile_collections_in_tx(tx, workspace_id, version_id).map_err(RuntimeError::from)
+    let (reconciliation, automation_claims) = match store.write_with(faults, |tx| {
+        let reconciliation = reconcile_collections_in_tx(tx, workspace_id, version_id)?;
+        // Added and removed records claim in the transaction that binds or
+        // unbinds them.
+        let claims = dohc_engine_domain::claim_record_lifecycle_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &reconciliation.lifecycle,
+            now_ms,
+        )?;
+        Ok::<_, RuntimeError>((reconciliation, claims))
     })? {
-        TxnOutcome::Committed(reconciliation) => reconciliation,
+        TxnOutcome::Committed(committed) => committed,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
 
@@ -827,7 +848,10 @@ fn reconcile_collections_on_store(
             },
         ));
     }
-    Ok(changed_paths)
+    Ok(CollectionReconciliation {
+        changed_paths,
+        automation_claims,
+    })
 }
 
 #[cfg(test)]

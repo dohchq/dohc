@@ -345,6 +345,47 @@
       "expected": {
         "status": "valid"
       }
+    },
+    {
+      "name": "button-null-valid",
+      "field": {
+        "name": "Mark paid",
+        "type": "button"
+      },
+      "valueYaml": "null",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "button-flagged",
+      "field": {
+        "name": "Mark paid",
+        "type": "button"
+      },
+      "valueYaml": "true",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-empty",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "button-flagged-empty-text",
+      "field": {
+        "name": "Mark paid",
+        "type": "button"
+      },
+      "valueYaml": "\"\"",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-empty",
+          "path": ""
+        }
+      }
     }
   ]
 }
