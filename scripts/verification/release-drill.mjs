@@ -14,7 +14,7 @@
 // feed's installer is placeholder bytes, and nothing installs or relaunches.
 
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -146,7 +146,7 @@ function removeApp(app) {
   for (const name of LINKED) {
     const link = join(app, name);
     try {
-      if (lstatSync(link).isSymbolicLink()) rmdirSync(link);
+      if (lstatSync(link).isSymbolicLink()) unlinkSync(link);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -375,9 +375,21 @@ export async function runDrill({
     result.dialogs = readDrillLog(logPath);
     if (keep && result.passed) Object.assign(result, { scratch, app });
     writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-    if (app && !result.app) removeApp(app);
-    if (scratch && !result.scratch) remove(scratch);
-    if (result.passed && !keep) remove(evidence);
+    const cleanup = [];
+    if (app && !result.app) cleanup.push(() => removeApp(app));
+    if (scratch && !result.scratch) cleanup.push(() => remove(scratch));
+    if (result.passed && !keep) cleanup.push(() => remove(evidence));
+    const failures = [];
+    for (const step of cleanup) {
+      try {
+        step();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    // A drill that already failed keeps its own error; cleanup failures are only printed.
+    for (const error of failures) console.error(`release drill cleanup: ${error instanceof Error ? error.message : String(error)}`);
+    if (failures.length > 0 && !result.error) throw failures[0];
   }
   return result;
 }
