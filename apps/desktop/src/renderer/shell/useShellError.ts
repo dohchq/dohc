@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
+import type { ErrorDetailField } from "./copyDetails";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
-type ShellErrorKind =
+export type ShellErrorKind =
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
+  | "import-files"
+  | "share-refresh"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -22,6 +25,9 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
+  // Facts for a report, one "label: value" line each, such as a technical
+  // cause. They go into Copy details, not the text a person reads.
+  details?: ReadonlyArray<ErrorDetailField>;
   retry: (() => void) | null;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
@@ -109,7 +115,7 @@ export function useShellError(workspaceId: string) {
       fallback: string,
       error: unknown,
       retry: (() => void) | null = null,
-      kind?: "workspace-search",
+      kind?: ShellErrorKind,
     ) => {
       const detail = error instanceof Error ? error.message.trim() : "";
       push({
@@ -121,6 +127,24 @@ export function useShellError(workspaceId: string) {
         ...(kind ? { kind } : {}),
       });
     },
+    [push],
+  );
+  // A failure already worded for the person. Report facts, such as a raw
+  // cause, go into Copy details only. A kind makes a newer message replace
+  // the row of an older one, such as one import's result replacing the last.
+  const reportShellFailure = useCallback(
+    (failure: {
+      message: string;
+      details?: ReadonlyArray<ErrorDetailField>;
+      retry?: (() => void) | null;
+      kind?: ShellErrorKind;
+    }) =>
+      push({
+        message: failure.message,
+        retry: failure.retry ?? null,
+        ...(failure.details?.length ? { details: failure.details } : {}),
+        ...(failure.kind ? { kind: failure.kind } : {}),
+      }),
     [push],
   );
   // Content search lives in the shell so its results survive panel switches.
@@ -152,10 +176,6 @@ export function useShellError(workspaceId: string) {
     [push],
   );
 
-  const showShellError = useCallback(
-    (message: string) => push({ message, retry: null }),
-    [push],
-  );
   // One row per settings file: a newer read replaces it, and a read with
   // nothing to report clears it. Try again reads the file again; the action
   // opens it.
@@ -208,9 +228,18 @@ export function useShellError(workspaceId: string) {
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
     target?.action?.run();
   }, []);
+  // A kind makes a newer message replace the row of an older one, such as
+  // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void) =>
-      push({ message, retry: null, tone: "success", ...(undo ? { action: { label: "Undo", run: undo, ends: true } } : {}) }),
+    (message: string, undo?: () => void, kind?: ShellErrorKind) => {
+      push({
+        message,
+        retry: null,
+        tone: "success",
+        ...(kind ? { kind } : {}),
+        ...(undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
+      });
+    },
     [push],
   );
   // The toast closes; the row in Notices stays.
@@ -234,6 +263,7 @@ export function useShellError(workspaceId: string) {
   return {
     shellErrors,
     reportShellError,
+    reportShellFailure,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -241,7 +271,6 @@ export function useShellError(workspaceId: string) {
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
-    showShellError,
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,

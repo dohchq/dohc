@@ -4945,7 +4945,9 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
-    expect((await screen.findByTestId("shell-notice")).textContent).toBe(
+    // A warning the person may need to act on: an error toast, then a row
+    // in Notices. Nothing is inserted above the workbench.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
     );
   });
@@ -15611,6 +15613,291 @@ describe("file transfers", () => {
     });
   });
 
+  it("reports an import as a toast and a Notices row, and a newer import replaces the row", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain("Imported 1 file.");
+    expect(screen.getByTestId("notice-toasts").contains(toast)).toBe(true);
+
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["one.md", "two.md"],
+      skipped: 0,
+    });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
+        "Imported 2 files.",
+      ),
+    );
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Imported 2 files.");
+    expect(notices.textContent).not.toContain("Imported 1 file.");
+  });
+
+  // Every file was skipped for its name or kind, so the same files would be
+  // skipped again: the notice names the count and offers no Try again.
+  it("offers no Try again when an import brings nothing", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 2 });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  function sharedViewBridge(refreshOk: boolean[]) {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.refreshSharedView = vi.fn(async () =>
+      refreshOk.shift() === false
+        ? {
+            ok: false as const,
+            changedPaths: 0,
+            errorMessage: "The relay did not answer.",
+          }
+        : {
+            ok: true as const,
+            status: "unchanged" as const,
+            changedPaths: 0,
+            excludedPaths: [],
+            unjournalablePaths: [],
+            collisionRecordQuarantined: false,
+            refusedOps: 0,
+            refusedDetail: null,
+          },
+    );
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md", "notes/two.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    return bridge;
+  }
+
+  async function importIntoNotes(bridge: ReturnType<typeof makeBridge>) {
+    const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
+    if (!folder) throw new Error("notes folder row missing");
+    fireEvent.contextMenu(folder);
+    await waitFor(() =>
+      expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
+    );
+  }
+
+  const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
+
+  // Picking the same files again would land second copies under collision
+  // names, so the notice names what landed; Try again refreshes the shared
+  // view, then asks for files for the same folder.
+  it("names what an interrupted import landed, and Try again refreshes before it asks for files for the same folder", async () => {
+    const bridge = sharedViewBridge([true, true]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "Imported one.md and two.md before the import stopped. Import only the files that are still missing.",
+    );
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+    expect(bridge.refreshSharedView.mock.invocationCallOrder[1]).toBeLessThan(
+      bridge.importWorkspaceFiles.mock.invocationCallOrder[1]!,
+    );
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+      stop: {
+        file: "two.md",
+        code: "EACCES",
+        detail: "EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
+      },
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "Imported one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
+    );
+    expect(toast.textContent).not.toContain("EACCES");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(
+      "Cause: EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
+    );
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  // A notice's message is cut at 500 characters. Long names must not cut off
+  // the failure or the instruction; the report still lists every file.
+  it("keeps the failure and the instruction whole with long file names, and lists every file in Copy details", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const imported = ["notes/" + long("one"), "notes/" + long("two"), "notes/" + long("three")];
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported,
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("four"), code: "EACCES", detail: "EACCES: permission denied" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toMatch(/Imported one-n+…? and 2 more before the import stopped\./);
+    expect(toast.textContent).toContain("or write to this folder. Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    for (const path of imported) expect(copied).toContain(`Imported: ${path}`);
+  });
+
+  // A dangling link's refusal names the link too. With long names, the
+  // instruction must still survive, and Copy keeps every path whole.
+  it("keeps the instruction whole when a long-named dangling link stops an import into a deep folder", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const deep = `${"nested-folder/".repeat(40)}${long("one")}`;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [deep, `notes/${long("two")}`],
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("link"), refusal: "dangling-link", detail: "The symbolic link points to a missing file." },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("a symbolic link to a missing file. Restore that file, then import it instead.");
+    expect(toast.textContent).toContain(" Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
+  });
+
+  it("keeps the skipped count when the first copy fails", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 2,
+      stop: { file: "three.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'three.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files (2 skipped). The disk is full.",
+    );
+  });
+
+  // Try again removes the row before it runs. When the shared view cannot
+  // refresh first, the person still learns why no file picker opened.
+  it("says why no file picker opened when the shared view does not refresh before Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", damaged: true as const },
+    });
+    const user = userEvent.setup();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not start the import. Refresh the shared view before you import",
+      ),
+    );
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("words a failed first copy the same way, with the raw error only in Copy details", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      stop: { file: "one.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'one.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not import files. The disk is full.");
+    expect(toast.textContent).not.toContain("ENOSPC");
+    expect(within(toast).getByTestId("workspace-shell-error-retry")).toBeTruthy();
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain("Cause: ENOSPC: no space left on device");
+  });
+
+  // The refresh reports its own cause; the toast after it says why no file
+  // picker opened and what to do next.
+  it("asks for no files when the refresh before Try again fails", async () => {
+    const bridge = sharedViewBridge([true, false]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not start the import. Refresh the shared view before you import",
+      ),
+    );
+    expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-center")).textContent).toContain(
+      "Couldn't refresh the shared view. The relay did not answer.",
+    );
+  });
+
   it("reports an interrupted shared import separately from ordinary skips", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
@@ -15624,7 +15911,7 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
 
-    await screen.findByText(/Imported 2 files before the import stopped/);
+    await screen.findByText(/Imported one.md and two.md before the import stopped/);
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(1),
     );
