@@ -337,7 +337,7 @@ export function WorkspaceManager(props: {
       const workspace = await openExistingFolder();
       if (workspace) await open(workspace);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }
 
@@ -346,7 +346,7 @@ export function WorkspaceManager(props: {
     try {
       await bridge().revealWorkspaceFolder({ workspaceId: workspace.workspaceId });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }
 
@@ -358,7 +358,7 @@ export function WorkspaceManager(props: {
       await props.onForgot();
       setNotice(`Forgot ${workspaceName(workspace)}. Its folder was not deleted.`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }
 

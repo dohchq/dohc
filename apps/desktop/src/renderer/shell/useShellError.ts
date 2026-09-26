@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
@@ -26,8 +27,8 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
-  // Facts for a report, one "label: value" line each, such as a technical
-  // cause. They go into Copy details, not the text a person reads.
+  // Facts for a report, one "label: value" line each, such as the error as
+  // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
   retry: (() => void) | null;
   // A step offered beside Try again: one that fixes the cause, such as
@@ -129,12 +130,10 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
     ) => {
-      const detail = error instanceof Error ? error.message.trim() : "";
+      const { cause } = readError(error);
       push({
-        message:
-          detail && detail !== fallback && !detail.startsWith(`${fallback} `)
-            ? `${fallback} ${detail}`
-            : detail || fallback,
+        message: withErrorWords(fallback, error),
+        ...(cause ? { details: [["Cause", cause]] } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
@@ -142,21 +141,31 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   // A failure already worded for the person. Report facts, such as a raw
-  // cause, go into Copy details only. A kind makes a newer message replace
-  // the row of an older one, such as one import's result replacing the last.
+  // cause, go into Copy details only; so does `cause`, the error that caused
+  // the words. Text that arrives raw is read into words the same way. A kind
+  // makes a newer message replace the row of an older one, such as one
+  // import's result replacing the last.
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
+      cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
       kind?: ShellErrorKind;
-    }) =>
+    }) => {
+      const shown = readError(failure.message);
+      const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      const details: ReadonlyArray<ErrorDetailField> = [
+        ...(failure.details ?? []),
+        ...(cause ? [["Cause", cause] as const] : []),
+      ];
       push({
-        message: failure.message,
+        message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
-        ...(failure.details?.length ? { details: failure.details } : {}),
+        ...(details.length ? { details } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
-      }),
+      });
+    },
     [push],
   );
   // Content search lives in the shell so its results survive panel switches.
@@ -196,8 +205,8 @@ export function useShellError(workspaceId: string) {
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
-      const cause = error instanceof Error ? error.message : null;
-      push({ message: cause ? `${lane} ${cause}` : lane, retry });
+      const { cause } = readError(error);
+      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry });
     },
     [push],
   );

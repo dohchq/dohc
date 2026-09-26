@@ -42,6 +42,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
+import { readError } from "../ipc/errorWords";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -762,6 +763,8 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // The error as it arrived, for Copy details.
+    cause?: string;
     // Admission stopped on pending writes or retained failures from another
     // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
@@ -827,11 +830,12 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
-  // For surfaces that report a failure as one sentence. One stable identity:
-  // ChatsView keys its polls and subscriptions off onError, so a fresh arrow
-  // per shell render tore them down and re-armed them every render.
+  // For surfaces that report a failure as one sentence, with the error that
+  // caused it when they have one. One stable identity: ChatsView keys its
+  // polls and subscriptions off onError, so a fresh arrow per shell render
+  // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string) => reportShellFailure({ message }),
+    (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -847,13 +851,17 @@ export function DesktopWorkspaceShell(props: {
   // the address that failed when the panel it came from has closed.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
-      reportShellError(error.message, new Error(error.message), () => {
-        if (error.retry?.()) return;
-        setCloudRetryServerUrl(error.serverUrl ?? "");
-        setCloudOpen(true);
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (error.retry?.()) return;
+          setCloudRetryServerUrl(error.serverUrl ?? "");
+          setCloudOpen(true);
+        },
       });
     },
-    [reportShellError],
+    [reportShellFailure],
   );
 
   // The live-document dialog's own reads and actions, straight through to
@@ -3561,11 +3569,12 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
-          const detail = error instanceof Error ? error.message.trim() : "";
+          const { words, cause } = readError(error);
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
-            message: detail || "dohc could not open this workspace.",
+            message: words ?? "dohc could not open this workspace.",
+            ...(cause ? { cause } : {}),
           });
         }
         return;
@@ -5968,6 +5977,7 @@ export function DesktopWorkspaceShell(props: {
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
+                  ["Cause", workspaceOpenFailure.cause],
                   ...reportFacts(),
                 ])
               }

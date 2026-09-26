@@ -18,6 +18,7 @@ import {
   isLoopbackOrigin,
   sdkErrorResponse,
 } from "./sdkFrame";
+import { ipcErrorMessage } from "./ipcError";
 
 type LoadState =
   | { status: "loading" }
@@ -123,9 +124,7 @@ export function PluginPanelPage(props: {
         setLoad({
           status: "error",
           message:
-            error instanceof Error
-              ? error.message
-              : "The plugin panel could not start.",
+            ipcErrorMessage(error, "The plugin panel could not start."),
         });
       });
 

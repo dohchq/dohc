@@ -7693,18 +7693,27 @@ describe("engine store recovery", () => {
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => {
-      throw new Error("EACCES: permission denied");
+      throw new Error(
+        "Error invoking remote method 'desktop:rebuild-engine-store': Error [EACCES]: EACCES: permission denied",
+      );
     });
     const { user, dialog } = await openRebuildDialog(bridge);
 
     await user.click(
       within(dialog).getByRole("button", { name: "Move and rebuild" }),
     );
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-    ).toContain(
-      "dohc could not move this workspace's data store. EACCES: permission denied",
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
     );
+    expect(toast.textContent).not.toContain("EACCES");
+    // Copy keeps the error as it arrived, on its own line.
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied.split("\n").slice(0, 2)).toEqual([
+      "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
+      "Cause: Error [EACCES]: EACCES: permission denied",
+    ]);
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
@@ -7823,6 +7832,28 @@ describe("workspace shell errors", () => {
     );
     expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+  });
+
+  it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(
+      "dohc is still reading this workspace's files. Try again when it finishes.",
+    );
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|OVERLOADED|invoking remote method/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
+      "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ]);
   });
 
   it("retries a failed initial listing without reopening the workspace", async () => {

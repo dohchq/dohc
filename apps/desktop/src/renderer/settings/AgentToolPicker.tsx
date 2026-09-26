@@ -11,7 +11,7 @@ export function AgentToolPicker(props: {
   disabled: boolean;
   checkLabel: "Check" | "Test runner";
   onChange(profile: AgentLaunchProfile): void;
-  onError(message: string): void;
+  onError(message: string, cause?: unknown): void;
 }) {
   const [result, setResult] = useState<AgentToolsResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,7 +26,7 @@ export function AgentToolPicker(props: {
     void bridge().detectAgentTools({ workspaceId: props.workspaceId }).then((value) => {
       if (requests.isCurrent(token)) setResult(value);
     }).catch((cause: unknown) => {
-      if (requests.isCurrent(token)) onError.current(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."));
+      if (requests.isCurrent(token)) onError.current(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."), cause);
     }).finally(() => {
       if (requests.isCurrent(token)) setLoading(false);
     });
