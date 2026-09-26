@@ -240,6 +240,21 @@ async function world(options: {
       return { claims: inserted, mark: next };
     },
     listAutomationScheduleMarks: async () => ({ marks: [...marks.values()] }),
+    runAutomationNow: async ({ automationId, noticeId }) => {
+      const key = `run-now:${noticeId}`;
+      const known = [...claims.values()].find((claim) => claim.automationId === automationId && "key" in claim.trigger && claim.trigger.key === key);
+      if (known) return { claim: known };
+      claimCount += 1;
+      const created: AutomationClaim = {
+        claimId: `atc_claim${claimCount}`, automationId, trigger: { key },
+        recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
+        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+        state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 12), updatedAtMs: 0,
+      };
+      claims.set(created.claimId, created);
+      pending.push(created);
+      return { claim: created };
+    },
     releaseAutomationClaim: async ({ claimId }) => {
       const claim = claims.get(claimId)!;
       if (claim.state !== "running") throw new Error("Automation claim is not running.");
@@ -563,6 +578,24 @@ describe("Collection automations", () => {
 
     w.executor.handlePulledPaths(["Tasks/notes.md", "Tasks/automations.yaml"]);
     await w.until(() => !w.subscriptions.has(TASKS));
+  });
+
+  it("runs Run now from a skipped-run notice once, with when the skipped runs began", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: day, at: '09:00', timezone: UTC}",
+      "    do: [{add-record: {Title: '=trigger.skipped'}}]",
+    ].join("\n") } });
+    await w.executor.open();
+    const notice = `schedule-skipped:ws:collection:Tasks#sweep:${Date.UTC(2026, 8, 22, 9)}`;
+    expect(await w.executor.runNow("collection:Tasks#sweep", notice)).toBe(true);
+    const claim = [...w.claims.values()].find((candidate) => "key" in candidate.trigger && candidate.trigger.key === `run-now:${notice}`)!;
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(await w.executor.runNow("collection:Tasks#sweep", notice), "a repeat answers the same claim").toBe(true);
+    expect([...w.claims.values()].filter((candidate) => "key" in candidate.trigger && candidate.trigger.key.startsWith("run-now:")))
+      .toHaveLength(1);
   });
 
   it("closes after a background run and opens again", async () => {

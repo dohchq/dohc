@@ -6323,6 +6323,13 @@ export const MarkNoticesPayload = z.object({
 });
 export type MarkNoticesPayload = z.infer<typeof MarkNoticesPayload>;
 export const NoticesChangedEvent = z.undefined();
+// Run now on a skipped schedule's notice, from the list for `account`.
+export const RunSkippedScheduleNowPayload = z.object({
+  account: NoticeAccountKey,
+  notice: NoticeRef,
+});
+// `note` is null once the run started on this computer, or says why not.
+export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
 
 export const noticeOperations = {
   listNotices: {
@@ -6332,6 +6339,10 @@ export const noticeOperations = {
   markNotices: {
     channel: "desktop:mark-notices",
     payload: MarkNoticesPayload, guard: "trusted-sender",
+  },
+  runSkippedScheduleNow: {
+    channel: "desktop:run-skipped-schedule-now",
+    payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 

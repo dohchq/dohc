@@ -15,8 +15,8 @@ const isTime = (value: unknown): value is number | null =>
 
 function isRecordedSchedule(value: unknown): value is ScheduleRecord["schedules"][number] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const { automationId, scheduleHash, enabledSince, throughMs, trigger } = value as Record<string, unknown>;
-  if (typeof automationId !== "string" || typeof scheduleHash !== "string") return false;
+  const { automationId, name, scheduleHash, enabledSince, throughMs, trigger } = value as Record<string, unknown>;
+  if (typeof automationId !== "string" || typeof name !== "string" || typeof scheduleHash !== "string") return false;
   if (!isTime(enabledSince) || !isTime(throughMs)) return false;
   if (!trigger || typeof trigger !== "object" || Array.isArray(trigger)) return false;
   const { kind, every, at, timezone, days } = trigger as Record<string, unknown>;

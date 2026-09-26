@@ -135,11 +135,14 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
     throughMs: number;
   }): Promise<AutomationClaimScheduleResult>;
   listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
+  /** Claims Run now from a skipped-run notice; a repeat answers the same claim. */
+  runAutomationNow(input: { automationId: string; noticeId: string }): Promise<unknown>;
 }
 
 /** An enabled schedule this executor can run. */
 export interface ScheduledAutomation {
   automationId: string;
+  name: string;
   trigger: AutomationScheduleTrigger;
   scheduleHash: string;
   /**
@@ -730,6 +733,7 @@ export class CollectionAutomations {
       if (automation.enabled && automation.when.kind === "schedule") {
         schedules.push({
           automationId,
+          name: automation.name,
           trigger: automation.when,
           scheduleHash: scheduleHash(automation.when),
           enabledSince: this.enabledSince.get(automationId) ?? null,
@@ -737,6 +741,17 @@ export class CollectionAutomations {
       }
     }
     return schedules;
+  }
+
+  /**
+   * Run now from a skipped-run notice, after this computer's dismissal was
+   * the notice's first. False while the engine is not answering.
+   */
+  async runNow(automationId: string, noticeId: string): Promise<boolean> {
+    const ran = await this.withLiveEngine((engine) => engine.runAutomationNow({ automationId, noticeId }));
+    if (ran === null) return false;
+    this.notifyClaimed();
+    return true;
   }
 
   /** Every schedule's mark in this workspace, or null while the engine is not answering. */

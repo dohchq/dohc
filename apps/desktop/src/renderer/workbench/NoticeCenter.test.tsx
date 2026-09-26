@@ -95,6 +95,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onOpenAutomation ? { onOpenAutomation: props.onOpenAutomation } : {})}
       {...(props.automationFailureToast ? { automationFailureToast: props.automationFailureToast } : {})}
       {...(props.onHideAutomationFailureToast ? { onHideAutomationFailureToast: props.onHideAutomationFailureToast } : {})}
+      {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
     />
   );
 }
@@ -1580,6 +1581,35 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
     openable: true,
   };
 }
+
+describe("skipped-run notices", () => {
+  const skipped = () => sentRow("s", {
+    kind: "schedule-skipped",
+    senderKind: "automation",
+    title: "Weekday report skipped 3 times",
+    target: { automation: "collection:Reports#weekday", path: "Reports/automations.yaml" },
+  });
+
+  it("offers Run now beside Open automation, and says why a run did not start", async () => {
+    const answer = deferred<string | null>();
+    const onRunSentNoticeNow = vi.fn((_notice: NoticeRow) => answer.promise);
+    renderNotices({ sentNotices: [skipped(), sentRow("a")], onOpenSentNotice: vi.fn(async () => null), onRunSentNoticeNow });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-s-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-a-run-now"), "only a skipped schedule runs now").toBeNull();
+
+    await userEvent.click(screen.getByTestId("sent-notice-s-run-now"));
+    const runNow = screen.getByTestId("sent-notice-s-run-now");
+    expect(runNow.textContent).toBe("Starting…");
+    expect(runNow.hasAttribute("disabled")).toBe(true);
+    expect(onRunSentNoticeNow).toHaveBeenCalledWith(expect.objectContaining({ noticeId: "s" }));
+
+    await act(async () => answer.resolve("This already ran from another computer, or from here."));
+    expect(screen.getByTestId("sent-notice-s-run-now").textContent).toBe("Run now");
+    expect(within(screen.getByTestId("sent-notice-s")).getByRole("status").textContent)
+      .toBe("This already ran from another computer, or from here.");
+  });
+});
 
 describe("notices sent to you", () => {
   it("puts this computer's rows first and sent rows after, each under one heading", async () => {

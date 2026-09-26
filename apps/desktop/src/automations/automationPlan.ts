@@ -102,6 +102,17 @@ export function scheduleDueAt(claim: Pick<RunClaim, "trigger">): number | null {
   return due !== null && Number.isSafeInteger(due) ? due : null;
 }
 
+/**
+ * The first skipped time a Run now claim runs for, from its key
+ * `run-now:<notice id>`, whose notice id ends with `:<first skipped ms>`.
+ */
+export function runNowSkippedFrom(claim: Pick<RunClaim, "trigger">): number | null {
+  const key = claim.trigger && "key" in claim.trigger ? claim.trigger.key : null;
+  const match = key === null ? null : /^run-now:schedule-skipped:.+:(0|[1-9]\d{0,15})$/u.exec(key);
+  const first = match ? Number(match[1]) : null;
+  return first !== null && Number.isSafeInteger(first) ? first : null;
+}
+
 /** A step with its position among all steps, counted depth first. */
 type OrderedStep =
   | { ordinal: number; step: Exclude<AutomationStep, IfStep> }
@@ -670,7 +681,7 @@ export function triggerMatches(inputs: RunInputs): boolean {
     case "group-message":
       return change.kind === "message";
     case "schedule":
-      return change.kind === "schedule" && scheduleDueAt(claim) !== null;
+      return change.kind === "schedule" && (scheduleDueAt(claim) !== null || runNowSkippedFrom(claim) !== null);
     case "field-changed": {
       if (change.kind !== "changed") return false;
       const fact = change.fields.find((candidate) => candidate.field === trigger.field);
@@ -810,12 +821,18 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
     ? { id: message.authorUserId, name: message.authorDisplayName }
     : null;
   const dueAt = scheduleDueAt(claim);
+  const skippedFrom = runNowSkippedFrom(claim);
   const scope: AutomationScope = {
     ...(triggerRecord ? { record: triggerRecord } : {}),
     ...(message ? { message } : {}),
     previous: previousValues(claim),
-    trigger: trigger.kind === "schedule" && dueAt !== null
-      ? { kind: "schedule", dueAt: localIsoTime(dueAt, trigger.timezone) }
+    trigger: trigger.kind === "schedule" && (dueAt !== null || skippedFrom !== null)
+      ? {
+        kind: "schedule",
+        dueAt: localIsoTime(dueAt ?? nowMs, trigger.timezone),
+        // Run now from a skipped-run notice: when the skipped runs began.
+        ...(skippedFrom !== null ? { skipped: localIsoTime(skippedFrom, trigger.timezone) } : {}),
+      }
       : {
           kind: trigger.kind,
           change: claim.change.kind,
