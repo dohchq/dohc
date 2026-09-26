@@ -97,7 +97,6 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       beginEngineShutdown: vi.fn(() => { log.push("begin-shutdown"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
-      stopAgentSessions: vi.fn(async () => { log.push("agents-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
       stopAgentIntegration: vi.fn(async () => { log.push("integration-stop"); }),
       closeWorkspaces: vi.fn(async () => { log.push("workspaces-close"); }),
@@ -338,18 +337,17 @@ describe("desktop open intents", () => {
 });
 
 describe("desktop shutdown", () => {
-  it.each(["search", "sitePreviews", "agents", "dispatch", "ydoc", "integration", "cli"] as const)(
+  it.each(["search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
     "waits for %s before releasing workspace authority",
     async (heldProducer) => {
       vi.useFakeTimers();
       const gates = {
-        search: deferred(), sitePreviews: deferred(), agents: deferred(), dispatch: deferred(),
+        search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
         ydoc: deferred(), integration: deferred(), cli: deferred(),
       };
       const f = fixture((d) => {
         d.shutdown.stopSearch = () => gates.search.promise;
         d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
-        d.shutdown.stopAgentSessions = () => gates.agents.promise;
         d.services.dispatch.stop = () => gates.dispatch.promise;
         d.shutdown.settleYDocs = () => gates.ydoc.promise;
         d.shutdown.stopAgentIntegration = () => gates.integration.promise;
@@ -372,7 +370,7 @@ describe("desktop shutdown", () => {
   it("settles every producer before closing authorities, then closes database, relay, and daemon", async () => {
     vi.useFakeTimers();
     const gates = {
-      search: deferred(), sitePreviews: deferred(), agents: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
+      search: deferred(), sitePreviews: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
     };
     const integrationStarted = deferred();
     const cliStarted = deferred();
@@ -381,7 +379,6 @@ describe("desktop shutdown", () => {
     const f = fixture((d) => {
       d.shutdown.stopSearch = () => gates.search.promise;
       d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
-      d.shutdown.stopAgentSessions = () => gates.agents.promise;
       d.services.dispatch.stop = () => gates.dispatch.promise;
       d.shutdown.settleYDocs = () => gates.ydoc.promise;
       d.shutdown.stopAgentIntegration = () => { integrationStarted.resolve(); return gates.integration.promise; };
@@ -396,7 +393,6 @@ describe("desktop shutdown", () => {
     expect(f.lifecycle.isQuitting()).toBe(true);
     expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
-    gates.agents.resolve();
     await integrationStarted.promise;
     gates.dispatch.resolve();
     await cliStarted.promise;

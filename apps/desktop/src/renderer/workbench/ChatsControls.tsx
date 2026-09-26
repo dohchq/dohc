@@ -2,7 +2,6 @@ import { ArrowLeft, Bot } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
-import type { AgentNotification } from "./agentNotifications";
 import { SectionLabel } from "../ui/controls";
 
 // Why a committed share read carried no rows. "unreachable" covers both a
@@ -201,47 +200,3 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
   );
 }
 
-// "Addressed to me" inbox: the calm, in-context list of things the agent is
-// waiting on the user for (asks + needs-input). It reuses the agent
-// notification model rather than a heavy new surface, and stays hidden when
-// there's nothing to answer.
-//
-// The rows are informational, and a notification is why: it carries a
-// workspace, a run, and copy — never a conversation or a message. The user
-// acts where the run does: a blocked run raises its own permission card, and
-// the History rail says what it did.
-export function AddressedToMe(props: { notifications: readonly AgentNotification[] }) {
-  const waiting = props.notifications.filter(
-    (notification) => notification.kind === "asked" || notification.kind === "needs-input",
-  );
-  if (waiting.length === 0) return null;
-  return (
-    <section
-      data-testid="chats-addressed-to-me"
-      aria-label="Addressed to me"
-      className="border-b border-line bg-panel-2/40"
-    >
-      <SectionLabel as="p" className="mb-0 px-3 pt-2">
-        Addressed to me
-      </SectionLabel>
-      <ul className="m-0 list-none p-0">
-        {waiting.map((notification) => (
-          <li key={notification.id}>
-            <div
-              data-testid="chats-addressed-item"
-              className="flex w-full items-start gap-1.5 px-3 py-2 text-left"
-            >
-              <Bot size={13} aria-hidden className="mt-0.5 shrink-0 text-accent" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-medium text-ink">
-                  {notification.title}
-                </span>
-                <span className="block truncate text-[11px] text-muted">{notification.body}</span>
-              </span>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}

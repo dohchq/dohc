@@ -519,12 +519,6 @@ const bridge: DohcDesktopBridge = {
   getAgentRunStatus: (payload) =>
     ipcRenderer.invoke(CHANNELS.getAgentRunStatus, payload),
   getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
-  probeAgentDrivers: (payload) =>
-    ipcRenderer.invoke(CHANNELS.probeAgentDrivers, payload),
-  getAgentSessionState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getAgentSessionState, payload),
-  answerAgentPermission: (payload) =>
-    ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
   stopAgentRun: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAgentRun, payload),
   resumeThreadDispatch: (payload) =>

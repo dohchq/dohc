@@ -19,10 +19,6 @@ import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import type {
-  AgentNotification,
-  AgentNotificationKind,
-} from "./agentNotifications";
 import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
 
 type NoticeAction = {
@@ -154,22 +150,6 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-
-const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
-  finished: CheckCircle2,
-  "needs-input": Bot,
-  asked: MessageSquare,
-  error: AlertTriangle,
-  "login-required": LogIn,
-};
-
-const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
-  finished: "success",
-  "needs-input": "warning",
-  asked: "neutral",
-  error: "danger",
-  "login-required": "warning",
-};
 
 // A Collection automation's engine id is "collection:<collection path>#<id>".
 // Its definition lives in the Collection's automations.yaml.
@@ -385,11 +365,6 @@ export function NoticeCenter(props: {
   // invent a title neither of them wrote.
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
   onReviewShareChanges?: (proposalId: string) => void;
-  // Agent -> user notifications (finished / needs-input / asked / error).
-  // Informational ledger entries: the History rail shows what the run did,
-  // and a blocked run raises its own permission card. Dismiss acknowledges.
-  agentNotifications?: readonly AgentNotification[];
-  onDismissAgentNotification?: (id: string) => void;
   // Automation failures (ADR 0008): the engine's failed claim rows the
   // owner has not acknowledged, one notice per automation with the newest
   // error and a count. Durable — they come back after a restart until
@@ -698,30 +673,10 @@ export function NoticeCenter(props: {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
-  const agentNotifications = props.agentNotifications ?? [];
   const notices = useMemo<Notice[]>(() => {
     const next: Notice[] = [];
     const state = props.syncStatus?.state;
     const conflictCount = props.syncStatus?.conflictCount ?? 0;
-
-    // Agent -> user notices lead: a run that finished, is blocked, asked a
-    // question, or failed is the thing the user most needs to see. Newest
-    // first so a fresh ask isn't buried under an older "finished".
-    for (const notification of [...agentNotifications].sort(
-      (a, b) => b.createdAtMs - a.createdAtMs,
-    )) {
-      next.push({
-        id: notification.id,
-        tone: AGENT_NOTICE_TONE[notification.kind],
-        title: notification.title,
-        body: notification.body,
-        timeMs: notification.createdAtMs,
-        Icon: AGENT_NOTICE_ICON[notification.kind],
-        ...(props.onDismissAgentNotification
-          ? { onDismiss: () => props.onDismissAgentNotification?.(notification.id) }
-          : {}),
-      });
-    }
 
     // Above the sync notices: someone is waiting on the granter's decision,
     // and until it comes their work sits where nobody can use it.
@@ -1050,7 +1005,6 @@ export function NoticeCenter(props: {
 
     return next;
   }, [
-    agentNotifications,
     crashReport,
     props.onSendCrashReport,
     props.onDismissCrashReport,
@@ -1064,7 +1018,6 @@ export function NoticeCenter(props: {
     props.automationStops,
     props.onDismissAutomationStops,
     props.conflictSummaries,
-    props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
     props.onRetryAutomationFailure,
     props.onOpenAutomation,

@@ -1008,28 +1008,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("workspace_status requires the user ID in environment credentials", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx, { credentials: false });
-      vi.stubEnv("DOHC_MCP_CLOUD_SERVER_URL", "http://cloud.test");
-      vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "");
-      try {
-        expect(await workspaceStatus(ctx)).toMatchObject({
-          cloudConnected: false,
-          credentialStatus: "invalid",
-        });
-
-        vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "user-1");
-        expect(await workspaceStatus(ctx)).toMatchObject({
-          cloudConnected: true,
-          credentialStatus: "available",
-        });
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    });
-  });
-
   it("workspace_status treats a stored credential without userId as signed out", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx, { credentialUserId: null });

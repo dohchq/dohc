@@ -5,7 +5,7 @@ import {
   ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload, type AutomationFailureNotice,
   ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
-  AgentPanelSnapshotResult, AgentPermissionResponsePayload, StopAgentRunPayload,
+  StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
   ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
 } from "./bridgeContract";
@@ -16,7 +16,6 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { AgentIntegration, AgentRunRecord } from "../agents/AgentIntegration";
-import type { AgentSessionManager } from "../agents/AgentSessionManager";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 
@@ -47,11 +46,9 @@ export function createAgentRunsIpc<
   assertAgentRunnableWorkspace(workspaceId: string): void;
   assertChatRunnerIdle(workspaceId: string): void;
   startAgentRunWithWorkspaceActivity(workspace: Workspace): Promise<AgentRunRecord>;
-  readonly cachedAgentSessions: Pick<AgentSessionManager, "panelSnapshot" | "stopSession"> | null;
   agentIntegration: Pick<AgentIntegration, "endAgentRun" | "getAgentRunStatus">;
   mcpShareAccessOf(shareView: unknown): ShareAccess | null;
   mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): McpConfigResult;
-  agentSessionManager(): Promise<Pick<AgentSessionManager, "probeDrivers" | "panelSnapshot" | "answerPermission">>;
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
@@ -66,7 +63,7 @@ export function createAgentRunsIpc<
     requireEngineCapture, linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace,
     assertAgentRunnableWorkspace, assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
-    agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
+    senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   } = dependencies;
 
@@ -209,23 +206,6 @@ export function createAgentRunsIpc<
       assertTrustedSender(event);
       const input = EndAgentRunPayload.parse(payload);
       requireWorkspace(input.workspaceId);
-      // A driver-backed run owns a live session (a child process). Ending such
-      // a run must go through the session manager so the child is actually
-      // stopped and disposed — not just the run record closed (this stop used
-      // to live on the retired Agent panel; Settings' stop lands here now).
-      // stopSession finalizes the run through agentIntegration.endAgentRun
-      // exactly once, so onRunEnded fires as before. No cached manager means
-      // no session ever started — plain run-record end.
-      const session = dependencies.cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
-      if (
-        dependencies.cachedAgentSessions &&
-        session?.runId === input.runId &&
-        ["starting", "ready", "running", "waiting-permission"].includes(session.status)
-      ) {
-        // Keep the caller's explicit outcome (e.g. "failed") on the record.
-        await dependencies.cachedAgentSessions.stopSession(input.workspaceId, input.status);
-        return;
-      }
       await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
     });
 
@@ -246,31 +226,6 @@ export function createAgentRunsIpc<
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
       return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
-    });
-
-    registerHandler(CHANNELS.probeAgentDrivers, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentRunPayload.parse(payload);
-      requireWorkspace(input.workspaceId);
-      const sessions = await agentSessionManager();
-      await sessions.probeDrivers(input.workspaceId);
-      return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-    });
-
-    registerHandler(CHANNELS.getAgentSessionState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentRunPayload.parse(payload);
-      requireWorkspace(input.workspaceId);
-      const sessions = await agentSessionManager();
-      return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-    });
-
-    registerHandler(CHANNELS.answerAgentPermission, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentPermissionResponsePayload.parse(payload);
-      requireWorkspace(input.workspaceId);
-      const sessions = await agentSessionManager();
-      return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
     });
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {

@@ -61,7 +61,7 @@ function fakeOperations(input?: {
 
 function manager(input?: {
   ops?: TryVersionOperations;
-  startRun?: (workspaceId: string, task: string, driverId?: string) => Promise<{ id: string }>;
+  startRun?: (workspaceId: string, task: string) => Promise<{ id: string }>;
   onStateChanged?: (workspaceId: string) => void;
   now?: () => number;
 }) {
@@ -105,9 +105,9 @@ describe("createTryInVersionSessions", () => {
       now: () => 1000,
     });
 
-    const started = await sessions.start("ws", "  tidy the notes ", "codex");
+    const started = await sessions.start("ws", "  tidy the notes ");
     expect(ops.created).toEqual(["Try: tidy the notes"]);
-    expect(startRun).toHaveBeenCalledWith("ws", "tidy the notes", "codex");
+    expect(startRun).toHaveBeenCalledWith("ws", "tidy the notes");
     expect(started).toEqual({
       versionId: "try-1",
       versionName: "Try: tidy the notes",
@@ -146,11 +146,11 @@ describe("createTryInVersionSessions", () => {
   it("does not record a session when the run fails to start, and says the version exists", async () => {
     const sessions = manager({
       startRun: async () => {
-        throw new Error("driver missing");
+        throw new Error("runner busy");
       },
     });
     await expect(sessions.start("ws", "tidy notes")).rejects.toThrow(
-      /version .* was created.*agent could not start.*driver missing/is,
+      /version .* was created.*agent could not start.*runner busy/is,
     );
     expect(sessions.snapshot("ws")).toBeNull();
     // The workspace is free to try again.

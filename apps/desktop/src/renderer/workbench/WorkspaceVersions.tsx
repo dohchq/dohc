@@ -666,8 +666,7 @@ export function VersionMenu(props: {
 
 // The "Try it in a version" task prompt (PR 0N-2). One short question; on
 // start, main creates the version, switches into it, and starts the run in a
-// single serialized gesture. If an installed agent driver is found, it does
-// the work; otherwise the run tracks the user's own agent tool.
+// single serialized gesture. The run tracks the user's own agent tool.
 // Exported for component tests; the product opens it from the version menu.
 export function TryTaskDialog(props: {
   workspaceId: string;
@@ -682,39 +681,7 @@ export function TryTaskDialog(props: {
   const [task, setTask] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [helper, setHelper] = useState<
-    | { status: "checking" }
-    | { status: "driver"; driverId: string; driverName: string }
-    | { status: "none" }
-  >({ status: "checking" });
   const liveToken = useRequestSequence();
-
-  useEffect(() => {
-    const token = liveToken.current();
-    void bridge()
-      .probeAgentDrivers({ workspaceId })
-      .then((panel) => {
-        if (!liveToken.isCurrent(token)) return;
-        // Which driver does the work is dohc's choice, not this dialog's: it
-        // reads the workspace's own default and falls back for us.
-        const selected = panel.drivers.find(
-          (driver) => driver.id === panel.selectedDriverId,
-        );
-        setHelper(
-          selected
-            ? {
-                status: "driver",
-                driverId: selected.id,
-                driverName: selected.displayName,
-              }
-            : { status: "none" },
-        );
-      })
-      .catch(() => {
-        if (!liveToken.isCurrent(token)) return;
-        setHelper({ status: "none" });
-      });
-  }, [workspaceId]);
 
   const start = useCallback(async () => {
     const trimmed = task.trim();
@@ -722,7 +689,7 @@ export function TryTaskDialog(props: {
       setError("Describe what the agent should try first.");
       return;
     }
-    if (helper.status === "checking" || busy) return;
+    if (busy) return;
     const token = liveToken.next();
     setBusy(true);
     setError(null);
@@ -733,7 +700,6 @@ export function TryTaskDialog(props: {
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
         task: trimmed,
-        ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
       });
       if (!liveToken.isCurrent(token)) return;
       props.onStarted(started.versionId);
@@ -744,7 +710,7 @@ export function TryTaskDialog(props: {
     } finally {
       releaseOperation?.();
     }
-  }, [busy, helper, props.beginLineageOperation, props.onStarted, task, workspaceId]);
+  }, [busy, props.beginLineageOperation, props.onStarted, task, workspaceId]);
 
   return (
     <Overlay onClose={() => (busy ? undefined : props.onClose())}>
@@ -792,11 +758,8 @@ export function TryTaskDialog(props: {
           data-testid="try-task-helper"
           className="mb-0 mt-1 text-[11px] leading-4 text-subtle"
         >
-          {helper.status === "checking"
-            ? "Checking for agent tools…"
-            : helper.status === "driver"
-              ? `${helper.driverName} will do the work. Its edits show up in History as they land.`
-              : "No agent app was found — start your own agent in this folder and dohc will follow what it changes."}
+          Start your own agent in this folder and dohc will follow what it
+          changes.
         </p>
         {error ? (
           <p
@@ -820,7 +783,7 @@ export function TryTaskDialog(props: {
           <button
             type="button"
             data-testid="try-task-start"
-            disabled={busy || helper.status === "checking" || task.trim().length === 0}
+            disabled={busy || task.trim().length === 0}
             onClick={() => void start()}
             className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
           >

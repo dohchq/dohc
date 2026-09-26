@@ -266,7 +266,6 @@ import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { createRelayLogWait } from "./workspaces/relayLogWait";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
-import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
 import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
 import {
   assertRealMountRoot,
@@ -343,7 +342,6 @@ import {
   createAgentIntegration,
   type AgentRunRecord,
 } from "./agents/AgentIntegration";
-import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
@@ -1691,29 +1689,6 @@ function mcpConfigFor(
   };
 }
 
-async function mcpRuntimeConfigFor(rootPath: string): Promise<{
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-}> {
-  await warmCredentialCache();
-  const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
-  // Defense in depth: managed agent runs are already refused on shared views,
-  // but if a runtime MCP is ever spawned for one it must carry the share's
-  // level — never the full local profile.
-  const config = mcpConfigFor(rootPath, mcpShareAccessOf(workspace?.shareView));
-  if ("unavailable" in config) throw new Error(config.message);
-  const env = mcpCloudEnvironment({
-    workspace,
-    credentials: cachedCredentials,
-  });
-  return {
-    command: config.command,
-    args: config.args,
-    ...(env ? { env } : {}),
-  };
-}
-
 // Test-only sync timing seams (hermetic E2E: the offline-rejoin spec cannot
 // wait out production backoff). Ignored outside DOHC_DESKTOP_TEST like every
 // other DOHC_TEST_* seam.
@@ -2128,9 +2103,9 @@ const agentIntegration = createAgentIntegration({
     };
   },
   home: stateDir(),
-  // Every terminal run path funnels through endAgentRun (driver
-  // turn-completed via AgentSessionManager, a Settings stop, the endAgentRun
-  // IPC) — the try-in-version review card listens on that single seam.
+  // Every terminal run path funnels through endAgentRun (a Settings stop or
+  // the endAgentRun IPC) — the try-in-version review card listens on that
+  // single seam.
   // tryInVersionSessions is initialized just below, before any run can end.
   onRunEnded: ({ attachmentId, workspaceId, runId, status }) => {
     tryInVersionSessions.handleRunEnded(
@@ -2169,24 +2144,10 @@ function createTryInVersionSessionsFor(
       return capture;
     });
   },
-  startRun: async (workspaceId, task, driverId) => {
+  startRun: async (workspaceId) => {
     return workspaceAuthorities.withBinding(binding, async (lease) => {
       assertChatRunnerIdle(workspaceId);
       desktopMarks.mark("try-in-version-run-start-begin");
-      if (driverId) {
-        const sessions = await agentSessionManager();
-        const snapshot = await sessions.startSession({
-          workspaceId,
-          driverId,
-          prompt: task,
-        });
-        lease.assertCurrent();
-        const session = snapshot.session;
-        if (!session?.runId || session.status === "failed") {
-          throw new Error(session?.lastError ?? "The agent could not start.");
-        }
-        return { id: session.runId };
-      }
       const run = await startAgentRunWithWorkspaceActivity(
         canonicalWorkspaceFor(lease),
       );
@@ -2206,9 +2167,9 @@ function createTryInVersionSessionsFor(
 }
 
 const tryInVersionSessions = {
-  start(workspaceId: string, task: string, driverId?: string) {
+  start(workspaceId: string, task: string) {
     return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.tryInVersionSessions.start(workspaceId, task, driverId),
+      lease.state.tryInVersionSessions.start(workspaceId, task),
     );
   },
   handleRunEnded(
@@ -2235,42 +2196,6 @@ const tryInVersionSessions = {
     ) ?? false;
   },
 };
-/**
- * The workspace's own `agents.*` settings: which driver it prefers, and which
- * model that driver should start with. Unreadable settings answer with the
- * defaults, which is "no preference" — the same thing an unset file says.
- */
-async function workspaceAgentDefaults(
-  workspaceId: string,
-): Promise<{ defaultDriverId: string | null; defaultModel: string | null }> {
-  const workspace = findWorkspace(workspaceId);
-  if (!workspace) return { defaultDriverId: null, defaultModel: null };
-  const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
-  return {
-    defaultDriverId: settings.agents.defaultDriverId,
-    defaultModel: settings.agents.defaultModel,
-  };
-}
-
-let cachedAgentSessions: AgentSessionManager | null = null;
-async function agentSessionManager(): Promise<AgentSessionManager> {
-  if (!cachedAgentSessions) {
-    const { createAgentSessionManager } = await import("./agents/AgentSessionManager");
-    cachedAgentSessions = createAgentSessionManager({
-      pluginDriversFor: () => [],
-      agentDefaultsFor: workspaceAgentDefaults,
-      integration: {
-        ...agentIntegration,
-        startAgentRun: (workspaceId) =>
-          startAgentRunWithWorkspaceActivity(requireWorkspace(workspaceId)),
-      },
-      rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
-      mcpFor: mcpRuntimeConfigFor,
-    });
-  }
-  return cachedAgentSessions;
-}
-
 // Linked chats and dispatch use the same physical authority as every other
 // workspace-owned resource. Each call into either store reacquires that exact
 // binding, so a detached and reattached workspace cannot reuse the old store.
@@ -4451,7 +4376,6 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
-    stopAgentSessions: () => cachedAgentSessions?.stopAll() ?? Promise.resolve(),
     settleYDocs: closeAllEngineYDocSessions,
     stopAgentIntegration: () => agentIntegration.stopAll(),
     closeWorkspaces: async () => {
@@ -5124,9 +5048,8 @@ function registerIpcHandlers(): void {
     automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
-    get cachedAgentSessions() { return cachedAgentSessions; },
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
-    agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
+    senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   });
   agentRunsIpc.registerAutomationFailures();

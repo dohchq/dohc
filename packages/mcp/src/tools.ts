@@ -1267,28 +1267,6 @@ async function remoteForCurrentWorkspace(
 }
 
 async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLoad> {
-  if (
-    process.env.DOHC_MCP_CLOUD_SERVER_URL ||
-    process.env.DOHC_MCP_CLOUD_USER_ID
-  ) {
-    if (
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL) &&
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)
-    ) {
-      return {
-        ok: true,
-        status: "available",
-        serverUrl: process.env.DOHC_MCP_CLOUD_SERVER_URL,
-        userId: process.env.DOHC_MCP_CLOUD_USER_ID,
-      };
-    }
-    return {
-      ok: false,
-      status: "invalid",
-      reason: "dohc MCP cloud environment is incomplete.",
-    };
-  }
-
   const credentials = await readJson<{
     version?: unknown;
     serverUrl?: unknown;

@@ -12,8 +12,6 @@ import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessio
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import { createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
-import { createAgentSessionManager, type AgentSessionManager } from "../agents/AgentSessionManager";
-import type { AgentDriver, AgentSession, AgentSessionStartInput } from "../agents/AgentDriver";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -77,27 +75,7 @@ async function harness(shared = false) {
     workspaceIds: () => [workspace.workspaceId], now: () => 10,
     createId: () => `run-${++nextRun}`, onRunEnded: ended,
   });
-  const provider = {
-    sessionId: "session-1", resumeCursor: "session-1",
-    prompt: vi.fn(async () => ({ turnId: "turn-1" })), cancel: vi.fn(async () => undefined),
-    answerPermission: vi.fn<AgentSession["answerPermission"]>(async () => undefined),
-    stop: vi.fn(async () => { events.push("stop-provider"); }),
-    dispose: vi.fn(async () => { events.push("dispose-provider"); }),
-  } satisfies AgentSession;
-  const inputs: AgentSessionStartInput[] = [];
-  const driver: AgentDriver = {
-    id: "fake-driver", displayName: "Fake",
-    probe: vi.fn(async () => ({ installed: true, auth: { status: "unknown" as const }, models: [] })),
-    startSession: async (input) => { inputs.push(input); return provider; },
-  };
-  const manager = createAgentSessionManager({
-    pluginDriversFor: () => [driver], integration,
-    rootFor: (id) => registry.find(id)?.rootPath ?? null,
-    mcpFor: () => ({ command: "dohc-mcp", args: [] }), now: () => 10,
-  });
-  let cached: AgentSessionManager | null = null;
-  const lazyManager = vi.fn(async () => { cached = manager; return manager; });
-  cleanups.push(async () => { await manager.stopAll(); await integration.stopAll(); await authority.close(); });
+  cleanups.push(async () => { await integration.stopAll(); await authority.close(); });
   const engineSessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
   const receivedShareEngine = createReceivedShareEngineAccess({
     sessions: () => engineSessions,
@@ -149,9 +127,8 @@ async function harness(shared = false) {
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
     requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
     startAgentRunWithWorkspaceActivity: start,
-    get cachedAgentSessions() { return cached; }, agentIntegration: integration,
+    agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
-    agentSessionManager: lazyManager,
     senderWorkspaceAuthority: {
       withActiveWorkspace: (value, id, subject, work) => withRendererWorkspaceOperation(
         value, id, `The ${subject} does not target the active workspace. Open the workspace and try again.`, async () => work(),
@@ -171,8 +148,8 @@ async function harness(shared = false) {
     return handler({ sender: value }, payload);
   });
   return {
-    workspace, registry, physical, sender, authority, renderers, events, integration, manager, lazyManager, inputs,
-    provider, driver, ended, setAgentRun, failure, datasetFailures, adapter, acknowledge, notify, requireWorkspace, requireCapture,
+    workspace, registry, physical, sender, authority, renderers, events, integration,
+    ended, setAgentRun, failure, datasetFailures, adapter, acknowledge, notify, requireWorkspace, requireCapture,
     ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
     detection, handlers, groupSizes, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
     durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
@@ -186,7 +163,6 @@ async function harness(shared = false) {
 const channels = [
   CHANNELS.listAutomationFailures, CHANNELS.dismissAutomationFailure, CHANNELS.chatRunRecordsForThread,
   CHANNELS.detectAgentTools, CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
-  CHANNELS.probeAgentDrivers, CHANNELS.getAgentSessionState, CHANNELS.answerAgentPermission,
   CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.runnerSelfTest,
 ];
 const threadPayload = { workspaceId: "workspace-a", threadId: "thread-1" };
@@ -197,12 +173,11 @@ const served = (failure: object) => ({ ...failure, name: "Stamp the finish date"
 describe("agent run IPC registrations", () => {
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
-    expect(h.groupSizes).toEqual([2, 3, 15]);
+    expect(h.groupSizes).toEqual([2, 3, 12]);
     expect([...h.handlers.keys()]).toEqual(channels);
     for (const channel of channels) await expect(h.invoke(channel, null, new Sender(-1))).rejects.toThrow("untrusted");
     expect(h.requireWorkspace).not.toHaveBeenCalled();
     expect(h.routed).toEqual([]);
-    expect(h.lazyManager).not.toHaveBeenCalled();
   });
 
   it("detects tools only for the active workspace without starting a session", async () => {
@@ -210,7 +185,6 @@ describe("agent run IPC registrations", () => {
     await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     expect(h.detection).toHaveBeenCalledOnce();
     expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath);
-    expect(h.lazyManager).not.toHaveBeenCalled();
     expect(h.activity).not.toHaveBeenCalled();
     await h.switchWorkspace();
     await expect(h.invoke(CHANNELS.detectAgentTools)).rejects.toThrow();
@@ -222,7 +196,6 @@ describe("agent run IPC registrations", () => {
     for (const channel of channels) await expect(h.invoke(channel, null)).rejects.toThrow();
     expect(h.requireWorkspace).not.toHaveBeenCalled();
     expect(h.routed).toEqual([]);
-    expect(h.lazyManager).not.toHaveBeenCalled();
   });
 
   it("clamps acknowledgments, keeps them monotonic, and reveals later failures", async () => {
@@ -365,35 +338,9 @@ describe("agent run IPC registrations", () => {
     expect(h.events).toEqual(["runnable", "idle", "start-with-activity"]);
     await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toMatchObject({ activeRun: { id: "run-1" } });
     await h.invoke(CHANNELS.endAgentRun, { workspaceId: "workspace-a", runId: "run-1", ...(status ? { status } : {}) });
-    expect(h.lazyManager).not.toHaveBeenCalled();
     expect(h.ended).toHaveBeenCalledTimes(1);
     expect(await h.durableRuns()).toEqual([expect.objectContaining({ id: "run-1", status: status ?? "complete", endedAt: 10 })]);
     await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toMatchObject({ activeRun: null, lastRun: { status: status ?? "complete" } });
-  });
-
-  it("reads a manager cached after registration and stops its provider before finalizing once", async () => {
-    const h = await harness();
-    await h.invoke(CHANNELS.getAgentSessionState);
-    await h.manager.startSession({ workspaceId: "workspace-a", driverId: "fake-driver", prompt: "Hello" });
-    h.events.length = 0;
-    await h.invoke(CHANNELS.endAgentRun, { workspaceId: "workspace-a", runId: "run-1", status: "failed" });
-    expect(h.events).toEqual(["stop-provider", "dispose-provider", "ended"]);
-    expect(h.provider.stop).toHaveBeenCalledTimes(1);
-    expect(h.provider.dispose).toHaveBeenCalledTimes(1);
-    expect(h.ended).toHaveBeenCalledTimes(1);
-    expect(await h.durableRuns()).toEqual([expect.objectContaining({ id: "run-1", status: "failed" })]);
-    expect(h.manager.panelSnapshot("workspace-a").session?.status).toBe("stopped");
-  });
-
-  it("does not stop a managed session when ending a different run", async () => {
-    const h = await harness();
-    await h.invoke(CHANNELS.startAgentRun);
-    await h.invoke(CHANNELS.getAgentSessionState);
-    await h.manager.startSession({ workspaceId: "workspace-a", driverId: "fake-driver", prompt: "Hello" });
-    await h.invoke(CHANNELS.endAgentRun, { workspaceId: "workspace-a", runId: "run-1" });
-    expect(h.provider.stop).not.toHaveBeenCalled();
-    expect(h.manager.panelSnapshot("workspace-a").session?.runId).toBe("run-2");
-    expect(await h.durableRuns()).toEqual([expect.objectContaining({ id: "run-1", status: "complete" }), expect.objectContaining({ id: "run-2", status: "running" })]);
   });
 
   it("forwards main-owned MCP configuration for a shared view", async () => {
@@ -403,18 +350,6 @@ describe("agent run IPC registrations", () => {
     });
     expect(h.shareAccess).toHaveBeenCalledWith(sharedView);
     expect(h.config).toHaveBeenCalledWith(h.workspace.rootPath, "view");
-  });
-
-  it("answers an actual managed permission and returns the resulting panel", async () => {
-    const h = await harness();
-    await h.manager.startSession({ workspaceId: "workspace-a", driverId: "fake-driver", prompt: "Hello" });
-    h.inputs[0]!.onEvent({ kind: "permission-request", requestId: "permission-1", requestType: "command", title: "Run command", options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] });
-    h.provider.answerPermission.mockImplementation(async (requestId, decision) => {
-      h.inputs[0]!.onEvent({ kind: "permission-resolved", requestId, decision });
-    });
-    await expect(h.invoke(CHANNELS.getAgentSessionState)).resolves.toMatchObject({ session: { pendingPermissions: [{ requestId: "permission-1" }] } });
-    await expect(h.invoke(CHANNELS.answerAgentPermission, { workspaceId: "workspace-a", requestId: "permission-1", decision: "allow_once" })).resolves.toMatchObject({ session: { pendingPermissions: [] } });
-    expect(h.provider.answerPermission).toHaveBeenCalledWith("permission-1", "allow_once");
   });
 
   it("rejects a stop from another renderer before dispatch", async () => {

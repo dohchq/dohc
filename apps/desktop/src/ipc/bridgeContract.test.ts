@@ -7,7 +7,6 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_STATUSES } from "../updates/updateMachine";
-import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -74,7 +73,6 @@ import {
   SwitchWorkspaceVersionPayload,
   TryInVersionRunState,
   TryInVersionStateResult,
-  AgentPanelSnapshotResult,
   TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
@@ -2050,7 +2048,7 @@ describe("settings IPC contract", () => {
           ...DEFAULT_WORKSPACE_SETTINGS,
           agents: {
             ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            defaultModel: "x".repeat(201),
+            mcpAutoStart: "yes",
           },
         },
       }).success,
@@ -3240,13 +3238,6 @@ describe("try-in-version IPC contract", () => {
       }).task,
     ).toBe("tidy the notes");
     expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: "codex",
-      }).driverId,
-    ).toBe("codex");
-    expect(
       TryInVersionStateResult.parse({ state: null }).state,
     ).toBeNull();
     expect(
@@ -4370,76 +4361,5 @@ describe("share changes IPC contract", () => {
     expect(() =>
       WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "p".repeat(129) }),
     ).toThrow();
-  });
-});
-
-describe("one driver id, every contract on its path", () => {
-  // A driver id is declared in a manifest, stored in workspace settings,
-  // listed in the agent panel, and then handed back to main with the task it
-  // is meant to run. One tighter bound anywhere on that path refuses a driver
-  // dohc itself offered, chose, and probed — which is what the try-in-version
-  // payload used to do at 100 characters while every other layer took 120.
-  const atCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH);
-  const overCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH + 1);
-
-  function panelWith(driverId: string) {
-    return {
-      drivers: [
-        {
-          id: driverId,
-          displayName: "Fixture Harness",
-          installed: true,
-          auth: { status: "unknown" as const },
-          models: [],
-        },
-      ],
-      session: null,
-      selectedDriverId: driverId,
-    };
-  }
-
-  it("carries an id at the cap through every contract on the path", () => {
-    expect(AgentPanelSnapshotResult.parse(panelWith(atCap)).selectedDriverId)
-      .toBe(atCap);
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: atCap,
-      }).driverId,
-      "the try payload keeps a tighter bound: the panel offers this driver, the dialog posts it, and this one boundary refuses it.",
-    ).toBe(atCap);
-  });
-
-  it("refuses an id past the cap in every contract on the path", () => {
-    expect(AgentPanelSnapshotResult.safeParse(panelWith(overCap)).success)
-      .toBe(false);
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: overCap,
-      }).success,
-    ).toBe(false);
-  });
-
-  it("carries a driver display name at its bound to the renderer", () => {
-    const name = "n".repeat(120);
-    expect(
-      AgentPanelSnapshotResult.parse({
-        drivers: [
-          {
-            id: "fixture-harness",
-            displayName: name,
-            installed: true,
-            auth: { status: "unknown" as const },
-            models: [],
-          },
-        ],
-        session: null,
-        selectedDriverId: "fixture-harness",
-      }).drivers[0]?.displayName,
-      "the two display-name bounds drift apart: a manifest dohc accepts names a driver the panel cannot describe.",
-    ).toBe(name);
   });
 });

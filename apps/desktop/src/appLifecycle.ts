@@ -75,7 +75,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     beginEngineShutdown(): void;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
-    stopAgentSessions(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
     closeWorkspaces(): Promise<void>;
@@ -101,7 +100,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     shutdown.beginEngineShutdown();
     const searchStop = shutdown.stopSearch().catch(() => undefined);
     const sitePreviewStop = shutdown.stopSitePreviews();
-    const agentSessionStop = shutdown.stopAgentSessions().catch(() => undefined);
     const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
     const cliServerStop = chatDispatchStop.then(() =>
       (cliServerStartup ?? Promise.resolve(cliServer))
@@ -109,13 +107,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         .catch(() => undefined),
     );
     const engineYDocStop = shutdown.settleYDocs();
-    const agentIntegrationStop = agentSessionStop
-      .then(() => shutdown.stopAgentIntegration())
-      .catch(() => undefined);
+    const agentIntegrationStop = shutdown.stopAgentIntegration().catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       engineYDocStop,
-      agentSessionStop,
       chatDispatchStop,
       cliServerStop,
       searchStop,

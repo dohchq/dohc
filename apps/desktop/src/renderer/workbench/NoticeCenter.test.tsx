@@ -8,7 +8,6 @@ import type {
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
-import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 
@@ -62,10 +61,6 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
-      {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
-      {...(props.onDismissAgentNotification
-        ? { onDismissAgentNotification: props.onDismissAgentNotification }
-        : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
@@ -120,21 +115,6 @@ function liveDeliveryStatus(
     historyShareView: false,
     ownerLiveDelivery,
     ...(ownerLiveDeliveryReason ? { ownerLiveDeliveryReason } : {}),
-  };
-}
-
-function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
-  return {
-    id: "ws-a::run-1::finished",
-    kind: "finished",
-    workspaceId: "ws-a",
-    workspaceName: "Personal",
-    agentName: "You",
-    runId: "run-1",
-    title: "Your agent finished",
-    body: "Reorganized /notes into three folders.",
-    createdAtMs: 1_700_000_000_000,
-    ...overrides,
   };
 }
 
@@ -1171,46 +1151,6 @@ describe("notice center", () => {
         name: "Restart",
       }),
     ).toBeNull();
-  });
-
-  it("surfaces agent notifications with specific copy, newest first", async () => {
-    renderNotices({
-      agentNotifications: [
-        agentNotice({ id: "ws-a::run-1::finished", createdAtMs: 1000 }),
-        agentNotice({
-          id: "ws-a::run-2::asked",
-          kind: "asked",
-          runId: "run-2",
-          title: "Your agent has a question",
-          body: "Which draft should I keep?",
-          createdAtMs: 2000,
-        }),
-      ],
-      onDismissAgentNotification: vi.fn(),
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const center = screen.getByTestId("notice-center");
-    expect(within(center).getByTestId("notice-center-count").textContent).toBe("2");
-    // Newest (the ask) leads; specific copy is shown verbatim.
-    const items = within(center).getAllByRole("listitem");
-    expect(items[0]!.textContent).toContain("Which draft should I keep?");
-    expect(within(center).getByText("Reorganized /notes into three folders.")).toBeTruthy();
-  });
-
-  it("dismisses an agent notification through its dismiss action", async () => {
-    const onDismissAgentNotification = vi.fn();
-    const notice = agentNotice();
-    renderNotices({
-      agentNotifications: [notice],
-      onDismissAgentNotification,
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByTestId(
-        "notice-ws-a::run-1::finished-dismiss",
-      ),
-    );
-    expect(onDismissAgentNotification).toHaveBeenCalledWith("ws-a::run-1::finished");
   });
 
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
