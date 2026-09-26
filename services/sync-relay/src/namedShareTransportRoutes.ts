@@ -3,7 +3,7 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
-import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseLogOp } from "./relayLogInputs";
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
@@ -48,7 +48,7 @@ export function createNamedShareTransportRoutes(
   ) => () => void,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
 ) {
   return async function respondToNamedShareTransport(
     request: Request,
@@ -61,6 +61,11 @@ export function createNamedShareTransportRoutes(
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
+      const clientOrigin = url.searchParams.get("originId");
+      const ownOriginId = clientOrigin === null || clientOrigin === ""
+        ? null
+        : namedShareOrigin(share.shareId, actor.userId,
+          parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS));
       const chatSide = chatSideOf(share.selector);
       if (
         channelWireId !== null &&
@@ -97,6 +102,7 @@ export function createNamedShareTransportRoutes(
       return jsonResponse({
         ok: true,
         ...page,
+        ownOriginId,
       });
     }
 
@@ -237,9 +243,8 @@ export function createNamedShareTransportRoutes(
       }
       const result = storage.appendLogBatch({
         workspaceId: share.workspaceId,
-        // Namespaced per share (= per member): member origins live in their
-        // own corner of the owner bucket's origin space.
-        originId: `share:${share.shareId}:${originId}`,
+        // Authentication, not the caller, selects the member sequence space.
+        originId: namedShareOrigin(share.shareId, actor.userId, originId),
         ops,
         // Close the revoke race completely: the share is re-verified inside
         // the append's own BEGIN IMMEDIATE transaction (the same write lock
@@ -258,7 +263,7 @@ export function createNamedShareTransportRoutes(
         ),
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
       }
       return jsonResponse({
         ok: true,

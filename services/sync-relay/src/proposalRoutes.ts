@@ -10,11 +10,8 @@ import {
   targetVersionId,
   type ShareSelector,
 } from "./shareFilter";
-import {
-  destinationPath,
-  proposalMomentPayload,
-  PROPOSAL_ORIGIN_PREFIX,
-} from "./shareProposals";
+import { destinationPath, proposalBase, proposalMomentPayload } from "./recipientMoments";
+import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import {
   SyncRelayBlobMissingError,
   type ObjectMomentRow,
@@ -94,7 +91,7 @@ export function createProposalRoutes(
     action: "propose",
     workspaceId: string,
   ) => () => void,
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
 ) {
   // Whether a recipient may propose changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
@@ -102,37 +99,6 @@ export function createProposalRoutes(
   // append route, because a level-specific refusal would tell a probing
   // recipient the selector's level. Changes follow PATHS, so a version share
   // (no paths) proposes nothing at any level.
-  // The granter's own facts for one proposed change, in the one
-  // version the proposal was submitted against: which file it is, where that
-  // file is now, and the moment that produced the content the recipient
-  // started from.
-  //
-  // One place, because the review listing and the accept door must agree.
-  // The listing tells the granter "this file changed since they sent it";
-  // accept is what turns that into a conflict with a real three-way base. Two
-  // copies of this resolution could disagree, and the granter would be told
-  // one thing and given another.
-  const proposalBase = (
-    workspaceId: string,
-    versionId: string,
-    op: ShareProposalOpRow,
-  ): { head: ObjectMomentRow | null; base: ObjectMomentRow | null } => {
-    const objectId = op.basedOnObjectId;
-    if (objectId === null) return { head: null, base: null };
-    return {
-      head: storage.objectMoment({ workspaceId, objectId, versionId }),
-      base:
-        op.basedOnBlobSha256 === null
-          ? null
-          : storage.objectMoment({
-              workspaceId,
-              objectId,
-              versionId,
-              blobSha256: op.basedOnBlobSha256,
-            }),
-    };
-  };
-
   // One op as the granter's review reads it. Shared by the listing and by the
   // single-op route, so a row and the file it opens can never disagree about
   // where a change lands or whether it drifted.
@@ -141,7 +107,7 @@ export function createProposalRoutes(
   // thousands of these and loads a file's text only when the granter opens
   // that file.
   const reviewOpRow = (workspaceId: string, versionId: string, op: ShareProposalOpRow) => {
-    const resolved = proposalBase(workspaceId, versionId, op);
+    const resolved = proposalBase(storage, workspaceId, versionId, op);
     return {
       opIndex: op.opIndex,
       basedOnPath: op.basedOnPath,
@@ -469,7 +435,7 @@ export function createProposalRoutes(
       let originSeq = storage.maxOriginSeq(route.workspaceId, originId);
       const logOps: SyncRelayLogInput[] = [];
       for (const op of proposal.ops) {
-        const resolved = proposalBase(route.workspaceId, versionId, op);
+        const resolved = proposalBase(storage, route.workspaceId, versionId, op);
         const built = proposalMomentPayload(op, {
           versionId,
           // A file the granter does not have gets a new object id, minted
@@ -480,6 +446,7 @@ export function createProposalRoutes(
           currentPath: resolved.head?.path ?? null,
           momentId: newId(),
           summary,
+          author: null,
         });
         if (!built.ok) throw badRequest(built.reason);
         originSeq += 1;
@@ -511,7 +478,7 @@ export function createProposalRoutes(
         },
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${route.workspaceId}`);
+        discussionActivity.wakeLog(route.workspaceId);
       }
       return jsonResponse({
         ok: true,

@@ -180,34 +180,40 @@ fn accepted_history_checkpoints_bound_lifetime_replay_and_keep_old_delivery_iden
                 accepted_history::accepted_source(conn, &held, "never-accepted", &mut budget)?
                     .is_none()
             );
-            assert!(accepted_history::read(
-                conn,
-                &held,
-                receipts[4097].journal_cursor,
-                &mut Budget {
-                    remaining: 1_000_000
-                },
-                2
-            )
-            .is_err());
-            assert!(accepted_history::read(
-                conn,
-                &held,
-                receipts[4097].journal_cursor - 1,
-                &mut Budget {
-                    remaining: 1_000_000
-                },
-                3
-            )
-            .is_err());
-            assert!(accepted_history::read(
-                conn,
-                &held,
-                receipts[4097].journal_cursor,
-                &mut Budget { remaining: 1 },
-                3
-            )
-            .is_err());
+            assert!(
+                accepted_history::read(
+                    conn,
+                    &held,
+                    receipts[4097].journal_cursor,
+                    &mut Budget {
+                        remaining: 1_000_000
+                    },
+                    2
+                )
+                .is_err()
+            );
+            assert!(
+                accepted_history::read(
+                    conn,
+                    &held,
+                    receipts[4097].journal_cursor - 1,
+                    &mut Budget {
+                        remaining: 1_000_000
+                    },
+                    3
+                )
+                .is_err()
+            );
+            assert!(
+                accepted_history::read(
+                    conn,
+                    &held,
+                    receipts[4097].journal_cursor,
+                    &mut Budget { remaining: 1 },
+                    3
+                )
+                .is_err()
+            );
             // A historical selection and its evidence are independent of the latest checkpoint.
             let point = accepted_history::read(
                 conn,
@@ -231,25 +237,55 @@ fn accepted_history_checkpoints_bound_lifetime_replay_and_keep_old_delivery_iden
         "UPDATE live_device_bootstraps SET bootstrap_moment_id='changed-origin'",
         "DELETE FROM live_accepted_checkpoints WHERE event_count=4095",
     ] {
-        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
-            tx.execute_batch("SAVEPOINT damage").map_err(write_sql)?;
-            tx.execute(sql,[]).map_err(write_sql)?;
-            assert!(accepted_history::read(tx,&held,receipts[4097].journal_cursor,&mut Budget{remaining:1_000_000},3).is_err(),"{sql}");
-            tx.execute_batch("ROLLBACK TO damage; RELEASE damage").map_err(write_sql)?;
-            Ok(())
-        }).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute_batch("SAVEPOINT damage").map_err(write_sql)?;
+                tx.execute(sql, []).map_err(write_sql)?;
+                assert!(
+                    accepted_history::read(
+                        tx,
+                        &held,
+                        receipts[4097].journal_cursor,
+                        &mut Budget {
+                            remaining: 1_000_000
+                        },
+                        3
+                    )
+                    .is_err(),
+                    "{sql}"
+                );
+                tx.execute_batch("ROLLBACK TO damage; RELEASE damage")
+                    .map_err(write_sql)?;
+                Ok(())
+            })
+            .unwrap();
     }
     for sql in [
         "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receivedAtMs',999) WHERE event_count=1",
         "UPDATE live_accepted_updates SET evidence_digest=printf('%064d',0) WHERE event_count=1",
     ] {
-        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
-            tx.execute_batch("SAVEPOINT old_source_damage").map_err(write_sql)?;
-            tx.execute(sql,[]).map_err(write_sql)?;
-            assert!(accepted_history::accepted_source(tx,&held,&receipts[0].delivery_id,&mut Budget{remaining:1_000_000}).is_err(),"{sql}");
-            tx.execute_batch("ROLLBACK TO old_source_damage; RELEASE old_source_damage").map_err(write_sql)?;
-            Ok(())
-        }).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute_batch("SAVEPOINT old_source_damage")
+                    .map_err(write_sql)?;
+                tx.execute(sql, []).map_err(write_sql)?;
+                assert!(
+                    accepted_history::accepted_source(
+                        tx,
+                        &held,
+                        &receipts[0].delivery_id,
+                        &mut Budget {
+                            remaining: 1_000_000
+                        }
+                    )
+                    .is_err(),
+                    "{sql}"
+                );
+                tx.execute_batch("ROLLBACK TO old_source_damage; RELEASE old_source_damage")
+                    .map_err(write_sql)?;
+                Ok(())
+            })
+            .unwrap();
     }
 }
 
@@ -413,13 +449,14 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
         assert_eq!(snapshot(&f.store), before);
     }
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    assert!(f
-        .store
-        .read_with(|conn| crate::replay_parity::structurally_equal_v2(
-            &durable::load_doc_in(conn, &key)?,
-            &f.doc
-        ))
-        .unwrap());
+    assert!(
+        f.store
+            .read_with(|conn| crate::replay_parity::structurally_equal_v2(
+                &durable::load_doc_in(conn, &key)?,
+                &f.doc
+            ))
+            .unwrap()
+    );
     assert!(matches!(
         apply_committed(
             &mut f.store,
@@ -431,7 +468,7 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
             |_, _, _, _| Ok(())
         )
         .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let after = snapshot(&f.store);
     assert_eq!(after.0, 4095);
@@ -669,7 +706,7 @@ impl Fixture {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
-        let ApplicationResult::Applied(ack) = result else {
+        let ApplicationResult::Applied(ack, _) = result else {
             panic!("apply refused")
         };
         self.sequence = ack.local_ydoc_sequence;
@@ -861,17 +898,18 @@ fn preparation_commit_boundaries_retain_exact_candidate_or_roll_back_every_refer
         let mut f = Fixture::new("# Point\n");
         f.edit("# Later\n", 3);
         let input = f.freeze(f.baseline_point.clone());
-        assert!(f
-            .owner
-            .prepare_restore(
-                &mut f.store,
-                input.clone(),
-                f.host.clone(),
-                1_000_000,
-                100,
-                &CrashAt(fault)
-            )
-            .is_err());
+        assert!(
+            f.owner
+                .prepare_restore(
+                    &mut f.store,
+                    input.clone(),
+                    f.host.clone(),
+                    1_000_000,
+                    100,
+                    &CrashAt(fault)
+                )
+                .is_err()
+        );
         let stored: Option<String> = f
             .store
             .read_with(|conn| {
@@ -902,17 +940,18 @@ fn configured_limits_and_foreign_key_retention_apply_to_preparation_and_replay()
     f.edit("# Later\n", 3);
     let input = f.freeze(f.baseline_point.clone());
     for (bytes, events) in [(1, 100), (1_000_000, 0)] {
-        assert!(f
-            .owner
-            .prepare_restore(
-                &mut f.store,
-                input.clone(),
-                f.host.clone(),
-                bytes,
-                events,
-                &NoFaults
-            )
-            .is_err());
+        assert!(
+            f.owner
+                .prepare_restore(
+                    &mut f.store,
+                    input.clone(),
+                    f.host.clone(),
+                    bytes,
+                    events,
+                    &NoFaults
+                )
+                .is_err()
+        );
     }
     let proposal = f.prepare(input.clone()).unwrap();
     for digest in [
@@ -920,17 +959,19 @@ fn configured_limits_and_foreign_key_retention_apply_to_preparation_and_replay()
         &proposal.receipt().frozen_state_digest,
         &proposal.receipt().point_state_digest,
     ] {
-        assert!(f
-            .store
-            .write_with(&NoFaults, |tx| tx
-                .execute("DELETE FROM binary_blobs WHERE sha256=?1", [digest])
-                .map_err(write_sql))
-            .is_err());
+        assert!(
+            f.store
+                .write_with(&NoFaults, |tx| tx
+                    .execute("DELETE FROM binary_blobs WHERE sha256=?1", [digest])
+                    .map_err(write_sql))
+                .is_err()
+        );
     }
-    assert!(f
-        .owner
-        .prepare_restore(&mut f.store, input, f.host.clone(), 1, 100, &NoFaults)
-        .is_err());
+    assert!(
+        f.owner
+            .prepare_restore(&mut f.store, input, f.host.clone(), 1, 100, &NoFaults)
+            .is_err()
+    );
 }
 
 #[test]
@@ -967,7 +1008,7 @@ fn durable_replay_rejects_modified_replacement_ranges_and_source_evidence() {
 
 #[test]
 fn verified_backup_retains_prepared_candidate_and_all_replay_evidence() {
-    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+    use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
     let mut f = Fixture::new("# Point\n");
     f.edit("# Later\n", 3);
     let input = f.freeze(f.baseline_point.clone());
@@ -1151,7 +1192,18 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
     f.edit("# Later\n", 11);
     let prep = f.freeze(selected);
     let input = admitted_restore(&mut f, prep.clone());
+    let remote_changes = |store: &EngineStore| {
+        store
+            .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+            .unwrap()
+    };
+    let before = remote_changes(&f.store);
     let receipt = apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    assert_eq!(
+        remote_changes(&f.store),
+        before + 1,
+        "a restore arrives from the computer that asked for it"
+    );
     assert_eq!(receipt.local_head_sequence, 3);
     assert_eq!(receipt.admitted, input.admitted);
     let projected = f.canonical().project(ContentKind::Richdoc).unwrap().content;
@@ -1193,6 +1245,11 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
     f.host.host_epoch = 2;
     assert_eq!(receipt, apply_restore(&mut f, input, &NoFaults).unwrap());
     assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(
+        remote_changes(&f.store),
+        before + 1,
+        "a replayed restore counts nothing"
+    );
 }
 
 #[test]
@@ -1289,10 +1346,11 @@ fn restore_copy_preserves_public_point_actual_rich_marks() {
     let before_vector = doc.state_vector();
     doc.rewrite_richdoc_preserving_source_bounded(&projection, &point, 8 * 1024 * 1024)
         .unwrap();
-    assert!(doc
-        .state_vector()
-        .iter()
-        .any(|(client, _)| before_vector.get(client) == 0));
+    assert!(
+        doc.state_vector()
+            .iter()
+            .any(|(client, _)| before_vector.get(client) == 0)
+    );
     assert_eq!(
         doc.project(ContentKind::Richdoc).unwrap().content,
         projection
@@ -1369,16 +1427,17 @@ fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
             .map_err(write_sql)
         })
         .unwrap();
-    assert!(f
-        .owner
-        .fence_restore(
-            &mut f.store,
-            prep.fence.operation.clone(),
-            f.host.clone(),
-            100,
-            &NoFaults
-        )
-        .is_err());
+    assert!(
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                prep.fence.operation.clone(),
+                f.host.clone(),
+                100,
+                &NoFaults
+            )
+            .is_err()
+    );
     assert_eq!(
         f.store
             .table_row_count("live_device_update_applications")
@@ -1422,20 +1481,21 @@ fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
         }
         let before = f.canonical();
         for (bytes, events) in [(1, 100), (2_000_000, 0)] {
-            assert!(f
-                .owner
-                .apply_restore(
-                    &mut f.store,
-                    &mut WriterDocCache::new(),
-                    input.clone(),
-                    f.host.clone(),
-                    bytes,
-                    events,
-                    90,
-                    &NoFaults,
-                    |_, _, _, _| Ok(()),
-                )
-                .is_err());
+            assert!(
+                f.owner
+                    .apply_restore(
+                        &mut f.store,
+                        &mut WriterDocCache::new(),
+                        input.clone(),
+                        f.host.clone(),
+                        bytes,
+                        events,
+                        90,
+                        &NoFaults,
+                        |_, _, _, _| Ok(()),
+                    )
+                    .is_err()
+            );
             assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
         }
         apply_restore(&mut f, input, &NoFaults).unwrap();
@@ -1460,15 +1520,16 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
             |store, audit| record_test_projection(store, audit, "restore-moment"),
         )
         .unwrap();
-    assert!(f
-        .owner
-        .register(
-            &mut f.store,
-            "namespace".into(),
-            f.host.clone(),
-            input.admitted.accepted.binding.clone()
-        )
-        .is_err());
+    assert!(
+        f.owner
+            .register(
+                &mut f.store,
+                "namespace".into(),
+                f.host.clone(),
+                input.admitted.accepted.binding.clone()
+            )
+            .is_err()
+    );
     // Simulate only the registration state a future reopen must authenticate.
     let mut held = f.handle.registration.lock().unwrap();
     held.live = true;
@@ -1582,28 +1643,30 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         application: input.clone(),
         settlement_id: settlement.settlement_id,
     };
-    assert!(f
-        .owner
-        .resume_restore(
-            &mut f.store,
-            resume.clone(),
-            f.host.clone(),
-            2_000_000,
-            100,
-            100,
-            &NoFaults,
-            |_, _, _, _| Err(ApplicationError::Conflict)
-        )
-        .is_err());
-    assert!(f
-        .owner
-        .register(
-            &mut f.store,
-            "namespace".into(),
-            f.host.clone(),
-            input.admitted.accepted.binding.clone()
-        )
-        .is_err());
+    assert!(
+        f.owner
+            .resume_restore(
+                &mut f.store,
+                resume.clone(),
+                f.host.clone(),
+                2_000_000,
+                100,
+                100,
+                &NoFaults,
+                |_, _, _, _| Err(ApplicationError::Conflict)
+            )
+            .is_err()
+    );
+    assert!(
+        f.owner
+            .register(
+                &mut f.store,
+                "namespace".into(),
+                f.host.clone(),
+                input.admitted.accepted.binding.clone()
+            )
+            .is_err()
+    );
     let first = f
         .owner
         .resume_restore(
@@ -1680,15 +1743,16 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
             )
             .unwrap()
     );
-    assert!(f
-        .owner
-        .register(
-            &mut f.store,
-            "namespace".into(),
-            f.host.clone(),
-            f.binding.clone()
-        )
-        .is_err());
+    assert!(
+        f.owner
+            .register(
+                &mut f.store,
+                "namespace".into(),
+                f.host.clone(),
+                f.binding.clone()
+            )
+            .is_err()
+    );
     let mut second = admitted_restore(&mut f, second_prep);
     second.admitted.accepted.receipt.delivery_id = "restore-two".into();
     second.admitted.accepted.receipt.journal_cursor = 100;
@@ -1722,7 +1786,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         )
         .unwrap();
     assert_eq!(result.binding.restore_fence_generation, 2);
-    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+    use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
     let BackupOutcome::Verified(backup) = create_verified_backup(
         &f.store,
         &f.dir.join("resumed-recovery"),
@@ -1756,19 +1820,20 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
     );
     let mut forged = resume;
     forged.application.preparation.point.markdown_digest = "a".repeat(64);
-    assert!(f
-        .owner
-        .resume_restore(
-            &mut f.store,
-            forged,
-            f.host.clone(),
-            2_000_000,
-            100,
-            200,
-            &NoFaults,
-            |_, _, _, _| Ok(())
-        )
-        .is_err());
+    assert!(
+        f.owner
+            .resume_restore(
+                &mut f.store,
+                forged,
+                f.host.clone(),
+                2_000_000,
+                100,
+                200,
+                &NoFaults,
+                |_, _, _, _| Ok(())
+            )
+            .is_err()
+    );
     f.store
         .read_with(|conn| -> Result<(), ApplicationError> {
             require_restore_generation(conn, &key, Some(2))?;

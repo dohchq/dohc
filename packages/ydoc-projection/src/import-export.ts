@@ -386,7 +386,7 @@ export function markdownToYDoc(
   return doc
 }
 
-function parseRichdocMarkdown(markdown: string): JSONContent {
+export function parseRichdocMarkdown(markdown: string): JSONContent {
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )

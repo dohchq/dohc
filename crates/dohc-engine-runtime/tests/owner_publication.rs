@@ -353,7 +353,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         )
         .await
         .unwrap();
-    assert!(matches!(applied, ApplicationResult::Applied(_)));
+    assert!(matches!(applied, ApplicationResult::Applied(..)));
     actor
         .owner_ydoc_outbox_acknowledge(
             "workspace".into(),

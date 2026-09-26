@@ -80,9 +80,10 @@ describe("an ordinary workspace", () => {
 });
 
 describe("a share view", () => {
-  it("offers the four routed operations at edit, and never New folder", () => {
+  it("offers the four routed operations and New collection at edit, and never New folder", () => {
     expect(commands({ kind: "folder", shareView: shareView("edit") })).toEqual([
       "new-file",
+      "new-collection",
       "import-files",
       "rename",
       "delete",
@@ -92,6 +93,7 @@ describe("a share view", () => {
     ]);
     expect(commands({ kind: "root", shareView: shareView("edit") })).toEqual([
       "new-file",
+      "new-collection",
       "import-files",
       "export-zip",
     ]);

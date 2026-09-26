@@ -6,6 +6,7 @@ import {
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
+import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
   applyFrontmatter,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
@@ -17,7 +18,7 @@ import {
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
 
-export type PropertiesPanelProps =
+export type PropertiesPanelProps = (
   | {
       body: string;
       onChange: (nextBody: string) => void;
@@ -27,7 +28,11 @@ export type PropertiesPanelProps =
       ydoc: Y.Doc;
       body?: never;
       onChange?: never;
-    };
+    }
+) & {
+  // For a Collection record: the automations that set each field, by name.
+  fieldMarks?: ReadonlyMap<string, readonly string[]>;
+};
 
 function isReserved(key: string): boolean {
   return HIDDEN_KEYS.has(key.trim().toLowerCase());
@@ -246,21 +251,26 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
           const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
+          const automations = props.fieldMarks?.get(entry.key.trim());
           return (
             <div key={index} data-testid="property-row" className="dohc-page-properties__row">
-              <input
-                data-testid="property-key"
-                aria-label={`Property ${index + 1} name`}
-                value={entry.key}
-                placeholder="Property"
-                spellCheck={false}
-                readOnly={locked}
-                onChange={(event) => setKey(index, event.target.value)}
-                onBlur={() => commit(entries)}
-                className={`dohc-page-properties__key${
-                  reserved || duplicate ? " is-invalid" : ""
-                }`}
-              />
+              {/* The name and its ⚡ share the first column. */}
+              <span className="flex min-w-0 items-center gap-1">
+                <input
+                  data-testid="property-key"
+                  aria-label={`Property ${index + 1} name`}
+                  value={entry.key}
+                  placeholder="Property"
+                  spellCheck={false}
+                  readOnly={locked}
+                  onChange={(event) => setKey(index, event.target.value)}
+                  onBlur={() => commit(entries)}
+                  className={`dohc-page-properties__key min-w-0 flex-1${
+                    reserved || duplicate ? " is-invalid" : ""
+                  }`}
+                />
+                {automations ? <AutomationFieldMark automations={automations} /> : null}
+              </span>
               {reserved ? (
                 <span
                   data-testid="property-reserved"

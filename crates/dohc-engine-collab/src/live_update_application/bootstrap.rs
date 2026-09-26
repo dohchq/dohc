@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
+use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -186,6 +186,8 @@ where
         let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if marker.head_update_seq != 0 || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest) { return Err(E::from(ApplicationError::Corrupt)); }
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
+        // The baseline is a document from elsewhere. A replay returns above.
+        dohc_engine_storage::count_remote_change_in_tx(tx, &binding.workspace_id).map_err(E::from)?;
         accepted_history::initialize(tx, &held, &bytes).map_err(E::from)?;
         follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
@@ -421,9 +423,11 @@ mod tests {
         );
         let mut conflict = input;
         conflict.operation_id = "different".into();
-        assert!(owner
-            .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
-            .is_err());
+        assert!(
+            owner
+                .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
+                .is_err()
+        );
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
 
@@ -562,7 +566,7 @@ mod tests {
                         |_, _, _, _| Ok(())
                     )
                     .unwrap(),
-                    ApplicationResult::Applied(_)
+                    ApplicationResult::Applied(..)
                 ));
             }
             assert!(matches!(
@@ -674,30 +678,34 @@ mod tests {
                 .is_none()
         );
         let before = counts(&store);
-        assert!(read_applied_sync(
-            &store,
-            &handle,
-            &[0],
-            AppliedSyncPolicy {
-                max_read_bytes: 1024,
-                ..policy
-            },
-            || true
-        )
-        .is_err());
-        assert!(read_next_applied(
-            &store,
-            &handle,
-            &cut.position,
-            AppliedSyncPolicy {
-                max_output_bytes: 4096,
-                max_host_vector_bytes: 4096,
-                max_read_bytes: 1,
-                ..policy
-            },
-            || true
-        )
-        .is_err());
+        assert!(
+            read_applied_sync(
+                &store,
+                &handle,
+                &[0],
+                AppliedSyncPolicy {
+                    max_read_bytes: 1024,
+                    ..policy
+                },
+                || true
+            )
+            .is_err()
+        );
+        assert!(
+            read_next_applied(
+                &store,
+                &handle,
+                &cut.position,
+                AppliedSyncPolicy {
+                    max_output_bytes: 4096,
+                    max_host_vector_bytes: 4096,
+                    max_read_bytes: 1,
+                    ..policy
+                },
+                || true
+            )
+            .is_err()
+        );
         assert!(read_applied_sync(&store, &handle, &[0], policy, || false).is_err());
         assert_eq!(counts(&store), before);
         store
@@ -827,15 +835,17 @@ mod tests {
             let (dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
             run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
             let (input, coordinate) = fence_input(&handle);
-            assert!(owner
-                .fence_restore(
-                    &mut store,
-                    input.clone(),
-                    coordinate.clone(),
-                    200,
-                    &Crash(point)
-                )
-                .is_err());
+            assert!(
+                owner
+                    .fence_restore(
+                        &mut store,
+                        input.clone(),
+                        coordinate.clone(),
+                        200,
+                        &Crash(point)
+                    )
+                    .is_err()
+            );
             drop(handle);
             drop(owner);
             drop(store);
@@ -1180,7 +1190,28 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
+        let remote_changes = |store: &EngineStore| {
+            store
+                .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+                .unwrap()
+        };
+        assert_eq!(
+            remote_changes(&store),
+            0,
+            "a rolled-back bootstrap counts nothing"
+        );
         assert!(run(&mut store, &mut cache, &handle, &vector, &NoFaults).is_ok());
+        assert_eq!(
+            remote_changes(&store),
+            1,
+            "the baseline is a document from elsewhere"
+        );
+        assert!(run(&mut store, &mut cache, &handle, &vector, &NoFaults).is_ok());
+        assert_eq!(
+            remote_changes(&store),
+            1,
+            "a replayed bootstrap counts nothing"
+        );
     }
     #[test]
     fn unresolved_dependencies_and_nonpublic_roots_do_not_create_domain_state() {
@@ -1262,12 +1293,13 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(tx
-                    .execute(
+                assert!(
+                    tx.execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err());
+                    .is_err()
+                );
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

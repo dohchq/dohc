@@ -136,14 +136,30 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty())
     };
-    let run_valid = object
-        .get("agentRunId")
-        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
-    if object.get("kind").and_then(Value::as_str) != Some("agent")
-        || !nonempty("agentId")
-        || !nonempty("onBehalfOf")
-        || !run_valid
-    {
+    let valid = match object.get("kind").and_then(Value::as_str) {
+        Some("agent") => {
+            nonempty("agentId")
+                && nonempty("onBehalfOf")
+                && object
+                    .get("agentRunId")
+                    .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+        }
+        // An automation writing a file, so the moment carries its identity
+        // and chain depth into the claims the write causes.
+        Some("automation") => {
+            nonempty("automationId")
+                && nonempty("onBehalfOf")
+                && object.len() == 4
+                && object
+                    .get("depth")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|depth| {
+                        depth <= u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH)
+                    })
+        }
+        _ => false,
+    };
+    if !valid {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     serde_json::to_string(&value)

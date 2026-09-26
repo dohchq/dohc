@@ -15,6 +15,7 @@ import {hashLinkBearer,hashLinkProfileSecret,LinkEgressRateLimiter} from "../lin
 import {TokenBucketLimiter} from "@dohc/service-http";
 import type { StorageContext } from "./context";
 import type { AcceptAppCollectionInput } from "./appCollections";
+import { DiscussionActivityHub } from "../discussionActivity";
 
 const hash = (value:string|Uint8Array) => createHash("sha256").update(value).digest("hex");
 const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
@@ -278,6 +279,18 @@ function httpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
   const body={authorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Sam"}};
   return {...f,handler,path,headers,body,request,setTime(value:number){now=value;}};
 }
+
+it("wakes the owner's held log read when a link submission lands",async()=>{
+  const activity=new DiscussionActivityHub();
+  const f=httpFixture({discussionActivity:activity,resolveActor:(_request,workspaceId)=>({workspaceId,userId:"owner"})});
+  const since=f.storage.fetchLogPage({workspaceId:"w",sinceRelaySeq:0,limit:500}).nextCursor;
+  const held=f.handler(new Request(`https://relay/sync/w/log?since=${since}&hold=30000`,{headers:{authorization:"Bearer owner"}}));
+  await vi.waitFor(()=>expect(activity.stats().waiters).toBe(1));
+  expect((await f.request("POST",f.body)).status).toBe(200);
+  // The submission's own request woke the read; the hold did not run out.
+  expect(activity.stats().waiters).toBe(0);
+  expect(await (await held).json()).toMatchObject({ok:true,ops:[],hasMore:true});
+});
 
 it.each([
   {access:"view",released:false,status:200},

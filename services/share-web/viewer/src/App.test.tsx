@@ -16,7 +16,7 @@ import {
   fileTree,
   loadCurrentState,
   loadLog,
-  MARKDOWN_PREVIEW_BYTE_CAP,
+  TEXT_PREVIEW_BYTE_CAP,
   MAX_LOG_PAGES,
 } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
@@ -2078,8 +2078,8 @@ describe("App", () => {
     expect(requests.sources).toHaveLength(12);
   });
 
-  it("pins the Markdown preview byte cap", () => {
-    expect(MARKDOWN_PREVIEW_BYTE_CAP).toBe(2 * 1024 * 1024);
+  it("pins the text preview byte cap", () => {
+    expect(TEXT_PREVIEW_BYTE_CAP).toBe(2 * 1024 * 1024);
   });
 
   it("offers oversized Markdown files as downloads without rendering them", async () => {
@@ -2091,13 +2091,13 @@ describe("App", () => {
     const encoder = new TextEncoder();
     const markdownChunks = [
       encoder.encode("# Oversized Markdown\n\n"),
-      new Uint8Array(MARKDOWN_PREVIEW_BYTE_CAP),
+      new Uint8Array(TEXT_PREVIEW_BYTE_CAP),
       encoder.encode("# Must not render"),
     ];
     expect(
       markdownChunks.reduce((size, chunk) => size + chunk.byteLength, 0),
     ).toBeGreaterThan(
-      MARKDOWN_PREVIEW_BYTE_CAP,
+      TEXT_PREVIEW_BYTE_CAP,
     );
     let nextChunk = 0;
     let streamCancelled = false;
@@ -2151,7 +2151,7 @@ describe("App", () => {
     };
     const markdown = "# Previewed Markdown\n\nStill rendered.";
     expect(new TextEncoder().encode(markdown).byteLength).toBeLessThanOrEqual(
-      MARKDOWN_PREVIEW_BYTE_CAP,
+      TEXT_PREVIEW_BYTE_CAP,
     );
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -2174,6 +2174,124 @@ describe("App", () => {
       "Still rendered.",
     );
     expect(container.querySelector(".download-card")).toBeNull();
+  });
+
+  it("shows an app's source file as plain text without running it", async () => {
+    const file: SharedFile = {
+      path: "reading-list/index.html",
+      blobSha256: "3".repeat(64),
+      contentKind: "text",
+    };
+    const source = [
+      "<!doctype html>",
+      "<script>window.__sharedSourceRan = true;</script>",
+      '<img src="x" onerror="window.__sharedSourceRan = true">',
+      '<p id="shared-source-marker">Reading list</p>',
+    ].join("\n");
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response(source);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const content = container.querySelector("main.content");
+    expect(content?.querySelector("pre.source-text")?.textContent).toBe(source);
+    expect(content?.querySelector("script, img, #shared-source-marker")).toBeNull();
+    expect(content?.querySelector(".download-card")).toBeNull();
+    expect(Reflect.has(window, "__sharedSourceRan")).toBe(false);
+  });
+
+  it.each([
+    ["a NUL byte", new Uint8Array([0x68, 0x69, 0x00, 0x0a])],
+    ["BOM-less UTF-16LE", new Uint8Array([0x68, 0x00, 0x69, 0x00, 0x0a, 0x00])],
+    ["many control bytes", new TextEncoder().encode(`${"\u0001\u0002".repeat(10)}${"text".repeat(100)}`)],
+    ["bytes that are not UTF-8", new Uint8Array([0x68, 0xff, 0xfe, 0x0a])],
+  ])("offers a text file with %s as a download", async (_label, bytes) => {
+    const file: SharedFile = {
+      path: "notes.txt",
+      blobSha256: "5".repeat(64),
+      contentKind: "text",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response(bytes);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.querySelector("pre.source-text")).toBeNull();
+    expect(container.querySelector(".download-card a[download]")?.textContent).toBe(
+      "Download file",
+    );
+  });
+
+  it("never renders one file's text under the next file's kind", async () => {
+    const source: SharedFile = { path: "a.txt", blobSha256: "6".repeat(64), contentKind: "text" };
+    const readme: SharedFile = { path: "b.md", blobSha256: "7".repeat(64), contentKind: "text" };
+    const sourceText = "SOURCE_ONLY [example](https://example.com)";
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([source, readme], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([source, readme]);
+      if (path === `/api/view/blob/${source.blobSha256}`) return new Response(sourceText);
+      if (path === `/api/view/blob/${readme.blobSha256}`) return new Response("# Readme");
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    expect(container.querySelector("pre.source-text")?.textContent).toBe(sourceText);
+
+    const added: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) added.push(...record.addedNodes);
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    await act(async () => {
+      buttonNamed(readme.path)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await settle(() => container.querySelector("article.markdown h1")?.textContent === "Readme");
+    observer.disconnect();
+
+    expect(added.some((node) => node.textContent?.includes("SOURCE_ONLY"))).toBe(false);
+  });
+
+  it("offers oversized source files as downloads without rendering them", async () => {
+    const file: SharedFile = {
+      path: "bundle.js",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response(new Uint8Array(TEXT_PREVIEW_BYTE_CAP + 1));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.querySelector("pre.source-text")).toBeNull();
+    expect(container.querySelector(".download-card a[download]")?.textContent).toBe(
+      "Download file",
+    );
   });
 
   it("refreshes the last-settled age every minute", async () => {

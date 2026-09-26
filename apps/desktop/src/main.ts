@@ -15,6 +15,7 @@ import {
   registerDevToolsIpcHandlers,
 } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
+import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -88,15 +89,17 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, readdir } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
+  SitePreviewReplacedEvent,
   McpConfigResult,
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
+  type PushShareDirectWritesResult,
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
@@ -109,6 +112,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
@@ -152,7 +156,6 @@ import {
 } from "./window/createMainWindow";
 import {
   createWorkspaceFolder,
-  resetFailedJoinFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import { createFolder } from "./workspaces/workspaceFiles";
@@ -182,6 +185,11 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
+import { CollectionAutomations } from "./automations/collectionAutomations";
+import { parseCollectionAutomationId } from "./automations/automationPlan";
+import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
+import { createAutomationRunStore } from "./automations/automationRunStore";
+import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
@@ -229,6 +237,7 @@ import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { createRelayLogWait } from "./workspaces/relayLogWait";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
 import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
 import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
@@ -314,6 +323,7 @@ import {
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { createOwedRunNotices } from "./agents/owedRunNotices";
 import { isAppImageBoot, resolveDohcMcpCommand } from "./agents/dohcMcpCommand";
 import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
@@ -328,6 +338,7 @@ import {
   WILL_QUIT_BUDGET_MS,
 } from "./workspaces/siteRunner";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
+import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 import { createPluginPanelPreviewStarter } from "./plugins/pluginPanelLifecycle";
 import { createDesktopPluginRuntime, type DesktopPluginRuntimeDependencies } from "./plugins/desktopPluginRuntime";
 import {
@@ -344,9 +355,11 @@ import {
 } from "./plugins/pluginSurfaces";
 
 import {
+  readWorkspaceText,
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
+  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -564,6 +577,46 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
   }
 }
 
+// A Collection automation step started or stopped waiting for a current
+// editor: the windows on that workspace re-list the hold notices.
+function notifyAutomationHoldsChanged(workspaceId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.automationHoldsChanged);
+}
+
+// The automations main read from a workspace changed: the windows on that
+// workspace re-read the ⚡ field marks.
+function notifyCollectionAutomationsChanged(workspaceId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
+}
+
+function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
+    win.webContents.send(channel, { workspaceId });
+  }
+}
+
+// A direct push main ran after a save in a share view finished: the windows
+// on that view show its stale and refused writes. False when no window
+// shows the view; the push queue then holds the answer until one does.
+function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
+  let shown = false;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
+    shown = true;
+  }
+  return shown;
+}
+
+// Main's queue of direct pushes, once the IPC handlers are registered.
+let shareDirectWrites: { shareViewEdited(workspaceId: string): void } | null = null;
+
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
   if (!payload.success) {
@@ -602,6 +655,7 @@ const {
   get chatDispatchService(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["chatDispatchService"] {
     return chatDispatchService;
   },
+  collectionAutomationsOf: (state) => state.collectionAutomations,
 });
 
 let linuxStableCliBinDir: string | undefined;
@@ -769,6 +823,8 @@ const credentialSessionCache =
     if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
       .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
+    // The notice list shows the signed-in account's notices.
+    notifyNoticesChanged();
     if (snapshot.credentials) void noticeStore().sync();
   });
 async function refreshCredentialCache(): Promise<void> {
@@ -828,16 +884,17 @@ async function noticeSession(): Promise<NoticeSession | null> {
     },
   };
 }
+function notifyNoticesChanged(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send(CHANNELS.noticesChanged);
+  }
+}
 function noticeStore(): NoticeStore {
   cachedNoticeStore ??= createNoticeStore({
     directory: join(stateDir(), "notices"),
     session: noticeSession,
     installId: localReactorFallbackId,
-    onChanged: () => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        window.webContents.send(CHANNELS.noticesChanged);
-      }
-    },
+    onChanged: notifyNoticesChanged,
   });
   return cachedNoticeStore;
 }
@@ -1110,7 +1167,36 @@ const shareRosters = createShareRosters({
   },
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
+  onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
 });
+
+// One formula evaluator for every open workspace. Its worker thread starts
+// on the first run and stops when idle. The worker runs from the staged
+// runtime, like the dataset child, because the main bundle cannot resolve
+// the package's own worker file.
+const automationEvaluator = createAutomationFormulaEvaluator(() =>
+  createAutomationEvaluator({
+    entryPath: join(pluginResourcesBasePath(), "app-backend-runtime", "automation-worker.mjs"),
+  }),
+);
+
+// The Collection automation executor of an open workspace, or undefined.
+function collectionAutomationsOf(workspaceId: string): CollectionAutomations | undefined {
+  return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
+}
+
+// A Collection automation that wrote a moment, as History shows it: its
+// name from the workspace's automations.yaml as this computer read it, or
+// its id when the file no longer has it, and the Collection it belongs to.
+// Any other automation, such as a plugin's, keeps the moment's origin label.
+function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
+  const parsed = parseCollectionAutomationId(automationId);
+  if (parsed === null) return null;
+  return {
+    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
+    collection: posix.basename(parsed.collectionPath),
+  };
+}
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
@@ -1128,10 +1214,11 @@ const shareRosters = createShareRosters({
 
 interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionState {
   activity: WorkspaceActivityState;
+  collectionAutomations: CollectionAutomations;
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
-  sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
+  sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
@@ -1186,11 +1273,18 @@ function createDesktopWorkspaceAuthorityState(
   const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   return {
     activity: new WorkspaceActivityState(),
+    collectionAutomations: createCollectionAutomationsFor(binding),
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
-    sitePreviews: createSitePreviewLifecycle({
+    sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
+      notifyReplaced: (senderId, replacement) => {
+        const parsed = SitePreviewReplacedEvent.safeParse(replacement);
+        const target = webContents.fromId(senderId);
+        if (!parsed.success || !target || target.isDestroyed()) return;
+        target.send(CHANNELS.sitePreviewReplaced, parsed.data);
+      },
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
@@ -1261,6 +1355,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
+      state.collectionAutomations.dispose(),
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
       Promise.resolve().then(() =>
@@ -1485,7 +1580,7 @@ const pluginSurfaces: WorkspacePluginSurfaces = {
 };
 
 type SitePreviewLifecycle = Omit<
-  ReturnType<typeof createSitePreviewLifecycle>,
+  ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
   "stopWorkspace"
 > & {
   stopWorkspace(
@@ -1498,6 +1593,15 @@ const sitePreviews: SitePreviewLifecycle = {
     workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
       lease.state.sitePreviews.start(input),
     ),
+  acquire: (input) =>
+    workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.acquire(input),
+    ),
+  release(input) {
+    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.release(input),
+    );
+  },
   status(workspaceId, siteRoot) {
     const lease = requireWorkspaceAuthority(workspaceId);
     try {
@@ -1610,14 +1714,6 @@ function removePhysicalWorkspace(
   });
 }
 
-async function cleanupFailedPhysicalWorkspace(
-  workspaceId: string,
-  rootPath: string,
-): Promise<void> {
-  await closeRelayTransportWorkspace(workspaceId);
-  await resetFailedJoinFolder(rootPath);
-}
-
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: createWorkspaceFolder,
@@ -1625,7 +1721,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   remove: removePhysicalWorkspace,
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
-  cleanup: cleanupFailedPhysicalWorkspace,
+  closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
   rollbackComplete: () => {
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
@@ -1840,6 +1936,11 @@ function engineForWorkspace(
     // Recorded durably before each pull request goes out.
     pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
+    // Another device's edits reach this one, and a document open here, while
+    // nobody touches this desktop: the relay answers a held read when the log
+    // changes. The rare pull covers a change that answer missed.
+    waitForChange: createRelayLogWait({ workspaceId: workspace.workspaceId, relay }),
+    idlePullMs: 5 * 60_000,
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
@@ -2854,6 +2955,10 @@ function rememberPendingCliRunMessageLink(
 }
 
 const chatDispatchService = createChatDispatchService({
+  runNotices: {
+    post: (input) => noticeStore().postNotice(input),
+    owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
+  },
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
@@ -3034,6 +3139,10 @@ async function openWorkspaceActivityForOperation(
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
+  // Automations run where changes are captured: never in a shared view.
+  if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
+    void operation.state.collectionAutomations.open();
+  }
   return result;
 }
 
@@ -3112,8 +3221,16 @@ async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
   editSignal?: AbortSignal,
 ): Promise<CollectionRecordEditContext> {
-  const { workspace, capture } =
-    await requirePluginEngineCaptureForOperation(operation);
+  const { capture } = await requirePluginEngineCaptureForOperation(operation);
+  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal);
+}
+
+function collectionEditContextWith(
+  operation: DesktopWorkspaceOperation,
+  capture: CollectionRecordEditContext["capture"],
+  signal: AbortSignal,
+): CollectionRecordEditContext {
+  const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
   return {
     capture,
@@ -3124,8 +3241,53 @@ async function collectionEditContextFor(
       if (!daemon) throw new Error("The workspace engine is not running.");
       return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
     },
-    signal: editSignal ?? operation.signal,
+    signal,
   };
+}
+
+// A workspace text file, or null when there is none.
+async function readWorkspaceTextIfPresent(rootPath: string, relativePath: string) {
+  try {
+    return await readWorkspaceText(rootPath, relativePath);
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException)?.code ?? "")) return null;
+    throw error;
+  }
+}
+
+// An open workspace's Collection automations. Runs write through the same
+// seam as every other collection write, with the capture the workspace
+// already opened, and end at the run's own signal or the operation's.
+function createCollectionAutomationsFor(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+): CollectionAutomations {
+  const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
+  const workspace = { workspaceId, rootPath, attachmentId };
+  return new CollectionAutomations({
+    withEngine: (work) => withEngineAdapter(workspace, work),
+    withRecordWrites: (signal, work) =>
+      withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) {
+          throw new Error("This workspace was closed.");
+        }
+        const capture = activity.engineCaptureFor(workspaceId);
+        if (!capture) throw new Error(captureRefusal("Automations"));
+        return work(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal])));
+      }),
+    readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
+    writeText: (path, text, expectedContentHash) =>
+      writeWorkspaceText(rootPath, path, text, expectedContentHash),
+    pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
+    roster: () => shareRosters.forRun(workspaceId),
+    cachedRoster: () => shareRosters.cached(workspaceId),
+    evaluator: automationEvaluator.forWorkspace(workspaceId),
+    store: createAutomationRunStore(rootPath),
+    onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
+    onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
+    onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
+    onError: (context, error) =>
+      console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+  });
 }
 
 const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
@@ -3202,6 +3364,12 @@ const { startDesktopCliServer } = createDesktopCliServer({
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   withEngineAdapter,
+  // The sessions are created below; the CLI server reaches them only per request.
+  liveDocuments: {
+    readDocument: (input) => engineYDocSessionIpc.readDocument(input),
+    editDocument: (input) => engineYDocSessionIpc.editDocument(input),
+  },
+  documentProjection: createDocumentProjectionWorker(),
   chatWrites,
   startCliServer,
   stateDir,
@@ -3329,6 +3497,7 @@ const desktopEngine = createDesktopEngine({
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
+  collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
 });
 const {
@@ -3618,6 +3787,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
   shareViewFiles,
   trashItem: (path) => shell.trashItem(path),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),
 });
 const ensureOwnedProjectionTargetCurrent =
@@ -4053,6 +4223,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings,
   openPath: (path) => shell.openPath(path),
+  knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
 
 function registerIpcHandlers(): void {
@@ -4136,7 +4307,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
@@ -4538,6 +4709,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
     acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
+    automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     get cachedAgentSessions() { return cachedAgentSessions; },
@@ -4546,10 +4718,25 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity,
   });
   agentRunsIpc.registerAutomationFailures();
+  registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
+    readText: readWorkspaceTextIfPresent,
+    createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
+    writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
+    showItemInFolder: (path) => shell.showItemInFolder(path),
+    deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
+  });
 
-  registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
+    withWorkspaceAuthority: (workspaceId, work) =>
+      workspaceAuthorities.withAuthority(workspaceId, (lease) => work({
+        get workspace() { return canonicalWorkspaceFor(lease); },
+        assertCurrent: () => lease.assertCurrent(),
+      })),
+    reportDirectWrites: notifyShareDirectWritesPushed,
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
     normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,
@@ -4787,9 +4974,8 @@ function registerIpcHandlers(): void {
   }));
 
   registerOperations(operationBoundary, noticeOperations, {
-    listNotices: async () => ({ notices: await noticeStore().list() }),
-    readNotice: (input) => noticeStore().mark(input, "read"),
-    dismissNotice: (input) => noticeStore().mark(input, "dismissed"),
+    listNotices: () => noticeStore().list(),
+    markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
   });
 
   workspaceEngineIpc.registerYDoc();

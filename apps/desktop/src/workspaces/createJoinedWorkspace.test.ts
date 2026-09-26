@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createJoinedWorkspaceRunner } from "./createJoinedWorkspace";
+import { createWorkspaceFolder } from "./createWorkspaceFolder";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
+import { createTestScratch } from "./testTemp";
 import type { RegistryEntry } from "./registryStore";
 
-function harness() {
+function harness(rootPath = "/joined") {
   const registry = new Map<string, RegistryEntry>();
   const authorities = createWorkspaceAuthorityOwner<RegistryEntry, object>({
     findWorkspace: (id) => registry.get(id) ?? null,
@@ -13,7 +17,7 @@ function harness() {
   const events: string[] = [];
   const workspace: RegistryEntry = {
     workspaceId: "joined",
-    rootPath: "/joined",
+    rootPath,
     kind: "personal",
     mode: "local-first",
   };
@@ -51,7 +55,7 @@ function harness() {
       }),
     release: (reservation, finalize) =>
       authorities.releaseReservation(reservation, finalize),
-    cleanup,
+    closeRelay: cleanup,
     rollbackComplete,
     logError: vi.fn(),
   });
@@ -78,6 +82,57 @@ function harness() {
 }
 
 describe("joined workspace creation", () => {
+  it("preserves existing files when folder creation fails before the join owns anything", async () => {
+    const root = await createTestScratch("dohc-join-preserve-");
+    const h = harness(root);
+    await writeFile(join(root, "local-work.md"), "work from another tool");
+    h.createFolder.mockRejectedValue(new Error("manifest creation failed"));
+
+    await expect(h.run(h.input)).rejects.toThrow("download failed");
+
+    expect(await readdir(root)).toEqual(["local-work.md"]);
+    expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("work from another tool");
+    expect(h.registry.size).toBe(0);
+    expect(h.cleanup).toHaveBeenCalledWith("joined");
+  });
+
+  it.each(["prepare", "populate"] as const)("preserves files added during %s and permits retry in another empty folder", async (phase) => {
+    const root = await createTestScratch("dohc-join-preserve-");
+    const h = harness(root);
+    h.createFolder.mockImplementation(() => createWorkspaceFolder({
+      rootPath: h.workspace.rootPath,
+      workspaceId: h.workspace.workspaceId,
+      kind: "personal",
+    }));
+    const entered = Promise.withResolvers<void>();
+    const resumed = Promise.withResolvers<void>();
+    const fail = async () => {
+      entered.resolve();
+      await resumed.promise;
+      throw new Error("download interrupted");
+    };
+    const result = h.run({ ...h.input, [phase]: fail });
+    const refusal = expect(result).rejects.toThrow("download failed");
+    await entered.promise;
+    const manifest = await readFile(join(root, ".dohc", "manifest.json"), "utf8");
+    await writeFile(join(root, "local-work.md"), "unsynced local work");
+    await writeFile(join(root, "partial.md"), "downloaded before interruption");
+    resumed.resolve();
+    await refusal;
+
+    expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
+    expect(await readFile(join(root, "partial.md"), "utf8")).toBe("downloaded before interruption");
+    expect(await readFile(join(root, ".dohc", "manifest.json"), "utf8")).toBe(manifest);
+    expect(h.registry.size).toBe(0);
+    expect(h.cleanup).toHaveBeenCalledWith("joined");
+
+    const retryRoot = await createTestScratch("dohc-join-retry-");
+    h.workspace.rootPath = retryRoot;
+    await expect(h.run({ ...h.input, rootPath: retryRoot })).resolves.toMatchObject({ rootPath: retryRoot });
+    expect(h.registry.get("joined")?.rootPath).toBe(retryRoot);
+    expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
+  });
+
   it("prepares identity before registration and starts population afterward", async () => {
     const h = harness();
     await expect(
@@ -115,7 +170,7 @@ describe("joined workspace creation", () => {
     await expect(h.run(h.input)).resolves.toBe(h.workspace);
   });
 
-  it("retires a registered workspace and cleans its files before removing the registry entry", async () => {
+  it("retires a registered workspace and closes its relay before removing the registry entry", async () => {
     const h = harness();
     h.input.populate.mockRejectedValue(new Error("first pull failed"));
     h.cleanup.mockImplementation(async () => {

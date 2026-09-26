@@ -12,11 +12,11 @@
 
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
-use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
+use crate::{CollabError, DocKey, Regime, WriterDocCache, durable};
 use dohc_engine_storage::{
-    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
+    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -28,26 +28,26 @@ mod publication;
 pub(crate) use publication::read_native_accepted_in;
 mod ack_read;
 mod sync;
-pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
+pub use ack_read::{LiveApplicationAckIdentity, read_application_ack};
 pub use sync::{
-    read_applied_sync, read_next_applied, AppliedPosition, AppliedSyncCut, AppliedSyncPolicy,
-    NextAppliedUpdate,
+    AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate, read_applied_sync,
+    read_next_applied,
 };
 mod activation;
 pub use activation::{
-    capture_imported_owner_activation, release_imported_owner_activation,
-    resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
+    ImportedOwnerActivation, ImportedOwnerSource, capture_imported_owner_activation,
+    release_imported_owner_activation, resume_imported_owner_activation,
 };
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
-pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+pub use adoption::{OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;
 mod settlement;
 pub use bootstrap::{
-    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+    BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck, bootstrap_committed,
 };
 pub use restore_content::{
     NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
@@ -55,12 +55,12 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
-pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
+pub use settlement::{LiveSettlementAudit, LiveSettlementResult, with_settlement};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -469,7 +469,12 @@ pub enum ApplicationPending {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
-    Applied(LiveUpdateHostApplicationAck),
+    /// The frame is applied, with the automation claims its field changes
+    /// inserted; a replayed frame claims nothing.
+    Applied(
+        LiveUpdateHostApplicationAck,
+        Vec<dohc_engine_domain::AutomationClaim>,
+    ),
     Pending(ApplicationPending),
 }
 
@@ -769,6 +774,7 @@ pub fn apply_committed(
                         record.sequence,
                         true,
                     ),
+                    Vec::new(),
                 ));
             }
             check_provenance(tx, &held.namespace, &event)?;
@@ -799,6 +805,53 @@ pub fn apply_committed(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
+            // Every accepted frame but this computer's own draft is a change
+            // from elsewhere: a collaborator's, or its owner's on another
+            // computer. The application row above makes a replay return
+            // before this point.
+            if !crate::owner_outbox::is_own_draft_in(
+                tx,
+                &key,
+                &event.metadata.accepted.receipt.update_digest,
+                crate::owner_outbox::AcceptedAs::Delivery(
+                    &event.metadata.accepted.receipt.delivery_id,
+                ),
+            )? {
+                dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
+            }
+            // The session host commits every accepted frame of a live-shared
+            // document as local, the owner's and each collaborator's alike,
+            // so the host is the one computer that claims its field changes
+            // (ADR 0008). The owner applies the same frame from the host's
+            // acceptance and a collaborator never journals it; neither
+            // claims. The author is the attribution this engine recorded when
+            // the frame is its own draft (an automation's write keeps its
+            // chain depth), and otherwise the principal the relay accepted it
+            // from, at depth 0.
+            let mut automation_claims = Vec::new();
+            if let Some(mut facts) = append.record_facts {
+                match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
+                    Some((actor, attribution)) => {
+                        facts.author_origin_id = actor;
+                        facts.attribution = attribution;
+                    }
+                    None => {
+                        let (_, principal_id, _, _) = event.metadata.accepted.authority.fields();
+                        facts.author_origin_id = Some(principal_id.to_owned());
+                    }
+                }
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &facts,
+                    event.metadata.accepted.received_at_ms,
+                )
+                .map_err(|error| {
+                    ApplicationError::Collab(CollabError::Corrupt {
+                        reason: format!("automation claim insert failed: {error}"),
+                    })
+                })?;
+            }
             accepted_history::append(tx, &held, &event, working_reserve_bytes)?;
             let readback = read_application(tx, &held.namespace, &event.metadata.accepted.receipt)?
                 .ok_or(ApplicationError::Corrupt)?;
@@ -818,6 +871,7 @@ pub fn apply_committed(
                     append.seq,
                     false,
                 ),
+                automation_claims,
             ))
         },
     );
@@ -827,7 +881,7 @@ pub fn apply_committed(
     match outcome {
         Ok(TxnOutcome::Committed(result)) => {
             if compaction_due
-                && matches!(&result, ApplicationResult::Applied(ack) if !ack.application_replayed)
+                && matches!(&result, ApplicationResult::Applied(ack, _) if !ack.application_replayed)
             {
                 // The key is already evicted. As in self_bound_log, an injected
                 // fold crash keeps the committed ACK; a real error suppresses it.
@@ -847,6 +901,66 @@ pub fn apply_committed(
         )),
         Err(TransactionError::Application(error)) => Err(error),
     }
+}
+
+/// The actor and attribution this engine recorded for a native update it
+/// drafted, when the accepted frame is that draft: the relay accepted the
+/// draft's own delivery, with the same bytes, for the same document.
+#[allow(clippy::type_complexity)]
+fn own_draft_attribution(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    receipt: &LiveUpdateReceipt,
+) -> Result<
+    Option<(
+        Option<String>,
+        Option<dohc_engine_domain::ChangeAttribution>,
+    )>,
+    ApplicationError,
+> {
+    let source: Option<String> = tx
+        .query_row(
+            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e \
+             JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
+             WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
+               AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
+               AND e.native_source_json IS NOT NULL",
+            params![
+                receipt.delivery_id,
+                receipt.update_digest,
+                key.workspace_id,
+                key.version_id,
+                key.object_id
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let source: crate::owner_outbox::OwnerOutboxNativeSource =
+        serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
+    let crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+        actor_origin_id,
+        actor_kind,
+        on_behalf_of,
+        chain_depth,
+        ..
+    } = source.origin
+    else {
+        return Ok(None);
+    };
+    let attribution = match (actor_kind, chain_depth) {
+        (Some(kind), Some(depth)) => Some(dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::parse(&kind)
+                .ok_or(ApplicationError::Corrupt)?,
+            on_behalf_of,
+            depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
+        }),
+        _ => None,
+    };
+    Ok(Some((actor_origin_id, attribution)))
 }
 
 struct ApplicationRecord {
@@ -1297,7 +1411,7 @@ mod tests {
     }
     fn ack(result: ApplicationResult) -> LiveUpdateHostApplicationAck {
         match result {
-            ApplicationResult::Applied(ack) => ack,
+            ApplicationResult::Applied(ack, _) => ack,
             other => panic!("expected applied: {other:?}"),
         }
     }
@@ -1325,9 +1439,11 @@ mod tests {
             delivery_id: first.metadata.accepted.receipt.delivery_id.clone(),
             update_digest: first.metadata.accepted.receipt.update_digest.clone(),
         };
-        assert!(read_application_ack(&store, &handle, &identity)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &handle, &identity)
+                .unwrap()
+                .is_none()
+        );
         let mut expected = ack(apply(&mut store, &mut cache, &handle, first));
         expected.application_replayed = true;
         apply(
@@ -1367,9 +1483,11 @@ mod tests {
             delivery_id: "absent".into(),
             update_digest: identity.update_digest.clone(),
         };
-        assert!(read_application_ack(&store, &handle, &absent)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &handle, &absent)
+                .unwrap()
+                .is_none()
+        );
         let wrong_digest = LiveApplicationAckIdentity {
             update_digest: "00".repeat(32),
             ..identity.clone()
@@ -1437,9 +1555,11 @@ mod tests {
                 binding(),
             )
             .unwrap();
-        assert!(read_application_ack(&store, &other_namespace, &identity)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &other_namespace, &identity)
+                .unwrap()
+                .is_none()
+        );
         let current = owner
             .register(
                 &mut store,
@@ -1617,11 +1737,13 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .unwrap();
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_some()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_some()))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1692,11 +1814,10 @@ mod tests {
                 assert_eq!(count(&store, "live_device_update_applications"), 65);
             }
             store = reopen(store, &dir);
-            assert!(crate::replay_parity::structurally_equal_v2_for_test(
-                &document(&store),
-                &source
-            )
-            .unwrap());
+            assert!(
+                crate::replay_parity::structurally_equal_v2_for_test(&document(&store), &source)
+                    .unwrap()
+            );
             for (index, update) in deliveries.into_iter().enumerate() {
                 let replay = ack(apply(&mut store, &mut cache, &handle, update));
                 assert!(replay.application_replayed);
@@ -1717,11 +1838,13 @@ mod tests {
             apply(&mut store, &mut cache, &handle, update),
             ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
         );
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_none()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_none()))
+                .unwrap()
+        );
         assert_eq!(count(&store, "ydoc_updates"), 1);
         store = reopen(store, &dir);
         assert_eq!(document(&store).encode_full_state(), before);
@@ -1811,7 +1934,7 @@ mod tests {
 
     #[test]
     fn populated_verified_backup_restores_application_fragments_and_compacted_replay() {
-        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, FreeSpaceProbe};
+        use dohc_engine_storage::backup::{BackupOutcome, FreeSpaceProbe, create_verified_backup};
         struct Space;
         impl FreeSpaceProbe for Space {
             fn available_bytes(&self, _: &std::path::Path) -> Result<u64, StorageError> {
@@ -2012,11 +2135,13 @@ mod tests {
                     apply(&mut store, &mut cache, &handle, update.clone()),
                     ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
                 );
-                assert!(store
-                    .read_with(|conn| cache
-                        .doc_for_consumer(conn, &key())
-                        .map(|doc| doc.is_none()))
-                    .unwrap());
+                assert!(
+                    store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap()
+                );
                 store = reopen(store, &dir);
                 assert_eq!(count(&store, "ydoc_updates"), before);
                 assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2045,11 +2170,13 @@ mod tests {
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
-                    assert!(store
-                        .read_with(|conn| cache
-                            .doc_for_consumer(conn, &key())
-                            .map(|doc| doc.is_none()))
-                        .unwrap());
+                    assert!(
+                        store
+                            .read_with(|conn| cache
+                                .doc_for_consumer(conn, &key())
+                                .map(|doc| doc.is_none()))
+                            .unwrap()
+                    );
                     store = reopen(store, &dir);
                     let persisted_sequence = store
                         .read_with(|conn| {
@@ -2235,8 +2362,9 @@ mod tests {
                     &handle,
                     conflict,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(())),
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -2255,8 +2383,9 @@ mod tests {
                         &handle,
                         event("noop", 3, vec![0, 0]),
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ),
                 "{damage}"
@@ -2270,8 +2399,9 @@ mod tests {
                         &handle,
                         first,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -2357,7 +2487,7 @@ mod tests {
                         100_000_000,
                         |_, _, _, _| Ok(())
                     ),
-                    Ok(ApplicationResult::Applied(_))
+                    Ok(ApplicationResult::Applied(..))
                 ),
                 "{pointer}"
             );
@@ -2415,9 +2545,10 @@ mod tests {
                         &handle,
                         update,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
-                    Ok(ApplicationResult::Applied(_))
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
+                    Ok(ApplicationResult::Applied(..))
                 ),
                 "{damage}"
             );
@@ -2441,16 +2572,18 @@ mod tests {
                 start_clock: 0,
                 end_clock: 1,
             }];
-            assert!(apply_committed(
-                &mut store,
-                &mut cache,
-                &handle,
-                update,
-                &NoFaults,
-                100_000_000,
-                |_, _, _, _| Ok(())
-            )
-            .is_err());
+            assert!(
+                apply_committed(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    update,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
+                .is_err()
+            );
             store = reopen(store, &dir);
             assert_eq!(count(&store, "ydoc_updates"), 0);
             assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2482,8 +2615,9 @@ mod tests {
                     &handle,
                     update,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(()))
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
                 .is_err(),
                 "{damage}"
             );
@@ -2513,11 +2647,13 @@ mod tests {
                 ),
                 Err(ApplicationError::Interrupted)
             ));
-            assert!(store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_none()))
-                .unwrap());
+            assert!(
+                store
+                    .read_with(|conn| cache
+                        .doc_for_consumer(conn, &key())
+                        .map(|doc| doc.is_none()))
+                    .unwrap()
+            );
             store = reopen(store, &dir);
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(
@@ -2528,5 +2664,285 @@ mod tests {
             assert_eq!(result.application_replayed, committed);
             assert_eq!(count(&store, "live_device_update_applications"), 1);
         }
+    }
+
+    /// The session host counts every accepted frame it commits as a change
+    /// from elsewhere, once, except a frame that is this computer's own
+    /// draft.
+    #[test]
+    fn the_session_host_counts_frames_from_elsewhere_once() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let remote_changes = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_storage::remote_changes_applied_in(conn, "workspace-1")
+                })
+                .unwrap()
+        };
+        let source = Ydoc::wire();
+        let own = source.plaintext_insert(0, "own");
+        let draft = crate::owner_outbox::append(
+            &mut store,
+            "workspace-1",
+            crate::owner_outbox::OwnerOutboxAppendInput {
+                binding: binding(),
+                base_update: Ydoc::wire().encode_full_state(),
+                append_key: "own-draft".into(),
+                update: own.clone(),
+                limits: crate::owner_outbox::OwnerOutboxLimits {
+                    max_pending_bytes: 10_000,
+                    max_pending_age_ms: 10_000,
+                },
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event(&draft.delivery_id, 1, own),
+        ));
+        assert_eq!(remote_changes(&store), 0, "this computer's own draft");
+
+        let other = event("other", 2, source.plaintext_insert(3, " other"));
+        ack(apply(&mut store, &mut cache, &handle, other.clone()));
+        assert_eq!(remote_changes(&store), 1, "a frame from elsewhere");
+        assert!(ack(apply(&mut store, &mut cache, &handle, other)).application_replayed);
+        assert_eq!(remote_changes(&store), 1, "a replayed frame counts once");
+    }
+
+    /// A live-shared record: the session host commits each accepted frame,
+    /// the owner's and a collaborator's alike, so it claims the frame's field
+    /// changes once, as the principal the relay accepted it from.
+    #[test]
+    fn the_session_host_claims_each_accepted_field_change_once() {
+        use dohc_engine_domain::{
+            AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
+        };
+        let dir = ScratchDir::new_named("live-device-application-claims").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version("workspace-1", "main", 0, &NoFaults)
+            .unwrap();
+        for (object_id, path, text) in [
+            (
+                "schema-object",
+                "notes/collection.yaml",
+                "fields:\n  status:\n    type: text\n",
+            ),
+            (
+                "object-1",
+                "notes/a.md",
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: open\n---\n",
+            ),
+        ] {
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: "workspace-1".into(),
+                        version_id: "main".into(),
+                        object_id: object_id.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: format!("moment:{object_id}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace-1", "main")?;
+                dohc_engine_domain::subscribe_automation_in_tx(
+                    tx,
+                    "workspace-1",
+                    &AutomationSubscription {
+                        automation_id: "collection:notes#watch".into(),
+                        prefix: "notes".into(),
+                        kinds: vec![AutomationChangeKind::Changed],
+                        fields: None,
+                    },
+                    1,
+                )
+            })
+            .unwrap();
+        durable::ensure_marker(
+            &mut store,
+            &key(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            put_binary_blob_with_sha(tx,&Ydoc::wire().encode_full_state(),&binding().lineage_claim_id).unwrap();
+            tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1,lineage_claim_status='exact',path='notes/a.md'",[binding().lineage_claim_id]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
+        let handle = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("connection-1"),
+                binding(),
+            )
+            .unwrap();
+        let mut cache = WriterDocCache::new();
+        let claims = |store: &EngineStore| -> Vec<(String, Option<String>)> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT change_kind, author_origin_id FROM automation_claims \
+                         ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+
+        let source = Ydoc::wire();
+        let owner_edit = event(
+            "owner-edit",
+            1,
+            source.frontmatter_set("status", "done").unwrap(),
+        );
+        let ApplicationResult::Applied(_, returned) =
+            apply(&mut store, &mut cache, &handle, owner_edit.clone())
+        else {
+            panic!("expected applied");
+        };
+        assert_eq!(
+            claims(&store),
+            vec![("changed".to_owned(), Some("owner-1".to_owned()))],
+            "the owner's accepted edit claims on the host"
+        );
+        assert_eq!(
+            returned.len(),
+            1,
+            "the host returns its claim, so the caller can wake the executor"
+        );
+        let ApplicationResult::Applied(replayed, returned) =
+            apply(&mut store, &mut cache, &handle, owner_edit)
+        else {
+            panic!("expected applied");
+        };
+        assert!(replayed.application_replayed);
+        assert!(returned.is_empty());
+        assert_eq!(claims(&store).len(), 1, "a replayed frame claims nothing");
+
+        let mut guest_edit = event(
+            "guest-edit",
+            2,
+            source.frontmatter_set("status", "late").unwrap(),
+        );
+        guest_edit.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest-1".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        guest_edit.metadata.accepted.received_at_ms = 20;
+        ack(apply(&mut store, &mut cache, &handle, guest_edit));
+        assert_eq!(
+            claims(&store),
+            vec![
+                ("changed".to_owned(), Some("owner-1".to_owned())),
+                ("changed".to_owned(), Some("guest-1".to_owned())),
+            ],
+            "a collaborator's accepted edit claims on the host too"
+        );
+
+        let body_only = event("body-only", 3, source.plaintext_insert(0, "body"));
+        ack(apply(&mut store, &mut cache, &handle, body_only));
+        assert_eq!(claims(&store).len(), 2, "a body-only frame claims nothing");
+
+        // This engine's own drafts, which an automation wrote at depth 2.
+        let own_draft = |store: &mut EngineStore, key: &str, update: &[u8]| {
+            let appended = crate::owner_outbox::append(
+                store,
+                "workspace-1",
+                crate::owner_outbox::OwnerOutboxAppendInput {
+                    binding: binding(),
+                    base_update: Ydoc::wire().encode_full_state(),
+                    append_key: key.into(),
+                    update: update.to_vec(),
+                    limits: crate::owner_outbox::OwnerOutboxLimits {
+                        max_pending_bytes: 100_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+            let source = crate::owner_outbox::OwnerOutboxNativeSource {
+                binding: binding(),
+                adoption_id: "adoption-1".into(),
+                native_sequence: 1,
+                update_digest: appended.update_digest.clone(),
+                origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                    actor_origin_id: Some("collection:notes#stamp".into()),
+                    actor_kind: Some("automation".into()),
+                    on_behalf_of: Some("local".into()),
+                    chain_depth: Some(2),
+                    recorded_at_ms: 1,
+                },
+            };
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1 \
+                         WHERE delivery_id = ?2",
+                        params![
+                            serde_json::to_string(&source).unwrap(),
+                            appended.delivery_id
+                        ],
+                    )
+                    .unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            appended.delivery_id
+        };
+        let newest = |store: &EngineStore| -> (Option<String>, i64) {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT author_origin_id, depth FROM automation_claims \
+                         ORDER BY created_at_ms DESC, claim_id DESC LIMIT 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap()
+        };
+        let stamped = source.frontmatter_set("status", "stamped").unwrap();
+        let delivery = own_draft(&mut store, "own-stamp", &stamped);
+        let mut accepted = event(&delivery, 4, stamped);
+        accepted.metadata.accepted.received_at_ms = 30;
+        ack(apply(&mut store, &mut cache, &handle, accepted));
+        assert_eq!(
+            newest(&store),
+            (Some("collection:notes#stamp".to_owned()), 2),
+            "the host's own draft keeps its automation author and depth"
+        );
+        // The same bytes under another delivery are not that draft.
+        let restamped = source.frontmatter_set("status", "restamped").unwrap();
+        own_draft(&mut store, "own-restamp", &restamped);
+        let mut elsewhere = event("elsewhere", 5, restamped);
+        elsewhere.metadata.accepted.received_at_ms = 40;
+        ack(apply(&mut store, &mut cache, &handle, elsewhere));
+        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0));
     }
 }

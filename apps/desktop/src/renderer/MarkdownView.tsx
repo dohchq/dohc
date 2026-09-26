@@ -1,3 +1,4 @@
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   ENGINE_CHIP,
@@ -65,6 +66,9 @@ import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from ".
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
+import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
+import { dirnameOf } from "./path";
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -871,6 +875,14 @@ export function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  // A record's properties show the ⚡ of the automations that set them. An
+  // editable file in a folder asks; main answers none for a folder that is
+  // not a document Collection. A shared file's automations run on its
+  // owner's computer.
+  const parentFolder = dirnameOf(props.path);
+  const fieldMarks = useCollectionFieldMarks(
+    readOnly || parentFolder === "" || isSharedWithMePath(props.path) ? null : parentFolder,
+  );
   const switchReadPendingRef = useRef(props.switchReadPending);
   switchReadPendingRef.current = props.switchReadPending;
   // The single question all three write paths ask. Both refs, because they
@@ -1784,9 +1796,17 @@ export function MarkdownView(props: {
   // to the renamed-away old path (ENOENT, swallowed) and the draft is lost.
   // Flushing through here lands the keystrokes while the path still exists.
   const { registerDraftFlush } = props;
+  const exitFlush = useRef<DraftFlush>(() => Promise.resolve());
+  const exitCapturedDraft = useRef<{ revision: number; text: string } | null>(null);
+  const captureStalledExit = useRef(() => {});
+  captureStalledExit.current = () => {
+    props.localBuffer.materializePendingDraft();
+    capturedConflictDraft.current = null;
+    captureFailedFlush();
+    exitCapturedDraft.current = { revision: draftRevision.current, text: latestDraft.current };
+  };
   useEffect(() => {
-    if (!registerDraftFlush) return;
-    registerDraftFlush((options) => {
+    const flushDraft: DraftFlush = (options) => {
       if (engineModeRef.current) {
         return flushEngineUpdatesRef.current();
       }
@@ -1809,6 +1829,7 @@ export function MarkdownView(props: {
       // Arming and reading the tail are one synchronous step, so no writer
       // can slip between them.
       flushBarrier.current = true;
+      const startedAfterUnmount = unmounted.current;
       props.localBuffer.materializePendingDraft();
       const localWritePending = writersLive.current > 0;
       const flush = (async () => {
@@ -1822,6 +1843,7 @@ export function MarkdownView(props: {
           }
           while (
             (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
+            !startedAfterUnmount &&
             !writesBlocked() &&
             !openingRef.current
           ) {
@@ -1831,6 +1853,7 @@ export function MarkdownView(props: {
             }
             await writeDraftNow({ rejectOnError: true, fromFlush: true });
           }
+          if (options?.captureOnFailure && unsavedDraft.current) captureFailedFlush();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
@@ -1844,12 +1867,22 @@ export function MarkdownView(props: {
       })();
       flushInFlight.current = flush;
       return flush;
-    });
-    return () => registerDraftFlush(null);
+    };
+    registerDraftFlush?.(flushDraft);
+    exitFlush.current = flushDraft;
+    return () => registerDraftFlush?.(null);
     // writeDraftNow and this flush read mutable state through refs plus
     // per-mount-stable props, so the first closure stays correct for the mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  useEffect(() => registerPendingEditorDraft(
+    () => !engineModeRef.current && (unsavedDraft.current || writersLive.current > 0) &&
+      (exitCapturedDraft.current?.revision !== draftRevision.current ||
+        exitCapturedDraft.current.text !== latestDraft.current),
+    options => exitFlush.current(options),
+    () => captureStalledExit.current(),
+  ), []);
 
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
@@ -1998,7 +2031,7 @@ export function MarkdownView(props: {
             />
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} />
+                <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
           </div>
@@ -2220,7 +2253,7 @@ export function MarkdownView(props: {
             />
             {!readOnly ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
           </div>
@@ -2306,7 +2339,7 @@ export function MarkdownView(props: {
             />
             {!readOnly && !opening ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
           </div>
