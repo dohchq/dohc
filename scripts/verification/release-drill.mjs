@@ -375,27 +375,26 @@ export async function runDrill({
     result.dialogs = readDrillLog(logPath);
     if (keep && result.passed) Object.assign(result, { scratch, app });
     writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-    const cleanup = [];
-    if (app && !result.app) cleanup.push(() => removeApp(app));
-    if (scratch && !result.scratch) cleanup.push(() => remove(scratch));
     const failures = [];
-    for (const step of cleanup) {
+    const attempt = (step) => {
       try {
         step();
       } catch (error) {
         failures.push(error);
       }
-    }
+    };
+    if (app && !result.app) attempt(() => removeApp(app));
+    if (scratch && !result.scratch) attempt(() => remove(scratch));
+    if (failures.length === 0 && result.passed && !keep) attempt(() => remove(evidence));
     if (failures.length > 0) {
       // Keep result.json, marked failed, so the cleanup failure has its evidence.
       result.passed = false;
       result.cleanupErrors = failures.map((error) => (error instanceof Error ? error.message : String(error)));
+      mkdirSync(evidence, { recursive: true });
       writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
       for (const message of result.cleanupErrors) console.error(`release drill cleanup: ${message}`);
       // A drill that already failed keeps its own error.
       if (!("error" in result)) throw failures[0];
-    } else if (result.passed && !keep) {
-      remove(evidence);
     }
   }
   return result;
