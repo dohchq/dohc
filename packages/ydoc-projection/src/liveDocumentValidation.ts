@@ -203,7 +203,7 @@ function validateRegistrationInput(
   if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
   const { cut, topology } = result
   let checkpointCopy: Uint8Array | undefined
-  const projected = projectAndFinalize(cut, topology, () => {
+  const projected = projectAndFinalize(cut, topology, 'drop', () => {
     if (!includeEvidence) return
     checkpointCopy = copyBytes(checkpoint)
     if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
@@ -303,7 +303,7 @@ export function createLiveMarkdownJournalValidator(
     if (result.kind === 'refused') failure = result
     else {
       const { cut, topology } = result
-      const projected = projectAndFinalize(cut, topology)
+      const projected = projectAndFinalize(cut, topology, 'refuse')
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
         if (!includeEvidence) return { kind: 'accepted' }
@@ -377,9 +377,16 @@ type ProjectedCut =
   | { readonly kind: 'accepted'; readonly projectedMarkdown: string; readonly finalized: Extract<OrderedLiveUpdateCutFinalizeResult, { kind: 'accepted' }> }
   | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
 
+// What to do with a current source witness that does not import as the
+// document. A baseline drops it, as the engine does. A journal candidate is
+// refused: the engine's own check reads some sources differently from the
+// importer, so a forged witness must not reach it through an update.
+type UnverifiedSource = 'drop' | 'refuse'
+
 function projectAndFinalize(
   cut: ValidatedLiveUpdateCut,
   topology: ProjectionTopology,
+  unverifiedSource: UnverifiedSource,
   beforeProjection?: () => void,
 ): ProjectedCut {
   let pending: LiveMarkdownValidationRefusal | undefined
@@ -388,7 +395,7 @@ function projectAndFinalize(
   try {
     beforeProjection?.()
     if (topology.kind !== 'compatible') refuse('invalid-schema')
-    projectedMarkdown = validatePublicState(cut.document, topology)
+    projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource)
   } catch (error) { pending = error instanceof Refusal ? error.reason : 'invalid-schema' }
   finally {
     try { finalized = cut.finishAfterProjection() }
@@ -702,6 +709,7 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
 function validatePublicState(
   scratch: Y.Doc,
   topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
+  unverifiedSource: UnverifiedSource,
 ): string {
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
@@ -752,8 +760,8 @@ function validatePublicState(
     if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
     const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
     try {
-      if (yDocToMarkdown(source) !== projectedMarkdown) refuse('invalid-schema')
-      preservedSource = metadata.dohcMarkdownSource as string
+      if (yDocToMarkdown(source) === projectedMarkdown) preservedSource = metadata.dohcMarkdownSource as string
+      else if (unverifiedSource === 'refuse') refuse('invalid-schema')
     }
     finally { source.destroy() }
   }

@@ -2156,6 +2156,21 @@ pub fn validate_scene_asset_with_store(
     authorize_scene_asset_with_store(conn, key, asset).map(|_| ())
 }
 
+/// The text of the object's current snapshot in its version: the file the
+/// last settle or capture left on disk.
+fn local_snapshot_text(conn: &Connection, key: &DocKey) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+           AND s.content_kind = 'text'",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
 /// Project one canonical live document through authoritative versioned state.
 /// Scene bytes never enter the Y.Doc; they resolve from the same workspace and
 /// version as its lineage and are injected only into the portable artifact.
@@ -2170,7 +2185,8 @@ pub fn project_ydoc_with_store(
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && let Some(source) = doc.preserved_markdown_source(&projection.content)
+            && let Some(source) =
+                doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
         {
             projection.content = source;
         }
@@ -3915,6 +3931,19 @@ pub(crate) fn map_domain_hard_error(error: DomainError) -> SyncError {
 mod tests {
     use super::*;
 
+    /// A receiver that holds no local snapshot or blob for the document.
+    fn receiver_database() -> Connection {
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        connection
+            .execute_batch(
+                "CREATE TABLE snapshots (workspace_id TEXT, version_id TEXT, object_id TEXT, \
+                 blob_sha256 TEXT, content_kind TEXT); \
+                 CREATE TABLE blobs (sha256 TEXT, text TEXT);",
+            )
+            .expect("create empty snapshot tables");
+        connection
+    }
+
     #[test]
     fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
         // The settle keeps the blank lines under frontmatter, so the lexical
@@ -3945,7 +3974,7 @@ mod tests {
         receiver
             .apply(&adoption)
             .expect("apply adoption on receiver");
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let projection =
             project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
@@ -3988,7 +4017,7 @@ mod tests {
             "the regression requires a projection witness stale against the document it rides in"
         );
 
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
             .expect("settle receiver");
@@ -4037,7 +4066,7 @@ mod tests {
             "the attack requires a source digest matching the planted bytes"
         );
 
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
             .expect("settle receiver");
