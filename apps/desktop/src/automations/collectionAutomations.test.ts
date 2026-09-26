@@ -14,8 +14,14 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, UNREADABLE_REACH, type CollectionAutomationEngine } from "./collectionAutomations";
+import {
+  CollectionAutomations,
+  TIMEOUTS_BEFORE_SWITCH_OFF,
+  UNREADABLE_REACH,
+  type CollectionAutomationEngine,
+} from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+import { AutomationChatSessionWait, automationMessageId, chatDirectoryOf, type AutomationChatMessage, type ChatDirectoryChannel, type ChatNeeds } from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -55,6 +61,8 @@ async function world(options: {
   unanswered?: { settle: boolean };
   /** The engine refuses the next settle this many times: its recovery took the claim back. */
   refused?: { settle: number; stillRunning?: boolean };
+  /** The workspace's chats, for automations that post. */
+  channels?: ChatDirectoryChannel[];
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -76,6 +84,12 @@ async function world(options: {
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
   const waiters = new Set<() => void>();
   const events: string[] = [];
+  // Messages the automations wrote, once per effect as the engine keeps them.
+  const messages: AutomationChatMessage[] = [];
+  let chatWrites = 0;
+  let beforeChatWrite: ((message: AutomationChatMessage) => Promise<void>) | null = null;
+  // What each directory read was asked for.
+  const directoryNeeds: ChatNeeds[] = [];
   let idleDrains = 0;
   // Each count fails that many of the next calls.
   const failures = { authoredWrite: 0, openSession: 0 };
@@ -323,6 +337,17 @@ async function world(options: {
     onFailuresChanged: () => { failuresChanged.push("changed"); wake(); },
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
+    chat: {
+      directory: async (current, needs) => {
+        directoryNeeds.push(needs);
+        return chatDirectoryOf(options.channels ?? [], current);
+      },
+      write: async (_signal, message) => {
+        chatWrites += 1;
+        await beforeChatWrite?.(message);
+        if (!messages.some((written) => written.effectId === message.effectId)) messages.push(message);
+      },
+    },
     onError: (context, error) => { errors.push({ context, error }); },
     withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
@@ -372,6 +397,10 @@ async function world(options: {
     effectRecords: () => records_,
     occupy: (id: string) => { occupied.add(id); },
     failOpenAt: (index: number) => { failOpenAt = opens + index; },
+    messages,
+    directoryNeeds,
+    chatWrites: () => chatWrites,
+    beforeChatWrite: (hook: ((message: AutomationChatMessage) => Promise<void>) | null) => { beforeChatWrite = hook; },
   };
 }
 
@@ -640,8 +669,10 @@ describe("Collection automations", () => {
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() >= 2);
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "definition-changed" });
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
     expect(claim.state).toBe("failed");
+    // Starting over makes new messages too, so the person hears that first.
+    expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, and direct messages the earlier run already made.");
     expect((await w.executor.runs(TASKS))[0]).toMatchObject({ definitionChanged: true });
 
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true });
@@ -939,7 +970,7 @@ describe("Collection automations", () => {
     await w.until(() => w.idleDrains() >= 2);
 
     await expect(w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "definition-changed" });
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
     expect(claim.state).toBe("failed");
     await w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "done");
@@ -1462,8 +1493,13 @@ describe("Collection automations", () => {
   });
 
   it("records no reach for an automation dohc cannot run yet", async () => {
-    const notify = "  - id: tell\n    name: Tell\n    when: {field-changed: Status}\n    do: [{set: {X: 1}, records: null}, {notify: Hi, to: [user-1]}]\n".replace(", records: null", "");
-    const w = await world({ automations: { Tasks: notify } });
+    const unsupported = [
+      "  - id: wake",
+      "    name: Wake",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {X: 1}}, {wake-agent: Hi, person: user-1}]",
+    ].join("\n");
+    const w = await world({ automations: { Tasks: unsupported } });
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
     await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
@@ -1593,7 +1629,7 @@ describe("Collection automations", () => {
     await w.baseStore.save({ ...saved!, plan: null, applied: [], compacted: true });
 
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "progress-gone" });
+      .resolves.toEqual({ status: "progress-gone", repeatsMessages: false });
     expect(claim.state).toBe("failed");
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true }))
       .resolves.toEqual({ status: "queued" });
@@ -1945,5 +1981,289 @@ describe("Collection automations", () => {
     await w.until(() => w.subscriptions.has("collection:Trip#spend"));
     await w.executor.automationsIn("Trip");
     expect(w.executor.stops()).toEqual([]);
+  });
+});
+
+describe("Collection automations that post", () => {
+  const TRIP: ChatDirectoryChannel = {
+    id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "posts", wireId: "trip", runningThreadId: null,
+  };
+  const DM_ANA: ChatDirectoryChannel = {
+    id: "dm-ana", name: "ana@dohc.test", slug: "dm-ana", kind: "dm", type: "chat", wireId: "dm-ana", runningThreadId: "thread-dm-ana",
+  };
+  // Ana holds the direct message's grant and nothing else, so she is not an editor.
+  const ANA_IN_DM: RosterGrant = {
+    grantId: "grant-dm-ana", recipientUserId: "user-ana", recipientEmail: "ana@dohc.test", files: null, channel: { wireId: "dm-ana", canPost: true },
+  };
+  const post = (...steps: string[]) => [
+    "  - id: tell",
+    "    name: Tell the trip",
+    "    when: {field-changed: Status}",
+    "    do:",
+    ...steps,
+  ].join("\n");
+
+
+  it("includes chat steps in share warnings and held summaries", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    await expect(w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).resolves.toEqual([
+      { automationId: "collection:Tasks#tell", automationName: "Tell the trip", collectionPath: "Tasks", target: "Trip", action: "post" },
+    ]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    const listed = await w.executor.automationsIn("Tasks");
+    expect(listed).toMatchObject({ automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", target: "Trip", action: "post" }] } }] });
+  });
+
+  it("posts in a Group and sends a direct message as the automation, keyed so a retry writes each once", async () => {
+    const w = await world({
+      channels: [TRIP, DM_ANA],
+      automations: { Tasks: post(
+        "      - post: 'Done: {record.Status}'",
+        "        group: Trip",
+        "      - direct-message: Your task is done",
+        "        to: [user-ana]",
+      ) },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const definition = parseAutomationsFile(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8"));
+    if (definition.status !== "read" || definition.entries[0]?.status !== "valid") throw new Error("unreadable fixture");
+    const seed = `${definitionHash(definition.entries[0].automation)}-1`;
+    const postId = `${stepKey(claim.claimId, seed, 0)}/post`;
+    const dmId = `${stepKey(claim.claimId, seed, 1)}/dm/user-ana`;
+    const automation = { automationId: "collection:Tasks#tell", name: "Tell the trip", depth: 1 };
+    expect(w.messages).toEqual([
+      expect.objectContaining({
+        target: { kind: "group", channelId: "trip", lane: "posts" },
+        effectId: postId, messageId: automationMessageId(postId), automation, body: "Done: Done",
+      }),
+      expect.objectContaining({
+        target: { kind: "direct-message", threadId: "thread-dm-ana" },
+        effectId: dmId, messageId: automationMessageId(dmId), automation, body: "Your task is done",
+      }),
+    ]);
+    const [run] = await w.executor.runs("collection:Tasks#tell");
+    expect(run!.writes).toEqual([
+      { kind: "message", messageId: automationMessageId(postId), name: "Trip" },
+      { kind: "message", messageId: automationMessageId(dmId), name: "your direct message with ana@dohc.test" },
+    ]);
+  });
+
+  it("writes into a chat Group's running conversation", async () => {
+    const w = await world({
+      channels: [{ ...TRIP, type: "chat" }],
+      automations: { Tasks: post("      - post: Done", "        group: Trip") },
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(w.messages.map((message) => message.target)).toEqual([{ kind: "group", channelId: "trip", lane: "chat" }]);
+  });
+
+  it("fails without writing when the Group or the direct message does not exist", async () => {
+    const w = await world({
+      channels: [TRIP],
+      automations: { Tasks: [
+        post("      - post: Done", "        group: Nowhere"),
+        "  - id: dm",
+        "    name: Tell Bob",
+        "    when: {field-changed: Status}",
+        "    do: [{direct-message: Done, to: [user-bob]}]",
+      ].join("\n") },
+    });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const group = w.claim("collection:Tasks#tell", task);
+    const direct = w.claim("collection:Tasks#dm", task);
+    await w.executor.open();
+    await w.settledClaim(group);
+    await w.settledClaim(direct);
+
+    expect(group).toMatchObject({ state: "failed", error: "dohc cannot find the Group Nowhere." });
+    expect(direct).toMatchObject({
+      state: "failed",
+      error: "There is no direct message with that person yet. Start one first: automations never start one.",
+    });
+    expect(w.chatWrites()).toBe(0);
+  });
+
+  it("stops a post that an editor could not make, including to a person a formula names", async () => {
+    const w = await world({
+      channels: [TRIP, DM_ANA],
+      automations: { Tasks: [
+        post("      - post: Done", "        group: Trip"),
+        "  - id: dm",
+        "    name: Tell Ana",
+        "    when: {field-changed: Status}",
+        "    do: [{direct-message: Done, to: ['=\"user-ana\"']}]",
+      ].join("\n") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const group = w.claim("collection:Tasks#tell", task);
+    const direct = w.claim("collection:Tasks#dm", task);
+    await w.executor.open();
+    await w.settledClaim(group);
+    await w.settledClaim(direct);
+
+    expect(group).toMatchObject({ state: "failed", error: "bob@dohc.test cannot post in Trip." });
+    expect(direct).toMatchObject({
+      state: "failed", error: "bob@dohc.test cannot post in your direct message with ana@dohc.test.",
+    });
+    expect(w.chatWrites()).toBe(0);
+  });
+
+  it("holds a direct message to a person a formula named once an editor's leaving allows it, until Allow", async () => {
+    const tellAna = post("      - direct-message: Done", "        to: ['=\"user-ana\"']");
+    const w = await world({ channels: [DM_ANA], automations: { Tasks: tellAna } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "bob@dohc.test cannot post in your direct message with ana@dohc.test." });
+
+    // Bob leaves. What his reach stopped now waits for a current editor.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    expect(w.messages).toEqual([]);
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({
+      action: "post", target: "your direct message with ana@dohc.test", recipient: "user-ana", stoppedFor: "bob@dohc.test",
+    });
+
+    await expect(w.executor.confirmReach({ ...hold!, recipient: hold!.recipient! })).resolves.toBe("confirmed");
+    await w.settledClaim(second);
+    expect(second.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
+  });
+
+  it("does not send a saved direct message after its people changed", async () => {
+    const w = await world({
+      channels: [DM_ANA],
+      automations: { Tasks: post("      - direct-message: Done", "        to: [user-ana]") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    let signedIn = false;
+    w.beforeChatWrite(async () => {
+      if (!signedIn) throw new AutomationChatSessionWait();
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+
+    // While the run waited, someone else was invited to the conversation.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [
+      ANA_IN_DM, { grantId: "grant-dm-eve", recipientUserId: null, recipientEmail: "eve@dohc.test", files: null, channel: { wireId: "dm-ana", canPost: true } },
+    ] });
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({
+      state: "failed",
+      error: "The people in your direct message with ana@dohc.test changed since this run began, so dohc did not send its message.",
+    });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("keeps each formula-named person's hold apart through a restart, until Allow", async () => {
+    const DM_CARA: ChatDirectoryChannel = { ...DM_ANA, id: "dm-cara", name: "cara@dohc.test", slug: "dm-cara", wireId: "dm-cara", runningThreadId: "thread-dm-cara" };
+    const CARA_IN_DM: RosterGrant = {
+      grantId: "grant-dm-cara", recipientUserId: "user-cara", recipientEmail: "cara@dohc.test", files: null, channel: { wireId: "dm-cara", canPost: true },
+    };
+    const tellBoth = post("      - direct-message: Done", "        to: ['=[\"user-ana\", \"user-cara\"]']");
+    const w = await world({ channels: [DM_ANA, DM_CARA], automations: { Tasks: tellBoth } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM, CARA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first.state).toBe("failed");
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM, CARA_IN_DM] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    expect(w.executor.holds().map((hold) => hold.recipient)).toEqual(["user-ana", "user-cara"]);
+
+    // A restart reads the holds back, one per person, and still sends nothing.
+    await w.executor.dispose();
+    const reopened = w.makeExecutor();
+    await reopened.open();
+    await w.until(() => w.events.filter((event) => event === `released ${second.claimId}`).length >= 2);
+    expect(w.messages).toEqual([]);
+    const holds = reopened.holds();
+    expect(holds.map((hold) => hold.recipient)).toEqual(["user-ana", "user-cara"]);
+    await reopened.confirmReach({ ...holds[0]!, recipient: holds[0]!.recipient! });
+    expect(reopened.holds().map((hold) => hold.recipient)).toEqual(["user-cara"]);
+    await reopened.confirmReach({ ...holds[1]!, recipient: holds[1]!.recipient! });
+    await w.settledClaim(second);
+    expect(w.messages.map((message) => message.target)).toEqual([
+      { kind: "direct-message", threadId: "thread-dm-ana" },
+      { kind: "direct-message", threadId: "thread-dm-cara" },
+    ]);
+  });
+
+  it("reads only the conversations of the people a formula named", async () => {
+    const w = await world({
+      channels: [DM_ANA],
+      automations: { Tasks: post("      - direct-message: Done", "        to: ['=\"user-ana\"']") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const people = w.directoryNeeds.map((needs) => [...needs.people]);
+    // Before the formula runs no conversation is read; after, only Ana's.
+    expect(people).toContainEqual([]);
+    expect(people).toContainEqual(["user-ana"]);
+    expect(people.flat().every((userId) => userId === "user-ana")).toBe(true);
+  });
+
+  it("asks before a start-over that could send an automation's messages again", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    w.beforeChatWrite(async () => { throw new Error("The server did not answer."); });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    await w.writeAutomations("Tasks", post("      - post: Done again", "        group: Trip"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await expect(w.executor.retry({ automationId: "collection:Tasks#tell", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: true });
+  });
+
+  it("waits for a session in a synced workspace, then posts once one arrives", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    let signedIn = false;
+    w.beforeChatWrite(async () => {
+      if (!signedIn) throw new AutomationChatSessionWait();
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+    expect(claim.state).toBe("pending");
+    expect(w.messages).toEqual([]);
+
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
   });
 });

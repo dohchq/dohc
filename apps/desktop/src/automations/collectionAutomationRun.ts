@@ -20,6 +20,7 @@ import {
   definitionHash,
   evaluationRequest,
   findsOf,
+  formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
   reachStepsOf,
@@ -32,7 +33,14 @@ import {
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
-import { checkAutomationReach, type ReachCollection, type ReachRoster } from "./automationReach";
+import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep, type StepReach } from "./automationReach";
+import {
+  AutomationChatSessionWait,
+  chatNeedsOf,
+  type AutomationChatMessage,
+  type ChatDirectory,
+  type ChatNeeds,
+} from "./automationChat";
 import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 
 // One run of one claim: check reach, read, evaluate, save the plan, then
@@ -43,7 +51,7 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 
 export const DEADLINE_ERROR = "The automation did not finish within 5 minutes.";
 export const DEFINITION_CHANGED_ERROR =
-  "This automation changed after this run began. Try again to run the new version from the start.";
+  "This automation changed after this run began. Try again to run the new version from the start. It may repeat changes, posts, and direct messages the earlier run already made.";
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
@@ -68,6 +76,45 @@ export interface CollectionAutomationRunDependencies {
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
   nowMs(): number;
+  chat: AutomationChatDependencies;
+  /**
+   * Keeps a verdict for each person a formula named, as for any step, and
+   * says which of them wait for a current editor to allow them.
+   */
+  recipientVerdicts(input: {
+    automationId: string;
+    definitionHash: string;
+    recipients: readonly RecipientReach[];
+  }): Promise<Array<"allowed" | "held" | "stopped">>;
+}
+
+/** A person a formula named, with what the roster says about reaching them. */
+interface RecipientReach {
+  /** The step's place in the automation. */
+  step: number;
+  userId: string;
+  name: string;
+  action: "post" | "notify";
+  reach: StepReach;
+}
+
+/** Where an automation's posts and direct messages go, and how they are written. */
+export interface AutomationChatDependencies {
+  /** What `needs` names under this roster; null when the engine is unavailable. */
+  directory(roster: Exclude<ReachRoster, { kind: "unknown" }>, needs: ChatNeeds): Promise<ChatDirectory | null>;
+  /**
+   * Writes one message as the automation, ending at `signal`. Throws
+   * AutomationChatSessionWait when a synced workspace has no session.
+   */
+  write(signal: AbortSignal, message: AutomationChatMessage): Promise<unknown>;
+}
+
+/** Whether any step posts or sends a direct message. */
+export function sendsMessages(automation: Automation): boolean {
+  const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
+    step.kind === "post" || step.kind === "direct-message" ||
+    (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
+  return walk(automation.do);
 }
 
 export type CollectionAutomationRunOutcome =
@@ -79,9 +126,10 @@ export type CollectionAutomationRunOutcome =
   // without a Try again, so only its settle is left.
   | { kind: "failed-before"; error: string }
   // Leave the claim for a later drain: the evaluator is busy, the engine is
-  // not answering, or a pause or close stopped the run. A stopped run's
-  // progress is saved, so the next drain resumes it.
-  | { kind: "wait"; reason: "busy" | "engine" | "stopped" };
+  // not answering, a pause or close stopped the run, or a synced workspace
+  // has no session to post under. A stopped run's progress is saved, so the
+  // next drain resumes it.
+  | { kind: "wait"; reason: "busy" | "engine" | "stopped" | "session" | "held" };
 
 export interface CollectionAutomationRunInput {
   claim: AutomationClaim;
@@ -205,9 +253,16 @@ export async function runCollectionAutomation(
   if ("outcome" in saved) return saved.outcome;
   const { current } = saved;
 
+  // Where the automation's messages go, found once for the reach check and
+  // the plan.
+  let chat: ChatDirectory | null = null;
+  if (sendsMessages(automation)) {
+    chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
+    if (chat === null) return { kind: "wait", reason: "engine" };
+  }
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
-  const steps = reachStepsOf(automation, collection, (path) => ({ path, name: path.split("/").at(-1) ?? path }));
+  const steps = reachStepsOf(automation, collection, (path) => ({ path, name: path.split("/").at(-1) ?? path }), chat);
   for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })) {
     if (!verdict.allowed) return failed(verdict.reason);
   }
@@ -233,7 +288,7 @@ export async function runCollectionAutomation(
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
-      planned = await plan(dependencies, input, keySeed);
+      planned = await plan(dependencies, input, keySeed, chat);
     } catch (error) {
       return input.stopped.aborted ? stopped : failed(errorText(error));
     }
@@ -249,7 +304,37 @@ export async function runCollectionAutomation(
     // way continues with these values instead of evaluating again.
     await store.save(run);
   }
-  const outcome = await applyPlan(dependencies, input, run, resumed);
+  // Every message is checked again under this roster before anything is
+  // sent. A person only a formula named has no verdict from the file, so
+  // they keep one here: one an editor's leaving allowed waits for Allow.
+  const planned = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
+  const messages = planned.flatMap(({ ordinal, effect }) => effect.kind === "message"
+    ? [{ ordinal, effect, step: { kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } } satisfies ReachStep }]
+    : []);
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps: messages.map(({ step }) => step) });
+  const recipients: RecipientReach[] = [];
+  for (const [index, { ordinal, effect }] of messages.entries()) {
+    if (effect.kind === "message" && effect.byFormula && effect.to.kind === "direct-message") {
+      recipients.push({ step: ordinal, userId: effect.to.userId, name: effect.name, action: "post", reach: verdicts[index]! });
+    }
+  }
+  // Kept before anything fails, so a stop is remembered for the next run.
+  const kept = recipients.length === 0 ? [] : await dependencies.recipientVerdicts({
+    automationId: claim.automationId, definitionHash: definitionHash(automation), recipients,
+  });
+  const stoppedReach = verdicts.find((reach) => !reach.allowed);
+  if (stoppedReach && !stoppedReach.allowed) return failed(stoppedReach.reason);
+  if (kept.includes("held")) return { kind: "wait", reason: "held" };
+  // A saved direct message is checked against its conversation as it is
+  // now, read for the plan's own people, resumed or not.
+  const planPeople = new Set(planned.flatMap(({ effect }) =>
+    effect.kind === "message" && effect.to.kind === "direct-message" ? [effect.to.userId] : []));
+  let sendChat = chat;
+  if (planPeople.size > 0) {
+    sendChat = await dependencies.chat.directory(roster, { groups: new Set(), people: planPeople });
+    if (sendChat === null) return { kind: "wait", reason: "engine" };
+  }
+  const outcome = await applyPlan(dependencies, input, run, resumed, sendChat);
   // A stopped run keeps its progress and no outcome; the next drain resumes it.
   if (outcome.kind === "wait") return outcome;
   if (outcome.kind === "failed") {
@@ -267,6 +352,7 @@ async function plan(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
   keySeed: string,
+  chat: ChatDirectory | null,
 ): Promise<{ kind: "plan"; steps: PlannedStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
@@ -313,7 +399,7 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, chat };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   // Formulas read `now` as the time of the change, so every attempt plans
   // the same values.
@@ -322,6 +408,14 @@ async function plan(
     ? []
     : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
+  // Only the conversations of the people the formulas named are read.
+  const named = formulaPeople(request, results);
+  if (named.length > 0) {
+    const needs = chatNeedsOf([automation]);
+    for (const userId of named) needs.people.add(userId);
+    inputs.chat = await dependencies.chat.directory(input.roster, needs);
+    if (inputs.chat === null) return stop({ kind: "wait", reason: "engine" });
+  }
   const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: keySeed });
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
@@ -351,6 +445,7 @@ async function applyPlan(
   input: CollectionAutomationRunInput,
   run: StoredRun,
   resumed: boolean,
+  chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, signal } = input;
   const author: ChangeAuthor = {
@@ -367,16 +462,22 @@ async function applyPlan(
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
     // Only a dataset Collection's run plans dataset effects.
-    if (effect.kind !== "set" && effect.kind !== "add") return failed(UNREADABLE_RUN_ERROR);
+    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message") return failed(UNREADABLE_RUN_ERROR);
     // After a stop, records may have changed while the run waited, so every
     // effect checks each field before it writes. Only the first effect the
     // run had not recorded may have landed before the stop.
     const mode: EffectMode = !resumed ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
     let writes: RunWrite[];
     try {
-      writes = await applyEffect(dependencies, { run, author, signal, ordinal }, effect, mode);
+      writes = await applyEffect(
+        dependencies,
+        { run, author, signal, ordinal, automationName: input.automation.name, depth: claim.depth + 1, chat },
+        effect,
+        mode,
+      );
     } catch (error) {
       if (input.stopped.aborted) return stopped;
+      if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
       return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
     }
     const applied = { ordinal, writes };
@@ -427,6 +528,9 @@ function fieldWrites(
 /** Every effect's record if it lands as planned, to size a run before it writes. */
 function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
   return plan.flatMap((step) => step.effects.map((effect) => {
+    if (effect.kind === "message") {
+      return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: effect.name }] };
+    }
     if (effect.kind === "add") {
       const path = `${effect.collectionPath}/${effect.name}.md`;
       return { ordinal: step.ordinal, writes: [
@@ -442,11 +546,42 @@ function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
 
 async function applyEffect(
   dependencies: CollectionAutomationRunDependencies,
-  context: { run: StoredRun; author: ChangeAuthor; signal: AbortSignal; ordinal: number },
+  context: {
+    run: StoredRun;
+    author: ChangeAuthor;
+    signal: AbortSignal;
+    ordinal: number;
+    automationName: string;
+    depth: number;
+    chat: ChatDirectory | null;
+  },
   effect: PlannedEffect,
   mode: EffectMode,
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
+  if (effect.kind === "message") {
+    // A saved direct message goes only where the plan meant: the same
+    // conversation, still with exactly that person.
+    if (effect.to.kind === "direct-message") {
+      const now = context.chat?.directMessage(effect.to.userId);
+      if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
+        throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);
+      }
+    }
+    // The engine records the message under its effect id, so a retry, or an
+    // attempt that stopped after the write landed, replays it.
+    await dependencies.chat.write(signal, {
+      target: effect.to.kind === "group"
+        ? { kind: "group", channelId: effect.to.channelId, lane: effect.to.lane }
+        : { kind: "direct-message", threadId: effect.to.threadId },
+      effectId: effect.effectId,
+      messageId: effect.messageId,
+      threadId: effect.threadId,
+      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
+      body: effect.body,
+    });
+    return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
+  }
   const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (edit: CollectionRecordEditContext, path: string, recordId: string, fields: readonly PlannedField[]) =>
     setCollectionRecordFields(edit, {

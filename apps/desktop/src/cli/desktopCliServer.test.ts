@@ -85,6 +85,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
     scanChatDispatch: async () => undefined,
+    notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
     findWorkspace: (id) => rows.get(id) ?? null,

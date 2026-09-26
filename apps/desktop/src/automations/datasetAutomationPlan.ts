@@ -207,6 +207,10 @@ const GENERATED_ONLY = (name: string) =>
 
 /** Why dohc cannot run an automation on this dataset, or null. */
 export function datasetAutomationProblem(automation: Automation, dataset: { definition: DatasetDefinition; generated: boolean }): string | null {
+  if (stepsInOrder(automation).some(({ step }) =>
+    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent")) {
+    return "Automations on dataset Collections can't post in chat, notify people, or wake agents.";
+  }
   const shape = shapeProblem(automation, (condition) => {
     const filters = datasetFindOf(condition);
     return "problem" in filters ? filters.problem : null;

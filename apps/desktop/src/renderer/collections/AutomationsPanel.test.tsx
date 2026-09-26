@@ -357,7 +357,7 @@ describe("an automation's runs", () => {
 
   it("opens from a notice, offers Try again except for a chain stop, and confirms a changed automation first", async () => {
     const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed, stopped]);
-    bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "definition-changed" });
+    bridge.retryCollectionAutomation.mockResolvedValueOnce({ status: "definition-changed", repeatsMessages: false });
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
 
     const failedRow = await screen.findByTestId("automation-run-atc_failed");
@@ -412,6 +412,19 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(
       "Undid 1 change. 1 added record stays. The Collection's rules do not let dohc undo 1 change.",
     ));
+  });
+
+  it("shows a sent message without offering record Undo", async () => {
+    makeBridge(read([summary(stamp, { lastRun: { state: "done", atMs: Date.now() } })]), [
+      run({ writes: [{ kind: "message", messageId: "message-1", name: "Trip" }] }),
+    ]);
+    render(<Panel />);
+    await userEvent.click(await screen.findByRole("button", { name: /^Runs\. The last run finished/ }));
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(row.textContent).toContain("Sent 1 message");
+    expect(within(row).queryByRole("button", { name: "Undo" })).toBeNull();
+    await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
+    expect(row.textContent).toContain("Sent a message to Trip");
   });
 
   it("shows what a run changed and says what Undo skipped", async () => {

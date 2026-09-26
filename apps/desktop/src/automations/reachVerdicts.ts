@@ -21,8 +21,13 @@ export interface StoredReachVerdict {
   /** The engine automation id. */
   automationId: string;
   definitionHash: string;
-  /** The step's identity among the steps the reach check sees (reachStepId). */
+  /** The step's place among the steps the reach check sees, or, with `recipient`, the step's place in the automation. */
   step: string;
+  /**
+   * A person a formula named, whose message the step sends: each gets a
+   * verdict of their own the first time a run names them.
+   */
+  recipient?: { userId: string; name: string; action: "post" | "notify" };
   verdict: ReachVerdict;
   /** The editor whose reach stopped the step, kept while it is held. */
   stoppedFor: string | null;
@@ -50,6 +55,6 @@ export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach
   return { verdict: "allowed", stoppedFor: null };
 }
 
-export function reachVerdictKey(automationId: string, definitionHash: string, step: string): string {
-  return JSON.stringify([automationId, definitionHash, step]);
+export function reachVerdictKey(automationId: string, definitionHash: string, step: string, recipient?: string): string {
+  return JSON.stringify(recipient === undefined ? [automationId, definitionHash, step] : [automationId, definitionHash, step, recipient]);
 }

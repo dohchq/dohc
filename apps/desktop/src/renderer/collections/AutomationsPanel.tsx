@@ -1,3 +1,4 @@
+import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowLeft, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -157,7 +158,7 @@ function ReachStatus(props: {
         step.verdict === "held" ? (
           <StatusLine key={index} tone="warning" icon={AlertTriangle} label="Waiting for you">
             <p className="m-0">
-              A step can now {step.action === "find" ? `find records in ${step.target}` : `change ${step.target}`}.{" "}
+              A step can now {automationReachCopy(step)}.{" "}
               {step.stoppedFor ? `It stopped before because ${step.stoppedFor} could not.` : "It could not before."}
             </p>
             <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(step.step, step.seq)}>

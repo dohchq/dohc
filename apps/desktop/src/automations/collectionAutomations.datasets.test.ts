@@ -135,6 +135,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
+    chat: { directory: async () => null, write: async () => { throw new Error("Dataset automations cannot send chat messages."); } },
     withEngine: async (work) => await work(engine),
     withRecordWrites: async () => { throw new Error("Dataset runs write through their own operations."); },
     readText: async (path) => {

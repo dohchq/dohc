@@ -41,13 +41,16 @@ import {
   type ReachRoster,
   type ReachDatasetGrants,
   type ReachShare,
+  type ReachStep,
 } from "./automationReach";
 import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
   UNDONE_RUN_ERROR,
+  sendsMessages,
   UNREADABLE_RUN_ERROR,
+  type AutomationChatDependencies,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
@@ -57,6 +60,7 @@ import { datasetAutomationProblem, datasetReachSteps, pinDatasetOperations } fro
 import { runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
+import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
 // 0012). It keeps an index of every Collection's automations.yaml, keeps the
@@ -157,6 +161,8 @@ export interface CollectionAutomationsOptions {
   cachedRoster(): Promise<ReachRoster>;
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
+  /** Where automations post and send direct messages, and the writer they use. */
+  chat: AutomationChatDependencies;
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
   onFailuresChanged(): void;
   /**
@@ -193,8 +199,8 @@ export type CollectionAutomationStepReach =
   | { verdict: "stopped"; reason: string }
   // Allowed now, but stopped before under the same definition: it waits
   // for a current editor to confirm it with `seq`. `target` is the
-  // Collection the step reaches.
-  | { verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: "change" | "find" };
+  // destination the step reaches.
+  | { verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: CollectionAutomationHold["action"] };
 
 /** One automation as the ⚡ panel reads it. */
 export type CollectionAutomationSummary =
@@ -247,8 +253,11 @@ export interface CollectionAutomationHold {
   seq: number;
   /** The Collection the automation belongs to, and the one the step reaches. */
   collection: string;
+  /** A Collection, a Group, or a direct message. */
   target: string;
-  action: "change" | "find";
+  action: "change" | "find" | "post" | "notify";
+  /** A person a formula named: the hold is theirs, not the step's. */
+  recipient?: string;
   /** The editor whose reach stopped the step. */
   stoppedFor: string | null;
 }
@@ -275,9 +284,9 @@ export interface CollectionAutomationShareStop {
   automationName: string;
   /** The full path of the Collection the automation belongs to. */
   collectionPath: string;
-  /** The Collection the step reaches, by the name the UI shows. */
+  /** The destination the step reaches, by the name the UI shows. */
   target: string;
-  action: "change" | "find";
+  action: CollectionAutomationHold["action"];
 }
 
 export interface CollectionAutomationRun {
@@ -300,11 +309,12 @@ export type CollectionAutomationRetry =
   | { status: "queued" }
   // The automation changed since the run began. Running it again starts
   // from the beginning and can repeat what it already did, so the person
-  // must choose that.
-  | { status: "definition-changed" }
+  // must choose that. `repeatsMessages` says the confirmation must also say
+  // that messages it sent may be sent again.
+  | { status: "definition-changed"; repeatsMessages: boolean }
   // The run failed so long ago that dohc dropped its progress. Running it
   // again starts from the beginning, and the person must choose that too.
-  | { status: "progress-gone" }
+  | { status: "progress-gone"; repeatsMessages: boolean }
   | { status: "refused"; reason: string };
 
 export type CollectionAutomationUndo =
@@ -356,7 +366,7 @@ type ClaimHistory = {
   failure: string | null;
 };
 /** What a released claim waits for; later drains pass it by until that clears. */
-type WaitReason = "roster" | "held" | "busy";
+type WaitReason = "roster" | "held" | "busy" | "session";
 /**
  * What the engine must hear about a claim this computer holds: hand it back
  * to wait, or settle it. `settled` runs once the engine takes the settle.
@@ -412,6 +422,11 @@ export class CollectionAutomations {
   private readonly changing = new Set<string>();
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
+  /**
+   * The Groups and direct messages automations post to, as the last roster
+   * found them. Reach reads it; a run reads its own.
+   */
+  private chat: ChatDirectory | null = null;
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
@@ -450,7 +465,7 @@ export class CollectionAutomations {
       this.timeouts = timeouts;
       this.verdictsUnreadable = unreadable;
       for (const verdict of verdicts) {
-        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step), verdict);
+        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.userId), verdict);
         this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
       }
       await this.loadIndex();
@@ -594,6 +609,12 @@ export class CollectionAutomations {
       .finally(() => this.clearWaits("roster", "held"));
   }
 
+  /** The signed-in session changed: runs that waited to post under one try again. */
+  sessionChanged(): void {
+    if (this.state !== "open") return;
+    this.clearWaits("session");
+  }
+
   /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
   pauseForEngineRestart(): void {
     if (this.state === "disposed" || this.state === "paused") return;
@@ -685,11 +706,11 @@ export class CollectionAutomations {
       }).map((reach, step): CollectionAutomationStepReach => {
         if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)));
-        const reached = reachSteps[step];
-        return stored?.verdict === "held" && reached && "collection" in reached
+        const reached = reachSteps[step] ? reachDestination(reachSteps[step]) : null;
+        return stored?.verdict === "held" && reached
           ? {
               verdict: "held", step: stored.step, stoppedFor: stored.stoppedFor, seq: stored.seq,
-              target: reached.collection.name, action: reached.kind === "find-records" || reached.kind === "dataset-field" ? "find" : "change",
+              ...reached,
             }
           : { verdict: "allowed" };
       });
@@ -738,6 +759,7 @@ export class CollectionAutomations {
     await this.ready();
     const roster = await this.options.cachedRoster();
     if (roster.kind === "unknown") return "roster-unknown";
+    await this.loadChat(roster);
     await this.updateVerdicts(() => {
       this.verdicts.clear();
       for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
@@ -849,14 +871,14 @@ export class CollectionAutomations {
     return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
       const index = reach.findIndex((candidate) => candidate.id === automationId);
       const owner = automations[index];
-      const target = reach[index]?.steps[step];
-      if (!owner || !target || !("collection" in target)) return [];
+      const reached = reach[index]?.steps[step];
+      const target = reached ? reachDestination(reached) : null;
+      if (!owner || !target) return [];
       return [{
         automationId,
         automationName: owner.automation.name,
         collectionPath: owner.collectionPath,
-        target: target.collection.name,
-        action: target.kind === "find-records" || target.kind === "dataset-field" ? "find" : "change",
+        ...target,
       }];
     });
   }
@@ -870,13 +892,22 @@ export class CollectionAutomations {
       this.reachSteps(collectionPath, automation).forEach((reach, index) => {
         const step = reachStepId(reach, index);
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
-        if (!stored || !matches(stored, automation) || !("collection" in reach)) return;
+        if (!stored || !matches(stored, automation)) return;
+        const held = reachDestination(reach);
+        if (held === null) return;
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
-          collection: collection.name, target: reach.collection.name,
-          action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" : "change", stoppedFor: stored.stoppedFor,
+          collection: collection.name, ...held, stoppedFor: stored.stoppedFor,
         });
       });
+      for (const stored of this.verdicts.values()) {
+        if (stored.automationId !== automationId || stored.definitionHash !== hash || !stored.recipient || stored.verdict !== "held" || !matches(stored, automation)) continue;
+        steps.push({
+          automationId, automationName: automation.name, definitionHash: hash, step: stored.step, seq: stored.seq,
+          collection: collection.name, target: stored.recipient.name, action: stored.recipient.action,
+          recipient: stored.recipient.userId, stoppedFor: stored.stoppedFor,
+        });
+      }
     }
     return steps;
   }
@@ -926,11 +957,17 @@ export class CollectionAutomations {
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
    */
-  async confirmReach(input: { automationId: string; definitionHash: string; step: string; seq: number }): Promise<"confirmed" | "changed"> {
+  async confirmReach(input: {
+    automationId: string;
+    definitionHash: string;
+    step: string;
+    seq: number;
+    recipient?: string;
+  }): Promise<"confirmed" | "changed"> {
     await this.ready();
     const confirmed = await this.updateVerdicts(() => {
       if (this.verdictsUnreadable) return false;
-      const key = reachVerdictKey(input.automationId, input.definitionHash, input.step);
+      const key = reachVerdictKey(input.automationId, input.definitionHash, input.step, input.recipient);
       const stored = this.verdicts.get(key);
       if (stored?.verdict !== "held" || stored.seq !== input.seq) return false;
       this.verdicts.set(key, { ...stored, verdict: "allowed", stoppedFor: null, seq: ++this.verdictSeq });
@@ -1011,7 +1048,13 @@ export class CollectionAutomations {
       if (runs.undo) return { status: "refused", reason: UNDONE_RUN_ERROR };
       const progressGone = runs.done === null && runs.current?.compacted === true;
       const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
-      if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
+      if (startsOver && !input.startOver) {
+        // Either version may have sent messages that a new run sends again.
+        const earlier = runs.current ?? runs.changedSince;
+        const repeatsMessages = sendsMessages(automation) ||
+          (earlier?.applied.some((effect) => effect.writes.some((write) => write.kind === "message")) ?? false);
+        return { status: progressGone ? "progress-gone" : "definition-changed", repeatsMessages };
+      }
       this.waitingFor.delete(input.claimId);
       const retried = this.datasets.has(parsed.collectionPath)
         ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
@@ -1326,7 +1369,7 @@ export class CollectionAutomations {
     const dataset = this.datasets.get(collectionPath);
     return dataset !== undefined
       ? datasetReachSteps(automation, collection, dataset.definition, dataset.grants)
-      : reachStepsOf(automation, collection, collectionNamed);
+      : reachStepsOf(automation, collection, collectionNamed, this.chat);
   }
 
   private definitionFor(id: { collectionPath: string; id: string }): Automation | null {
@@ -1458,7 +1501,7 @@ export class CollectionAutomations {
     const shown = this.verdictsUnreadable
       ? ["unreadable"]
       : [
-          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step)} ${hold.seq}`),
+          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq}`),
           ...this.stops().map((stop) => `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`),
         ].sort();
     if (isDeepStrictEqual(shown, this.publishedHolds)) return;
@@ -1480,6 +1523,7 @@ export class CollectionAutomations {
    * notice once.
    */
   private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations: readonly OwnedAutomation[]): Promise<boolean> {
+    await this.loadChat(roster);
     return await this.updateVerdicts(() => {
       // Without the saved verdicts every step waits.
       if (this.verdictsUnreadable) return automations.length > 0;
@@ -1734,6 +1778,10 @@ export class CollectionAutomations {
     if (stop.aborted) return release;
     switch (outcome.kind) {
       case "wait":
+        // A synced workspace with no session waits for one: a post written
+        // now would reach nobody.
+        if (outcome.reason === "session") return { kind: "release", waitsFor: "session" };
+        if (outcome.reason === "held") return { kind: "release", waitsFor: "held" };
         if (outcome.reason !== "busy") return release;
         this.scheduleBusyRetry();
         return { kind: "release", waitsFor: "busy" };
@@ -1842,6 +1890,40 @@ export class CollectionAutomations {
     }
   }
 
+  /**
+   * Keeps each formula-named person's verdict under the roster, as
+   * recordVerdicts does for steps. A person an editor's leaving allowed
+   * waits for Allow.
+   */
+  private async recipientVerdicts(input: Parameters<CollectionAutomationRunDependencies["recipientVerdicts"]>[0]) {
+    return await this.updateVerdicts(() => input.recipients.map(({ step: ordinal, userId, name, action, reach }) => {
+      const step = String(ordinal);
+      // Without the saved verdicts every step waits.
+      if (this.verdictsUnreadable) return "held" as const;
+      const key = reachVerdictKey(input.automationId, input.definitionHash, step, userId);
+      const previous = this.verdicts.get(key);
+      const next = nextReachVerdict(previous, reach, true);
+      if (previous?.verdict !== next.verdict || previous.stoppedFor !== next.stoppedFor) {
+        this.verdicts.set(key, {
+          automationId: input.automationId, definitionHash: input.definitionHash, step,
+          recipient: { userId, name, action }, ...next, seq: ++this.verdictSeq,
+        });
+      }
+      return next.verdict;
+    }));
+  }
+
+  /** Finds where automations post again, when any automation does. */
+  private async loadChat(roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<void> {
+    if (!this.everyAutomation().some(({ automation }) => sendsMessages(automation))) return;
+    try {
+      const sending = this.everyAutomation().map(({ automation }) => automation).filter(sendsMessages);
+      this.chat = (await this.options.chat.directory(roster, chatNeedsOf(sending))) ?? this.chat;
+    } catch (error) {
+      this.options.onError("read where automations post", error);
+    }
+  }
+
   private runDependencies(): CollectionAutomationRunDependencies {
     return {
       withReads: (work) => this.withLiveEngine(work),
@@ -1851,6 +1933,8 @@ export class CollectionAutomations {
       evaluator: this.options.evaluator,
       store: this.options.store,
       nowMs: this.nowMs,
+      chat: this.options.chat,
+      recipientVerdicts: (input) => this.recipientVerdicts(input),
     };
   }
 
@@ -1914,4 +1998,12 @@ export class CollectionAutomations {
       await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     }
   }
+}
+
+function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
+  return reach.kind === "post"
+    ? { target: reach.group.name, action: "post" as const }
+    : "collection" in reach
+      ? { target: reach.collection.name, action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" as const : "change" as const }
+      : null;
 }
