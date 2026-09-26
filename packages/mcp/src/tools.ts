@@ -180,7 +180,7 @@ function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: 
     return "This file is a live document. Edit it in dohc; a raw file write cannot update its document state.";
   }
   if (kinds.includes("richdoc")) {
-    return "This file is a live document. Read it with dohc_read_document and change it with dohc_edit_document; a raw file write cannot update its document state.";
+    return "This file is a live document. Create it with dohc_create_document, read it with dohc_read_document, and change it with dohc_edit_document; a raw file write cannot update its document state.";
   }
   return null;
 }
@@ -2629,6 +2629,36 @@ export async function editDocument(
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,
     ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    ...(agent === undefined ? {} : { agent }),
+  });
+}
+
+export async function createDocument(
+  ctx: ToolContext,
+  args: { path: string; markdown?: string },
+  agent: string | undefined,
+) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentCreate", {
+    path: resolved.normalized,
+    markdown: args.markdown ?? "",
+    ...(agent === undefined ? {} : { agent }),
+  });
+}
+
+// A comment on a file is a chat linked to it, which the desktop starts the
+// way a person's comment starts.
+export async function startFileChat(
+  ctx: ToolContext,
+  args: { path: string; title: string; body: string; requestId?: string; runId?: string },
+  agent: string | undefined,
+) {
+  const resolved = await safeResolve(ctx, args.path, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "fileChatStart", {
+    ...args,
+    path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
   });
 }

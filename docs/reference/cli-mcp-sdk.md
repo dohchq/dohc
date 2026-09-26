@@ -122,9 +122,20 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, path, changed, warning? } | { ok: false, reason }`.
 
+### `dohc_create_document`
+
+Create a Markdown document at a path that does not exist yet. `markdown` is its body text, without frontmatter. dohc writes it the way a person types into a new file, so later changes go through dohc_edit_document.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `markdown`: `string`
+
+Returns `{ ok: true, path } | { ok: false, reason }`.
+
 ### `dohc_write_file`
 
-Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.
+Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -260,6 +271,20 @@ Changes the workspace, so a shared view does not offer it.
 - `runId`: `string`
 
 Returns `{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`.
+
+### `dohc_start_file_chat`
+
+Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `title`: `string`. Required.
+- `body`: `string`. Required.
+- `requestId`: `string`
+- `runId`: `string`
+
+Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason }`.
 
 ### `dohc_reply_to_chat`
 
@@ -856,13 +881,13 @@ Returns `{ kind: "migration-preview-page", changes: { kind, table, key, before, 
 
 Prepare one field, table, or name change.
 
-change.kind is one of renameCollection, renameTable, renameField, changeField, addField. Review the result, then approve it with approveMigration.
+change.kind is one of renameCollection, renameTable, renameField, changeField, addButton, addField. Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
-- `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
+- `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
 
 Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 

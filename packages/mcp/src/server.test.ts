@@ -23,9 +23,10 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_set_record_fields",
   "dohc_create_record",
   "dohc_edit_document",
+  "dohc_create_document",
 ];
 
-const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_reply_to_chat"];
+const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
 
 const READ_TOOLS = [
   "dohc_list_files",
@@ -242,6 +243,45 @@ describe("MCP tool results", () => {
       { cwd: root, actor: "agent", agent: "claude-code", ...edit },
       { cwd: root, actor: "agent", ...edit },
     ]);
+  });
+
+  it("creates a document under the agent name from the handshake", async () => {
+    const root = await workspaceRoot();
+    const sent: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        sent.push(request);
+        return { ok: true, path: "notes/new.md" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({ name: "dohc_create_document", arguments: { path: "notes/new.md", markdown: "# New" } });
+    expect(result.structuredContent).toEqual({ ok: true, path: "notes/new.md" });
+    expect(sent).toMatchObject([{
+      verb: "documentCreate",
+      args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" },
+    }]);
+  });
+
+  it("comments on a file by starting its chat", async () => {
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        expect(request).toMatchObject({
+          verb: "fileChatStart",
+          args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+        });
+        return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({
+      name: "dohc_start_file_chat",
+      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+    });
+    expect(result.structuredContent).toEqual({
+      ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",
+    });
   });
 
   it("turns poll options into a decision even without needsDecision", async () => {

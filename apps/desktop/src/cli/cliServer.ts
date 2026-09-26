@@ -84,6 +84,7 @@ import {
 } from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -193,6 +194,13 @@ export interface CliDocumentsPort {
     edit: DocumentEdit;
     origin: LiveDocumentEditOrigin;
   }): Promise<LiveDocumentEditOutcome>;
+  // Creates the file the way the explorer does, then writes `markdown`
+  // into its live session. Refuses a path that already exists.
+  create(input: {
+    path: string;
+    markdown: string;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<{ path: string }>;
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
@@ -1599,6 +1607,78 @@ async function linkRunMessage(
   return warning;
 }
 
+interface FileChatStart {
+  path: string;
+  title: string;
+  body: string;
+  runId?: string;
+  agent?: string;
+}
+
+// A comment on a file takes the path a person's does: a chat linked to the
+// file, then its first message, through the one chat write module. `created`
+// says whether a chat now exists, so a retry knows whether it may start one.
+async function startFileChat(
+  context: CliWorkspaceContext,
+  input: FileChatStart,
+  options: CliServerOptions,
+): Promise<{ created: boolean; result: unknown }> {
+  let thread: ChatThread;
+  try {
+    thread = await options.chatWrites.createFileThread(context, {
+      title: input.title,
+      linkedFile: async () => {
+        const objectId = await context.fileObjectIdForPath(input.path);
+        if (!objectId) {
+          throw new Error(
+            `dohc does not track ${input.path} yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file.`,
+          );
+        }
+        return { objectId, pathHint: input.path };
+      },
+    });
+  } catch (error) {
+    return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
+  }
+  let message: ChatMessage;
+  try {
+    message = await options.chatWrites.sendMessage(context, {
+      writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
+      threadId: thread.id,
+      body: input.body,
+      resolveAttachments: async () => [],
+    });
+  } catch (error) {
+    // The chat exists now. Name it, so the caller replies there instead
+    // of starting a second one.
+    await notifyWrite(options, context);
+    const cause = error instanceof Error ? error.message : String(error);
+    return {
+      created: true,
+      result: {
+        ok: false as const,
+        reason: `dohc started chat ${thread.id} on ${input.path}, but could not post its first message (${cause}). Reply in that chat to post it.`,
+      },
+    };
+  }
+  const linkWarning = await linkRunMessage(context, {
+    actor: "agent",
+    ...(input.runId ? { runId: input.runId } : {}),
+    messageId: message.id,
+  }, options);
+  await notifyWrite(options, context);
+  return {
+    created: true,
+    result: {
+      ok: true as const,
+      path: input.path,
+      threadId: thread.id,
+      messageId: message.id,
+      ...(linkWarning ? { warning: linkWarning } : {}),
+    },
+  };
+}
+
 // The results of requests a caller sent with a request id, per workspace. A
 // caller whose request passed the socket deadline sends it again with the same
 // id and gets the first result instead of the work done twice. Kept in memory
@@ -2103,6 +2183,68 @@ async function dispatch(
       if (requestId === undefined) return (await edit()).result;
       return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
     }
+
+    case "documentCreate": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, markdown } = request.args;
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      // A new file, so the stricter materialization rules apply.
+      const validated = validateUserMaterializePath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
+        return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };
+      }
+      try {
+        return {
+          ok: true as const,
+          ...(await documents.create({
+            path: validated.normalized,
+            markdown,
+            origin: documentEditOrigin(agent),
+          })),
+        };
+      } catch (error) {
+        return mcpFailure(error, `failed to create document: ${request.args.path}`);
+      }
+    }
+
+    // A comment on a file takes the path a person's does: a chat linked to
+    // the file, then its first message, through the one chat write module.
+    case "fileChatStart": {
+      if (request.args.actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const input = {
+        path: validated.normalized,
+        title: request.args.title,
+        body: request.args.body,
+        ...(request.args.runId ? { runId: request.args.runId } : {}),
+        ...(request.args.agent ? { agent: request.args.agent } : {}),
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await startFileChat(context, input, options)).result;
+      return await onceForRequestId(
+        context,
+        options,
+        requestId,
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
+        async () => {
+          const started = await startFileChat(context, input, options);
+          return { done: started.created, result: started.result };
+        },
+      );
+    }
   }
 
   const loadedChannels = request.verb === "reply"
@@ -2570,10 +2712,12 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
-  const documentWriteRequest = request.verb === "documentEdit";
+  const documentWriteRequest =
+    request.verb === "documentEdit" || request.verb === "documentCreate";
   const writeRequest =
     collectionWriteRequest ||
     documentWriteRequest ||
+    request.verb === "fileChatStart" ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2584,7 +2728,7 @@ async function workspaceContextForRequest(
       collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
         : documentWriteRequest
-          ? "document edits are not available in a read-only shared view"
+          ? "document changes are not available in a read-only shared view"
           : "chats are not available in a read-only shared view",
     );
   }

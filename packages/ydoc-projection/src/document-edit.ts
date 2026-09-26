@@ -10,6 +10,7 @@ import {
   markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
+  startsWithFrontmatter,
 } from './import-export.js'
 
 // An agent reads a live document as Markdown and edits it by replacing text in
@@ -110,6 +111,24 @@ export function documentEditUpdate(
     }
     return update
   })
+}
+
+// Frontmatter written into a body lands as blocks now and reads back as
+// frontmatter from the file.
+export const FRONTMATTER_REFUSAL =
+  'A new document starts without frontmatter. Write its body text only.'
+
+/**
+ * The update that writes the first text into a new document. The text is
+ * the body only, so frontmatter is refused.
+ */
+export function documentCreateUpdate(
+  state: Uint8Array,
+  markdown: string,
+  options: DocumentEditOptions,
+): Uint8Array | null {
+  if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL)
+  return documentEditUpdate(state, { replacement: markdown }, options)
 }
 
 function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {

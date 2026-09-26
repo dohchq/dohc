@@ -1427,6 +1427,11 @@ function parseFrontmatter(src: string): {
   return { meta, body: rest ?? '' }
 }
 
+/** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
+export function startsWithFrontmatter(markdown: string): boolean {
+  return parseFrontmatter(markdown).body !== markdown
+}
+
 function loadFrontmatterWithUnsupportedTags(raw: string): {
   value: unknown
   hasUnsupportedTag: boolean

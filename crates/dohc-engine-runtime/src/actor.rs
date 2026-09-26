@@ -39,7 +39,8 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
+    CAPTURE_NEW_FILE_LIVE, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
+    WorkspaceRootGuard,
 };
 pub use collections::CollectionReconciliation;
 pub use dohc_engine_sync::SharingDeclined;
