@@ -11,7 +11,7 @@ import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBa
 import { parseDatasetDefinition, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import type { DatasetAutomationClaim, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { resolveCompatibleDatasetRevision, createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
+import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
@@ -22,6 +22,7 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
+import { hasGeneratedDatasetOperations } from "./datasetGenerator";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
@@ -479,6 +480,20 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
             catch (error) { failures.push({ datasetId, error }); }
           }
           return { definitions, failures };
+        },
+        /** A dataset's approved revision now. */
+        revision(datasetId: string): DatasetRevision { assertCurrent(); return host.approvedRevision(owner, { workspaceId, datasetId }); },
+        /** Whether dohc generated the dataset's operations, the only ones automations can use at launch. */
+        generated(datasetId: string): boolean {
+          assertCurrent();
+          const approved = host.approvedArtifacts(owner, { workspaceId, datasetId });
+          return hasGeneratedDatasetOperations(approved.operationSource, approved.revision.definition);
+        },
+        /** Whether an invocation under a saved revision would still run under the rules approved now. */
+        resolves(reference: { datasetId: string; revision: number; revisionSha256: string }): boolean {
+          assertCurrent();
+          try { resolveCompatibleDatasetRevision(db, { workspaceId, datasetId: reference.datasetId }, reference); return true; }
+          catch (error) { if (error instanceof DatasetHostError) return false; throw error; }
         },
         subscribe(datasetId: string, subscription: DatasetAutomationSubscription) { assertCurrent(); host.automationClaims.subscribe({ workspaceId, datasetId }, subscription); },
         unsubscribe(datasetId: string, automationId: string) { assertCurrent(); host.automationClaims.unsubscribe({ workspaceId, datasetId }, automationId); },

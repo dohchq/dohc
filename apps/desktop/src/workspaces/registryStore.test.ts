@@ -91,6 +91,7 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
 describe("automation failure acknowledgments", () => {
   const failure = (generation: number, automationId = "hello/triage") => ({
     automationId,
+    datasetInstance: null,
     error: "handler exploded",
     updatedAtMs: 1_000,
     generation,

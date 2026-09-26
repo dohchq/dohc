@@ -84,6 +84,7 @@ async function harness(automations: string, run: (context: {
     onHoldsChanged: () => undefined,
     onAutomationsChanged: () => undefined,
     onError: (context, error) => { errors.push(`${context}: ${String(error)}`); },
+    withDatasetHost: async () => null,
   });
   const stopBridge = bridgeAutomationClaimsToExecutors(lifecycle, () => executor);
   try {

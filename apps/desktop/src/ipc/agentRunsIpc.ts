@@ -2,7 +2,7 @@ import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload,
+  ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload, type AutomationFailureNotice,
   ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
   AgentPanelSnapshotResult, AgentPermissionResponsePayload, StopAgentRunPayload,
@@ -11,7 +11,7 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
-import { unacknowledgedAutomationFailures } from "../workspaces/registryStore";
+import { automationFailureAckKey, unacknowledgedAutomationFailures } from "../workspaces/registryStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -35,6 +35,8 @@ export function createAgentRunsIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
   withEngineAdapter<Result>(workspace: EngineWorkspace, work: (adapter: Pick<VersionedLiveAdapter, "listAutomationFailures">) => Promise<Result>): Promise<Result | null>;
   acknowledgeWorkspaceAutomationFailure(workspaceId: string, automationId: string, generation: number): void;
+  /** Dataset automations' failures, from the dataset host's ledger while it is open. */
+  datasetAutomationFailures(workspaceId: string): Promise<Array<Omit<AutomationFailureNotice, "name">>>;
   notifyAutomationFailuresChanged(workspaceId: string): void;
   /** A Collection automation's name in its automations.yaml, or null. */
   automationNameOf(workspaceId: string, automationId: string): string | null;
@@ -62,7 +64,7 @@ export function createAgentRunsIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged,
+    withEngineAdapter, acknowledgeWorkspaceAutomationFailure, datasetAutomationFailures, notifyAutomationFailuresChanged,
     requireEngineCapture, linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace,
     assertAgentRunnableWorkspace, assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor, sharedViewOf, pluginWorkspaceRuntimes,
@@ -71,9 +73,21 @@ export function createAgentRunsIpc<
   } = dependencies;
 
   function registerAutomationFailures(): void {
-    // Automation failures (ADR 0008): the engine's failed claim rows — one
-    // row per automation with the newest error and a counting generation —
-    // minus what the owner has acknowledged in the registry.
+    // Automation failures (ADR 0008): the engine's failed claim rows and the
+    // dataset ledger's — one row per automation with the newest error and a
+    // counting generation — minus what the owner has acknowledged in the
+    // registry.
+    const failuresOf = async (operation: Operation): Promise<Array<Omit<AutomationFailureNotice, "name">> | null> => {
+      const engine = await withEngineAdapter(
+        receivedShareEngine.workspaceForRegistered(operation.workspace),
+        async (adapter) => await adapter.listAutomationFailures(),
+      );
+      if (engine === null) return null;
+      return [
+        ...engine.failures.map((failure) => ({ ...failure, datasetInstance: null })),
+        ...await datasetAutomationFailures(operation.workspace.workspaceId),
+      ];
+    };
     registerHandler(CHANNELS.listAutomationFailures, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListAutomationFailuresPayload.parse(payload);
@@ -82,13 +96,10 @@ export function createAgentRunsIpc<
         input.workspaceId,
         "Automation notice read stopped because this window changed workspaces.",
         async (operation) => {
-          const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.listAutomationFailures(),
-          );
+          const failures = await failuresOf(operation);
           return ListAutomationFailuresResult.parse({
             failures: unacknowledgedAutomationFailures(
-              result?.failures ?? [],
+              failures ?? [],
               operation.workspace.automationFailureAcks,
             ).map((failure) => ({
               ...failure,
@@ -113,22 +124,20 @@ export function createAgentRunsIpc<
         input.workspaceId,
         "Automation notice update stopped because this window changed workspaces.",
         async (operation) => {
-          const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.listAutomationFailures(),
-          );
-          if (!result) {
+          const failures = await failuresOf(operation);
+          if (!failures) {
             throw new Error("The workspace engine is not running.");
           }
-          const current = result.failures.find(
+          const current = failures.find(
             (failure) => failure.automationId === input.automationId,
           );
-          // No failed claims for that automation: nothing to acknowledge.
-          if (!current) return;
+          // No failed claims for that automation, or a notice about a
+          // dataset instance that is gone: nothing to acknowledge.
+          if (!current || current.datasetInstance !== input.datasetInstance) return;
           operation.assertCurrent();
           acknowledgeWorkspaceAutomationFailure(
             input.workspaceId,
-            input.automationId,
+            automationFailureAckKey(current),
             Math.min(input.generation, current.generation),
           );
           notifyAutomationFailuresChanged(input.workspaceId);

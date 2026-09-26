@@ -9536,6 +9536,7 @@ describe("automation failure notices", () => {
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,
+    datasetInstance: null,
   };
   const NOTICE_ID = "notice-automation-failure-hello-plugin/triage";
 
@@ -9565,6 +9566,7 @@ describe("automation failure notices", () => {
       workspaceId: WORKSPACE.workspaceId,
       automationId: "hello-plugin/triage",
       generation: 1,
+      datasetInstance: null,
     });
   });
 
@@ -9607,7 +9609,7 @@ describe("automation failure notices", () => {
   it("tries a failed Collection automation again from its notice, and opens its runs", async () => {
     const failure = {
       automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
-      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     };
     const noticeId = "notice-automation-failure-collection:tasks#stamp";
     const user = userEvent.setup();
@@ -9645,7 +9647,7 @@ describe("automation failure notices", () => {
   it("moves an open panel to the next automation a notice opens", async () => {
     const failure = (id: string, claimId: string) => ({
       automationId: `collection:tasks#${id}`, claimId, chainStopped: false,
-      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     });
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -9678,7 +9680,7 @@ describe("automation failure notices", () => {
     const bridge = makeBridge(Promise.resolve(null));
     const old = {
       automationId: "collection:tasks#old", claimId: "atc_old", chainStopped: false,
-      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1,
+      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1, datasetInstance: null,
     };
     bridge.listAutomationFailures.mockResolvedValue({ failures: [old] });
     renderShell(bridge);

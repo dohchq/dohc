@@ -375,6 +375,25 @@ describe("an automation's runs", () => {
     ));
   });
 
+  it("shows dataset changes in run history", async () => {
+    const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
+    makeBridge(read([summary(stamp)]), [run({ writes: [
+      { kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
+        fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] },
+      { kind: "dataset-created", rules, operationId: "create", tableId: "table-1", recordId: "invoice-2", version: 1 },
+      { kind: "dataset-kept", recordId: "invoice-3", fieldId: "status", field: "Status", planned: "Closed", current: "Pending" },
+      { kind: "dataset-skipped", recordId: "invoice-4", reason: "The record was removed" },
+    ] })]);
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(row.textContent).toContain("Changed 1 field and added 1 record");
+    await userEvent.click(within(row).getByRole("button", { name: "Show 4 changes" }));
+    expect(row.textContent).toContain("invoice-1 · Status: Open → Closed");
+    expect(row.textContent).toContain("Added invoice-2");
+    expect(row.textContent).toContain("invoice-3 · Status: kept Pending");
+    expect(row.textContent).toContain("invoice-4 · The record was removed.");
+  });
+
   it("shows what a run changed and says what Undo skipped", async () => {
     const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "failed", atMs: Date.now() } })]), [failed]);
     const onNotice = vi.fn();

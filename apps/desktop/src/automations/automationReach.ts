@@ -69,6 +69,11 @@ export type ReachStep =
   // Set fields, add records, or change found records in `collection`.
   | { kind: "change-records"; collection: ReachCollection }
   | { kind: "find-records"; collection: ReachCollection }
+  // Find, add, or change records in a dataset through its approved
+  // operations, with the owner's access. File Edit on a dataset grants no
+  // record access, so until each editor's data grants are checked, only a
+  // Collection that only its owner edits can run one.
+  | { kind: "dataset-records"; collection: ReachCollection }
   // `channelWireId` is null for a Group that has not synced yet.
   | { kind: "post"; group: { channelWireId: string | null; name: string } }
   | { kind: "notify"; person: ReachPerson }
@@ -230,6 +235,12 @@ function checkOwnerStep(
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "view"));
       return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
+    case "dataset-records": {
+      const other = editors[0];
+      return other
+        ? stop(`This step uses your access to ${step.collection.name}, and ${nameOf(other)} can also edit its automations.`, nameOf(other))
+        : ALLOWED;
+    }
     case "post": {
       const blocked = editors.find((person) => !canPost(person, step.group.channelWireId));
       return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
@@ -270,10 +281,11 @@ export function checkAutomationReach(roster: ReachRoster, automation: ReachAutom
   const people = roster.kind === "owner" ? peopleOf(roster) : [];
   const editors = people.filter((person) => sources.some((path) => canEdit(person, path)));
   return automation.steps.map((step) => {
-    const target = step.kind === "change-records" || step.kind === "find-records" ? step.collection : null;
+    const target = step.kind === "change-records" || step.kind === "find-records" || step.kind === "dataset-records" ? step.collection : null;
     const targetProblem = target && pathProblem(target.path, target.name, "target");
     if (targetProblem) return stop(targetProblem);
     if (roster.kind === "owner") return checkOwnerStep(roster, collection, step, people, editors);
+    if (step.kind === "dataset-records") return stop(`In a shared view, automations cannot use ${collection.name}'s records.`);
     return target && within(target.path, collection.path)
       ? ALLOWED
       : stop(`In a shared view, automations can use only ${collection.name}.`);

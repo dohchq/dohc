@@ -91,6 +91,11 @@ function orderSteps(steps: readonly AutomationStep[], counter = { next: 0 }): Or
   });
 }
 
+/** Every step with its ordinal, depth first, as runs and keys count them. */
+export function stepsInOrder(automation: Automation): Array<{ ordinal: number; step: AutomationStep }> {
+  return [...everyStep(orderSteps(automation.do))].map(({ ordinal, step }) => ({ ordinal, step }));
+}
+
 function* everyStep(steps: readonly OrderedStep[]): Generator<OrderedStep> {
   for (const entry of steps) {
     yield entry;
@@ -215,6 +220,41 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
   return { problem: FIND_SHAPE };
 }
 
+/** A Find condition on a dataset as a read's equality filters: every field it checks, with its value. */
+export type DatasetFindFilter = { field: string; value: Extract<FindQuery, { match: "field" }>["value"] };
+
+const DATASET_FIND_SHAPE =
+  'A Find on a dataset can check fields with ==, such as record.Status == "Doing" && record.Paid == false.';
+
+/**
+ * Reads a Find condition on a dataset: `true`, or `record.F == value` terms
+ * joined by &&, where each value is a literal or a trigger record field.
+ * A dataset's read compares whole values, so it offers no "contains".
+ */
+export function datasetFindOf(condition: string): DatasetFindFilter[] | { problem: string } {
+  if (!isOneExpression(condition)) return { problem: DATASET_FIND_SHAPE };
+  const filters: DatasetFindFilter[] = [];
+  const visit = (node: Expression): boolean => {
+    while (node.type === "ParenthesizedExpression") node = node.expression;
+    if (node.type === "LogicalExpression" && node.operator === "&&") return visit(node.left) && visit(node.right);
+    if (node.type !== "BinaryExpression" || (node.operator !== "==" && node.operator !== "===") || node.left.type === "PrivateIdentifier") return false;
+    for (const [side, other] of [[node.left, node.right], [node.right, node.left]] as const) {
+      const field = candidateField(side);
+      const value = field === null ? null : findValue(other);
+      if (field !== null && value !== null) {
+        filters.push({ field, value });
+        return true;
+      }
+    }
+    return false;
+  };
+  const node = parseExpressionAt(condition, 0, { ecmaVersion: "latest", preserveParens: true });
+  let bare: Expression = node;
+  while (bare.type === "ParenthesizedExpression") bare = bare.expression;
+  if (bare.type === "Literal" && bare.value === true) return [];
+  return visit(node) ? filters : { problem: DATASET_FIND_SHAPE };
+}
+
 const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
   "record-added", "record-changed", "field-changed", "record-removed", "starts-matching",
 ]);
@@ -227,9 +267,24 @@ const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
 const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
 
 export function unsupportedReason(automation: Automation): string | null {
-  if (!RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
-  const DATASET = "dohc cannot run automations on dataset tables and operations yet.";
+  const DATASET = "Only a dataset Collection's automations can name tables and operations.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
+  for (const { step } of stepsInOrder(automation)) {
+    if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) return DATASET;
+  }
+  return shapeProblem(automation, (condition) => {
+    const query = findQueryOf(condition);
+    return "problem" in query ? query.problem : null;
+  });
+}
+
+/**
+ * Why no executor can run an automation of this shape yet, whatever its
+ * Collection keeps: its trigger, its steps, and its limits. `findProblem`
+ * reads a Find condition the way the Collection's records can be queried.
+ */
+export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
+  if (!RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -247,11 +302,10 @@ export function unsupportedReason(automation: Automation): string | null {
       case "run-file":
         return "dohc cannot run code steps yet.";
       case "find": {
-        if (step.operation !== null) return DATASET;
         finds += 1;
         formulas += 1;
-        const query = findQueryOf(step.condition);
-        if ("problem" in query) return query.problem;
+        const problem = findProblem(step.condition);
+        if (problem !== null) return problem;
         break;
       }
       case "if":
@@ -259,7 +313,6 @@ export function unsupportedReason(automation: Automation): string | null {
         break;
       case "set":
       case "add-record":
-        if (step.operation !== null) return DATASET;
         formulas += step.values.filter((entry) => isFormula(entry.value)).length;
         if (step.kind === "set" && step.records !== null && step.values.some((entry) => isFormula(entry.value)) &&
           bindings.get(step.records)?.kind === "find") {
@@ -453,6 +506,16 @@ export function localIsoTime(ms: number): string {
 
 type Fact = AutomationClaim["change"]["fields"][number];
 
+/** What planning reads from a claim: the Collection it is in, and what changed. */
+export interface RunClaim {
+  collectionPath: string;
+  change: {
+    kind: AutomationClaim["change"]["kind"];
+    fields: ReadonlyArray<Pick<Fact, "field" | "previous" | "next">>;
+    fieldsOmitted: number;
+  };
+}
+
 function factValue(side: Fact["previous"]): { value: JsonValue } | null | "truncated" {
   if (side === null) return null;
   return "truncated" in side ? "truncated" : { value: side.value };
@@ -461,7 +524,7 @@ function factValue(side: Fact["previous"]): { value: JsonValue } | null | "trunc
 /** What the read phase found: the trigger record and each Find's records. */
 export interface RunInputs {
   automation: Automation;
-  claim: AutomationClaim;
+  claim: RunClaim;
   /** Null when the trigger record was removed. */
   record: RunRecord | null;
   found: ReadonlyMap<number, readonly RunRecord[]>;
@@ -521,7 +584,7 @@ export interface EvaluationRequest {
   slots: Slot[];
 }
 
-function previousValues(claim: AutomationClaim): JsonObject {
+function previousValues(claim: RunClaim): JsonObject {
   const previous: JsonObject = {};
   for (const fact of claim.change.fields) {
     const side = factValue(fact.previous);
@@ -531,7 +594,7 @@ function previousValues(claim: AutomationClaim): JsonObject {
 }
 
 // The trigger record as it was before the change, for starts-matching.
-function recordBefore(record: RunRecord, claim: AutomationClaim): JsonObject {
+function recordBefore(record: RunRecord, claim: RunClaim): JsonObject {
   const before = recordScope(record);
   for (const fact of claim.change.fields) {
     const side = factValue(fact.previous);
@@ -727,6 +790,8 @@ export function planRun(
   const landed = new Map<string, Map<string, JsonValue>>();
   const addedIds = new Map<number, string>();
   let writes = 0;
+  // Records key on their path and id together: dataset records of two tables can share an id.
+  const keyOf = (target: RunRecord) => `${target.path}\u0000${target.id}`;
   const fieldsFor = (
     recordId: string,
     initial: JsonObject,
@@ -784,7 +849,7 @@ export function planRun(
             effects: records.map((target, index) => ({
               kind: "set",
               target: { recordId: target.id, collectionPath, path: target.path },
-              fields: fieldsFor(target.id, target.values, step.values.map(({ field, value }) => ({
+              fields: fieldsFor(keyOf(target), target.values, step.values.map(({ field, value }) => ({
                 field,
                 after: isFormula(value) ? (lists.get(field)![index] ?? null) : value.value,
               }))),
@@ -808,7 +873,7 @@ export function planRun(
             effects: [{
               kind: "set",
               target: { recordId: record.id, collectionPath: claim.collectionPath, path: record.path },
-              fields: fieldsFor(record.id, record.values, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
+              fields: fieldsFor(keyOf(record), record.values, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
             }],
           });
         }

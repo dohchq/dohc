@@ -10,7 +10,7 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import type { DatasetAutomationClaim, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetAutomationClaim, DatasetAutomationFailure, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
@@ -51,6 +51,8 @@ import {
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
+import { datasetAutomationProblem, pinDatasetOperations } from "./datasetAutomationPlan";
+import { datasetReachSteps, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
@@ -72,14 +74,16 @@ import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./re
 // A dataset Collection's claims come from its dataset host's ledger instead,
 // where the host claims each commit it makes (ADR 0011). The drain takes
 // engine claims first, then dataset claims, one at a time, and treats both
-// the same way. dohc cannot run dataset steps yet, so without a dataset
-// runner every dataset automation is unsupported, and the executor neither
-// subscribes one nor opens the dataset host for one.
+// the same way; a dataset run's steps go through the dataset's approved
+// operations (datasetAutomationRun.ts). The executor uses the dataset host
+// only while something else has it open, as the Collections list does, or
+// when a person asks about a dataset's automations. A workspace whose
+// datasets nobody uses never opens it for automations.
 
 export const AUTOMATIONS_FILE_NAME = "automations.yaml";
 const DATASET_FILE_NAME = "dataset.json";
 const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
-export const DATASET_AUTOMATIONS_UNSUPPORTED = "dohc cannot run automations on dataset Collections yet.";
+const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // After the deadline, a run's writes stop at their next check. A write
@@ -114,8 +118,8 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
 }
 
-/** A dataset host's claim ledger, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
-export interface DatasetAutomationLedger {
+/** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
+export interface DatasetAutomationHost extends DatasetRunHost {
   /** Each approved, unarchived dataset's rules. */
   datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> };
   subscribe(datasetId: string, subscription: DatasetAutomationSubscription): void;
@@ -130,18 +134,8 @@ export interface DatasetAutomationLedger {
   claims(automationId: string): DatasetAutomationClaim[];
   /** One of an automation's claims however old, or null. */
   claim(automationId: string, claimId: string): DatasetAutomationClaim | null;
-  failures(): Array<{ automationId: string; claimId: string }>;
+  failures(): DatasetAutomationFailure[];
 }
-
-/** Runs one dataset claim, as runCollectionAutomation runs an engine claim. */
-export type DatasetClaimRunner = (input: {
-  claim: DatasetAutomationClaim;
-  automation: Automation;
-  definition: DatasetDefinition;
-  collection: ReachCollection;
-  roster: Exclude<ReachRoster, { kind: "unknown" }>;
-  signal: AbortSignal;
-}) => Promise<CollectionAutomationRunOutcome>;
 
 export interface CollectionAutomationsOptions {
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -173,16 +167,19 @@ export interface CollectionAutomationsOptions {
    */
   onAutomationsChanged(): void;
   onError(context: string, error: unknown): void;
-  /** This workspace's dataset claim ledger; resolves null when it has no dataset host. */
-  withDatasetLedger?<T>(work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null>;
-  /** Runs dataset claims. dohc cannot run dataset steps yet: only tests pass one. */
-  runDatasetClaim?: DatasetClaimRunner;
+  /**
+   * This workspace's dataset host, while it is open; resolves null when it is
+   * not. With `open`, opens it first: only for what a person asked for.
+   */
+  withDatasetHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open: boolean): Promise<T | null>;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
   deadline?: (abort: () => void) => () => void;
 }
 
 type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
+/** A dataset Collection's approved rules, and whether dohc generated its operations. */
+type IndexedDataset = { definition: DatasetDefinition; generated: boolean };
 
 /** One step's reach as the ⚡ panel shows it. */
 export type CollectionAutomationStepReach =
@@ -376,7 +373,7 @@ export class CollectionAutomations {
    */
   private readonly schemaFields = new Map<string, ReadonlySet<string> | "unreadable">();
   /** Dataset Collections, with their approved rules. Only when dohc can run dataset automations. */
-  private readonly datasets = new Map<string, DatasetDefinition>();
+  private readonly datasets = new Map<string, IndexedDataset>();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -493,7 +490,7 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     void this.enqueue(async () => {
-      let datasets: Promise<Map<string, DatasetDefinition> | null> | undefined;
+      let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
       for (const folder of folders) {
         this.schemaFields.delete(folder);
         this.datasets.delete(folder);
@@ -503,11 +500,14 @@ export class CollectionAutomations {
           continue;
         }
         this.collections.delete(folder);
-        const definition = (await (datasets ??= this.datasetFolders()))?.get(folder);
-        if (definition === undefined) {
+        // A new automations.yaml beside a dataset is a reason to open its host.
+        const open = await this.options.pathExists(`${folder}/${DATASET_FILE_NAME}`) &&
+          await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`);
+        const dataset = (await (datasets ??= this.datasetFolders(open)))?.get(folder);
+        if (dataset === undefined) {
           this.files.delete(folder);
         } else {
-          this.datasets.set(folder, definition);
+          this.datasets.set(folder, dataset);
           await this.readFile(folder);
         }
       }
@@ -526,30 +526,37 @@ export class CollectionAutomations {
   }
 
   /**
-   * A dataset's approved rules changed: an approval, a migration, a restore,
-   * or an archive. Sources change before approval, so the watcher alone
-   * cannot tell. Re-index every dataset Collection and reconcile.
+   * The dataset host opened, or a dataset's approved rules changed: an
+   * approval, a migration, a restore, or an archive. Sources change before
+   * approval, so the watcher alone cannot tell. Re-index every dataset
+   * Collection, reconcile, and drain what the host's ledger holds.
    */
   datasetsChanged(): void {
     if (this.opened === null) return;
-    void this.enqueue(async () => {
-      const folders = await this.datasetFolders();
-      if (folders === null) return;
-      for (const path of this.datasets.keys()) {
-        if (folders.has(path)) continue;
-        this.datasets.delete(path);
-        this.files.delete(path);
-      }
-      for (const [path, definition] of folders) {
-        if (this.collections.has(path)) continue;
-        this.datasets.set(path, definition);
-        await this.readFile(path);
-      }
-      await this.reconcile(false);
-      this.publishHolds();
-    })
-      .then(() => this.rosterChanged())
+    void this.enqueue(() => this.indexDatasets(false))
+      .then(() => {
+        this.rosterChanged();
+        this.notifyClaimed();
+        this.options.onFailuresChanged();
+      })
       .catch((error: unknown) => this.options.onError("reload dataset automations", error));
+  }
+
+  private async indexDatasets(open: boolean): Promise<void> {
+    const folders = await this.datasetFolders(open);
+    if (folders === null) return;
+    for (const path of this.datasets.keys()) {
+      if (folders.has(path)) continue;
+      this.datasets.delete(path);
+      this.files.delete(path);
+    }
+    for (const [path, dataset] of folders) {
+      if (this.collections.has(path)) continue;
+      this.datasets.set(path, dataset);
+      await this.readFile(path);
+    }
+    await this.reconcile(false);
+    this.publishHolds();
   }
 
   /** The wake-up: a claim event landed, a retry queued a claim, or a reconcile registered work. */
@@ -620,14 +627,17 @@ export class CollectionAutomations {
     await this.ready();
     // A file change the watcher or a panel write already queued lands first.
     await this.chain;
-    // A dataset Collection dohc cannot run automations for is not in the index.
-    const unindexedDataset = !this.files.has(collectionPath) && !this.collections.has(collectionPath) &&
-      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
-    const indexed = unindexedDataset ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
+    const maybeDataset = () => !this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
+      this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
+    // A dataset whose host is not open yet: a person is looking at it, so open it.
+    if (await maybeDataset()) await this.enqueue(() => this.indexDatasets(true));
+    // A dataset whose rules are not approved is not in the index.
+    const unapproved = await maybeDataset();
+    const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     if (!indexed) return { status: "missing" };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
     const unsupported = (automation: Automation) =>
-      unindexedDataset ? DATASET_AUTOMATIONS_UNSUPPORTED : this.cannotRun(collectionPath, automation);
+      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
@@ -662,7 +672,7 @@ export class CollectionAutomations {
       if (roster.kind === "unknown") {
         return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
       }
-      const reachSteps = reachStepsOf(automation, collection, collectionNamed);
+      const reachSteps = this.reachSteps(collectionPath, automation);
       const steps = checkAutomationReach(roster, {
         id: automation.id, collection, codeFiles: [], steps: reachSteps,
       }).map((reach, step): CollectionAutomationStepReach => {
@@ -679,6 +689,33 @@ export class CollectionAutomations {
       return { ...summary, reach: { kind: "checked", steps } };
     });
     return { status: "read", contentHash: indexed.contentHash, automations };
+  }
+
+  /**
+   * Each dataset automation's newest failure, for the failure notices, while
+   * the dataset host is open. It does not open the host.
+   */
+  async datasetFailures(): Promise<DatasetAutomationFailure[]> {
+    try {
+      return (await this.withLiveHost((host) => host.failures())) ?? [];
+    } catch (error) {
+      this.options.onError("list dataset automation failures", error);
+      return [];
+    }
+  }
+
+  /**
+   * The automations the ⚡ panel saves, with each dataset step pinned to the
+   * approved operation it prefers (datasetAutomationPlan.ts).
+   */
+  async pinOperations(collectionPath: string, automations: readonly Automation[]): Promise<Automation[]> {
+    await this.ready();
+    if (!this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
+      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
+      await this.enqueue(() => this.indexDatasets(true));
+    }
+    const dataset = this.datasets.get(collectionPath);
+    return dataset === undefined ? [...automations] : automations.map((automation) => pinDatasetOperations(automation, dataset.definition));
   }
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
@@ -699,7 +736,7 @@ export class CollectionAutomations {
       for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
-        const steps = reachStepsOf(automation, collection, collectionNamed);
+        const steps = this.reachSteps(collectionPath, automation);
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
             automationId, definitionHash: hash, step,
@@ -822,7 +859,7 @@ export class CollectionAutomations {
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const hash = definitionHash(automation);
       const collection = collectionNamed(collectionPath);
-      reachStepsOf(automation, collection, collectionNamed).forEach((reach, step) => {
+      this.reachSteps(collectionPath, automation).forEach((reach, step) => {
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
         if (!stored || !matches(stored, automation) || !("collection" in reach)) return;
         steps.push({
@@ -951,7 +988,7 @@ export class CollectionAutomations {
     this.changing.add(input.claimId);
     try {
       const known = this.datasets.has(parsed.collectionPath)
-        ? await this.withLiveLedger((ledger) => ledger.claim(input.automationId, input.claimId) !== null)
+        ? await this.withLiveHost((ledger) => ledger.claim(input.automationId, input.claimId) !== null)
         : await this.withLiveEngine(async (engine) =>
           (await engine.listAutomationClaims({ automationId: input.automationId })).claims.some((claim) => claim.claimId === input.claimId));
       if (known === null) throw new Error("The workspace engine is not running.");
@@ -968,7 +1005,7 @@ export class CollectionAutomations {
       if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
       this.waitingFor.delete(input.claimId);
       const retried = this.datasets.has(parsed.collectionPath)
-        ? await this.withLiveLedger((ledger) => ledger.retry(input.claimId))
+        ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
         : await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
       if (retried === null) throw new Error("The workspace engine is not running.");
       if (startsOver) {
@@ -1095,10 +1132,10 @@ export class CollectionAutomations {
     return this.options.withEngine(work);
   }
 
-  /** The dataset ledger, only while the executor runs and only when dohc can run dataset automations. */
-  private withLiveLedger<T>(work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null> {
-    if (this.state === "disposed" || this.state === "paused" || this.options.runDatasetClaim === undefined) return Promise.resolve(null);
-    return this.options.withDatasetLedger?.(work) ?? Promise.resolve(null);
+  /** The dataset host, only while the executor runs. With `open`, opens it for what a person asked. */
+  private withLiveHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open = false): Promise<T | null> {
+    if (this.state === "disposed" || this.state === "paused") return Promise.resolve(null);
+    return this.options.withDatasetHost(work, open);
   }
 
   /** One automation's run history, and optionally the failure its notice offers, from the ledger that holds its claims. */
@@ -1107,7 +1144,7 @@ export class CollectionAutomations {
     const failureOf = (failures: ReadonlyArray<{ automationId: string; claimId: string }>) =>
       failures.find((failure) => failure.automationId === automationId)?.claimId ?? null;
     if (id !== null && this.datasets.has(id.collectionPath)) {
-      return await this.withLiveLedger((ledger) => ({
+      return await this.withLiveHost((ledger) => ({
         claims: ledger.claims(automationId),
         failure: withFailure ? failureOf(ledger.failures()) : null,
       }));
@@ -1207,17 +1244,17 @@ export class CollectionAutomations {
    * A dataset store that cannot open, or a dataset whose rules cannot be
    * read, is reported and left out, so document automations still run.
    */
-  private async datasetFolders(): Promise<Map<string, DatasetDefinition> | null> {
-    let listed: Awaited<ReturnType<DatasetAutomationLedger["datasets"]>> | null;
+  private async datasetFolders(open = false): Promise<Map<string, IndexedDataset> | null> {
+    let listed: Awaited<ReturnType<DatasetAutomationHost["datasets"]>> | null;
     try {
-      listed = await this.withLiveLedger((ledger) => ledger.datasets());
+      listed = await this.withLiveHost((host) => host.datasets(), open);
     } catch (error) {
       this.options.onError("open this workspace's dataset store", error);
       return null;
     }
     if (listed === null) return null;
     for (const { datasetId, error } of listed.failures) this.options.onError(`read dataset ${datasetId}'s rules`, error);
-    const folders = new Map<string, DatasetDefinition>();
+    const folders = new Map<string, IndexedDataset>();
     for (const definition of listed.definitions) {
       const folder = posix.dirname(definition.schemaPath);
       if (folder === ".") continue;
@@ -1228,19 +1265,32 @@ export class CollectionAutomations {
       } catch {
         // A descriptor that is not JSON names no dataset.
       }
-      if (typeof described === "object" && described !== null && "datasetId" in described && described.datasetId === definition.datasetId) {
-        folders.set(folder, definition);
-      }
+      if (typeof described !== "object" || described === null || !("datasetId" in described) || described.datasetId !== definition.datasetId) continue;
+      // Only a dataset with automations needs its operation source read.
+      const generated = await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`) &&
+        await this.withLiveHost((host) => host.generated(definition.datasetId)).catch((error: unknown) => {
+          this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
+          return false;
+        }) === true;
+      folders.set(folder, { definition, generated });
     }
     return folders;
   }
 
   /** Why dohc cannot run an automation in this indexed Collection yet, or null. */
   private unsupportedIn(collectionPath: string, automation: Automation): string | null {
-    const definition = this.datasets.get(collectionPath);
-    if (definition === undefined) return unsupportedReason(automation);
-    const subscription = datasetSubscriptionFor(automation, definition);
-    return "problem" in subscription ? subscription.problem : null;
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined) return unsupportedReason(automation);
+    const subscription = datasetSubscriptionFor(automation, dataset.definition);
+    return "problem" in subscription ? subscription.problem : datasetAutomationProblem(automation, dataset);
+  }
+
+  /** The Collections each step reaches, for the reach check. */
+  private reachSteps(collectionPath: string, automation: Automation) {
+    const collection = collectionNamed(collectionPath);
+    return this.datasets.has(collectionPath)
+      ? datasetReachSteps(automation, collection)
+      : reachStepsOf(automation, collection, collectionNamed);
   }
 
   private definitionFor(id: { collectionPath: string; id: string }): Automation | null {
@@ -1320,7 +1370,7 @@ export class CollectionAutomations {
   private desiredDatasetSubscriptions(): Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }> {
     const desired = new Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }>();
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
-      const definition = this.datasets.get(collectionPath);
+      const definition = this.datasets.get(collectionPath)?.definition;
       if (definition === undefined || !automation.enabled) continue;
       const watched = datasetSubscriptionFor(automation, definition);
       if ("problem" in watched) continue;
@@ -1400,7 +1450,7 @@ export class CollectionAutomations {
       for (const { automationId, collectionPath, automation } of automations) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
-        const steps = reachStepsOf(automation, collection, collectionNamed);
+        const steps = this.reachSteps(collectionPath, automation);
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
@@ -1447,7 +1497,7 @@ export class CollectionAutomations {
   private async reconcileDatasets(all: boolean): Promise<void> {
     const desired = this.desiredDatasetSubscriptions();
     // A dataset store that cannot open stops only dataset automations.
-    await this.withLiveLedger((ledger) => {
+    await this.withLiveHost((ledger) => {
       for (const { datasetId, ...current } of ledger.subscriptions()) {
         if (!current.automationId.startsWith(COLLECTION_AUTOMATION_PREFIX)) continue;
         const wanted = desired.get(current.automationId);
@@ -1501,7 +1551,7 @@ export class CollectionAutomations {
   private async nextClaim(): Promise<HeldClaim | null> {
     const claim = await this.withLiveEngine((engine) => engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }));
     if (claim !== null) return { source: "engine", claim };
-    const dataset = await this.withLiveLedger((ledger) => ledger.next());
+    const dataset = await this.withLiveHost((ledger) => ledger.next());
     return dataset === null ? null : { source: "dataset", claim: dataset };
   }
 
@@ -1559,8 +1609,8 @@ export class CollectionAutomations {
   }
 
   /** The dataset ledger, or at close any ledger still open. */
-  private withLedger<T>(live: boolean, work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null> {
-    return live ? this.withLiveLedger(work) : this.options.withDatasetLedger?.(work) ?? Promise.resolve(null);
+  private withLedger<T>(live: boolean, work: (ledger: DatasetAutomationHost) => T | Promise<T>): Promise<T | null> {
+    return live ? this.withLiveHost(work) : this.options.withDatasetHost(work, false);
   }
 
   /** Whether the claim's ledger still holds this attempt as running, or null when it cannot say. */
@@ -1602,7 +1652,7 @@ export class CollectionAutomations {
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
-    const definition = id ? this.datasets.get(id.collectionPath) : undefined;
+    const definition = id ? this.datasets.get(id.collectionPath)?.definition : undefined;
     // An engine claim's change is in a document Collection, and not in a
     // Collection inside this one, which the subscription's path also covers.
     // A dataset claim's change is in the dataset this Collection keeps.
@@ -1632,12 +1682,14 @@ export class CollectionAutomations {
     if (stop.aborted) return release;
     if (stepHeld) return { kind: "release", waitsFor: "held" };
     const collection = collectionNamed(id.collectionPath);
-    const runDataset = this.options.runDatasetClaim;
-    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => {
-      if (held.source === "engine") return runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop });
-      if (runDataset === undefined || definition === undefined) throw new Error(DATASET_AUTOMATIONS_UNSUPPORTED);
-      return runDataset({ claim: held.claim, automation, definition, collection, roster, signal });
-    });
+    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
+      ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
+      : runDatasetAutomation({
+        withHost: (work) => this.withLiveHost(work),
+        evaluator: this.options.evaluator,
+        store: this.options.store,
+        nowMs: () => this.nowMs(),
+      }, { claim: held.claim, automation, collection, roster, signal, stopped: stop }));
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.
@@ -1814,7 +1866,7 @@ export class CollectionAutomations {
     if (this.isSubscribed(held)) return;
     const { automationId } = held.claim;
     if (held.source === "dataset") {
-      await this.withLiveLedger((ledger) => ledger.unsubscribe(held.claim.datasetId, automationId));
+      await this.withLiveHost((ledger) => ledger.unsubscribe(held.claim.datasetId, automationId));
       return;
     }
     const id = parseCollectionAutomationId(automationId);

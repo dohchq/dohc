@@ -316,18 +316,27 @@ export interface RegistryEntry extends CreatedWorkspace {
 }
 
 /**
+ * Where an automation's acknowledgment is recorded: its engine id, or for a
+ * dataset automation its id and the dataset instance its count belongs to,
+ * so a dataset made again starts with nothing acknowledged.
+ */
+export function automationFailureAckKey(failure: { automationId: string; datasetInstance: string | null }): string {
+  return failure.datasetInstance === null ? failure.automationId : `${failure.automationId}@${failure.datasetInstance}`;
+}
+
+/**
  * The failure rows the owner has not acknowledged yet: generation above the
  * recorded acknowledgment. Generic over the row so the pure store does not
  * import the wire type.
  */
 export function unacknowledgedAutomationFailures<
-  F extends { automationId: string; generation: number },
+  F extends { automationId: string; datasetInstance: string | null; generation: number },
 >(
   failures: readonly F[],
   acks: Record<string, number> | undefined,
 ): F[] {
   return failures.filter(
-    (failure) => failure.generation > (acks?.[failure.automationId] ?? 0),
+    (failure) => failure.generation > (acks?.[automationFailureAckKey(failure)] ?? 0),
   );
 }
 

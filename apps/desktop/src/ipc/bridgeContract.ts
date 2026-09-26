@@ -5298,6 +5298,9 @@ export const AutomationFailureNotice = z.object({
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
+  // A dataset automation's failures count per instance of its dataset, which
+  // a delete and remake or a restore replaces; null for a document Collection.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
 
@@ -5315,6 +5318,8 @@ export const DismissAutomationFailurePayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: z.string().min(1),
   generation: z.number().int().nonnegative(),
+  // The notice's dataset instance. A dismissal of an earlier instance changes nothing.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type DismissAutomationFailurePayload = z.infer<
   typeof DismissAutomationFailurePayload
