@@ -258,7 +258,7 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
   if (sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !== publication.publicationId) throw notFound();
   const result: LinkAppPublicationAuthority = {
     descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
-      files: candidate.files.filter(file => file.path === "bundle.js" || file.path === "bundle.css")},
+      files: candidate.files},
     shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
     sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
   };

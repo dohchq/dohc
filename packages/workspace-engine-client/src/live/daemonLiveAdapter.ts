@@ -219,12 +219,13 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
-// The store refusals the desktop recovers from by moving the store aside.
-// Each is the storage crate's `code()` for the variant.
+// The store refusals the desktop names and recovers from. Each is the
+// storage crate's `code()` for the variant.
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
+  "migrated-by-newer-build",
 ] as const;
 export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 
@@ -333,7 +334,8 @@ export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
   );
 }
 
-const ERROR_CODES: readonly DaemonErrorCode[] = [
+// Every code the engine answers with. A crash report keeps only these.
+export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "AUTH_FAILED",
   "PROTOCOL_VERSION_UNSUPPORTED",
   "MALFORMED_FRAME",
@@ -389,7 +391,7 @@ function wireErrorFrom(error: unknown): DaemonWireError | null {
   const candidate = error.wireError;
   if (
     typeof candidate.code !== "string" ||
-    !ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
+    !DAEMON_ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
     typeof candidate.message !== "string" ||
     typeof candidate.retry !== "string" ||
     !RETRYABILITIES.includes(candidate.retry as Retryability)

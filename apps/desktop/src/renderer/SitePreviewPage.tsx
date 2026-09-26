@@ -26,6 +26,7 @@ import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppPublication } from "./OwnerAppPublication";
+import { ipcErrorMessage } from "./ipcError";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
@@ -299,7 +300,7 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       setLoad({
         status: "error",
-        message: error instanceof Error ? error.message : "Could not load this app.",
+        message: ipcErrorMessage(error, "Could not load this app."),
       });
     }
   }, [props.workspaceId, props.siteRoot, siteContext]);
@@ -432,9 +433,7 @@ export function SitePreviewPage(props: {
       if (!isCurrent() || generationRef.current > generationAtStart) return;
       setPreview(null);
       setActionError(
-        error instanceof Error
-          ? error.message
-          : `Could not start ${modeLabel(mode)} preview.`,
+        ipcErrorMessage(error, `Could not start ${modeLabel(mode)} preview.`),
       );
       return null;
     } finally {
@@ -528,7 +527,7 @@ export function SitePreviewPage(props: {
       if (isCurrent()) props.onShareSite?.(target);
     } catch (error) {
       if (isCurrent()) {
-        setActionError(error instanceof Error ? error.message : "Could not prepare this app for sharing.");
+        setActionError(ipcErrorMessage(error, "Could not prepare this app for sharing."));
       }
     }
   }, [preview, props.onOpenApp, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
@@ -628,7 +627,7 @@ export function SitePreviewPage(props: {
       setIdleReason("stopped");
     } catch (error) {
       if (!isCurrent()) return;
-      setActionError(error instanceof Error ? error.message : "Could not stop preview.");
+      setActionError(ipcErrorMessage(error, "Could not stop preview."));
     }
   }
 

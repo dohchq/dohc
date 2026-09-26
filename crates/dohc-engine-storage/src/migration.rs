@@ -5,6 +5,10 @@
 //! change appends a new migration with the next ordinal and flows through the
 //! same runner.
 //!
+//! Before the runner, the open ritual refuses a store whose ledger holds a
+//! migration this list does not define, completed or not: a newer build ran
+//! it.
+//!
 //! The runner walks the list in order. A migration whose completed ledger row
 //! matches this build's checksum is skipped; a completed row with a different
 //! checksum fails closed; a missing row is applied. Body, `user_version`
@@ -2493,7 +2497,10 @@ CREATE TABLE share_direct_write_plan (
 ) STRICT;
 ";
 
-/// The frozen, ordered list of migrations this build knows.
+/// The frozen, ordered list of migrations this build knows. No build may
+/// delete or rename the `v2-baseline` ledger row, because an older build
+/// recognizes a newer store only by that row and would otherwise offer
+/// Rebuild for it.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 0,
@@ -2579,6 +2586,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_SHARE_DIRECT_WRITES_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 14,
+        id: "v2-authored-create-intent",
+        sql: "CREATE TABLE authored_create_intent (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), input_json TEXT NOT NULL, stage_id TEXT NOT NULL) STRICT;",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -2654,6 +2667,44 @@ fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError
         }
     }
     Ok(())
+}
+
+/// The refusal for a store a newer build migrated, or `None`. The ledger must
+/// be this engine's, which the baseline row proves, and hold a row
+/// `migrations` does not define. A newer build wrote that row, whether or not
+/// its migration completed, and this build cannot know what it changed.
+/// Reads only, so the open ritual asks before it writes anything.
+pub(crate) fn newer_build_refusal(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> rusqlite::Result<Option<StorageError>> {
+    let mut ledger = match conn
+        .prepare("SELECT ordinal, id FROM engine_migrations ORDER BY ordinal")
+    {
+        Ok(statement) => statement,
+        // No ledger, no newer migration. The open's validation judges the
+        // rest of the file.
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            return Ok(None);
+        }
+        Err(other) => return Err(other),
+    };
+    let rows = ledger
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !rows.iter().any(|(_, id)| id == BASELINE_MIGRATION_ID) {
+        return Ok(None);
+    }
+    Ok(rows
+        .into_iter()
+        .find(|(_, id)| !migrations.iter().any(|migration| migration.id == id))
+        .map(|(ordinal, id)| StorageError::MigratedByNewerBuild {
+            ordinal,
+            // The id reaches the desktop's technical details; bound it.
+            id: id.chars().take(64).collect(),
+        }))
 }
 
 /// Run every pending migration in `migrations` (ordered) against `conn`,
@@ -2857,6 +2908,10 @@ mod tests {
             (
                 "v2-share-direct-writes",
                 "8a34d5488c9313ad8f2ad2b84cb5c274ff1e2a9a06b962a14141e9188b399c46",
+            ),
+            (
+                "v2-authored-create-intent",
+                "be47dca6cca30c2330af64417998687bd61443adf6ad5677325216f63b9a590e",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3433,6 +3488,120 @@ mod tests {
     #[test]
     fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
+    }
+
+    /// An older build cannot know what a newer build's migration changed, so
+    /// it must not run against the store. The newer list here is this build's
+    /// plus one, so the test holds whatever the shipped count is.
+    #[test]
+    fn a_shorter_migration_list_refuses_a_store_with_an_extra_completed_row() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let mut newer = BASELINE_MIGRATIONS.to_vec();
+        newer.push(Migration {
+            ordinal: BASELINE_MIGRATIONS.len() as u32,
+            id: "from-a-newer-build",
+            sql: "CREATE TABLE from_a_newer_build (x INTEGER);",
+            sets_user_version: None,
+        });
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("the newer build migrates");
+
+        assert!(
+            newer_build_refusal(&conn, &newer)
+                .expect("read ledger")
+                .is_none(),
+            "the newer build opens its store"
+        );
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("a shorter list refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "a newer build ran migration {} (from-a-newer-build), which this build does not define",
+                BASELINE_MIGRATIONS.len()
+            )
+        );
+    }
+
+    /// A build that knows ordinals 0 through 13 refuses a store migrated to
+    /// 15 and names the first migration it does not define. Stand-ins fill
+    /// the ordinals up to 15 that this build does not ship yet.
+    #[test]
+    fn a_build_that_knows_13_refuses_a_store_at_15() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let mut newer = BASELINE_MIGRATIONS.to_vec();
+        assert_eq!(newer[13].ordinal, 13, "main ships ordinals 0 through 13");
+        while let Some(last) = newer.last().map(|m| m.ordinal)
+            && last < 15
+        {
+            let (id, sql) = match last + 1 {
+                14 => ("stand-in-14", "CREATE TABLE stand_in_14 (x INTEGER);"),
+                _ => ("stand-in-15", "CREATE TABLE stand_in_15 (x INTEGER);"),
+            };
+            newer.push(Migration {
+                ordinal: last + 1,
+                id,
+                sql,
+                sets_user_version: None,
+            });
+        }
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("migrate to 15");
+
+        let refused = newer_build_refusal(&conn, &newer[..14])
+            .expect("read ledger")
+            .expect("a build that knows 13 refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        let first_unknown = format!("a newer build ran migration {} (", newer[14].ordinal);
+        assert!(refused.to_string().starts_with(&first_unknown), "{refused}");
+    }
+
+    /// A newer build's migration that stopped before it completed can still
+    /// have changed the store. Its started row alone refuses the store.
+    #[test]
+    fn a_newer_builds_unfinished_migration_refuses_the_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("migrate");
+        conn.execute(
+            "INSERT INTO engine_migrations \
+             (ordinal, id, checksum, engine_build, protocol_version, transactional, started_at) \
+             VALUES (?1, 'from-a-newer-build', 'newer', 'newer', 1, 0, 2)",
+            [BASELINE_MIGRATIONS.len() as i64],
+        )
+        .expect("a newer build starts a migration and stops");
+
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("the started row refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+    }
+
+    /// Only this engine's ledger names a newer build. A table with the same
+    /// name but no baseline row belongs to something else, and the open's own
+    /// checks classify it.
+    #[test]
+    fn a_ledger_without_the_baseline_row_names_no_newer_build() {
+        let dir = tempdir();
+        let conn = open_bare(&dir.join("engine.db"));
+        conn.execute_batch(
+            "CREATE TABLE engine_migrations (ordinal INTEGER, id TEXT);
+             INSERT INTO engine_migrations VALUES (0, 'someone-elses-migration');",
+        )
+        .expect("a foreign ledger");
+        assert!(
+            newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+                .expect("read ledger")
+                .is_none()
+        );
     }
 
     /// A one-shot crash injector local to the storage crate's tests (the

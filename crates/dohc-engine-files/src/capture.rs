@@ -52,6 +52,13 @@ pub enum IngestOutcome {
     /// ownership change (policy widened, content became ownable) re-ingests
     /// on the next scan instead of reading as already-captured.
     NotOwned,
+    /// A live document session holds a new file, and its own settle records
+    /// the content. The op is neither acknowledged nor failed, and the run
+    /// stays clean. The manifest drops any entry it had for the path, so every
+    /// later scan offers it again, even with bytes an earlier file there had.
+    /// The capture driver asks for that scan once a session releases its
+    /// lease.
+    Deferred,
 }
 
 /// The actual content identity an applied ingest persisted.
@@ -115,6 +122,9 @@ pub struct CaptureApplyResult {
     pub not_owned_paths: Vec<String>,
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
+    /// Ingests the sink deferred to a live document session, in plan order.
+    /// Their manifest entries are dropped, and they do not degrade the run.
+    pub deferred_paths: Vec<String>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
     /// controller safely retries that unit and any earlier committed units.
@@ -237,6 +247,7 @@ enum Applied {
     Ingested { size: u64, sha256: String },
     Retired,
     NotOwned,
+    Deferred,
 }
 
 impl From<IngestOutcome> for Applied {
@@ -244,6 +255,7 @@ impl From<IngestOutcome> for Applied {
         match outcome {
             IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
             IngestOutcome::NotOwned => Self::NotOwned,
+            IngestOutcome::Deferred => Self::Deferred,
         }
     }
 }
@@ -253,6 +265,7 @@ struct Receipt {
     captured: Vec<CapturedIngest>,
     not_owned_paths: Vec<String>,
     failed_applies: Vec<String>,
+    deferred_paths: Vec<String>,
 }
 
 impl Receipt {
@@ -262,6 +275,7 @@ impl Receipt {
             captured: Vec::with_capacity(capacity),
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
+            deferred_paths: Vec::new(),
         }
     }
 
@@ -277,6 +291,7 @@ impl Receipt {
             }
             Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
             Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
+            Ok(Applied::Deferred) => self.deferred_paths.push(op.path().to_owned()),
             Err(_) => self.failed_applies.push(op.path().to_owned()),
         }
     }
@@ -292,6 +307,7 @@ impl Receipt {
             captured: self.captured,
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
+            deferred_paths: self.deferred_paths,
             crashed_after_durable_boundary: Some(boundary_path.to_owned()),
             degraded: true,
         }
@@ -304,6 +320,7 @@ impl Receipt {
             captured: self.captured,
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
+            deferred_paths: self.deferred_paths,
             crashed_after_durable_boundary: None,
             degraded,
         }

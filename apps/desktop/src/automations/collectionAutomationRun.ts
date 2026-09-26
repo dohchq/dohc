@@ -268,6 +268,7 @@ async function plan(
       }
     }
     const found = new Map<number, RunRecord[]>();
+    const truncatedFinds = new Set<number>();
     for (const find of findsOf(automation)) {
       const { query } = find;
       const filter = query.match === "all" ? undefined : {
@@ -280,13 +281,18 @@ async function plan(
         ...(filter ? { filter } : {}),
         limit: MAX_FOUND_RECORDS,
       });
-      found.set(find.ordinal, result.records.map(runRecordOf));
+      if (result.nextCursor !== null) {
+        // The planner refuses this Find only if its branch runs. Never bind a partial page.
+        truncatedFinds.add(find.ordinal);
+      } else {
+        found.set(find.ordinal, result.records.map(runRecordOf));
+      }
     }
-    return { removed: false, record, found } as const;
+    return { removed: false, record, found, truncatedFinds } as const;
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found };
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   // Formulas read `now` as the time of the change, so every attempt plans
   // the same values.
