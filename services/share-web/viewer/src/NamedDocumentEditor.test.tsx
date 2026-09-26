@@ -47,3 +47,22 @@ it("shows no properties section for a file without frontmatter", async () => {
   await act(async () => root.render(<NamedDocumentEditor session={session("Body")} path="docs/a.md" onState={() => {}}/>));
   expect(container.querySelector('section[aria-label="Properties"]')).toBeNull();
 });
+
+it("says the file could not open, not that the connection failed, when the share service refuses it", async () => {
+  const live = session("Body");
+  const unavailable: NamedLiveBrowserState = {...live.state(), status: "disconnected", reason: "authority-unavailable"};
+  await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => unavailable}} path="docs/a.md" link onState={() => {}}/>));
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("dohc could not open the file for editing. Try again.");
+  const button = container.querySelector("button");
+  expect(button?.textContent).toBe("Try again");
+  await act(async () => button?.click());
+  expect(live.reconnect).toHaveBeenCalledOnce();
+});
+
+it("asks the reader to check the connection when the connection failed", async () => {
+  const live = session("Body");
+  const closed: NamedLiveBrowserState = {...live.state(), status: "disconnected", reason: "transport-closed"};
+  await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => closed}} path="docs/a.md" onState={() => {}}/>));
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("Editing paused. Check your connection, then retry.");
+  expect(container.querySelector("button")?.textContent).toBe("Retry connection");
+});

@@ -1,5 +1,5 @@
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {RETRY_BUDGET_MS} from "./retry";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.
@@ -13,6 +13,7 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
     redirect: "error", signal, headers: {accept: "application/json", ...(body === undefined ? {} : {"content-type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
+    if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError("Unavailable");
     if (response.status !== 200 || response.redirected || !response.body ||
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw Error("Unavailable");
     const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});

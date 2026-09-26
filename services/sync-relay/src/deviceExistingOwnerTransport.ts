@@ -25,7 +25,8 @@ export interface ExistingOwnerSession {
 export interface ExistingOwnerDeviceConfig {
   client: EngineClient;
   workspaces: readonly { workspaceId: string; workspaceHandle: string }[];
-  ownerFor(binding: LiveObjectBinding): ExistingOwnerSession;
+  /** May wait for the open document to learn a claim this device just made. */
+  ownerFor(binding: LiveObjectBinding): Promise<ExistingOwnerSession>;
   maxQueuedBytes: number;
   maxFrameBytes: number;
   maxUploads: number;
@@ -211,7 +212,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const existing = [...registrations.values()].find(row => isDeepStrictEqual(row.binding,binding));
         if (existing && resumeAdoptionId === undefined) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}},signal); return; }
         if (!existing && registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
-        try {owner = existing?.owner ?? config.ownerFor(binding); owner.assertCurrent();}
+        try {owner = existing?.owner ?? await config.ownerFor(binding); owner.assertCurrent();}
         catch (error) {
           if (resumeAdoptionId === undefined) throw error;
           owner = undefined;

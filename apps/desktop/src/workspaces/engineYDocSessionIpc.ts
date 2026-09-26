@@ -57,6 +57,13 @@ import {
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 
+/** The session holds no claim yet, and every binding names one. */
+class OwnerClaimNotLearned extends Error {
+  constructor(readonly resync: () => Promise<void>) {
+    super("The open document has not learned its sync claim yet.");
+  }
+}
+
 export interface EngineYDocIpcSender {
   readonly id: number;
   isDestroyed(): boolean;
@@ -904,7 +911,22 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return applied;
   }
 
-  existingOwner(binding: LiveObjectBinding) {
+  /**
+   * Turning sync on claims an open document's history, then tells its session
+   * to resync, which is how the session learns the claim. A registration that
+   * arrives in between waits for that resync once. Any other mismatch refuses.
+   */
+  async existingOwner(binding: LiveObjectBinding) {
+    try {
+      return this.#existingOwner(binding);
+    } catch (error) {
+      if (!(error instanceof OwnerClaimNotLearned)) throw error;
+      await error.resync();
+    }
+    return this.#existingOwner(binding);
+  }
+
+  #existingOwner(binding: LiveObjectBinding) {
     const authority = this.#acquireWorkspace(binding.workspaceId);
     try {
       authority.assertCurrent();
@@ -922,7 +944,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         captured.assertCurrent();
         if (!renderer?.isCurrent() || captured.caller.sender.isDestroyed() || owned.deleted || this.#isSharedView(owned.workspace) ||
           owned.provider.nativeOwner?.sessionId !== native.sessionId || owned.provider.objectId !== binding.objectId ||
-          owned.provider.versionId !== binding.mainVersionId || owned.provider.lineageClaimId !== binding.lineageClaimId) throw new Error("Existing owner changed.");
+          owned.provider.versionId !== binding.mainVersionId) throw new Error("Existing owner changed.");
+        const claim = owned.provider.lineageClaimId ?? null;
+        if (claim === null) throw new OwnerClaimNotLearned(() => native.resyncIfNeeded());
+        if (claim !== binding.lineageClaimId) throw new Error("Existing owner changed.");
       };
       assertCurrent();
       return {

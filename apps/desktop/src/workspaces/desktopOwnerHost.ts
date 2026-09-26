@@ -75,8 +75,8 @@ export function startDesktopOwnerHost(options: {
         try {bound.assertCurrent();}
         catch (error) {connected?.stop(); throw error;}
       };
-      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = binding => {
-        assertCurrent(); const owner = options.ownerFor(binding);
+      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = async binding => {
+        assertCurrent(); const owner = await options.ownerFor(binding); assertCurrent();
         return {...owner,assertCurrent() {assertCurrent(); owner.assertCurrent();}};
       };
       connected = connectDeviceHost({url: options.config.url,credential: options.config.credential,limits: options.config.control,

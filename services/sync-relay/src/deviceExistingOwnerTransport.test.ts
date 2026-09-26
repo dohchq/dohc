@@ -32,7 +32,7 @@ it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])
     finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
   let stale = false;
   const staleOwner = {...owner,nativeSessionId:"stale-session",assertCurrent:vi.fn(() => {if (stale) throw new Error("Owner session retired.");})};
-  const ownerFor = vi.fn((binding:{objectId:string}) => {
+  const ownerFor = vi.fn(async (binding:{objectId:string}) => {
     if (binding.objectId === "missing-owner") throw new Error("Owner session unavailable.");
     return binding.objectId === "stale-owner" ? staleOwner : owner;
   });
@@ -113,7 +113,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
     sendLiveApplication: vi.fn(async (_request: unknown,_event: unknown) => ({result: {status: "applied",ack: {}}})) };
-  const ownerFor = vi.fn(() => owner);
+  const ownerFor = vi.fn(async () => owner);
   transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor,
     maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 1,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
   try {
@@ -189,7 +189,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
     expect((await peer!.sendRequest({id: 12,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
     const acquired = ownerFor.mock.calls.length;
-    ownerFor.mockImplementationOnce(() => {throw new Error("renderer session is closed");});
+    ownerFor.mockImplementationOnce(async () => {throw new Error("renderer session is closed");});
     singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
     expect((await peer!.sendRequest({id: 13,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
     expect(ownerFor).toHaveBeenCalledTimes(acquired);

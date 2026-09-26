@@ -1442,6 +1442,51 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  // Owner registration can arrive between the resync request and its
+  // result. It waits on the provider's native owner, not on a timer.
+  it("lets the provider's owner wait for the resync that brings the claim", async () => {
+    const engine = seedPlaintextEngine("idle");
+    let claimed = false;
+    const resynced = Promise.withResolvers<void>();
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync || !claimed) return response;
+        await resynced.promise;
+        return {
+          ...response,
+          result: {
+            ...(response.result as Record<string, JsonValue>),
+            lineageClaimId: "own-claim",
+            lineageOriginatedHere: true,
+          },
+        };
+      },
+    };
+    const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION,
+      path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined});
+    const owner = provider.nativeOwner!;
+    await owner.resyncIfNeeded();
+    expect(provider.lineageClaimId).toBeNull();
+
+    claimed = true;
+    engine.emitEvent({
+      name: YDOC_EVENT.remoteUpdate,
+      seq: 100,
+      sessionGeneration: 1,
+      payload: { sessionId: owner.sessionId, resyncRequired: true },
+    });
+    let learned = false;
+    const waiting = owner.resyncIfNeeded().then(() => { learned = provider.lineageClaimId === "own-claim"; });
+    expect(provider.lineageClaimId).toBeNull();
+    resynced.resolve();
+    await waiting;
+    expect(learned).toBe(true);
+    await provider.close();
+  });
+
   it("takes the claim its own lost record made and keeps its document", async () => {
     const engine = seedPlaintextEngine("local");
     let claimed = false;
