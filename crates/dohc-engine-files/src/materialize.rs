@@ -286,20 +286,34 @@ impl AuthoredCreateStage {
     }
 
     pub fn prepare(&self, text: &str) -> Result<(), MaterializeError> {
-        use std::io::Write;
         if text.len() > MAX_MATERIALIZE_BYTES {
             return Err(MaterializeError::TooLarge { actual: text.len() });
         }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.stage)
-            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
-        file.write_all(text.as_bytes())
-            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
-        file.sync_all()
-            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
-        sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
+        prepare_target_parent_symlink_free(&self.root, &self.target)?;
+        let sibling = self.preparation_sibling();
+        let prepared = (|| {
+            // Create in the destination directory to inherit its security metadata.
+            let file = write_temp(&sibling, text.as_bytes())?;
+            file.sync_all()
+                .map_err(|error| MaterializeError::io(&sibling, &error))?;
+            std::fs::hard_link(&sibling, &self.stage)
+                .map_err(|error| MaterializeError::io(&self.stage, &error))?;
+            sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
+        })();
+        let removed = remove_authored_preparation(&sibling);
+        prepared?;
+        removed?;
+        sync_parent_dir(sibling.parent(), DurabilityPolicy::per_os())
+    }
+
+    fn preparation_sibling(&self) -> PathBuf {
+        temp_sibling(
+            &self.target,
+            &format!(
+                "authored-create-{}",
+                self.stage.file_stem().expect("stage ID").to_string_lossy()
+            ),
+        )
     }
 
     /// False means an existing entry won. Never overwrite or follow that entry.
@@ -374,11 +388,22 @@ impl AuthoredCreateStage {
     }
 
     pub fn cleanup(&self) -> Result<(), MaterializeError> {
+        remove_authored_preparation(&self.preparation_sibling())?;
         match std::fs::remove_file(&self.stage) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(e) => Err(MaterializeError::io(&self.stage, &e)),
         }
+    }
+}
+
+fn remove_authored_preparation(path: &Path) -> Result<(), MaterializeError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(())
+        }
+        Err(error) => Err(MaterializeError::io(path, &error)),
     }
 }
 
@@ -2328,6 +2353,119 @@ fn rename_no_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authored_create_preparation_retains_only_private_identity() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-preparation").expect("scratch");
+        let stage =
+            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
+                .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        assert!(!stage.preparation_sibling().exists());
+        assert!(!stage.target.exists());
+        assert_eq!(
+            std::fs::read_to_string(&stage.stage).expect("private bytes"),
+            "authored"
+        );
+        std::fs::remove_dir(stage.target.parent().expect("parent"))
+            .expect("destination removed after preparation");
+        assert!(stage.stage.exists());
+        let reopened =
+            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
+                .expect("reopen");
+        assert!(reopened.publish().expect("publish"));
+        assert!(reopened.is_published().expect("retained identity"));
+    }
+
+    #[test]
+    fn authored_create_failed_preparation_removes_sibling_and_preserves_existing_evidence() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-prepare-failure").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"e".repeat(64))
+            .expect("stage");
+        std::fs::write(&stage.stage, "prior evidence").expect("existing stage");
+        assert!(stage.prepare("new attempt").is_err());
+        assert!(!stage.preparation_sibling().exists());
+        assert_eq!(
+            std::fs::read_to_string(&stage.stage).expect("private bytes"),
+            "prior evidence"
+        );
+        stage.cleanup().expect("discard abandoned preparation");
+        stage.prepare("retry").expect("retry");
+    }
+
+    #[test]
+    fn authored_create_abandoned_sibling_never_becomes_user_content() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-orphan-sibling").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"f".repeat(64))
+            .expect("stage");
+        let sibling = stage.preparation_sibling();
+        std::fs::write(&sibling, "partial preparation").expect("crash before evidence link");
+        assert!(crate::floor::is_excluded_file(
+            sibling.file_name().unwrap().to_str().unwrap()
+        ));
+        stage.cleanup().expect("retry cleanup before intent");
+        assert!(!sibling.exists());
+        stage.prepare("complete").expect("prepare");
+        std::fs::hard_link(&stage.stage, &sibling).expect("crash after private evidence link");
+        stage.cleanup().expect("cleanup both private names");
+        assert!(!sibling.exists());
+        assert!(!stage.stage.exists());
+        assert!(!stage.target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authored_create_uses_ordinary_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = dohc_test_scratch::ScratchDir::new_named("authored-mode").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"1".repeat(64))
+            .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        let mode = std::fs::metadata(&stage.stage)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode & !0o600, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authored_create_inherits_destination_acl() {
+        fn powershell(path: &std::path::Path, script: &str) {
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("DOHC_ACL_PROBE", path)
+                .output()
+                .expect("powershell");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let root = dohc_test_scratch::ScratchDir::new_named("authored-acl").expect("scratch");
+        let destination = root.path().join("destination");
+        std::fs::create_dir(&destination).expect("directory");
+        powershell(
+            &destination,
+            r#"$ErrorActionPreference='Stop'; $acl=[System.IO.Directory]::GetAccessControl($env:DOHC_ACL_PROBE); $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,[System.Security.AccessControl.FileSystemRights]::Read,[System.Security.AccessControl.InheritanceFlags]'ObjectInherit,ContainerInherit',[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow); $acl.AddAccessRule($rule); [System.IO.Directory]::SetAccessControl($env:DOHC_ACL_PROBE,$acl)"#,
+        );
+        let stage =
+            super::AuthoredCreateStage::open(root.path(), "destination/record.md", &"2".repeat(64))
+                .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        stage.publish().expect("publish");
+        powershell(
+            &stage.target,
+            r#"$ErrorActionPreference='Stop'; $rules=([System.IO.File]::GetAccessControl($env:DOHC_ACL_PROBE)).GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (-not ($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' -and $_.IsInherited -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) })) { throw 'Destination inherited Read ACE is missing' }"#,
+        );
+        assert!(stage.is_published().expect("same inode"));
+        assert!(!stage.preparation_sibling().exists());
+    }
+
     #[test]
     fn authored_create_resolves_ambiguous_link_outcomes_by_identity() {
         for kind in [
