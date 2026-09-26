@@ -131,7 +131,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
-    releaseAutomationGroups: async () => ({ takenGeneration: 0, handover: { floorMs: 0, automations: [] } }),
+    releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async () => ({ needsHandover: false }),
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),
@@ -159,7 +159,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     onPressSettled: (event) => { settled.push(event); wake(); },
     onPressWaiting: (event) => { waiting.push(event); wake(); },
     groupHost: async () => (options.groups ? 0 : null),
-    groupHandover: async () => ({ state: "unchanged" }),
+    groupRelayRecord: async () => ({ generation: 0, handover: null }),
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },

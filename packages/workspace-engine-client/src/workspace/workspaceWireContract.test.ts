@@ -624,8 +624,8 @@ describe("automations wire schemas", () => {
       ],
     };
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { takenGeneration: 3, handover }),
-    ).toEqual({ takenGeneration: 3, handover });
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { watchedGeneration: 3, handover }),
+    ).toEqual({ watchedGeneration: 3, handover });
     expect(decodeAutomationGroupHandover(handover)).toEqual(handover);
     expect(() =>
       decodeAutomationGroupHandover({

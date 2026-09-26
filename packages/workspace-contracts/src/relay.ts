@@ -612,21 +612,22 @@ export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // A release carries, as `groups`, what the next host needs so each Group
 // message starts its automations exactly once across the handover: the
 // Collection automations the computer handing over watched, and the ids of
-// the Group messages it and earlier hosts already decided, at most one
-// window of them. The relay keeps it, as a JSON object it does not read, for
-// the computer the release names, until the next release.
-// `groupsTaken` is the generation of the last handover the releasing
-// computer took. When that is older than the handover the relay holds, that
-// computer never took it, so it ran nothing since, and the relay keeps that
-// handover for the next computer instead.
-export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 2 * 1024 * 1024;
+// the Group messages it and earlier hosts already decided, at most 2,000 of
+// them. The relay keeps it, as a JSON object it does not read, for the
+// computer the release names, until the next release or take over.
+// `groupsWatched` is the host generation at which the releasing computer
+// last watched its Group subscriptions. When the relay recorded a release or
+// take over after that, that computer ran nothing since, so its handover is
+// stale: the relay carries a handover it holds on to the next computer, and
+// after a take over, the next computer starts from now.
+export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 // GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
 // for the current host's generation; another is refused with `conflict`.
-// `groups` is the Group handover the relay keeps for the current host, with
-// the `generation` it keeps it under. With `groups` null, `generation` says
-// another computer ran since this one last ran, as a take over does; null
-// says nobody did.
+// `generation` is the host generation the relay's last release or take over
+// started, null for none. `groups` is that release's Group handover when it
+// names the current host, and null after a take over or for another
+// computer.
 export interface RelayAutomationGroupHandoverResponse {
   ok: true;
   generation: number | null;

@@ -26,7 +26,7 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
-  type AutomationGroupHandoverState,
+  type AutomationGroupRelayRecord,
   type AutomationReleaseGroupsResult,
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
@@ -234,11 +234,11 @@ export interface CollectionAutomationsOptions {
    */
   groupHost(): Promise<number | null>;
   /**
-   * What the relay keeps for this computer at this host generation: the
-   * handover a release left for it, none it has not taken already, or one
-   * left for another computer. Throws when the relay does not answer.
+   * The relay's last release or take over, read at this host generation,
+   * with the handover when a release left it for this computer. Throws when
+   * the relay does not answer.
    */
-  groupHandover(generation: number): Promise<AutomationGroupHandoverState>;
+  groupRelayRecord(generation: number): Promise<AutomationGroupRelayRecord>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
@@ -2335,9 +2335,9 @@ export class CollectionAutomations {
 
   /**
    * The engine watches exactly these Groups at this host generation. A new
-   * generation first needs its handover: the engine changes nothing until
-   * the relay's copy arrives, then takes it and claims each stored message
-   * no host decided, in one write.
+   * generation first needs the relay's record: the engine changes nothing
+   * until it arrives, then takes a handover left here and claims each
+   * stored message no host decided, in one write.
    */
   private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
     // A watch may land even when its answer is lost.
@@ -2349,9 +2349,9 @@ export class CollectionAutomations {
     };
     let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
     if (answer?.needsHandover) {
-      let handover: AutomationGroupHandoverState;
+      let relay: AutomationGroupRelayRecord;
       try {
-        handover = await this.options.groupHandover(generation);
+        relay = await this.options.groupRelayRecord(generation);
       } catch (error) {
         // Nothing changed in the engine. The next sync pull asks again.
         this.handoverUnread = true;
@@ -2359,7 +2359,7 @@ export class CollectionAutomations {
         return;
       }
       this.handoverUnread = false;
-      answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, handover }));
+      answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, relay }));
     }
     if (answer === null || answer.needsHandover) return;
     for (const [automationId, subscription] of [...this.subscribed]) {

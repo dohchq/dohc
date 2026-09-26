@@ -2516,9 +2516,9 @@ ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
 /// or skipped as the automation's own post, including those an earlier host
 /// handed over. A message it names never claims again here, and the next
 /// host gets the recent part. The import row holds the host generation this
-/// computer last watched at, and the relay generation and time of the last
-/// handover it took, so the same handover never applies twice. Coverage
-/// starts with the message claims this computer already holds.
+/// computer last watched at, so a relay record no newer than it changes
+/// nothing, and when it last took a handover. Coverage starts with the
+/// message claims this computer already holds.
 const V2_AUTOMATION_GROUP_COVERAGE_DDL: &str = "\
 ALTER TABLE automation_group_subscriptions
     ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1));
@@ -2532,10 +2532,9 @@ CREATE TABLE automation_group_coverage (
 CREATE INDEX idx_automation_group_coverage_created
     ON automation_group_coverage(workspace_id, created_at_ms);
 CREATE TABLE automation_group_imports (
-    workspace_id        TEXT    NOT NULL PRIMARY KEY,
-    generation          INTEGER NOT NULL CHECK (generation >= 0),
-    handover_generation INTEGER NOT NULL CHECK (handover_generation >= 0),
-    imported_at_ms      INTEGER NOT NULL
+    workspace_id   TEXT    NOT NULL PRIMARY KEY,
+    generation     INTEGER NOT NULL CHECK (generation >= 0),
+    imported_at_ms INTEGER NOT NULL
 ) STRICT;
 INSERT OR IGNORE INTO automation_group_coverage
     (workspace_id, automation_id, message_id, created_at_ms)
@@ -2979,7 +2978,7 @@ mod tests {
             ),
             (
                 "v2-automation-group-coverage",
-                "9c122f9cd9f29a4b07ace078c040912b9c84f41b3fcfa68b76178c8a4d077861",
+                "d4ab2fefcb14de1667162d3b5242d73a29cf6f6f0865d191c75913ce7dcc50cd",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

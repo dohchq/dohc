@@ -10,7 +10,7 @@ use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
 use dohc_engine_domain::AutomationGroupHandover;
 use dohc_engine_domain::AutomationGroupHandoverAutomation;
-use dohc_engine_domain::AutomationGroupHandoverInput;
+use dohc_engine_domain::AutomationGroupRelayRecord;
 use dohc_engine_domain::AutomationGroupSubscription;
 use dohc_engine_domain::AutomationGroupWatch;
 use dohc_engine_domain::AutomationPress;
@@ -63,7 +63,7 @@ struct AutomationReleaseGroupsParams {
 }
 
 /// Every Group subscription this computer watches, at the automation host
-/// generation it runs at. Without `handover`, the caller has not asked the
+/// generation it runs at. Without `relay`, the caller has not asked the
 /// relay.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -71,22 +71,24 @@ struct AutomationWatchGroupsParams {
     generation: i64,
     subscriptions: Vec<AutomationGroupSubscriptionParams>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    handover: Option<AutomationGroupHandoverStateParams>,
+    relay: Option<AutomationGroupRelayParams>,
     now_ms: Option<i64>,
 }
 
-/// What the relay holds for this computer at a new generation.
+/// The last release or take over the relay recorded, 0 for none, with the
+/// handover when a release left it for this computer.
 #[derive(Deserialize)]
-#[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
-enum AutomationGroupHandoverStateParams {
-    Missing,
-    Unchanged,
-    Fetched {
-        generation: i64,
-        #[serde(rename = "floorMs")]
-        floor_ms: i64,
-        automations: Vec<AutomationGroupHandoverAutomationParams>,
-    },
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupRelayParams {
+    generation: i64,
+    handover: Option<AutomationGroupHandoverParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupHandoverParams {
+    floor_ms: i64,
+    automations: Vec<AutomationGroupHandoverAutomationParams>,
 }
 
 #[derive(Deserialize)]
@@ -113,38 +115,25 @@ struct AutomationGroupDecidedParams {
     created_at_ms: i64,
 }
 
-/// What the relay held, as the engine takes it; absent when the caller has not asked.
-fn group_handover_input(
-    params: Option<AutomationGroupHandoverStateParams>,
-) -> AutomationGroupHandoverInput {
-    match params {
-        None => AutomationGroupHandoverInput::Unfetched,
-        Some(AutomationGroupHandoverStateParams::Missing) => AutomationGroupHandoverInput::Missing,
-        Some(AutomationGroupHandoverStateParams::Unchanged) => {
-            AutomationGroupHandoverInput::Unchanged
-        }
-        Some(AutomationGroupHandoverStateParams::Fetched {
-            generation,
-            floor_ms,
-            automations,
-        }) => AutomationGroupHandoverInput::Fetched {
-            generation,
-            handover: AutomationGroupHandover {
-                floor_ms,
-                automations: automations
-                    .into_iter()
-                    .map(|automation| AutomationGroupHandoverAutomation {
-                        automation_id: automation.automation_id,
-                        since_ms: automation.since_ms,
-                        decided: automation
-                            .decided
-                            .into_iter()
-                            .map(|decided| (decided.message_id, decided.created_at_ms))
-                            .collect(),
-                    })
-                    .collect(),
-            },
-        },
+fn group_relay_record(params: AutomationGroupRelayParams) -> AutomationGroupRelayRecord {
+    AutomationGroupRelayRecord {
+        generation: params.generation,
+        handover: params.handover.map(|handover| AutomationGroupHandover {
+            floor_ms: handover.floor_ms,
+            automations: handover
+                .automations
+                .into_iter()
+                .map(|automation| AutomationGroupHandoverAutomation {
+                    automation_id: automation.automation_id,
+                    since_ms: automation.since_ms,
+                    decided: automation
+                        .decided
+                        .into_iter()
+                        .map(|decided| (decided.message_id, decided.created_at_ms))
+                        .collect(),
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -375,7 +364,7 @@ impl EngineService {
         )
         .await?;
         Ok(json!({
-            "takenGeneration": released.taken_generation,
+            "watchedGeneration": released.watched_generation,
             "handover": automation_group_handover_json(&released.handover),
         }))
     }
@@ -403,7 +392,7 @@ impl EngineService {
                     starts_with: subscription.starts_with,
                 })
                 .collect(),
-            handover: group_handover_input(params.handover),
+            relay: params.relay.map(group_relay_record),
         };
         let watched = Self::read_under_ctx(
             &cancellation,

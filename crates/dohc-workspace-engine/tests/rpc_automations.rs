@@ -1379,7 +1379,7 @@ async fn group_messages_written_here_claim_through_rpc() {
         json!({ "nowMs": 36 }),
     )
     .await;
-    assert_eq!(released["takenGeneration"], json!(0));
+    assert_eq!(released["watchedGeneration"], json!(0));
     let handover = released["handover"].clone();
     assert_eq!(handover["automations"][0]["automationId"], json!(TASK));
     assert_eq!(
@@ -1396,14 +1396,14 @@ async fn group_messages_written_here_claim_through_rpc() {
     );
 
     // The next generation asks for its handover, then takes it.
-    let next = |handover: Option<Value>| {
+    let next = |relay: Option<Value>| {
         let mut params = json!({
             "generation": 2,
             "subscriptions": [{ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }],
             "nowMs": 40,
         });
-        if let Some(handover) = handover {
-            params["handover"] = handover;
+        if let Some(relay) = relay {
+            params["relay"] = relay;
         }
         params
     };
@@ -1422,10 +1422,11 @@ async fn group_messages_written_here_claim_through_rpc() {
         &mut id,
         "automations.watchGroups",
         next(Some(json!({
-            "state": "fetched",
             "generation": 2,
-            "floorMs": handover["floorMs"],
-            "automations": handover["automations"],
+            "handover": {
+                "floorMs": handover["floorMs"],
+                "automations": handover["automations"],
+            },
         }))),
     )
     .await;
@@ -1435,13 +1436,15 @@ async fn group_messages_written_here_claim_through_rpc() {
         &handle,
         &mut id,
         "automations.watchGroups",
-        next(Some(json!({ "state": "lost" }))),
+        next(Some(
+            json!({ "state": "fetched", "generation": 2, "handover": null }),
+        )),
     )
     .await;
     assert_eq!(
         unknown.code,
         ErrorCode::InvalidParams,
-        "only the relay's three answers"
+        "only the relay's record"
     );
 }
 

@@ -112,7 +112,7 @@ describe("automation hosts", () => {
       for (const [action, body] of [
         ["check-in", { installId: "ana-laptop", label: "Ana", claim: true }],
         ["choose", { installId: "desktop", generation: 1 }],
-        ["release", { installId: "desktop", generation: 1, releasedThroughMs: 1, groups: GROUPS, groupsTaken: 9 }],
+        ["release", { installId: "desktop", generation: 1, releasedThroughMs: 1, groups: GROUPS, groupsWatched: 9 }],
         ["take-over", { generation: 1 }],
       ] as const) {
         expect((await send(h, action, body, userId)).status, `${userId} ${action}`).toBe(404);
@@ -138,16 +138,16 @@ describe("automation hosts", () => {
     });
     expect((await send(h, "choose", { installId: "laptop", generation: 1 })).status, "stale").toBe(409);
     expect(
-      (await send(h, "release", { installId: "laptop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsTaken: 9 })).status,
+      (await send(h, "release", { installId: "laptop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 9 })).status,
       "only the computer handing over releases",
     ).toBe(409);
     expect(
-      (await send(h, "release", { installId: "desktop", generation: 1, releasedThroughMs: 5, groups: GROUPS, groupsTaken: 9 })).status,
+      (await send(h, "release", { installId: "desktop", generation: 1, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 9 })).status,
       "a release names the generation it read",
     ).toBe(409);
 
     const released = await state(
-      await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsTaken: 9 }),
+      await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsWatched: 9 }),
     );
     expect(released.host).toEqual({
       installId: "laptop",
@@ -165,14 +165,14 @@ describe("automation hosts", () => {
     expect(await (await groups(h, 1)).json(), "no release left one").toEqual({ ok: true, generation: null, groups: null });
     await send(h, "choose", { installId: "laptop", generation: 1 });
     expect(
-      (await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: [], groupsTaken: 1 })).status,
+      (await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: [], groupsWatched: 1 })).status,
       "groups is an object",
     ).toBe(400);
     expect(
       (await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5 })).status,
       "a release carries the Group handover",
     ).toBe(400);
-    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsTaken: 9 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 9 });
 
     expect(await (await groups(h, 3)).json()).toEqual({ ok: true, generation: 3, groups: GROUPS });
     expect((await groups(h, 2)).status, "not the current generation").toBe(409);
@@ -186,16 +186,29 @@ describe("automation hosts", () => {
     await send(h, "take-over", { generation: 4 });
     expect(await (await groups(h, 5)).json(), "another computer ran: a take over").toEqual({ ok: true, generation: 5, groups: null });
 
-    // The desktop runs on: a called-off handover later finds nobody else ran.
+    // A called-off handover later still finds the take over, for the
+    // desktop's engine to compare with the generation it last watched at.
     await send(h, "choose", { installId: "laptop", generation: 5 });
     await send(h, "choose", { installId: "desktop", generation: 6 });
-    expect(await (await groups(h, 7)).json()).toEqual({ ok: true, generation: null, groups: null });
+    expect(await (await groups(h, 7)).json()).toEqual({ ok: true, generation: 5, groups: null });
 
-    // Its release goes on as it is, whatever handover it took before.
+    // Once it watched after the take over, its release goes on as it is.
     await send(h, "choose", { installId: "laptop", generation: 7 });
     const afterTakeOver = { floorMs: 9, automations: [] };
-    await send(h, "release", { installId: "desktop", generation: 8, releasedThroughMs: 9, groups: afterTakeOver, groupsTaken: 0 });
+    await send(h, "release", { installId: "desktop", generation: 8, releasedThroughMs: 9, groups: afterTakeOver, groupsWatched: 7 });
     expect(await (await groups(h, 9)).json()).toEqual({ ok: true, generation: 9, groups: afterTakeOver });
+  });
+
+  it("starts the next computer from now when the one releasing never watched after its take over", async () => {
+    const { h } = await relay();
+    await checkIn(h, "desktop", true);
+    await checkIn(h, "laptop");
+    await send(h, "choose", { installId: "laptop", generation: 1 });
+    await send(h, "take-over", { generation: 2 });
+    // The laptop took over at 3 and never watched there.
+    await send(h, "choose", { installId: "desktop", generation: 3 });
+    await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 1 });
+    expect(await (await groups(h, 5)).json(), "its handover is stale").toEqual({ ok: true, generation: 5, groups: null });
   });
 
   it("keeps a handover for its computer across a handover the owner called off", async () => {
@@ -204,7 +217,7 @@ describe("automation hosts", () => {
     await checkIn(h, "laptop");
     await checkIn(h, "studio");
     await send(h, "choose", { installId: "laptop", generation: 1 });
-    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsTaken: 0 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 0 });
     // Before the laptop read it, the owner chose the studio, then the laptop again.
     await send(h, "choose", { installId: "studio", generation: 3 });
     const back = await state(await send(h, "choose", { installId: "laptop", generation: 4 }));
@@ -217,21 +230,21 @@ describe("automation hosts", () => {
     await checkIn(h, "desktop", true);
     await checkIn(h, "laptop");
     await send(h, "choose", { installId: "laptop", generation: 1 });
-    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsTaken: 0 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS, groupsWatched: 0 });
     // The laptop never read its handover before the owner chose the desktop back.
     await send(h, "choose", { installId: "desktop", generation: 3 });
     const untaken = { floorMs: 3, automations: [] };
-    await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 6, groups: untaken, groupsTaken: 0 });
+    await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 6, groups: untaken, groupsWatched: 0 });
     expect(await (await groups(h, 5)).json(), "the desktop's own handover").toEqual({ ok: true, generation: 5, groups: GROUPS });
 
     // A computer that took it hands over its own, which carries it on.
     await send(h, "choose", { installId: "laptop", generation: 5 });
     const taken = { floorMs: 4, automations: [] };
-    await send(h, "release", { installId: "desktop", generation: 6, releasedThroughMs: 7, groups: taken, groupsTaken: 5 });
+    await send(h, "release", { installId: "desktop", generation: 6, releasedThroughMs: 7, groups: taken, groupsWatched: 5 });
     expect(await (await groups(h, 7)).json()).toEqual({ ok: true, generation: 7, groups: taken });
     expect(
       (await send(h, "release", { installId: "laptop", generation: 7, releasedThroughMs: 8, groups: taken })).status,
-      "a release says which handover it took",
+      "a release says the generation it last watched at",
     ).toBe(400);
   });
 
@@ -261,7 +274,7 @@ describe("automation hosts", () => {
     await checkIn(h, "laptop");
     await checkIn(h, "studio");
     await send(h, "choose", { installId: "laptop", generation: 1 });
-    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsTaken: 9 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS, groupsWatched: 9 });
 
     // The laptop has not read the desktop's release when the owner chooses
     // the studio, so it reports its own older checkpoint.
@@ -273,7 +286,7 @@ describe("automation hosts", () => {
       releasedThroughMs: 9_000,
     });
     const released = await state(
-      await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5_000, groups: GROUPS, groupsTaken: 9 }),
+      await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 9 }),
     );
     expect(released.host).toEqual({
       installId: "studio",
@@ -301,7 +314,7 @@ describe("automation hosts", () => {
       releasedThroughMs: null,
     });
     expect(
-      (await send(h, "release", { installId: "desktop", generation: 3, releasedThroughMs: 1, groups: GROUPS, groupsTaken: 9 })).status,
+      (await send(h, "release", { installId: "desktop", generation: 3, releasedThroughMs: 1, groups: GROUPS, groupsWatched: 9 })).status,
       "a late release after a take-over changes nothing",
     ).toBe(409);
   });
@@ -355,7 +368,7 @@ describe("automation hosts", () => {
       generation: 2,
       releasedThroughMs: 1,
       groups: { ...GROUPS, padding: "x".repeat(padding) },
-      groupsTaken: 1,
+      groupsWatched: 1,
     });
     expect((await release(AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES)).status).toBe(413);
     expect((await release(AUTOMATION_HOST_MAX_BODY_BYTES)).status).toBe(200);
@@ -404,7 +417,7 @@ describe("automation hosts", () => {
       expect((await send(h, "check-in", body)).status, JSON.stringify(body)).toBe(400);
     }
     expect((await send(h, "choose", { installId: "desktop", generation: -1 })).status).toBe(400);
-    expect((await send(h, "release", { installId: "desktop", generation: 0, releasedThroughMs: 1.5, groups: GROUPS, groupsTaken: 9 })).status).toBe(400);
+    expect((await send(h, "release", { installId: "desktop", generation: 0, releasedThroughMs: 1.5, groups: GROUPS, groupsWatched: 9 })).status).toBe(400);
     expect((await h(request("owner", `${BASE}/check-in`))).status, "check-in is a POST").toBe(405);
     expect((await send(h, "read", {})).status).toBe(404);
     expect((await h(request("owner", `${BASE}/choose/extra`))).status).toBe(404);

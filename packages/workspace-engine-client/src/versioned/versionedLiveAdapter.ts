@@ -1188,7 +1188,8 @@ export class VersionedLiveAdapter {
 
   /**
    * Sets every Group subscription this computer watches, in one engine
-   * write, taking a new host generation's handover.
+   * write, taking the handover a release left for it at a new host
+   * generation.
    */
   async watchAutomationGroups(
     input: AutomationWatchGroupsParams,

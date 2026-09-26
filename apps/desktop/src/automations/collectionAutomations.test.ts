@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupHandoverState, ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
@@ -105,9 +105,10 @@ async function world(options: {
   const presses = new Map<string, string>();
   const pressEvents: unknown[] = [];
   const subscriptions = new Map<string, StoredSubscription>();
-  // The host generation the engine last took Group subscriptions at, and each handover it took.
+  // The host generation the engine last watched Group subscriptions at, and
+  // the relay record each new generation read.
   let groupGeneration = 0;
-  const tookHandovers: AutomationGroupHandoverState[] = [];
+  const relayRecords: AutomationGroupRelayRecord[] = [];
   const frozenGroups = new Map<string, StoredSubscription>();
   const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
@@ -187,8 +188,8 @@ async function world(options: {
     unsubscribeAutomation: async ({ automationId }) => { subscriptions.delete(automationId); wake(); return { unsubscribed: true }; },
     // The engine's Group rules: a release freezes them all and answers the
     // handover, the same when repeated; a watch at a host generation it has
-    // not taken asks for that generation's handover first, then sets the
-    // whole set.
+    // not watched at asks for the relay's record first, then sets the whole
+    // set.
     releaseAutomationGroups: async () => {
       for (const subscription of [...subscriptions.values()]) {
         if (!("groupId" in subscription)) continue;
@@ -197,7 +198,7 @@ async function world(options: {
       }
       wake();
       return {
-        takenGeneration: groupGeneration,
+        watchedGeneration: groupGeneration,
         handover: {
           floorMs: 0,
           automations: [...frozenGroups.keys()].map((automationId) => ({
@@ -206,11 +207,11 @@ async function world(options: {
         },
       };
     },
-    watchAutomationGroups: async ({ generation, subscriptions: watching, handover }) => {
-      if (generation > groupGeneration && handover === undefined) return { needsHandover: true };
-      if (generation > groupGeneration) {
+    watchAutomationGroups: async ({ generation, subscriptions: watching, relay }) => {
+      if (generation !== groupGeneration && relay === undefined) return { needsHandover: true };
+      if (generation !== groupGeneration) {
         groupGeneration = generation;
-        if (handover !== undefined) tookHandovers.push(handover);
+        if (relay !== undefined) relayRecords.push(relay);
       }
       for (const [automationId, subscription] of [...subscriptions]) {
         if ("groupId" in subscription) subscriptions.delete(automationId);
@@ -489,7 +490,7 @@ async function world(options: {
       },
     },
     groupHost: async () => (options.runsGroupTriggers ?? true ? 0 : null),
-    groupHandover: async () => ({ state: "unchanged" }),
+    groupRelayRecord: async () => ({ generation: 0, handover: null }),
     requestHost: async () => { hostRequests += 1; },
     readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
     postNotice: async (notice, signal) => {
@@ -534,7 +535,7 @@ async function world(options: {
     holdsChanged: () => holdsChanged,
     automationsChanged: () => automationsChanged,
     hostRequests: () => hostRequests,
-    tookHandovers,
+    relayRecords,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
     resumable,
@@ -3313,7 +3314,7 @@ describe("Collection automations that a Group message starts", () => {
     w.engine.releaseAutomationGroups = release;
     const released = await w.executor.releaseGroupSubscriptions(() => true);
     expect(released?.handover.automations.map((automation) => automation.automationId)).toEqual(["collection:Tasks#task", "collection:Tasks#lost"]);
-    expect(released?.takenGeneration, "a workspace that never synced took generation 0").toBe(0);
+    expect(released?.watchedGeneration, "a workspace that never synced watches at generation 0").toBe(0);
     expect([...w.subscriptions.keys()]).toEqual([]);
   });
 
@@ -3446,7 +3447,7 @@ describe("Collection automations that a Group message starts", () => {
       hostChanged: () => executor.hostChanged(),
       finishHere: async (_workspaceId, stillHandingOver) => {
         const released = await executor.releaseGroupSubscriptions(stillHandingOver);
-        return released === null ? null : { throughMs: 5_000, groups: released.handover, groupsTaken: released.takenGeneration };
+        return released === null ? null : { throughMs: 5_000, groups: released.handover, groupsWatched: released.watchedGeneration };
       },
       logError: (_workspaceId, error) => { hostErrors.push(error); },
       monotonicMs: () => clock.ms,
@@ -3460,13 +3461,14 @@ describe("Collection automations that a Group message starts", () => {
     const executor = w.makeExecutor({
       groupHost: () => automationHostGeneration(workspace, () => hosts.runsAt("ws")),
       // The relay answers only for the current generation, as main.ts reads it.
-      groupHandover: async (generation) => {
+      groupRelayRecord: async (generation) => {
         if (relay.down) throw new TypeError("fetch failed");
         if (relay.row?.generation !== generation) throw new Error("The relay answered the Group handover read with 409.");
-        if (relay.kept === null) return { state: "unchanged" };
-        return relay.kept.forInstall === relay.row.installId
-          ? { state: "fetched", generation: relay.kept.generation, ...relay.kept.groups }
-          : { state: "missing" };
+        if (relay.kept === null) return { generation: 0, handover: null };
+        return {
+          generation: relay.kept.generation,
+          handover: relay.kept.forInstall === relay.row.installId ? relay.kept.groups : null,
+        };
       },
       requestHost: () => hosts.admit("ws"),
     });
@@ -3518,7 +3520,7 @@ describe("Collection automations that a Group message starts", () => {
     next!.done = true;
     next!.wake();
     await desk.until(() => subscribed(desk));
-    expect(desk.tookHandovers).toEqual([{ state: "fetched", generation: 3, ...relay.kept!.groups }]);
+    expect(desk.relayRecords).toEqual([{ generation: 3, handover: relay.kept!.groups }]);
     expect(relay.kept?.groups).toMatchObject({ automations: [{ automationId: "collection:Tasks#task" }] });
     expect(subscribed(laptop)).toBe(false);
     expect(onDesk.armed(), "the handover ended").toEqual([]);
@@ -3542,7 +3544,7 @@ describe("Collection automations that a Group message starts", () => {
     onDesk.clock.ms += HOST_FRESH_MS + 1;
     onDesk.hosts.relayAnswered("ws");
     await desk.until(() => subscribed(desk));
-    expect(desk.tookHandovers).toEqual([{ state: "fetched", generation: 3, ...relay.kept!.groups }]);
+    expect(desk.relayRecords).toEqual([{ generation: 3, handover: relay.kept!.groups }]);
     expect(subscribed(laptop)).toBe(false);
     expect([...onLaptop.hostErrors, ...onDesk.hostErrors]).toEqual([]);
   });
@@ -3568,7 +3570,7 @@ describe("Collection automations that a Group message starts", () => {
     expect(relay.row, "its Group trigger recorded it as the host").toMatchObject({ installId: "laptop" });
     expect(removals, "no gap in which a message claims nowhere").toBe(0);
     expect(subscribed(w)).toBe(true);
-    expect(w.tookHandovers, "the first host finds none").toEqual([{ state: "unchanged" }]);
+    expect(w.relayRecords, "the first host finds none").toEqual([{ generation: 0, handover: null }]);
     expect(here.hostErrors).toEqual([]);
   });
 

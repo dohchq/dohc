@@ -1256,9 +1256,9 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_chat_write_announces_the_group_claims_it_committed() {
     use dohc_engine_domain::{
-        AutomationGroupHandoverInput, AutomationGroupSubscription, AutomationGroupWatch,
-        ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane, FollowState,
-        FollowTargetKind, LinkedChatStore, SetFollow, StartChannelThread, watch_automation_groups,
+        AutomationGroupSubscription, AutomationGroupWatch, ChannelGroup, ChatActorKind,
+        ChatChannelKind, ChatThreadLane, FollowState, FollowTargetKind, LinkedChatStore, SetFollow,
+        StartChannelThread, watch_automation_groups,
     };
     use dohc_engine_sync::apply_chat_envelope;
 
@@ -1288,7 +1288,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                     channel_id: "trip".to_owned(),
                     starts_with: Some("/task".to_owned()),
                 }],
-                handover: AutomationGroupHandoverInput::Unfetched,
+                relay: None,
             },
             6,
             &NoFaults,

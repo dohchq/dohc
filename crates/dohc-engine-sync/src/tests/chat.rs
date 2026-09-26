@@ -1459,7 +1459,7 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
                 channel_id,
                 starts_with: Some("/task".to_owned()),
             }],
-            handover: dohc_engine_domain::AutomationGroupHandoverInput::Unfetched,
+            relay: None,
         },
         1,
         &NoFaults,

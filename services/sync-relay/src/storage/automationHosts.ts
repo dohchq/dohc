@@ -8,10 +8,11 @@ import { badRequest, notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
 
-// The Group handover the last release carried, for the computer it named:
-// at most one per workspace, replaced by the next release that took it. A
-// take over replaces it with a mark for the computer that took over, which
-// carries no handover and tells a later reader another computer ran.
+// The relay's last release or take over, at most one per workspace: the
+// host generation it started, the computer it named, and the Group handover
+// a release carried. A take over writes a mark with no handover. A reader
+// compares the generation with the one it last watched at to tell whether
+// another computer may have run since.
 export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_automation_group_handovers (
@@ -20,7 +21,7 @@ export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
       generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
       for_install_id TEXT NOT NULL CHECK (length(for_install_id) BETWEEN 1 AND 256),
       took_over INTEGER NOT NULL CHECK (took_over IN (0, 1)),
-      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 2097152)
+      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 4194304)
     ) STRICT;
   `);
 }
@@ -66,8 +67,8 @@ export interface AutomationHostReleaseInput extends OwnerScope {
   releasedThroughMs: number;
   /** The Group handover, as JSON text. */
   groups: string;
-  /** The generation whose handover the releasing computer last took. */
-  groupsTaken: number;
+  /** The host generation the releasing computer last watched its Group subscriptions at. */
+  groupsWatched: number;
 }
 
 export interface AutomationGroupHandoverInput extends OwnerScope {
@@ -229,26 +230,28 @@ export function releaseAutomationHost(
       handoverFrom: null,
       releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
     }, host);
-    // A computer that never took the handover the relay holds ran nothing
-    // since it: that handover stays the one to carry on. After a take over
-    // there is none to carry, so the release's own goes on.
+    // A computer that has not watched since the relay's last record ran
+    // nothing since, so its own handover is stale. The record goes on
+    // instead: a handover that computer never took, or, after a take over
+    // it never watched at, a mark, so the next computer starts from now.
     const held = storage.db.prepare(
       "SELECT generation, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
     ).get(input.workspaceId);
-    const carry = held !== undefined && held.took_over === 0 && input.groupsTaken < Number(held.generation);
+    const stale = held !== undefined && input.groupsWatched < Number(held.generation);
     keepGroupHandover(storage, input.workspaceId, {
       generation: host.generation + 1,
       forInstallId: host.installId,
-      tookOver: false,
-      groups: carry ? String(held.groups_json) : input.groups,
+      tookOver: stale && held.took_over === 1,
+      groups: stale ? String(held.groups_json) : input.groups,
     });
     return readState(storage, input.workspaceId);
   });
 }
 
-// The Group handover the relay keeps for the current host, at the current
-// host's generation. It stays the host's, across a handover the owner called
-// off, until a release that took it replaces it.
+// The relay's last release or take over, read at the current host's
+// generation: the generation it started, and the Group handover when a
+// release left it for the current host. It stays across a handover the owner
+// called off, until the next release or take over replaces it.
 export function readAutomationGroupHandover(
   storage: StorageContext,
   input: AutomationGroupHandoverInput,
@@ -261,15 +264,7 @@ export function readAutomationGroupHandover(
       "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
     ).get(input.workspaceId);
     if (!row) return { generation: null, groups: null };
-    const mine = row.for_install_id === host.installId;
-    if (row.took_over === 1) {
-      // The computer that took over, at a later generation of its own run:
-      // nobody else ran since. Anyone else, or that computer as it takes
-      // over, finds another computer's run.
-      return mine && Number(row.generation) < input.generation
-        ? { generation: null, groups: null }
-        : { generation: Number(row.generation), groups: null };
-    }
+    const mine = row.took_over === 0 && row.for_install_id === host.installId;
     return {
       generation: Number(row.generation),
       groups: mine ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,

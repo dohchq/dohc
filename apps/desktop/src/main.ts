@@ -75,7 +75,7 @@ import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
   decodeAutomationGroupHandover,
-  type AutomationGroupHandoverState,
+  type AutomationGroupRelayRecord,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -3330,7 +3330,7 @@ const automationHosts = createAutomationHosts({
     const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
     if (released === null) return null;
     const throughMs = await automationScheduler.finishHere(workspaceId);
-    return throughMs === null ? null : { throughMs, groups: released.handover, groupsTaken: released.takenGeneration };
+    return throughMs === null ? null : { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
@@ -3418,13 +3418,12 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
 }
 
-// What the relay keeps for this computer at this host generation, as the
-// engine takes it: the handover a release left for it, none it has not
-// taken already, or one left for another computer, as after a take over.
-// The engine checks a handover again before it takes it.
-async function automationGroupHandover(workspaceId: string, generation: number): Promise<AutomationGroupHandoverState> {
+// The relay's last release or take over, read at this host generation, as
+// the engine takes it: 0 for none, with the handover when a release left it
+// for this computer. The engine checks a handover again before it takes it.
+async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
   const entry = findWorkspace(workspaceId);
-  if (!entry?.remote) return { state: "unchanged" };
+  if (!entry?.remote) return { generation: 0, handover: null };
   const { credentials } = await remoteForWorkspace(entry);
   const response = await relayShareResponseWithCredentials(
     credentials,
@@ -3438,10 +3437,10 @@ async function automationGroupHandover(workspaceId: string, generation: number):
   if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
     throw new Error(`The relay answered the Group handover read with ${response.status}.`);
   }
-  if (kept.groups !== null && typeof kept.generation === "number") {
-    return { state: "fetched", generation: kept.generation, ...decodeAutomationGroupHandover(kept.groups) };
-  }
-  return kept.generation === null ? { state: "unchanged" } : { state: "missing" };
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
+  };
 }
 
 // Whether any computer can run this workspace's schedules and Group
@@ -3587,7 +3586,7 @@ function createCollectionAutomationsFor(
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
-    groupHandover: (generation) => automationGroupHandover(workspaceId, generation),
+    groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),

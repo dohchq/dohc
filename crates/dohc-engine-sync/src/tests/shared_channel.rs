@@ -700,7 +700,7 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
                 channel_id,
                 starts_with: Some("/task".to_owned()),
             }],
-            handover: dohc_engine_domain::AutomationGroupHandoverInput::Unfetched,
+            relay: None,
         },
         3,
         &NoFaults,

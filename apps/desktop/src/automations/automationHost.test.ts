@@ -74,7 +74,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
       whileFinishing?.(stillHandingOver);
-      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsTaken: 2 };
+      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2 };
     },
     logError: (_workspaceId, error) => { errors.push(error); },
     monotonicMs: () => clock,
@@ -167,7 +167,7 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.requests[1], "the release carries the Group handover").toEqual({
       action: "release",
-      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsTaken: 2 },
+      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2 },
     });
     expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
     expect(await w.hosts.runsHere("ws")).toBe(false);
