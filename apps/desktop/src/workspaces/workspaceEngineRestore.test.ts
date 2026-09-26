@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +10,8 @@ import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
+  RestoreFolderInUseError,
+  RestoreHeadChangedError,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
@@ -194,6 +196,59 @@ describe("engine restore", () => {
     const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId);
     expect(undo.restored).toBe("text");
     expect(await readText(root, "new.md")).toBe("created\n");
+    await engine.stop();
+  });
+
+  it("lists a file's moments after one, and restores only while the expected moment is newest", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "doc.md", "original\n");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await write(root, "doc.md", "edited\n");
+    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    await engine.flush();
+    const edit = (await engine.listMoments()).moments[0]!;
+    const objectId = (await engine.fileObjectIdForPath("doc.md"))!;
+    await expect(engine.listObjectMomentsAfter(objectId, edit.id)).resolves.toEqual([]);
+
+    // A change on disk the engine has not recorded yet is recorded first,
+    // and then the file is no longer at the expected moment.
+    await write(root, "doc.md", "someone else\n");
+    await expect(engine.restoreFileToBeforeMoment(edit.id, { expectedHeadMomentId: edit.id }))
+      .rejects.toBeInstanceOf(RestoreHeadChangedError);
+    expect(await readText(root, "doc.md")).toBe("someone else\n");
+    const after = await engine.listObjectMomentsAfter(objectId, edit.id);
+    expect(after).toHaveLength(1);
+
+    const restore = await engine.restoreFileToBeforeMoment(edit.id, { expectedHeadMomentId: after[0]! });
+    expect(await readText(root, "doc.md")).toBe("original\n");
+    await expect(engine.listObjectMomentsAfter(objectId, edit.id)).resolves.toEqual([restore.restoredMomentId, after[0]]);
+    await engine.stop();
+  });
+
+  it("removes a created file only while nothing else is in its folder, checked in the queue", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "keep.md", "keep\n");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await write(root, "ideas/collection.yaml", "name: Ideas\n");
+    engine.captureBatch([{ path: "ideas/collection.yaml", operation: "update" }]);
+    await engine.flush();
+    const created = (await engine.listMoments()).moments[0]!;
+
+    await write(root, "ideas/other.md", "someone else\n");
+    await expect(engine.restoreFileToBeforeMoment(created.id, { expectedHeadMomentId: created.id, aloneInFolder: true }))
+      .rejects.toBeInstanceOf(RestoreFolderInUseError);
+    expect(await readText(root, "ideas/collection.yaml")).toBe("name: Ideas\n");
+
+    await rm(join(root, "ideas/other.md"));
+    await expect(engine.restoreFileToBeforeMoment(created.id, { expectedHeadMomentId: created.id, aloneInFolder: true }))
+      .resolves.toMatchObject({ restored: "deleted" });
+    expect(existsSync(join(root, "ideas/collection.yaml"))).toBe(false);
     await engine.stop();
   });
 

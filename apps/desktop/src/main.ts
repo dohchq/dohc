@@ -17,6 +17,7 @@ import {
 } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
+import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -189,7 +190,7 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
-import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
+import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
@@ -1985,7 +1986,15 @@ function engineForWorkspace(
     relay,
     operations: {
       push: () => daemonRelay.push(),
-      pull: (materializePage) => daemonRelay.pull(materializePage),
+      // Each page's files, once written, go to the Collection automation
+      // executor: a pull need not leave a watcher batch.
+      pull: (materializePage) =>
+        daemonRelay.pull(async (changed) => {
+          await materializePage(changed);
+          collectionAutomationsOf(workspace.workspaceId)?.handlePulledPaths(
+            changed.map((change) => change.path),
+          );
+        }),
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
@@ -4435,7 +4444,9 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", automationAuthor, notifyRenderer,
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent",
+    namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
+    automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
@@ -4855,6 +4866,27 @@ function registerIpcHandlers(): void {
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
+  });
+
+  registerStopAndRestoreIpc<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation,
+    CloudSessionCredentials
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),
+    sharesChanged: shareRosters.sharesChanged,
+    requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
+    queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
+    deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
+    notifyRenderer,
+    assertOriginalWorkspace: (workspace) => {
+      if (shareViewIsPresent(workspace.shareView)) throw new Error("Only the original workspace has shares to stop.");
+    },
   });
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

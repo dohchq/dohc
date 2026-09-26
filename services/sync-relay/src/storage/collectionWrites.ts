@@ -54,8 +54,9 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
       storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
       PRIMARY KEY (grant_id, submit_id)
     ) STRICT;
-    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant
-      ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms);
+    DROP INDEX IF EXISTS idx_sync_relay_collection_writes_grant;
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
+      ON sync_relay_collection_writes(grant_id, first_origin_seq);
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_insert
       AFTER INSERT ON sync_relay_collection_writes BEGIN
       UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + NEW.storage_bytes

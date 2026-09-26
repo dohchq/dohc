@@ -99,6 +99,7 @@ import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as collectionWriteStorage from "./storage/collectionWrites";
+import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -564,6 +565,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
+  }
+
+  readOwnerCollectionWrites(input: ownerCollectionWriteStorage.OwnerCollectionWritesInput) {
+    return ownerCollectionWriteStorage.readOwnerCollectionWrites(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {

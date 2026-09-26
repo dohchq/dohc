@@ -8,6 +8,7 @@ import { filterCollectionWriteForShare, type ShareSelector } from "./shareFilter
 import { CollectionWriteStaleError, type SyncRelayStorage } from "./storage";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
+export type OwnerCollectionWriteRoute = { route: "owner-collection-writes"; workspaceId: string; grantId: string };
 
 // A burst of 30 direct writes per grant, then one every two seconds.
 const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
@@ -121,6 +122,38 @@ export function createCollectionWriteRoutes(input: {
     if (committed.created) input.discussionActivity.wake(`log:${share.workspaceId}`);
     return jsonResponse({ ok: true, ...committed.receipt, created: committed.created });
   };
+}
+
+/**
+ * `GET /sync/:workspaceId/collection-writes/:grantId`: the owner reads one
+ * grant's direct writes, a revoked grant's too, to restore what the person
+ * changed. The server checked that the caller owns the workspace. Readable
+ * with the lane off, so turning it off never hides what it wrote.
+ */
+export function readOwnerCollectionWrites(
+  request: Request,
+  route: OwnerCollectionWriteRoute,
+  ownerUserId: string,
+  storage: SyncRelayStorage,
+): Response {
+  if (request.method !== "GET") throw relayError("method_not_allowed");
+  const query = new URL(request.url).searchParams;
+  for (const key of query.keys()) {
+    if (!["afterOriginSeq", "limit"].includes(key) || query.getAll(key).length !== 1) {
+      throw badRequest("Invalid collection write selection.");
+    }
+  }
+  const after = query.get("afterOriginSeq");
+  const page = storage.readOwnerCollectionWrites({
+    workspaceId: route.workspaceId,
+    ownerUserId,
+    grantId: route.grantId,
+    ...(after === null ? {} : { afterOriginSeq: Number(after) }),
+    limit: Number(query.get("limit") ?? 100),
+  });
+  return new Response(JSON.stringify(page), {
+    headers: { "content-type": "application/json", "cache-control": "private, no-store" },
+  });
 }
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {
