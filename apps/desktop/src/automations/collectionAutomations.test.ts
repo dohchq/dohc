@@ -21,9 +21,10 @@ import {
   type CollectionAutomationEngine,
 } from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
-import { AutomationChatSessionWait, automationMessageId, chatDirectoryOf, type AutomationChatMessage, type ChatDirectoryChannel, type ChatNeeds } from "./automationChat";
+import { AutomationChatSessionWait, automationMessageId, automationNoticeId, chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel, type ChatNeeds } from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
+import { NoticeNotSentError } from "../notices/noticeStore";
 
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
@@ -90,6 +91,11 @@ async function world(options: {
   let beforeChatWrite: ((message: AutomationChatMessage) => Promise<void>) | null = null;
   // What each directory read was asked for.
   const directoryNeeds: ChatNeeds[] = [];
+  // The run signal each notice was sent under.
+  const noticeSignals: AbortSignal[] = [];
+  // Notices the automations sent, once per id as the outbox keeps them.
+  const notices: AutomationNotice[] = [];
+  let beforeNotice: ((notice: AutomationNotice) => Promise<void>) | null = null;
   let idleDrains = 0;
   // Each count fails that many of the next calls.
   const failures = { authoredWrite: 0, openSession: 0 };
@@ -348,6 +354,11 @@ async function world(options: {
         if (!messages.some((written) => written.effectId === message.effectId)) messages.push(message);
       },
     },
+    postNotice: async (notice, signal) => {
+      noticeSignals.push(signal);
+      await beforeNotice?.(notice);
+      if (!notices.some((sent) => sent.noticeId === notice.noticeId)) notices.push(notice);
+    },
     onError: (context, error) => { errors.push({ context, error }); },
     withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
@@ -401,6 +412,9 @@ async function world(options: {
     directoryNeeds,
     chatWrites: () => chatWrites,
     beforeChatWrite: (hook: ((message: AutomationChatMessage) => Promise<void>) | null) => { beforeChatWrite = hook; },
+    notices,
+    noticeSignals,
+    beforeNotice: (hook: ((notice: AutomationNotice) => Promise<void>) | null) => { beforeNotice = hook; },
   };
 }
 
@@ -672,7 +686,7 @@ describe("Collection automations", () => {
       .resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
     expect(claim.state).toBe("failed");
     // Starting over makes new messages too, so the person hears that first.
-    expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, and direct messages the earlier run already made.");
+    expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, direct messages, and notices the earlier run already made.");
     expect((await w.executor.runs(TASKS))[0]).toMatchObject({ definitionChanged: true });
 
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true });
@@ -2265,5 +2279,128 @@ describe("Collection automations that post", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(w.messages).toHaveLength(1);
+  });
+});
+
+describe("Collection automations that notify", () => {
+  const viewer = (email: string, paths: string[]): RosterGrant => ({
+    grantId: `grant-${email}`, recipientUserId: `user-${email}`, recipientEmail: email,
+    files: { paths, versionId: null, access: "view" }, channel: null,
+  });
+  const notify = (to: string, text = "Done: {record.Status}") => [
+    "  - id: tell",
+    "    name: Tell people",
+    "    when: {field-changed: Status}",
+    `    do: [{notify: '${text}', to: ${to}}]`,
+  ].join("\n");
+
+  it("reports a newly allowed named notice recipient as held", async () => {
+    const w = await world({ automations: { Tasks: notify("[user-ana@dohc.test]") } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", action: "notify" }] } }] });
+  });
+
+  it("sends each person one notice with the automation's name, the text, and where it points", async () => {
+    const long = "x".repeat(600);
+    const w = await world({ automations: { Tasks: notify("[user-owner, user-ana@dohc.test]", long) } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const definition = parseAutomationsFile(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8"));
+    if (definition.status !== "read" || definition.entries[0]?.status !== "valid") throw new Error("unreadable fixture");
+    const key = stepKey(claim.claimId, `${definitionHash(definition.entries[0].automation)}-1`, 0);
+    const notice = (recipientUserId: string) => ({
+      noticeId: automationNoticeId(key, recipientUserId),
+      kind: "automation-notify",
+      title: "Tell people",
+      body: `${"x".repeat(499)}…`,
+      target: { path: task.path, record: task.id, automation: "collection:Tasks#tell", run: claim.claimId },
+      recipientUserId,
+    });
+    expect(w.notices).toEqual([notice("user-owner"), notice("user-ana@dohc.test")]);
+    // Each notice goes out under the run's signal, so a stop ends it before it sends.
+    expect(w.noticeSignals).toHaveLength(2);
+    expect(w.noticeSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    const [run] = await w.executor.runs("collection:Tasks#tell");
+    expect(run!.writes).toEqual([
+      { kind: "notice", noticeId: automationNoticeId(key, "user-owner"), name: "you" },
+      { kind: "notice", noticeId: automationNoticeId(key, "user-ana@dohc.test"), name: "ana@dohc.test" },
+    ]);
+  });
+
+  it("notifies nobody when a person is not among the workspace's people or cannot view the Collection", async () => {
+    const w = await world({
+      collections: ["Tasks", "Budget"],
+      automations: { Tasks: [
+        notify("[user-zed]"),
+        "  - id: far",
+        "    name: Tell Bob",
+        "    when: {field-changed: Status}",
+        "    do: [{notify: Done, to: ['=\"user-bob@dohc.test\"']}]",
+      ].join("\n") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("bob@dohc.test", ["Budget"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const unknown = w.claim("collection:Tasks#tell", task);
+    const far = w.claim("collection:Tasks#far", task);
+    await w.executor.open();
+    await w.settledClaim(unknown);
+    await w.settledClaim(far);
+
+    expect(unknown).toMatchObject({ state: "failed", error: "that person cannot view Tasks." });
+    expect(far).toMatchObject({ state: "failed", error: "bob@dohc.test cannot view Tasks." });
+    expect(w.notices).toEqual([]);
+  });
+
+  it("holds a notice to a person a formula named once they can newly view the Collection, until Allow", async () => {
+    const w = await world({ collections: ["Tasks", "Budget"], automations: { Tasks: notify("['=\"user-ana@dohc.test\"']") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Budget"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "ana@dohc.test cannot view Tasks." });
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({ action: "notify", target: "ana@dohc.test", recipient: "user-ana@dohc.test" });
+    await w.executor.confirmReach({ ...hold!, recipient: hold!.recipient! });
+    await w.settledClaim(second);
+    expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["user-ana@dohc.test"]);
+  });
+
+  it("fails on a notice that did not reach its person, and Try again notifies only the people left", async () => {
+    const w = await world({ automations: { Tasks: notify("[user-owner, user-ana@dohc.test]") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const posted: string[] = [];
+    let full = true;
+    w.beforeNotice(async (notice) => {
+      posted.push(notice.recipientUserId);
+      if (full && notice.recipientUserId === "user-ana@dohc.test") {
+        throw new NoticeNotSentError("This person has too many unread notices to get this one.");
+      }
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({
+      state: "failed",
+      error: "dohc could not notify ana@dohc.test. This person has too many unread notices to get this one.",
+    });
+
+    full = false;
+    await w.executor.retry({ automationId: "collection:Tasks#tell", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(posted).toEqual(["user-owner", "user-ana@dohc.test", "user-ana@dohc.test"]);
+    expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["user-owner", "user-ana@dohc.test"]);
   });
 });

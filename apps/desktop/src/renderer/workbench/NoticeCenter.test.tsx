@@ -280,6 +280,16 @@ describe("automation failure notices", () => {
     const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
     expect(notice.textContent).toContain("A step in Trip can post in Planning. Allow it to run?");
   });
+
+  it("names the person a held notice would go to", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+      step: "2", seq: 6, collection: "Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null,
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-2");
+    expect(notice.textContent).toContain("A step in Trip can notify ana@dohc.test. Allow it to run?");
+  });
 });
 
 describe("update toast", () => {

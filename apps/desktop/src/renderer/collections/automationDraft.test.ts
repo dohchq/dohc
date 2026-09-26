@@ -99,3 +99,10 @@ it("keeps chat recipients and nested record steps at their runtime reach indices
     set,
   ])).toEqual([[0], [1, 2, 3, 4], [5]]);
 });
+
+it("counts named notice recipients before a record edit", () => {
+  expect(reachPlaces([
+    { kind: "notify", text: "Hi", to: [{ kind: "literal", value: "ana" }, { kind: "formula", expression: "Owner" }] },
+    { kind: "set", values: [], records: null, operation: null },
+  ])).toEqual([[0], [1]]);
+});

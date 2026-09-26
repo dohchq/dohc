@@ -39,6 +39,13 @@ interface ChatDirectMessageTarget {
 export interface ChatDirectory {
   group(name: string): ChatGroupTarget | { problem: string };
   directMessage(userId: string): ChatDirectMessageTarget | { problem: string };
+  /** How a person is named to the owner: "you", their email, or "that person". */
+  person(userId: string): string;
+  /**
+   * A person a notice can go to: the owner, or someone who accepted one of
+   * the workspace's shares. A pending invite has no account yet.
+   */
+  noticeRecipient(userId: string): { name: string } | { problem: string };
 }
 
 /** The Groups and direct messages an automation on this computer can write to. */
@@ -47,9 +54,18 @@ export function chatDirectoryOf(
   roster: Exclude<ReachRoster, { kind: "unknown" }>,
 ): ChatDirectory {
   const grants = roster.kind === "owner" ? roster.grants : [];
-  const personName = (userId: string) =>
-    grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)?.recipientEmail ?? "that person";
+  const ownerUserId = roster.kind === "owner" ? roster.ownerUserId : null;
+  const personName = (userId: string) => userId === ownerUserId
+    ? "you"
+    : grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)?.recipientEmail ?? "that person";
   return {
+    person: personName,
+    noticeRecipient(userId) {
+      if (userId === ownerUserId || grants.some((grant) => grant.recipientUserId === userId)) {
+        return { name: personName(userId) };
+      }
+      return { problem: "dohc cannot find that person among the people this workspace is shared with. They may not have accepted your share yet." };
+    },
     group(name) {
       const matches = channels.filter((channel) =>
         channel.kind === "channel" && (channel.name === name || channel.slug === name));
@@ -81,6 +97,30 @@ export function chatDirectoryOf(
       return { channelId: found.id, wireId: found.wireId, threadId: found.runningThreadId!, name };
     },
   };
+}
+
+/** A notice an automation sends to one person (item 6, section 3). */
+export interface AutomationNotice {
+  noticeId: string;
+  kind: "automation-notify";
+  title: string;
+  body: string;
+  target: { path: string; record?: string; automation: string; run: string };
+  recipientUserId: string;
+}
+
+/**
+ * A notice's id, the same on every attempt, so the outbox and the relay
+ * drop a repeat.
+ */
+export function automationNoticeId(stepKey: string, recipientUserId: string): string {
+  return `automation-notify:${createHash("sha256").update(`${stepKey}/notify/${recipientUserId}`).digest("hex")}`;
+}
+
+/** `text` cut to `max` characters, ending with "…" when it was longer. */
+export function cutText(text: string, max: number): string {
+  const characters = [...text];
+  return characters.length <= max ? text : `${characters.slice(0, max - 1).join("")}…`;
 }
 
 /** One message an automation writes, keyed so a retry writes it once. */

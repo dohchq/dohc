@@ -3437,6 +3437,7 @@ function createCollectionAutomationsFor(
           : await chatWrites.sendMessage(place, { ...common, threadId: message.target.threadId });
       }),
     },
+    postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {

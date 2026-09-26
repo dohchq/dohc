@@ -54,6 +54,7 @@ function valueText(value: unknown): string {
 }
 
 function writeText(write: RunWrite): string {
+  if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
   const record = "path" in write ? recordName(write.path) : String(write.recordId);
   switch (write.kind) {
@@ -79,7 +80,9 @@ function runSummary(run: Run): string {
   const fields = run.writes.reduce((total, write) => total + (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0), 0);
   const added = run.writes.filter((write) => write.kind === "created" || write.kind === "dataset-created").length;
   const messages = run.writes.filter((write) => write.kind === "message").length;
+  const notices = run.writes.filter((write) => write.kind === "notice").length;
   const parts = [
+    ...(notices > 0 ? [`sent ${count(notices, "notice", "notices")}`] : []),
     ...(messages > 0 ? [`sent ${count(messages, "message", "messages")}`] : []),
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
     ...(added > 0 ? [`added ${count(added, "record", "records")}`] : []),

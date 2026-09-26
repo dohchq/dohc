@@ -304,7 +304,7 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
       next: side(fact.kind !== "removed", change.next as JsonValue, truncated),
     });
   }
-  return { collectionPath, change: { kind: fact.kind, fields, fieldsOmitted: 0 } };
+  return { automationId: claim.automationId, claimId: claim.claimId, collectionPath, change: { kind: fact.kind, fields, fieldsOmitted: 0 } };
 }
 
 /**
