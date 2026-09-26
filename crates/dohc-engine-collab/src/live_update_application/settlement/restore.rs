@@ -455,8 +455,6 @@ mod tests {
             stopped <= empty + 32,
             "a stopped operation must use the unique operation lookup: {empty} -> {stopped}"
         );
-        eprintln!(
-            "restore lookup VM steps: empty={empty}, ordinary10000={ordinary}, stopped10000={stopped}"
-        );
+        eprintln!("restore lookup VM steps: empty={empty}, ordinary10000={ordinary}, stopped10000={stopped}");
     }
 }

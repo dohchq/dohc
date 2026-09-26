@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
-use dohc_engine_domain::{DomainError, WriteResult, WriteText, write_text_in_tx};
+use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -423,11 +423,9 @@ mod tests {
         );
         let mut conflict = input;
         conflict.operation_id = "different".into();
-        assert!(
-            owner
-                .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
-                .is_err()
-        );
+        assert!(owner
+            .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
+            .is_err());
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
 
@@ -678,34 +676,30 @@ mod tests {
                 .is_none()
         );
         let before = counts(&store);
-        assert!(
-            read_applied_sync(
-                &store,
-                &handle,
-                &[0],
-                AppliedSyncPolicy {
-                    max_read_bytes: 1024,
-                    ..policy
-                },
-                || true
-            )
-            .is_err()
-        );
-        assert!(
-            read_next_applied(
-                &store,
-                &handle,
-                &cut.position,
-                AppliedSyncPolicy {
-                    max_output_bytes: 4096,
-                    max_host_vector_bytes: 4096,
-                    max_read_bytes: 1,
-                    ..policy
-                },
-                || true
-            )
-            .is_err()
-        );
+        assert!(read_applied_sync(
+            &store,
+            &handle,
+            &[0],
+            AppliedSyncPolicy {
+                max_read_bytes: 1024,
+                ..policy
+            },
+            || true
+        )
+        .is_err());
+        assert!(read_next_applied(
+            &store,
+            &handle,
+            &cut.position,
+            AppliedSyncPolicy {
+                max_output_bytes: 4096,
+                max_host_vector_bytes: 4096,
+                max_read_bytes: 1,
+                ..policy
+            },
+            || true
+        )
+        .is_err());
         assert!(read_applied_sync(&store, &handle, &[0], policy, || false).is_err());
         assert_eq!(counts(&store), before);
         store
@@ -835,17 +829,15 @@ mod tests {
             let (dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
             run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
             let (input, coordinate) = fence_input(&handle);
-            assert!(
-                owner
-                    .fence_restore(
-                        &mut store,
-                        input.clone(),
-                        coordinate.clone(),
-                        200,
-                        &Crash(point)
-                    )
-                    .is_err()
-            );
+            assert!(owner
+                .fence_restore(
+                    &mut store,
+                    input.clone(),
+                    coordinate.clone(),
+                    200,
+                    &Crash(point)
+                )
+                .is_err());
             drop(handle);
             drop(owner);
             drop(store);
@@ -1293,13 +1285,12 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
-                assert!(
-                    tx.execute(
+                assert!(tx
+                    .execute(
                         "DELETE FROM binary_blobs WHERE sha256=?1",
                         [hex_sha256(&vector.bytes)]
                     )
-                    .is_err()
-                );
+                    .is_err());
                 tx.execute(
                     "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
                     [],

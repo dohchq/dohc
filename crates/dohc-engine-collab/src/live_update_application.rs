@@ -12,11 +12,11 @@
 
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
-use crate::{CollabError, DocKey, Regime, WriterDocCache, durable};
+use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
+    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -28,26 +28,26 @@ mod publication;
 pub(crate) use publication::read_native_accepted_in;
 mod ack_read;
 mod sync;
-pub use ack_read::{LiveApplicationAckIdentity, read_application_ack};
+pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
 pub use sync::{
-    AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate, read_applied_sync,
-    read_next_applied,
+    read_applied_sync, read_next_applied, AppliedPosition, AppliedSyncCut, AppliedSyncPolicy,
+    NextAppliedUpdate,
 };
 mod activation;
 pub use activation::{
-    ImportedOwnerActivation, ImportedOwnerSource, capture_imported_owner_activation,
-    release_imported_owner_activation, resume_imported_owner_activation,
+    capture_imported_owner_activation, release_imported_owner_activation,
+    resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
 };
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
-pub use adoption::{OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed};
+pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;
 mod settlement;
 pub use bootstrap::{
-    BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck, bootstrap_committed,
+    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
 pub use restore_content::{
     NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
@@ -55,12 +55,12 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
+pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
-pub use settlement::{LiveSettlementAudit, LiveSettlementResult, with_settlement};
+pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -1439,11 +1439,9 @@ mod tests {
             delivery_id: first.metadata.accepted.receipt.delivery_id.clone(),
             update_digest: first.metadata.accepted.receipt.update_digest.clone(),
         };
-        assert!(
-            read_application_ack(&store, &handle, &identity)
-                .unwrap()
-                .is_none()
-        );
+        assert!(read_application_ack(&store, &handle, &identity)
+            .unwrap()
+            .is_none());
         let mut expected = ack(apply(&mut store, &mut cache, &handle, first));
         expected.application_replayed = true;
         apply(
@@ -1483,11 +1481,9 @@ mod tests {
             delivery_id: "absent".into(),
             update_digest: identity.update_digest.clone(),
         };
-        assert!(
-            read_application_ack(&store, &handle, &absent)
-                .unwrap()
-                .is_none()
-        );
+        assert!(read_application_ack(&store, &handle, &absent)
+            .unwrap()
+            .is_none());
         let wrong_digest = LiveApplicationAckIdentity {
             update_digest: "00".repeat(32),
             ..identity.clone()
@@ -1555,11 +1551,9 @@ mod tests {
                 binding(),
             )
             .unwrap();
-        assert!(
-            read_application_ack(&store, &other_namespace, &identity)
-                .unwrap()
-                .is_none()
-        );
+        assert!(read_application_ack(&store, &other_namespace, &identity)
+            .unwrap()
+            .is_none());
         let current = owner
             .register(
                 &mut store,
@@ -1737,13 +1731,11 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .unwrap();
-        assert!(
-            store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_some()))
-                .unwrap()
-        );
+        assert!(store
+            .read_with(|conn| cache
+                .doc_for_consumer(conn, &key())
+                .map(|doc| doc.is_some()))
+            .unwrap());
     }
 
     #[test]
@@ -1814,10 +1806,11 @@ mod tests {
                 assert_eq!(count(&store, "live_device_update_applications"), 65);
             }
             store = reopen(store, &dir);
-            assert!(
-                crate::replay_parity::structurally_equal_v2_for_test(&document(&store), &source)
-                    .unwrap()
-            );
+            assert!(crate::replay_parity::structurally_equal_v2_for_test(
+                &document(&store),
+                &source
+            )
+            .unwrap());
             for (index, update) in deliveries.into_iter().enumerate() {
                 let replay = ack(apply(&mut store, &mut cache, &handle, update));
                 assert!(replay.application_replayed);
@@ -1838,13 +1831,11 @@ mod tests {
             apply(&mut store, &mut cache, &handle, update),
             ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
         );
-        assert!(
-            store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_none()))
-                .unwrap()
-        );
+        assert!(store
+            .read_with(|conn| cache
+                .doc_for_consumer(conn, &key())
+                .map(|doc| doc.is_none()))
+            .unwrap());
         assert_eq!(count(&store, "ydoc_updates"), 1);
         store = reopen(store, &dir);
         assert_eq!(document(&store).encode_full_state(), before);
@@ -1934,7 +1925,7 @@ mod tests {
 
     #[test]
     fn populated_verified_backup_restores_application_fragments_and_compacted_replay() {
-        use dohc_engine_storage::backup::{BackupOutcome, FreeSpaceProbe, create_verified_backup};
+        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, FreeSpaceProbe};
         struct Space;
         impl FreeSpaceProbe for Space {
             fn available_bytes(&self, _: &std::path::Path) -> Result<u64, StorageError> {
@@ -2135,13 +2126,11 @@ mod tests {
                     apply(&mut store, &mut cache, &handle, update.clone()),
                     ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
                 );
-                assert!(
-                    store
-                        .read_with(|conn| cache
-                            .doc_for_consumer(conn, &key())
-                            .map(|doc| doc.is_none()))
-                        .unwrap()
-                );
+                assert!(store
+                    .read_with(|conn| cache
+                        .doc_for_consumer(conn, &key())
+                        .map(|doc| doc.is_none()))
+                    .unwrap());
                 store = reopen(store, &dir);
                 assert_eq!(count(&store, "ydoc_updates"), before);
                 assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2170,13 +2159,11 @@ mod tests {
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
-                    assert!(
-                        store
-                            .read_with(|conn| cache
-                                .doc_for_consumer(conn, &key())
-                                .map(|doc| doc.is_none()))
-                            .unwrap()
-                    );
+                    assert!(store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap());
                     store = reopen(store, &dir);
                     let persisted_sequence = store
                         .read_with(|conn| {
@@ -2362,9 +2349,8 @@ mod tests {
                     &handle,
                     conflict,
                     &NoFaults,
-                    100_000_000,
-                    |_, _, _, _| Ok(())
-                ),
+                    100_000_000
+                , |_,_,_,_| Ok(())),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -2383,9 +2369,8 @@ mod tests {
                         &handle,
                         event("noop", 3, vec![0, 0]),
                         &NoFaults,
-                        100_000_000,
-                        |_, _, _, _| Ok(())
-                    ),
+                        100_000_000
+                    , |_,_,_,_| Ok(())),
                     Err(ApplicationError::Corrupt)
                 ),
                 "{damage}"
@@ -2399,9 +2384,8 @@ mod tests {
                         &handle,
                         first,
                         &NoFaults,
-                        100_000_000,
-                        |_, _, _, _| Ok(())
-                    ),
+                        100_000_000
+                    , |_,_,_,_| Ok(())),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -2545,9 +2529,8 @@ mod tests {
                         &handle,
                         update,
                         &NoFaults,
-                        100_000_000,
-                        |_, _, _, _| Ok(())
-                    ),
+                        100_000_000
+                    , |_,_,_,_| Ok(())),
                     Ok(ApplicationResult::Applied(..))
                 ),
                 "{damage}"
@@ -2572,18 +2555,16 @@ mod tests {
                 start_clock: 0,
                 end_clock: 1,
             }];
-            assert!(
-                apply_committed(
-                    &mut store,
-                    &mut cache,
-                    &handle,
-                    update,
-                    &NoFaults,
-                    100_000_000,
-                    |_, _, _, _| Ok(())
-                )
-                .is_err()
-            );
+            assert!(apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                update,
+                &NoFaults,
+                100_000_000,
+                |_, _, _, _| Ok(())
+            )
+            .is_err());
             store = reopen(store, &dir);
             assert_eq!(count(&store, "ydoc_updates"), 0);
             assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2615,9 +2596,8 @@ mod tests {
                     &handle,
                     update,
                     &NoFaults,
-                    100_000_000,
-                    |_, _, _, _| Ok(())
-                )
+                    100_000_000
+                , |_,_,_,_| Ok(()))
                 .is_err(),
                 "{damage}"
             );
@@ -2647,13 +2627,11 @@ mod tests {
                 ),
                 Err(ApplicationError::Interrupted)
             ));
-            assert!(
-                store
-                    .read_with(|conn| cache
-                        .doc_for_consumer(conn, &key())
-                        .map(|doc| doc.is_none()))
-                    .unwrap()
-            );
+            assert!(store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_none()))
+                .unwrap());
             store = reopen(store, &dir);
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(
