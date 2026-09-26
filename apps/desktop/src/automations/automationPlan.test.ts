@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "../workspaces/collectionRecordEdits";
@@ -165,6 +166,100 @@ describe("trigger facts", () => {
 describe("plans", () => {
   const key = { claimId: "atc_one", hash: "0123456789abcdef" };
 
+  it("plans many formulas after matching a large formula-to value", async () => {
+    const definition = automation([
+      "id: large", "name: Large", "when: {field-changed: Status, to: '=record.Status'}",
+      `do: [{set: {${Array.from({ length: 12 }, (_, index) => `F${index}: '= ${index}'`).join(", ")}}}]`,
+    ].join("\n"));
+    const value = "x".repeat(24 * 1024);
+    const run = inputs(definition, {
+      record: { ...task, values: { Status: value } },
+      claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: value.length } }] }),
+    });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(results).toEqual([value, ...Array.from({ length: 12 }, (_, index) => index)].map(value => ({ ok: true, value })));
+      expect(planRun(run, request, results, key).kind).toBe("plan");
+    } finally { await evaluator.close(); }
+  });
+
+  it.each([
+    'when: {starts-matching: record.Status == "Done"}',
+    `when: {field-changed: Status, to: '= "Done"'}`,
+  ])("skips Only if and actions when the trigger criterion does not match: %s", async when => {
+    const definition = automation([
+      "id: trigger", "name: Trigger", when, "if: record.Details.name", "do: [{set: {Note: '=record.Details.name'}}]",
+    ].join("\n"));
+    const run = inputs(definition, {
+      record: { ...task, values: { Status: "Doing", Details: null } },
+      claim: claim({ fields: [{ field: "Status", historyId: 7, previous: { value: "Todo" }, next: { value: "Doing" } }] }),
+    });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(planRun(run, request, results, key)).toEqual({ kind: "skip" });
+      expect(results.slice(-2)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
+    } finally { await evaluator.close(); }
+  });
+
+  it.each([
+    { next: { first: 1, second: [2, 3] }, kind: "plan" },
+    { next: { first: 1, second: [3, 2] }, kind: "skip" },
+    { next: [1, { nested: true }], kind: "plan" },
+    { next: [1, { nested: false }], kind: "skip" },
+  ])("matches a formula-to value with deep JSON equality: $next", async ({ next, kind }) => {
+    const target = Array.isArray(next) ? '[1, {nested: true}]' : '({second: [2, 3], first: 1})';
+    const definition = automation([
+      "id: trigger", "name: Trigger", `when: {field-changed: Status, to: '= ${target}'}`, "do: [{set: {Note: '=\"matched\"'}}]",
+    ].join("\n"));
+    const run = inputs(definition, { claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { value: next } }] }) });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(planRun(run, request, results, key).kind).toBe(kind);
+      expect(results[1]).toEqual({ ok: true, value: kind === "plan" ? "matched" : null });
+    } finally { await evaluator.close(); }
+  });
+
+  it("reports a failing trigger before a false Only if condition", async () => {
+    const definition = automation([
+      "id: trigger", "name: Trigger", "when: {starts-matching: record.Details.name}", "if: 'false'", "do: [{set: {Note: '=1'}}]",
+    ].join("\n"));
+    const run = inputs(definition, { record: { ...task, values: { Details: null } }, claim: claim({ kind: "added" }) });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(planRun(run, request, results, key)).toMatchObject({ kind: "failed" });
+      expect(results.slice(1)).toEqual([{ ok: true, value: null }, { ok: true, value: null }]);
+    } finally { await evaluator.close(); }
+  });
+
+  it("guards nested conditions and both branches without changing step ordinals", () => {
+    const definition = automation([
+      "id: guarded", "name: Guarded", "when: record-added", "if: record.Count > 0", "do:",
+      "  - if: record.Details != null", "    do:",
+      "      - if: record.Details.ready", "        do: [{set: {Note: '=record.Details.name'}}]",
+      "        otherwise: [{set: {Note: '=record.Details.fallback'}}]",
+      "    otherwise: [{set: {Note: '=\"missing\"'}}]",
+      "  - set: {Seen: '=true'}",
+    ].join("\n"));
+    const request = evaluationRequest(inputs(definition), 0);
+    const yes = (index: number) => ({ index, truthy: true });
+    const no = (index: number) => ({ index, truthy: false });
+    expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
+      [], [yes(0)], [yes(0), yes(1)], [yes(0), yes(1), yes(2)],
+      [yes(0), yes(1), no(2)], [yes(0), no(1)], [yes(0)],
+    ]);
+    const plan = planRun(inputs(definition), request,
+      [true, false, null, null, null, "missing", true].map(value => ({ ok: true as const, value })), key);
+    expect(plan.kind === "plan" && plan.steps.map(step => step.ordinal)).toEqual([4, 5]);
+  });
+
   it("asks for every formula in one request, reading now as the time of the change", () => {
     const definition = automation([
       "id: stamp", "name: Stamp", "when: {field-changed: Status}", "if: record.Count > 1",
@@ -173,7 +268,7 @@ describe("plans", () => {
     const request = evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30));
     expect(request.formulas).toEqual([
       { kind: "expression", source: "record.Count > 1" },
-      { kind: "expression", source: "today()" },
+      { kind: "expression", source: "today()", when: [{ index: 0, truthy: true }] },
     ]);
     expect(request.scope).toMatchObject({
       record: { Status: "Done", Count: 2, id: "rec_task" },

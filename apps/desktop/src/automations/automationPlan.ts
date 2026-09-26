@@ -509,33 +509,50 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const { automation, claim, record, found } = inputs;
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
-  const add = (slot: Slot, source: string) => {
+  const add = (slot: Slot, source: string, when: NonNullable<AutomationFormula["when"]> = []) => {
+    const index = formulas.length;
     slots.push(slot);
-    formulas.push({ kind: "expression", source });
+    formulas.push({ kind: "expression", source, ...(when.length ? { when: [...when] } : {}) });
+    return index;
   };
-  if (automation.if !== null) add({ kind: "only-if" }, automation.if);
+  const conditions: NonNullable<AutomationFormula["when"]> = [];
   const trigger = automation.when;
-  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") add({ kind: "to" }, trigger.to.expression);
-  if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
-    add({ kind: "matched-before" }, `((record) => (${trigger.condition}\n))(${BEFORE_BINDING})`);
-    add({ kind: "matches" }, trigger.condition);
-  } else if (trigger.kind === "starts-matching") {
-    add({ kind: "matches" }, trigger.condition);
+  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") {
+    const fact = claim.change.fields.find(candidate => candidate.field === trigger.field);
+    const next = fact ? factValue(fact.next) : "truncated";
+    const equals = next === "truncated" ? (record?.values[trigger.field] ?? null) : (next?.value ?? null);
+    conditions.push({ index: add({ kind: "to" }, trigger.to.expression), equals });
   }
+  if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
+    conditions.push({ index: add({ kind: "matched-before" }, `((record) => (${trigger.condition}\n))(${BEFORE_BINDING})`), truthy: false });
+    conditions.push({ index: add({ kind: "matches" }, trigger.condition, conditions), truthy: true });
+  } else if (trigger.kind === "starts-matching") {
+    conditions.push({ index: add({ kind: "matches" }, trigger.condition), truthy: true });
+  }
+  if (automation.if !== null) conditions.push({ index: add({ kind: "only-if" }, automation.if, conditions), truthy: true });
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
-  for (const { ordinal, step } of everyStep(steps)) {
-    if (step.kind === "if") add({ kind: "if", ordinal }, step.if);
-    if (step.kind !== "set" && step.kind !== "add-record") continue;
-    const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
-      ? step.records
-      : null;
-    for (const { field, value } of step.values) {
-      if (!isFormula(value)) continue;
-      if (records === null) add({ kind: "value", ordinal, field }, value.expression);
-      else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`);
+  const addSteps = (entries: readonly OrderedStep[], when: NonNullable<AutomationFormula["when"]>) => {
+    for (const entry of entries) {
+      const { ordinal, step } = entry;
+      if ("then" in entry) {
+        const index = add({ kind: "if", ordinal }, entry.step.if, when);
+        addSteps(entry.then, [...when, { index, truthy: true }]);
+        addSteps(entry.otherwise, [...when, { index, truthy: false }]);
+        continue;
+      }
+      if (step.kind !== "set" && step.kind !== "add-record") continue;
+      const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
+        ? step.records
+        : null;
+      for (const { field, value } of step.values) {
+        if (!isFormula(value)) continue;
+        if (records === null) add({ kind: "value", ordinal, field }, value.expression, when);
+        else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`, when);
+      }
     }
-  }
+  };
+  addSteps(steps, conditions);
   const bound: JsonObject = {};
   for (const [name, binding] of bindings) {
     bound[name] = binding.kind === "find" ? (found.get(binding.ordinal) ?? []).map(recordScope) : null;
