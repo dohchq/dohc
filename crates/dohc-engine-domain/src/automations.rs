@@ -834,6 +834,7 @@ pub fn claim_group_message_in_tx(
         .collect::<Result<_, _>>()
         .map_err(DomainError::sql_corrupt)?;
     let mut inserted = Vec::new();
+    let mut decided = false;
     for (automation_id, starts_with, channel_id, lane, since_ms) in &subscriptions {
         let watch = GroupWatch {
             automation_id,
@@ -841,13 +842,15 @@ pub fn claim_group_message_in_tx(
             channel_id,
             since_ms: *since_ms,
         };
-        inserted.extend(decide_group_message(
-            conn,
-            workspace_id,
-            &watch,
-            lane,
-            message,
-        )?);
+        if let Some(claims) = decide_group_message(conn, workspace_id, &watch, lane, message)? {
+            decided = true;
+            inserted.extend(claims);
+        }
+    }
+    // Once the message is decided for every subscription, so no decision
+    // above met a floor another one moved.
+    if decided {
+        maintain_group_coverage(conn, workspace_id, i64::MIN)?;
     }
     Ok(inserted)
 }
@@ -860,13 +863,17 @@ pub fn claim_group_message_in_tx(
 /// begin with the starting text, is not decided. A message a host decided
 /// before, here or on a computer that handed over, claims nothing. A message
 /// at the chain depth cap records a failed `chain-stopped` claim instead.
+/// Answers the claims of a decision it recorded, or `None` when it recorded
+/// none. The caller keeps the coverage within its bounds once it has
+/// decided everything in hand, so no decision meets a floor that moved
+/// under it.
 fn decide_group_message(
     conn: &Connection,
     workspace_id: &str,
     watch: &GroupWatch<'_>,
     lane: &str,
     message: &AutomationGroupMessage<'_>,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+) -> Result<Option<Vec<AutomationClaim>>, DomainError> {
     let text = message.body.trim_start_matches(is_js_trim_ws);
     if message.created_at_ms < watch.since_ms
         || message.created_at_ms > clock_ms().saturating_add(AUTOMATION_GROUP_FUTURE_MS)
@@ -874,7 +881,7 @@ fn decide_group_message(
             .starts_with
             .is_some_and(|prefix| !text.starts_with(prefix))
     {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let decided_now = conn
         .execute(
@@ -890,11 +897,10 @@ fn decide_group_message(
         .map_err(DomainError::sql_persist)?
         == 1;
     if !decided_now {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    maintain_group_coverage(conn, workspace_id, i64::MIN)?;
     if message.automation_id == Some(watch.automation_id) {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     // An automation message claims at its depth, kept within 1 and the cap, so
     // a chain stops at the cap across computers. A forged high depth only
@@ -944,6 +950,7 @@ fn decide_group_message(
         &claimed,
         message.created_at_ms,
     )
+    .map(Some)
 }
 
 /// A Group subscription row whose automation a handover named but this
@@ -1069,8 +1076,8 @@ fn clock_ms() -> i64 {
 /// [`MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES`] decisions, however they are
 /// dated, and none posted before `window_start`. A pending row whose
 /// handover was taken before `window_start` goes too. Answers the floor.
-/// Every new decision runs it without a window; a watch and a release run
-/// it with one.
+/// Storing a message that decided anything runs it without a window, after
+/// every subscription decided; a watch and a release run it with one.
 fn maintain_group_coverage(
     conn: &Connection,
     workspace_id: &str,
@@ -1346,6 +1353,14 @@ fn watch_automation_groups_in_tx(
             true,
         )?;
     }
+    // The replay's decisions stay within the bounds too. Maintenance waits
+    // until every row is in place, so no replay above met a floor another
+    // one moved.
+    maintain_group_coverage(
+        conn,
+        workspace_id,
+        now_ms.saturating_sub(AUTOMATION_GROUP_COVERAGE_MS),
+    )?;
     Ok(AutomationGroupWatched {
         needs_handover: false,
         claims,
@@ -1478,13 +1493,9 @@ fn claim_stored_group_messages(
             automation_id: automation_id.as_deref(),
             chain_depth,
         };
-        inserted.extend(decide_group_message(
-            conn,
-            workspace_id,
-            watch,
-            &lane,
-            &message,
-        )?);
+        if let Some(claims) = decide_group_message(conn, workspace_id, watch, &lane, &message)? {
+            inserted.extend(claims);
+        }
     }
     Ok(inserted)
 }

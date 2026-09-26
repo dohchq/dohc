@@ -2489,6 +2489,73 @@ fn each_decision_keeps_the_coverage_bounded() {
     }
 }
 
+/// A message another host decided for one automation stays decided while
+/// the same message is decided for the next: the bound applies once every
+/// subscription has decided it.
+#[test]
+fn a_message_at_the_bound_claims_nothing_its_last_host_decided() {
+    let mut laptop = Computer::new();
+    laptop.watch(1, recorded(0), 10);
+    let bound = MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES as i64;
+    laptop
+        .store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO automation_group_coverage \
+                 (workspace_id, automation_id, message_id, created_at_ms) \
+                 VALUES (?1, ?2, 'm-old', 100)",
+                rusqlite::params![WS, TASK],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            for index in 1..bound {
+                tx.execute(
+                    "INSERT INTO automation_group_coverage \
+                     (workspace_id, automation_id, message_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![WS, ALL, format!("newer{index}"), 200 + index],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            }
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("decisions");
+    laptop.store_message(&post("m-old", "/task Old", 100));
+    assert_eq!(
+        sorted(laptop.claimed.clone()),
+        pairs(&[(ALL, "m-old")]),
+        "the task automation decided it on the last host"
+    );
+}
+
+/// A watch that replays several subscriptions keeps every decision until
+/// all of them are in place: one automation's replay never pushes out what
+/// the next one decided on the last host.
+#[test]
+fn a_replay_never_pushes_out_what_the_next_subscription_decided() {
+    let mut laptop = Computer::new();
+    let mut desk = Computer::new();
+    laptop.watch(1, recorded(0), 10);
+    let mut handover = release_automation_groups(&mut laptop.store, WS, 15, &NO_FAULTS)
+        .expect("release")
+        .handover;
+    let bound = MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES;
+    for automation in &mut handover.automations {
+        if automation.automation_id == ALL {
+            automation.decided = (0..bound).map(|index| (format!("h{index}"), 20)).collect();
+        }
+    }
+    for index in 0..3 {
+        desk.store_message(&post(&format!("h{index}"), "Hello", 20));
+    }
+    desk.store_message(&post("m30", "/task New", 30));
+    desk.watch(3, fetched(3, handover), 40);
+    assert_eq!(
+        sorted(desk.claimed.clone()),
+        pairs(&[(ALL, "m30"), (TASK, "m30")]),
+        "the laptop decided every hello for the all-messages automation"
+    );
+}
+
 /// A handover carries every decision the host keeps, however it is dated:
 /// one dated past the host's clock, as another computer's decision can be,
 /// counts toward the bound like any other and is never left out.
