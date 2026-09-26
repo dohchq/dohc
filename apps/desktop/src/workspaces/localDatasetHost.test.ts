@@ -486,8 +486,8 @@ describe("local dataset owner adapter", () => {
     expect(await host.automations.invoke(context, step)).toMatchObject({replayed: true});
     expect(await host.action(step)).toMatchObject({replayed: false});
     // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
-    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
-    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow(/not permitted/);
+    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow("You do not have access to this Collection.");
+    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
     expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
   });
 
