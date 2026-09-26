@@ -1066,7 +1066,7 @@ describe("Collection automations", () => {
       for (const [id, record] of w.records) if (record.path === path) w.records.delete(id);
     };
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
-      .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
     expect(trashed).toEqual([added!.path]);
     expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
@@ -1114,7 +1114,7 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Count).toBe(3);
 
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
-      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task).Count).toBe(2);
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
       .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
@@ -1154,7 +1154,7 @@ describe("Collection automations", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
 
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
-      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     const [finished] = await w.executor.runs("collection:Tasks#stamp");
     expect(finished).toMatchObject({ undone: true });
@@ -1196,7 +1196,7 @@ describe("Collection automations", () => {
     const trashed: string[] = [];
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async (path) => {
       trashed.push(path);
-    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0 });
+    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(trashed).toEqual([added.path]);
   });
 

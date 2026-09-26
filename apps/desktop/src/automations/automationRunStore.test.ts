@@ -11,7 +11,7 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
     version: 2, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], replans: [], readableFields: null, superseded: false, undo: null, settled, compacted: false,
+    created: [], replans: [], undoRequests: [], readableFields: null, superseded: false, undo: null, settled, compacted: false,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }
@@ -29,6 +29,12 @@ describe("the automation run store", () => {
     // A field named __proto__ stays a field.
     expect(runs[0]!.applied[0]!.writes[0]).toMatchObject({ field: "__proto__", before: 1, after: 2 });
     await expect(store.runsOf(AUTOMATION, "atc_other")).resolves.toEqual({ runs: [], unreadable: false });
+    // A dataset Undo's request is read back, and a whole save keeps it.
+    const request = { datasetId: "d", tableId: "t", recordId: 7, operationId: "edit", version: 4, values: { status: "Open" } };
+    await store.recordUndoRequest(saved, request);
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed)?.undoRequests).toEqual([request]);
+    await store.save({ ...saved, undo: "done", undoRequests: [request] });
+    expect((await store.runsOf(AUTOMATION, "atc_one")).runs.find((found) => found.keySeed === saved.keySeed)?.undoRequests).toEqual([request]);
     await store.saveSubscriptions([{ automationId: AUTOMATION, path: "Tasks", kinds: ["changed"], fields: ["Status"] }]);
     await expect(store.readSubscriptions()).resolves.toEqual([
       { automationId: AUTOMATION, path: "Tasks", kinds: ["changed"], fields: ["Status"] },

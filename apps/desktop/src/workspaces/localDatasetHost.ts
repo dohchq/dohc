@@ -481,6 +481,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           }
           return { definitions, failures };
         },
+        /** Invokes an operation as the owner, the person on this computer, as an Undo does. */
+        invokeAsOwner: (input: LocalDatasetInvocation) => invoke(input),
         /** The dataset's current data grants: each principal and the operations it may use. */
         dataGrants(datasetId: string): { workspaceId: string; grants: Array<{ principalKey: string; operationIds: string[] }> } {
           assertCurrent();
