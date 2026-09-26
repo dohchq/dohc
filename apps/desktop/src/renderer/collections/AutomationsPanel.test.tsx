@@ -13,7 +13,7 @@ import type {
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
-import { writeAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { expressionProblem } from "../../automations/automationPlan";
 import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
@@ -63,7 +63,7 @@ const run = (overrides: Partial<Run>): Run => ({
   writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
 });
 
-function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean } = {}) {
+function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
   const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
@@ -74,7 +74,20 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     writeCollectionAutomations: vi.fn(async (payload: WriteCollectionAutomationsPayload) => {
       written.push(payload);
       const result = writeResults.shift() ?? { status: "written" as const, contentHash: "b".repeat(64) };
-      if (result.status === "written") current = read(payload.automations.map((automation) => summary(automation)));
+      if (result.status === "written") {
+        let automations = payload.automations;
+        if (options.roundTripWrites) {
+          const written = writeAutomationsFile(automations.map((automation) => ({ status: "valid", automation })));
+          if (written.status !== "ok") throw new Error("Fixture automation could not be written");
+          const parsed = parseAutomationsFile(written.text);
+          if (parsed.status !== "read") throw new Error("Fixture automation could not be read");
+          automations = parsed.entries.map((entry) => {
+            if (entry.status !== "valid") throw new Error("Fixture automation is invalid after writing");
+            return entry.automation;
+          });
+        }
+        current = read(automations.map((automation) => summary(automation)));
+      }
       return result;
     }),
     listCollectionAutomationRuns: vi.fn(async (): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs })),
@@ -672,6 +685,97 @@ describe("the builder", () => {
       null,
     ));
     expect(written).toHaveLength(1);
+  });
+
+  it.each(["existing", "new"])("keeps a newer %s draft after retrying an older save, then saves it against the acknowledged version", async (kind) => {
+    const { bridge, written } = makeBridge(
+      kind === "new" ? { status: "missing" } : read([summary(stamp)]), [], { roundTripWrites: true },
+    );
+    bridge.writeCollectionAutomations.mockRejectedValueOnce(new Error("Write unavailable"));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    if (kind === "new") await user.click(await screen.findByRole("button", { name: "New automation" }));
+    else await openBuilder(user);
+    const name = screen.getByRole("textbox", { name: "Name" });
+    await user.clear(name);
+    await user.type(name, "Draft A");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not save automations.yaml.", expect.any(Error), expect.any(Function),
+    ));
+    const tryAgain = onError.mock.calls[0]![2] as () => void;
+    await waitFor(() => expect(name.matches(":disabled")).toBe(false));
+    await user.clear(name);
+    await user.type(name, "Draft B");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Doing");
+
+    await act(async () => tryAgain());
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.name).toBe("Draft A");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Draft B");
+    expect(within(screen.getByTestId("collection-automations-panel")).getByText("Draft A")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(2));
+    expect(written[1]!.automations[0]!.name).toBe("Draft B");
+    expect(written[1]!.automations[0]!.when).toMatchObject({ to: { kind: "literal", value: "Doing" } });
+    expect(written[1]!.automations).toHaveLength(1);
+    expect(written[1]!.automations[0]!.id).toBe(written[0]!.automations[0]!.id);
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull());
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a different builder open when an earlier save finishes", async () => {
+    const { bridge, written, replaceFile } = makeBridge(read([summary(stamp), summary(nudge)]));
+    let finish!: (result: WriteCollectionAutomationsResult) => void;
+    bridge.writeCollectionAutomations.mockImplementationOnce((payload) => {
+      written.push(payload);
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await openBuilder(user, nudge.name);
+
+    await act(async () => {
+      replaceFile(read(written[0]!.automations.map((automation) => summary(automation))));
+      finish({ status: "written", contentHash: HASH });
+    });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(nudge.name);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("can retry a save after its builder closes without closing another builder", async () => {
+    const { bridge, written } = makeBridge(read([summary(stamp), summary(nudge)]));
+    bridge.writeCollectionAutomations.mockRejectedValueOnce(new Error("Write unavailable"));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const tryAgain = onError.mock.calls[0]![2] as () => void;
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await openBuilder(user, nudge.name);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+
+    await act(async () => tryAgain());
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.name).toBe(`${stamp.name}!`);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(`${nudge.name}!`);
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 
   it("asks before the page closes the panel over changes, and keeps no draft once they are discarded", async () => {

@@ -932,7 +932,6 @@ mod tests {
             }
         }
     }
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn owner_adoption_rolls_back_before_commit_and_replays_lost_ack_after_restart() {
         use dohc_engine_storage::{FaultAction, FaultPoint};

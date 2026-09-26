@@ -7,6 +7,7 @@ const base: Parameters<typeof deriveSyncStatus>[0] = {
   hasConflict: false,
   cloudEnabled: false,
   cloudConnected: false,
+  syncFailed: false,
   lastSyncedAtMs: null,
 };
 
@@ -25,6 +26,14 @@ describe("deriveSyncStatus", () => {
     expect(
       deriveSyncStatus({ ...base, pendingChangeCount: 3, inFlight: true }).state,
     ).toBe("syncing");
+  });
+
+  // A retry in flight does not undo a failure: the pass that is running is
+  // the one that has not worked yet.
+  it("shows a failed sync over a pass in flight, and a conflict over both", () => {
+    const failing = { ...base, cloudEnabled: true, cloudConnected: true, inFlight: true, syncFailed: true };
+    expect(deriveSyncStatus(failing).state).toBe("sync-failed");
+    expect(deriveSyncStatus({ ...failing, hasConflict: true }).state).toBe("conflict");
   });
 
   it("prioritizes conflict over everything", () => {

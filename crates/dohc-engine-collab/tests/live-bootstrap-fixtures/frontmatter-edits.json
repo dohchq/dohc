@@ -1,0 +1,20 @@
+[
+  {"name":"replace with multiline value in indented mapping","markdown":"---\n  a: 1\n  b: 2\n---\n\nBody","key":"a","value":"first\n\n# value text\n","refused":false,"expected":"---\n  a: |\n    first\n\n    # value text\n  b: 2\n---\n\nBody"},
+  {"name":"add nested value after indented block scalar","markdown":"---\n    a: |+\n      # value text\n\n    # tail\n---\n\nBody","key":"c","value":{"nested":[3]},"refused":false,"expected":"---\n    a: |+\n      # value text\n\n    c:\n      nested:\n        - 3\n    # tail\n---\n\nBody"},
+  {"name":"replace in two-space mapping","markdown":"---\n  a: 1\n  b: 2\n---\n\nBody","key":"a","value":3,"refused":false,"expected":"---\n  a: 3\n  b: 2\n---\n\nBody"},
+  {"name":"add to two-space mapping","markdown":"---\n  a: 1\n  b: 2\n---\n\nBody","key":"c","value":3,"refused":false,"expected":"---\n  a: 1\n  b: 2\n  c: 3\n---\n\nBody"},
+  {"name":"replace in four-space mapping","markdown":"---\n    a: 1\n    b: 2\n---\n\nBody","key":"a","value":3,"refused":false,"expected":"---\n    a: 3\n    b: 2\n---\n\nBody"},
+  {"name":"add to four-space mapping","markdown":"---\n    a: 1\n    b: 2\n---\n\nBody","key":"c","value":3,"refused":false,"expected":"---\n    a: 1\n    b: 2\n    c: 3\n---\n\nBody"},
+  {"name":"replace with blank lines between entries","markdown":"---\n  a: 1\n\n\n  b: 2\n---\n\nBody","key":"a","value":3,"refused":false,"expected":"---\n  a: 3\n\n\n  b: 2\n---\n\nBody"},
+  {"name":"replace before trailing comment","markdown":"---\n  a: 1\n  b: 2\n  # tail\n---\n\nBody","key":"b","value":3,"refused":false,"expected":"---\n  a: 1\n  b: 3\n  # tail\n---\n\nBody"},
+  {"name":"add before trailing comment","markdown":"---\n  a: 1\n  b: 2\n  # tail\n---\n\nBody","key":"c","value":3,"refused":false,"expected":"---\n  a: 1\n  b: 2\n  c: 3\n  # tail\n---\n\nBody"},
+  {"name":"replace in CRLF mapping","markdown":"---\r\n    a: 1\r\n\r\n    b: 2\r\n---\r\n\r\nBody","key":"a","value":3,"refused":false,"expected":"---\r\n    a: 3\r\n\r\n    b: 2\r\n---\r\n\r\nBody"},
+  {"name":"add to CRLF mapping","markdown":"---\r\n    a: 1\r\n    b: 2\r\n---\r\n\r\nBody","key":"c","value":3,"refused":false,"expected":"---\r\n    a: 1\r\n    b: 2\r\n    c: 3\r\n---\r\n\r\nBody"},
+  {"name":"replace final entry before closing delimiter at EOF","markdown":"---\n  a: 1\n  b: 2\n---","key":"b","value":3,"refused":false,"expected":"---\n  a: 1\n  b: 3\n---"},
+  {"name":"add before closing delimiter at EOF","markdown":"---\n  a: 1\n  b: 2\n---","key":"c","value":3,"refused":false,"expected":"---\n  a: 1\n  b: 2\n  c: 3\n---"},
+  {"name":"anchor removed","markdown":"---\na: &v .nan\nb: *v\n---\n\nBody","key":"a","value":1,"refused":true},
+  {"name":"nested alias loses anchor","markdown":"---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody","key":"a","value":1,"refused":true},
+  {"name":"aliasing key edited","markdown":"---\na: &v .nan\nb: *v\n---\n\nBody","key":"b","value":1,"refused":false,"expected":"---\na: &v .nan\nb: 1\n---\n\nBody"},
+  {"name":"alias changes type after anchor rebinding","markdown":"---\na: &v '.nan'\nb: &v .nan\nc: *v\n---\n\nBody","key":"b","value":1,"refused":true},
+  {"name":"unrelated edit keeps nested alias","markdown":"---\na: &v .nan\nb: {nested: [*v]}\nc: 0\n---\n\nBody","key":"c","value":1,"refused":false,"expected":"---\na: &v .nan\nb: {nested: [*v]}\nc: 1\n---\n\nBody"}
+]

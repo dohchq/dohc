@@ -41,10 +41,11 @@ import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
-  applyFrontmatter,
-  orderFrontmatter,
-  parseFrontmatter,
-} from "./markdown/frontmatter";
+  frontmatterBlockFor,
+  leadingFrontmatter,
+  writtenFrontmatterKeys,
+} from "@dohc/ydoc-projection/frontmatter";
+import { orderFrontmatter } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
@@ -55,6 +56,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -104,9 +106,6 @@ const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 
-const RAW_FRONTMATTER_RE =
-  /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
-
 type MarkdownEditorComponent = ForwardRefExoticComponent<
   MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
 >;
@@ -147,13 +146,11 @@ function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
   body: string;
 } {
-  const match = RAW_FRONTMATTER_RE.exec(markdown);
-  if (!match) return { frontmatter: null, body: markdown };
-  const parsed = parseFrontmatter(markdown);
-  if (parsed.body === markdown) {
-    return { frontmatter: null, body: markdown };
-  }
-  return { frontmatter: match[1] ?? "", body: parsed.body };
+  // A block that does not read stays out of the body too, as the engine keeps
+  // it, so the editor never renders it as Markdown.
+  const block = leadingFrontmatter(markdown);
+  if (!block) return { frontmatter: null, body: markdown };
+  return { frontmatter: block.text, body: markdown.slice(block.text.length) };
 }
 
 export function markdownEditorBody(markdown: string): string {
@@ -754,12 +751,23 @@ export function MarkdownView(props: {
     const editorBody = wysiwygRef.current?.getMarkdown();
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
-    const liveMeta = engine.doc
-      ? (Object.fromEntries(
-          engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-        ) as Record<string, unknown>)
-      : parseFrontmatter(latestDraft.current).meta;
-    return applyFrontmatter(body, orderFrontmatter(liveMeta));
+    if (!engine.doc) {
+      return mergeMarkdownEditorBody(latestDraft.current, body);
+    }
+    const liveMeta = Object.fromEntries(
+      engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+    ) as Record<string, unknown>;
+    // The frontmatter text the settle keeps, so a copy matches the file.
+    const meta = engine.doc.getMap("meta");
+    const written = writtenFrontmatterKeys(engine.doc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const block = frontmatterBlockFor(
+      orderFrontmatter(liveMeta),
+      meta.get("dohcFrontmatterSource"),
+      body,
+      "\n",
+      written,
+    );
+    return `${block}${body}`;
   };
 
   const hasSetAsideEdit =
@@ -2042,6 +2050,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
+            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState === "saved"} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2264,6 +2273,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2350,6 +2360,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
           </div>
           <div
             ref={readDocumentRef}

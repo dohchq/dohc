@@ -35,7 +35,7 @@ const USAGE_EXAMPLES = [
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
-  onError?: (message: string) => void;
+  onError?: (message: string, cause?: unknown) => void;
   workspacePath: string;
   preferredName?: string;
   agentName?: string;

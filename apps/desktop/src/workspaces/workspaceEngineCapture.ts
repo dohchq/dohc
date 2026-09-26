@@ -16,8 +16,10 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  VersionedTextStoreError,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentWriteAuthor,
   type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
@@ -430,7 +432,7 @@ export interface WorkspaceEngineCapture {
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentAuthor,
+    author: MomentWriteAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
@@ -2758,7 +2760,7 @@ export function createWorkspaceEngineCapture(
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
@@ -2780,7 +2782,7 @@ export function createWorkspaceEngineCapture(
       | { kind: "text"; text: string; sha256: string }
       | { kind: "binary"; bytes: Uint8Array; sha256: string; byteLength: number },
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     // Content equality is the no-op rule: it keeps one engine record per
@@ -3249,9 +3251,6 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
         }
-        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
-          throw new Error(`File already exists: ${path}`);
-        }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
@@ -3264,15 +3263,25 @@ export function createWorkspaceEngineCapture(
           summary: `Updated ${pathBasename(path)}`,
           correlationId: `authored-write-${createId()}`,
         };
-        await engine.writeTextFile({
-          workspaceId,
-          versionId,
-          path,
-          text,
-          metadata,
-          author,
-        });
-        await materialize([{ kind: "write", path, text }], policy);
+        try {
+          await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path,
+            text,
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
+            metadata,
+            author,
+          });
+        } catch (error) {
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
+          }
+          throw error;
+        }
+        if (!writeOptions.createOnly) {
+          await materialize([{ kind: "write", path, text }], policy);
+        }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },

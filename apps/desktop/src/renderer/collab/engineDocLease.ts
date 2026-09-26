@@ -8,6 +8,7 @@ import {
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
 import {
@@ -833,7 +834,7 @@ function createEngineDocSession(
         ...current,
         permanentFailure: { token },
       }));
-      reportSaveState("error", error.message);
+      reportSaveState("error", readError(error).words);
     }
     enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
   };
@@ -903,9 +904,7 @@ function createEngineDocSession(
     }
     reportSaveState(
       "error",
-      error instanceof Error
-        ? `dohc could not finish replacing this document: ${error.message}`
-        : "dohc could not finish replacing this document.",
+      withErrorWords("dohc could not finish replacing this document.", error),
     );
   };
 

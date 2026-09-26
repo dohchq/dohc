@@ -96,6 +96,7 @@ export function listVersionCreateLogRowsByBlob(storage: StorageContext, input: {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    aboveRelaySeq?: number;
   }): SyncRelayLogRow[] {
     return storage.db
       .prepare(
@@ -104,7 +105,7 @@ export function listVersionCreateLogRowsByBlob(storage: StorageContext, input: {
          FROM sync_relay_version_snapshot_blobs candidate
          JOIN sync_relay_log l ON l.relay_seq = candidate.relay_seq
          WHERE candidate.workspace_id = ? AND candidate.version_id = ?
-           AND candidate.blob_sha256 = ?
+           AND candidate.blob_sha256 = ? AND candidate.relay_seq > ?
          ORDER BY candidate.relay_seq DESC
          LIMIT ?`,
       )
@@ -112,6 +113,7 @@ export function listVersionCreateLogRowsByBlob(storage: StorageContext, input: {
         input.workspaceId,
         input.versionId,
         input.sha256,
+        input.aboveRelaySeq ?? -1,
         SHARED_BLOB_CANDIDATE_LIMIT,
       )
       .map(rowToLogRow);

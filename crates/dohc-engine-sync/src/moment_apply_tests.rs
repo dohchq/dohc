@@ -49,6 +49,125 @@ fn text_sha(text: &str) -> String {
 }
 
 #[test]
+fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
+    for kind in [ChangeActorKind::Agent, ChangeActorKind::Automation] {
+        for principal in [None, Some("owner")] {
+            let (_source_scratch, mut source) = test_store();
+            let (_peer_scratch, mut peer) = test_store();
+            crate::adopt_join_identity(
+                &mut source,
+                "ws",
+                "source",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .expect("source identity");
+            let author = moment_author_json(
+                Some("creator"),
+                Some(&ChangeAttribution {
+                    actor_kind: kind,
+                    on_behalf_of: principal.map(str::to_owned),
+                    depth: if kind == ChangeActorKind::Automation {
+                        4
+                    } else {
+                        0
+                    },
+                }),
+            )
+            .expect("declared creator");
+            VersionedTextStore::new(&mut source)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "record-object".to_owned(),
+                        path: "tasks/record.md".to_owned(),
+                        text: "created by a live document".to_owned(),
+                        moment_id: "created-moment".to_owned(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: Some(author.clone()),
+                        now_ms: 2_000,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("source moment");
+            source
+                .write_with(&NoFaults, |tx| {
+                    crate::outbound::journal_moment_append_in_tx(tx, "ws", "created-moment")
+                })
+                .expect("journal source moment");
+            let op = source
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms \
+                         FROM replication_log WHERE workspace_id='ws' AND imported=0",
+                        [],
+                        |row| {
+                            let payload: String = row.get(4)?;
+                            Ok(ReplicationEnvelope {
+                                workspace_id: row.get(0)?,
+                                origin_id: row.get(1)?,
+                                origin_seq: row.get(2)?,
+                                op_kind: row.get(3)?,
+                                payload: serde_json::from_str(&payload).expect("journal JSON"),
+                                recorded_at_ms: row.get(5)?,
+                                relay_seq: None,
+                            })
+                        },
+                    )
+                })
+                .expect("read outbound journal");
+            hydrate_texts(&mut peer, &["created by a live document"]);
+            assert_eq!(
+                apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
+                ApplyOutcome::new(ApplyDisposition::Applied(0)),
+                "{kind:?}, principal {principal:?}",
+            );
+            let history = VersionedTextStore::new(&mut peer)
+                .get_moment("ws", "created-moment")
+                .expect("peer history")
+                .expect("replicated moment");
+            assert_eq!(
+                serde_json::from_str::<Value>(history.author_json.as_deref().expect("author"))
+                    .unwrap(),
+                serde_json::from_str::<Value>(&author).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn declared_moment_authors_refuse_a_null_empty_or_non_string_principal() {
+    for author in [
+        json!({"kind":"agent", "agentId":"creator"}),
+        json!({"kind":"automation", "automationId":"creator", "depth":4}),
+    ] {
+        for principal in [Value::Null, json!(""), json!(42)] {
+            let (_scratch, mut peer) = test_store();
+            let mut payload = absent_text_payload("bad-author", "object", "doc.md", "content");
+            payload["author"] = author.clone();
+            payload["author"]["onBehalfOf"] = principal.clone();
+            hydrate_texts(&mut peer, &["content"]);
+            let result =
+                apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+                    .expect("refusal is recorded");
+            assert!(
+                matches!(result.primary, ApplyDisposition::Refused(_)),
+                "{author}, principal {principal}",
+            );
+            assert_eq!(peer.table_row_count("moments").unwrap(), 0);
+            assert_eq!(peer.table_row_count("snapshots").unwrap(), 0);
+        }
+    }
+}
+
+#[test]
 fn owner_binding_read_failure_does_not_acknowledge_moment() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["remote text"]);

@@ -55,12 +55,12 @@ pub enum ShareViewIdentityOutcome {
     AlreadyRecorded,
 }
 
-#[cfg(any(test, feature = "fault-injection"))]
+#[cfg(test)]
 pub(crate) fn crashes(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
     faults.poll(point) == dohc_engine_storage::FaultAction::Crash
 }
 
-#[cfg(not(any(test, feature = "fault-injection")))]
+#[cfg(not(test))]
 pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }

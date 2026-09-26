@@ -1813,8 +1813,10 @@ async fn accepted_frames_claim_once_through_settlement_and_capture() {
     const PATH: &str = "tasks/alpha.md";
     let source = Ydoc::wire();
     source.apply(&vector("ordinary-frontmatter-order")).unwrap();
-    source.frontmatter_set("id", RECORD);
-    source.frontmatter_set("status", "open");
+    source.frontmatter_set("id", RECORD).expect("set id");
+    source
+        .frontmatter_set("status", "open")
+        .expect("set status");
     let f = Fixture::build(false, source.encode_full_state(), PATH, |store| {
         dohc_engine_domain::VersionedTextStore::new(store)
             .write_text(
@@ -1901,12 +1903,20 @@ async fn accepted_frames_claim_once_through_settlement_and_capture() {
         })
     };
 
-    f.apply(5, source.frontmatter_set("status", "done")).await;
+    f.apply(
+        5,
+        source
+            .frontmatter_set("status", "done")
+            .expect("set status"),
+    )
+    .await;
     // The collaborator's frame arrives later, so its claim sorts after.
     let terminal = f
         .apply_as(
             6,
-            source.frontmatter_set("status", "late"),
+            source
+                .frontmatter_set("status", "late")
+                .expect("set status"),
             ServerDerivedLiveUpdateAuthority::Named {
                 principal_id: "guest".into(),
                 grant_id: "grant".into(),

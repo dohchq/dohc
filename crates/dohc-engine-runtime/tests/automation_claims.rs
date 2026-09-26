@@ -262,7 +262,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         .await
         .expect("subscribe field-filtered automation");
 
-    let edit = doc.frontmatter_set("status", "done");
+    let edit = doc.frontmatter_set("status", "done").unwrap();
     let append = handle
         .ydoc_record_update(
             key.clone(),
@@ -396,7 +396,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     // A change already at the chain depth cap runs nothing: the automation
     // gets a failed `chain-stopped` claim instead of a pending one, so the
     // stop reaches the owner's failure surface.
-    let capped = doc.frontmatter_set("status", "capped");
+    let capped = doc.frontmatter_set("status", "capped").unwrap();
     let at_cap = handle
         .ydoc_record_update(
             key.clone(),
@@ -446,7 +446,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             PATH.to_owned(),
             ContentKind::Richdoc,
             Regime::LocalOnly,
-            doc.frontmatter_set("priority", "high"),
+            doc.frontmatter_set("priority", "high").unwrap(),
             None,
             Some(ChangeAttribution {
                 actor_kind: ChangeActorKind::Human,
@@ -635,6 +635,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
         name: &'static str,
         record_id: &'static str,
         creator: Option<u32>,
+        principal: Option<&'static str>,
         editor: Option<Option<u32>>,
         compact: bool,
         claimers: &'static [&'static str],
@@ -645,6 +646,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "beta",
             record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
             creator: Some(1),
+            principal: Some("user:ice"),
             editor: Some(None),
             compact: true,
             claimers: &["collection:tasks#other"],
@@ -654,6 +656,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "gamma",
             record_id: "rec_cccccccccccccccccccccccccc",
             creator: Some(cap),
+            principal: Some("user:ice"),
             editor: None,
             compact: false,
             claimers: &["collection:tasks#other"],
@@ -663,10 +666,21 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "delta",
             record_id: "rec_dddddddddddddddddddddddddd",
             creator: None,
+            principal: None,
             editor: Some(Some(1)),
             compact: false,
             claimers: &["collection:tasks#other", AUTOMATION],
             depth: 0,
+        },
+        Case {
+            name: "epsilon",
+            record_id: "rec_eeeeeeeeeeeeeeeeeeeeeeeeee",
+            creator: Some(cap),
+            principal: None,
+            editor: None,
+            compact: true,
+            claimers: &["collection:tasks#other"],
+            depth: cap,
         },
     ] {
         let path = format!("tasks/{}.md", case.name);
@@ -685,7 +699,11 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                 Regime::LocalOnly,
                 doc.encode_full_state(),
                 case.creator.map(|_| AUTOMATION.to_owned()),
-                case.creator.and_then(automation),
+                case.creator.map(|depth| ChangeAttribution {
+                    actor_kind: ChangeActorKind::Automation,
+                    on_behalf_of: case.principal.map(str::to_owned),
+                    depth,
+                }),
                 None,
                 true,
                 None,
@@ -704,7 +722,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                     path.clone(),
                     ContentKind::Richdoc,
                     Regime::LocalOnly,
-                    doc.frontmatter_set("status", "doing"),
+                    doc.frontmatter_set("status", "doing").expect("set status"),
                     editor.map(|_| AUTOMATION.to_owned()),
                     editor.and_then(automation),
                     created.lineage_claim_id.clone(),
@@ -787,6 +805,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                 case.name
             );
             assert_eq!(claim.depth, case.depth, "{}", case.name);
+            assert_eq!(claim.change.on_behalf_of.as_deref(), case.principal);
             assert_eq!(claim.chain_stopped(), case.depth == cap);
         }
     }

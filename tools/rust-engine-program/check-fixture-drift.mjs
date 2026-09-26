@@ -21,6 +21,14 @@ const dependencyError =
 // which is the exact rot this check exists to prevent — add new sets here.
 const fixtureSets = [
   {
+    dir: "crates/dohc-engine-collab/tests/lossless-fixtures",
+    oracle: "yjs 13.6.30",
+    dependencyOverrideEnv: "DOHC_YJS_BASE",
+    // Fixed client identity and edits make the retained and collected states
+    // byte-stable. Their deleted content must remain part of the drift check.
+    volatileFields: [],
+  },
+  {
     dir: "crates/dohc-engine-collab/tests/fixtures",
     oracle: "packages/ydoc-projection",
     // The base override its generator reads when this checkout has no

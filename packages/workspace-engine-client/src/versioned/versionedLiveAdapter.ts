@@ -395,13 +395,15 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    createOnly?: boolean;
+    requestId?: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
       {
@@ -409,6 +411,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         text: input.text,
+        ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
         ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
@@ -861,21 +864,29 @@ export class VersionedLiveAdapter {
     });
   }
 
+  /**
+   * Lists every file in the version, or only files under the folder `under`.
+   * The engine orders paths bytewise, so a folder's files are one run that
+   * starts after `${under}/`; the listing stops at the first path past it.
+   */
   async listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
+    under?: string;
   }): Promise<VersionedTextListEntry[]> {
     this.assertWorkspace(input.workspaceId);
+    const prefix = input.under === undefined ? "" : `${input.under}/`;
     const files: VersionedTextListEntry[] = [];
-    let afterPath: string | undefined;
+    let afterPath: string | undefined = prefix || undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.textList, {
         versionId: input.versionId,
         limit: 500,
         ...(afterPath !== undefined ? { afterPath } : {}),
       });
-      files.push(...page.files);
-      afterPath = page.nextAfterPath ?? undefined;
+      const inside = page.files.filter((file) => file.path.startsWith(prefix));
+      files.push(...inside);
+      afterPath = inside.length === page.files.length ? page.nextAfterPath ?? undefined : undefined;
     } while (afterPath !== undefined);
     return files;
   }

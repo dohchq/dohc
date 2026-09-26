@@ -107,6 +107,14 @@ function detailWith(
 }
 
 describe("engineMomentDetailForIpc per-side content kinds", () => {
+  it("omits an agent owner label when its principal was not declared", () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "agent", agentId: "agent"};
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record).not.toHaveProperty("agentAuthorName");
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
   it("preserves the public author without invoking the agent name resolver", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
@@ -121,7 +129,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("names an automation author as main reads it, and nothing else", () => {
     const detail = detailWith({before: null, after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
-    detail.moment.author = {kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "local", depth: 1};
+    detail.moment.author = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1};
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.automationAuthor).toEqual({ name: "Named collection:Tasks#stamp", collection: "Tasks" });
     expect(record.agentAuthorName).toBeUndefined();
