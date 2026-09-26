@@ -244,6 +244,7 @@ export function unsupportedReason(automation: Automation): string | null {
       case "find": {
         if (step.operation !== null) return DATASET;
         finds += 1;
+        formulas += 1;
         const query = findQueryOf(step.condition);
         if ("problem" in query) return query.problem;
         break;
@@ -430,6 +431,8 @@ export interface RunInputs {
   /** Null when the trigger record was removed. */
   record: RunRecord | null;
   found: ReadonlyMap<number, readonly RunRecord[]>;
+  /** Finds whose page has more matches. Their partial records must not enter the scope. */
+  truncatedFinds?: ReadonlySet<number>;
 }
 
 /**
@@ -469,6 +472,7 @@ export function triggerMatches(inputs: RunInputs): boolean {
 /** Where each formula's answer goes. */
 type Slot =
   | { kind: "only-if" }
+  | { kind: "find"; ordinal: number }
   | { kind: "to" }
   | { kind: "matched-before" }
   | { kind: "matches" }
@@ -509,10 +513,12 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const { automation, claim, record, found } = inputs;
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
+  const findGuards: NonNullable<AutomationFormula["when"]> = [];
   const add = (slot: Slot, source: string, when: NonNullable<AutomationFormula["when"]> = []) => {
     const index = formulas.length;
     slots.push(slot);
-    formulas.push({ kind: "expression", source, ...(when.length ? { when: [...when] } : {}) });
+    const guards = [...when, ...findGuards];
+    formulas.push({ kind: "expression", source, ...(guards.length ? { when: guards } : {}) });
     return index;
   };
   const conditions: NonNullable<AutomationFormula["when"]> = [];
@@ -535,6 +541,11 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const addSteps = (entries: readonly OrderedStep[], when: NonNullable<AutomationFormula["when"]>) => {
     for (const entry of entries) {
       const { ordinal, step } = entry;
+      if (step.kind === "find" && inputs.truncatedFinds?.has(ordinal)) {
+        // An inactive Find returns null. Only an active overflow stops later formulas.
+        const index = add({ kind: "find", ordinal }, "true", when);
+        findGuards.push({ index, truthy: false });
+      }
       if ("then" in entry) {
         const index = add({ kind: "if", ordinal }, entry.step.if, when);
         addSteps(entry.then, [...when, { index, truthy: true }]);
@@ -555,6 +566,7 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   addSteps(steps, conditions);
   const bound: JsonObject = {};
   for (const [name, binding] of bindings) {
+    if (binding.kind === "find" && inputs.truncatedFinds?.has(binding.ordinal)) continue;
     bound[name] = binding.kind === "find" ? (found.get(binding.ordinal) ?? []).map(recordScope) : null;
   }
   if (trigger.kind === "starts-matching" && claim.change.kind === "changed" && record) {
@@ -608,6 +620,8 @@ function slotSubject(slot: Slot): string {
   switch (slot.kind) {
     case "only-if":
       return 'The "Only if" condition';
+    case "find":
+      return `The Find in step ${slot.ordinal + 1}`;
     case "to":
       return "The value this automation waits for";
     case "matched-before":
@@ -640,7 +654,7 @@ export function planRun(
   const slotKey = (slot: Slot) =>
     slot.kind === "value" || slot.kind === "values"
       ? `${slot.kind}:${slot.ordinal}:${slot.field}`
-      : slot.kind === "if" ? `if:${slot.ordinal}` : slot.kind;
+      : slot.kind === "if" || slot.kind === "find" ? `${slot.kind}:${slot.ordinal}` : slot.kind;
   for (const [index, slot] of request.slots.entries()) {
     const result = results[index];
     if (!result) return { kind: "failed", error: "The evaluator did not answer every formula.", timedOut: false };
@@ -650,6 +664,9 @@ export function planRun(
         error: `${slotSubject(slot)} failed. ${result.error.message}`,
         timedOut: result.error.code === "timeout",
       };
+    }
+    if (slot.kind === "find" && result.value) {
+      return { kind: "failed", error: `A Find matched more than ${MAX_FOUND_RECORDS} records. Narrow its condition, then try again.`, timedOut: false };
     }
     answers.set(slotKey(slot), result.value);
   }
