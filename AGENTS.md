@@ -43,7 +43,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 7. **Apps are real web apps.** A dohc app is source-backed, inspectable, dynamic, and connected only to data and capabilities the owner exposes. Its source lives and syncs in the workspace so collaborators and their agents can continue changing it. It can be shared by URL with someone who does not use dohc. Treat app execution, authentication, and workspace access as separate security boundaries.
 
-8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Plugins extend dohc; keep their source visible and easy for agents to change. The core must already provide the reliable substrate.
+8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Apps and Collection automations extend the work; their source and definitions live in the workspace, where any agent can read and change them. People customize dohc through a settings file and pinned apps. They do not rewrite built-in parts, and updates keep their settings and apps. The core must already provide the reliable substrate.
 
 Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
 
@@ -76,7 +76,7 @@ Use these examples to test product proposals. A feature can use dohc's vocabular
 
 ### Tailor the workspace
 
-- ✅ **dohc.** A user asks an agent to create or change a source-visible plugin or app for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
+- ✅ **dohc.** A user asks an agent to create or change an app or a Collection automation for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
 - ❌ **Not dohc.** dohc ships a hardcoded CRM, requires a project ritual, or becomes a template marketplace. dohc supplies reliable building blocks. Users and agents decide what to build.
 
 ## Product invariants
