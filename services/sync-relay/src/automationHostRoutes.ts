@@ -87,11 +87,11 @@ export function createAutomationHostRoutes(
     if (route.action === "groups") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const asked = new URL(request.url).searchParams.get("generation");
-      const groups = storage.readAutomationGroupHandover({
+      const kept = storage.readAutomationGroupHandover({
         ...scope,
         generation: generation(asked === null || asked === "" ? Number.NaN : Number(asked)),
       });
-      const answer: RelayAutomationGroupHandoverResponse = { ok: true, groups };
+      const answer: RelayAutomationGroupHandoverResponse = { ok: true, ...kept };
       return jsonResponse(answer, 200);
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");

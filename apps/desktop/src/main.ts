@@ -75,7 +75,7 @@ import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
   decodeAutomationGroupHandover,
-  type AutomationGroupHandover,
+  type AutomationGroupHandoverState,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -3418,12 +3418,13 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
 }
 
-// The Group handover the release that started this host generation carried,
-// as the relay keeps it, or null when none did. The engine checks it again
-// before it takes it.
-async function automationGroupHandover(workspaceId: string, generation: number): Promise<AutomationGroupHandover | null> {
+// What the relay keeps for this computer at this host generation, as the
+// engine takes it: the handover a release left for it, none it has not
+// taken already, or one left for another computer, as after a take over.
+// The engine checks a handover again before it takes it.
+async function automationGroupHandover(workspaceId: string, generation: number): Promise<AutomationGroupHandoverState> {
   const entry = findWorkspace(workspaceId);
-  if (!entry?.remote) return null;
+  if (!entry?.remote) return { state: "unchanged" };
   const { credentials } = await remoteForWorkspace(entry);
   const response = await relayShareResponseWithCredentials(
     credentials,
@@ -3431,11 +3432,16 @@ async function automationGroupHandover(workspaceId: string, generation: number):
     { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
   );
   const body: unknown = await response.json().catch(() => undefined);
-  const groups = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
-    ? (body as { groups?: unknown }).groups
+  const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
+    ? body as { generation?: unknown; groups?: unknown }
     : undefined;
-  if (groups === undefined) throw new Error(`The relay answered the Group handover read with ${response.status}.`);
-  return groups === null ? null : decodeAutomationGroupHandover(groups);
+  if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
+    throw new Error(`The relay answered the Group handover read with ${response.status}.`);
+  }
+  if (kept.groups !== null && typeof kept.generation === "number") {
+    return { state: "fetched", generation: kept.generation, ...decodeAutomationGroupHandover(kept.groups) };
+  }
+  return kept.generation === null ? { state: "unchanged" } : { state: "missing" };
 }
 
 // Whether any computer can run this workspace's schedules and Group

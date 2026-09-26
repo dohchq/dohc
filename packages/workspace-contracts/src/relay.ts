@@ -614,19 +614,22 @@ export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // Collection automations the computer handing over watched, and the ids of
 // the Group messages it and earlier hosts already decided, at most one
 // window of them. The relay keeps it, as a JSON object it does not read, for
-// the host the release names, and answers it to
-// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>.
-// `groupsTaken` is the generation whose handover the releasing computer last
-// took. When that is older than the handover the relay holds, that computer
-// never ran it, and the relay keeps that handover for the next host instead.
+// the computer the release names, until the next release.
+// `groupsTaken` is the generation of the last handover the releasing
+// computer took. When that is older than the handover the relay holds, that
+// computer never took it, so it ran nothing since, and the relay keeps that
+// handover for the next computer instead.
 export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
-// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>:
-// the Group handover the release that started this generation carried, or
-// null when none did, as for the first host or one that took over. A
-// generation that is no longer the host's is refused with `conflict`.
+// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
+// for the current host's generation; another is refused with `conflict`.
+// `groups` is the Group handover the relay keeps for the current host, with
+// the `generation` it keeps it under. With `groups` null, `generation` names
+// a handover kept for another computer, as after a take over, or is null
+// when no release ever left one.
 export interface RelayAutomationGroupHandoverResponse {
   ok: true;
+  generation: number | null;
   groups: Record<string, unknown> | null;
 }
 

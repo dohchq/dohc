@@ -159,7 +159,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     onPressSettled: (event) => { settled.push(event); wake(); },
     onPressWaiting: (event) => { waiting.push(event); wake(); },
     groupHost: async () => (options.groups ? 0 : null),
-    groupHandover: async () => null,
+    groupHandover: async () => ({ state: "unchanged" }),
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },

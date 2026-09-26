@@ -8,15 +8,15 @@ import { badRequest, notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
 
-// The Group handover the last release carried, for the host it named: at
-// most one per workspace, replaced by the next release. It is served only
-// while that host's generation is current.
+// The Group handover the last release carried, for the computer it named:
+// at most one per workspace, replaced by the next release that took it.
 export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_automation_group_handovers (
       workspace_id TEXT NOT NULL PRIMARY KEY
         REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
       generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
+      for_install_id TEXT NOT NULL CHECK (length(for_install_id) BETWEEN 1 AND 256),
       groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 2097152)
     ) STRICT;
   `);
@@ -218,33 +218,40 @@ export function releaseAutomationHost(
     ).get(input.workspaceId);
     if (held && input.groupsTaken < Number(held.generation)) {
       storage.db.prepare(
-        "UPDATE sync_relay_automation_group_handovers SET generation = ? WHERE workspace_id = ?",
-      ).run(host.generation + 1, input.workspaceId);
+        "UPDATE sync_relay_automation_group_handovers SET generation = ?, for_install_id = ? WHERE workspace_id = ?",
+      ).run(host.generation + 1, host.installId, input.workspaceId);
     } else {
       storage.db.prepare(
-        `INSERT INTO sync_relay_automation_group_handovers (workspace_id, generation, groups_json)
-         VALUES (?, ?, ?)
+        `INSERT INTO sync_relay_automation_group_handovers (workspace_id, generation, for_install_id, groups_json)
+         VALUES (?, ?, ?, ?)
          ON CONFLICT(workspace_id) DO UPDATE SET
-           generation = excluded.generation, groups_json = excluded.groups_json`,
-      ).run(input.workspaceId, host.generation + 1, input.groups);
+           generation = excluded.generation, for_install_id = excluded.for_install_id,
+           groups_json = excluded.groups_json`,
+      ).run(input.workspaceId, host.generation + 1, host.installId, input.groups);
     }
     return readState(storage, input.workspaceId);
   });
 }
 
-// The Group handover the release that started `generation` carried, or null
-// when that generation began without one. Only the current generation's.
+// The Group handover the relay keeps for the current host, at the current
+// host's generation. It stays the host's, across a handover the owner called
+// off, until a release that took it replaces it.
 export function readAutomationGroupHandover(
   storage: StorageContext,
   input: AutomationGroupHandoverInput,
-): Record<string, unknown> | null {
+): { generation: number | null; groups: Record<string, unknown> | null } {
   return storage.readTx(() => {
     requireOwner(storage, input);
-    if (readHost(storage, input.workspaceId)?.generation !== input.generation) throw relayError("conflict");
+    const host = readHost(storage, input.workspaceId);
+    if (!host || host.generation !== input.generation) throw relayError("conflict");
     const row = storage.db.prepare(
-      "SELECT groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ? AND generation = ?",
-    ).get(input.workspaceId, input.generation);
-    return row ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null;
+      "SELECT generation, for_install_id, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+    ).get(input.workspaceId);
+    if (!row) return { generation: null, groups: null };
+    return {
+      generation: Number(row.generation),
+      groups: row.for_install_id === host.installId ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,
+    };
   });
 }
 

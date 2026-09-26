@@ -26,7 +26,7 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
-  type AutomationGroupHandover,
+  type AutomationGroupHandoverState,
   type AutomationReleaseGroupsResult,
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
@@ -234,11 +234,11 @@ export interface CollectionAutomationsOptions {
    */
   groupHost(): Promise<number | null>;
   /**
-   * The Group handover the release that started this host generation
-   * carried, from the relay, or null when none did. Throws when the relay
-   * does not answer.
+   * What the relay keeps for this computer at this host generation: the
+   * handover a release left for it, none it has not taken already, or one
+   * left for another computer. Throws when the relay does not answer.
    */
-  groupHandover(generation: number): Promise<AutomationGroupHandover | null>;
+  groupHandover(generation: number): Promise<AutomationGroupHandoverState>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
@@ -2349,7 +2349,7 @@ export class CollectionAutomations {
     };
     let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
     if (answer?.needsHandover) {
-      let handover: AutomationGroupHandover | null;
+      let handover: AutomationGroupHandoverState;
       try {
         handover = await this.options.groupHandover(generation);
       } catch (error) {

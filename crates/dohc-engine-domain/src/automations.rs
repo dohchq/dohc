@@ -206,20 +206,29 @@ pub struct AutomationGroupWatch {
     pub handover: AutomationGroupHandoverInput,
 }
 
-/// The handover a watch at a new generation takes.
+/// What the relay holds for a watch at a new generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationGroupHandoverInput {
-    /// The caller has not fetched it. A watch at a generation this computer
-    /// has not taken yet changes nothing and asks for it.
+    /// The caller has not asked. A watch at a generation this computer has
+    /// not watched at yet changes nothing and asks for it.
     Unfetched,
-    /// The relay holds none: the first host, or one that took over.
+    /// A handover for another computer: this one took over without a
+    /// release. What it froze earlier starts again from now.
     Missing,
-    Fetched(AutomationGroupHandover),
+    /// No handover this computer has not taken already: no other computer
+    /// ran since this one stopped, so what it froze starts where it was.
+    Unchanged,
+    /// The handover a release left for this computer, and the generation the
+    /// relay keeps it under.
+    Fetched {
+        generation: i64,
+        handover: AutomationGroupHandover,
+    },
 }
 
-/// What a release answers: the handover, and the host generation whose
+/// What a release answers: the handover, and the relay generation of the
 /// handover this computer last took. When that is older than the handover
-/// the relay holds, this computer never ran that generation, and the
+/// the relay holds, this computer never took that handover, and the
 /// relay's copy stays the one to carry on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationGroupRelease {
@@ -979,32 +988,45 @@ fn release_automation_groups_in_tx(
         .map_err(DomainError::sql_corrupt)?
         .collect::<Result<_, _>>()
         .map_err(DomainError::sql_corrupt)?;
+    // Newest first, within the bounds. Maintenance keeps every decision
+    // posted by now within them; past them, only decisions dated after now
+    // are left out.
     let mut decided = conn
         .prepare_cached(
-            "SELECT automation_id, message_id, created_at_ms FROM automation_group_coverage \
-             WHERE workspace_id = ?1 AND created_at_ms >= ?2 \
-             ORDER BY automation_id, created_at_ms, message_id",
+            "SELECT c.automation_id, c.message_id, c.created_at_ms \
+             FROM automation_group_coverage c \
+             WHERE c.workspace_id = ?1 AND c.created_at_ms >= ?2 AND c.automation_id IN \
+               (SELECT automation_id FROM automation_group_subscriptions WHERE workspace_id = ?1) \
+             ORDER BY c.created_at_ms > ?3, c.created_at_ms DESC, c.message_id DESC",
         )
         .map_err(DomainError::sql_corrupt)?;
-    let rows = decided
-        .query_map(params![workspace_id, floor_ms], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })
+    let mut rows = decided
+        .query(params![workspace_id, floor_ms, now_ms])
         .map_err(DomainError::sql_corrupt)?;
-    for row in rows {
-        let (automation_id, message_id, created_at_ms) = row.map_err(DomainError::sql_corrupt)?;
+    let (mut count, mut bytes) = (0usize, 0usize);
+    while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+        let automation_id: String = row.get(0).map_err(DomainError::sql_corrupt)?;
+        let message_id: String = row.get(1).map_err(DomainError::sql_corrupt)?;
+        let created_at_ms: i64 = row.get(2).map_err(DomainError::sql_corrupt)?;
+        count += 1;
+        bytes += decided_json_bytes(&message_id);
+        if count > MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES
+            || bytes > MAX_AUTOMATION_GROUP_HANDOVER_BYTES
+        {
+            break;
+        }
         if let Ok(index) = automations
             .binary_search_by(|automation| automation.automation_id.as_str().cmp(&automation_id))
         {
             automations[index].decided.push((message_id, created_at_ms));
         }
     }
+    drop(rows);
+    for automation in &mut automations {
+        automation.decided.sort();
+    }
     Ok(AutomationGroupRelease {
-        taken_generation: taken_group_generation(conn, workspace_id)?,
+        taken_generation: group_imports(conn, workspace_id)?.handover_generation,
         handover: AutomationGroupHandover {
             floor_ms,
             automations,
@@ -1012,56 +1034,74 @@ fn release_automation_groups_in_tx(
     })
 }
 
-/// The host generation whose handover this computer last took, 0 before any.
-fn taken_group_generation(conn: &Connection, workspace_id: &str) -> Result<i64, DomainError> {
+/// What this computer took so far: the host generation it last watched at,
+/// the relay generation of the last handover it took, and when it took it.
+struct GroupImports {
+    generation: i64,
+    handover_generation: i64,
+    imported_at_ms: i64,
+}
+
+fn group_imports(conn: &Connection, workspace_id: &str) -> Result<GroupImports, DomainError> {
     Ok(conn
         .query_row(
-            "SELECT generation FROM automation_group_imports WHERE workspace_id = ?1",
+            "SELECT generation, handover_generation, imported_at_ms \
+             FROM automation_group_imports WHERE workspace_id = ?1",
             params![workspace_id],
-            |row| row.get(0),
+            |row| {
+                Ok(GroupImports {
+                    generation: row.get(0)?,
+                    handover_generation: row.get(1)?,
+                    imported_at_ms: row.get(2)?,
+                })
+            },
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?
-        .unwrap_or(0))
+        .unwrap_or(GroupImports {
+            generation: 0,
+            handover_generation: 0,
+            imported_at_ms: 0,
+        }))
 }
 
-/// Bytes one decided message takes in a handover's JSON.
-fn decided_json_bytes(message_id: &str, created_at_ms: i64) -> usize {
-    serde_json::json!({ "messageId": message_id, "createdAtMs": created_at_ms })
-        .to_string()
-        .len()
-        + 1
+/// At most the bytes one decided message takes in a handover's JSON: an id
+/// escapes to at most twice its length.
+fn decided_json_bytes(message_id: &str) -> usize {
+    2 * message_id.len() + 48
 }
 
 /// Keeps what this computer decided about Group messages within its bounds,
 /// and starts every Group subscription no earlier than the oldest decision
 /// kept, so the coverage always holds each decision a subscription could
-/// meet again. The bounds are the window, and the newest decisions within
-/// the message and byte bounds; a decision posted after `now_ms` never
-/// moves the floor past `now_ms`. A handover a pending row came from, taken
-/// longer ago than the window, lets that row go. Answers the floor.
+/// meet again. The bounds are the window, and the newest decisions posted
+/// by now within the message and byte bounds. A decision dated after now
+/// stays and never moves the floor. A handover a pending row came from,
+/// taken longer ago than the window, lets that row go. Answers the floor.
 fn maintain_group_coverage(
     conn: &Connection,
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<i64, DomainError> {
     let window_start = now_ms.saturating_sub(AUTOMATION_GROUP_COVERAGE_MS);
+    // Posted by now, newest first. One dated after now, as a forged date
+    // makes it, never moves the floor.
     let mut newest = conn
         .prepare_cached(
             "SELECT message_id, created_at_ms FROM automation_group_coverage \
-             WHERE workspace_id = ?1 AND created_at_ms >= ?2 \
+             WHERE workspace_id = ?1 AND created_at_ms >= ?2 AND created_at_ms <= ?3 \
              ORDER BY created_at_ms DESC, message_id DESC",
         )
         .map_err(DomainError::sql_corrupt)?;
     let mut rows = newest
-        .query(params![workspace_id, window_start])
+        .query(params![workspace_id, window_start, now_ms])
         .map_err(DomainError::sql_corrupt)?;
     let (mut count, mut bytes, mut left_out) = (0usize, 0usize, None);
     while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
         let message_id: String = row.get(0).map_err(DomainError::sql_corrupt)?;
         let created_at_ms: i64 = row.get(1).map_err(DomainError::sql_corrupt)?;
         count += 1;
-        bytes += decided_json_bytes(&message_id, created_at_ms);
+        bytes += decided_json_bytes(&message_id);
         if count > MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES
             || bytes > MAX_AUTOMATION_GROUP_HANDOVER_BYTES
         {
@@ -1136,33 +1176,54 @@ fn watch_automation_groups_in_tx(
             subscription,
         )?);
     }
-    let handover = if watch.generation > taken_group_generation(conn, workspace_id)? {
-        let handover = match &watch.handover {
+    let taken = group_imports(conn, workspace_id)?;
+    // What this watch does with the rows it finds: take a new handover, keep
+    // them as they are because no other computer ran since, or, after a take
+    // over, start what was frozen again from now.
+    let mut import: Option<&AutomationGroupHandover> = None;
+    let mut resume = true;
+    if watch.generation > taken.generation {
+        let mut handover_generation = taken.handover_generation;
+        let mut imported_at_ms = taken.imported_at_ms;
+        match &watch.handover {
             AutomationGroupHandoverInput::Unfetched => {
                 return Ok(AutomationGroupWatched {
                     needs_handover: true,
                     claims: Vec::new(),
                 });
             }
-            AutomationGroupHandoverInput::Missing => None,
-            AutomationGroupHandoverInput::Fetched(handover) => {
-                validate_group_handover(handover)?;
-                Some(handover)
+            AutomationGroupHandoverInput::Missing => resume = false,
+            AutomationGroupHandoverInput::Unchanged => {}
+            AutomationGroupHandoverInput::Fetched {
+                generation,
+                handover,
+            } => {
+                if *generation > taken.handover_generation {
+                    validate_group_handover(handover)?;
+                    import = Some(handover);
+                    handover_generation = *generation;
+                    imported_at_ms = now_ms;
+                }
             }
-        };
+        }
         conn.execute(
-            "INSERT INTO automation_group_imports (workspace_id, generation, imported_at_ms) \
-             VALUES (?1, ?2, ?3) \
+            "INSERT INTO automation_group_imports \
+             (workspace_id, generation, handover_generation, imported_at_ms) \
+             VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(workspace_id) DO UPDATE SET \
-               generation = excluded.generation, imported_at_ms = excluded.imported_at_ms",
-            params![workspace_id, watch.generation, now_ms],
+               generation = excluded.generation, \
+               handover_generation = excluded.handover_generation, \
+               imported_at_ms = excluded.imported_at_ms",
+            params![
+                workspace_id,
+                watch.generation,
+                handover_generation,
+                imported_at_ms
+            ],
         )
         .map_err(DomainError::sql_persist)?;
-        Some(handover)
-    } else {
-        None
-    };
-    if let Some(Some(handover)) = handover {
+    }
+    if let Some(handover) = import {
         let mut insert = conn
             .prepare_cached(
                 "INSERT OR IGNORE INTO automation_group_coverage \
@@ -1202,9 +1263,11 @@ fn watch_automation_groups_in_tx(
         params![workspace_id],
     )
     .map_err(DomainError::sql_persist)?;
-    // A handover taken now replaces any earlier one's pending starts.
-    let (handed_over, pending): (Vec<(&str, i64)>, Vec<(&str, i64)>) = match handover {
-        Some(Some(handover)) => (
+    // A handover taken now replaces what was frozen and pending here. With no
+    // new handover, a frozen row starts where it was, and pending rows stay;
+    // after a take over, neither does.
+    let (handed_over, kept): (Vec<(&str, i64)>, Vec<(&str, &str, i64)>) = match import {
+        Some(handover) => (
             handover
                 .automations
                 .iter()
@@ -1217,20 +1280,29 @@ fn watch_automation_groups_in_tx(
                 .collect(),
             Vec::new(),
         ),
-        Some(None) => (Vec::new(), Vec::new()),
-        None => (
+        None if resume => (
             Vec::new(),
             rows.iter()
-                .filter(|(_, channel_id, _, _)| channel_id == PENDING_GROUP)
-                .map(|(automation_id, _, since_ms, _)| (automation_id.as_str(), *since_ms))
+                .filter(|(_, _, _, frozen)| *frozen)
+                .map(|(automation_id, channel_id, since_ms, _)| {
+                    (automation_id.as_str(), channel_id.as_str(), *since_ms)
+                })
                 .collect(),
         ),
+        None => (Vec::new(), Vec::new()),
     };
-    let start_of = |starts: &[(&str, i64)], automation_id: &str| {
-        starts
+    let handed_start = |automation_id: &str| {
+        handed_over
             .iter()
-            .find(|(started, _)| *started == automation_id)
+            .find(|(handed, _)| *handed == automation_id)
             .map(|(_, since_ms)| *since_ms)
+    };
+    let kept_start = |automation_id: &str, channel_id: &str| {
+        kept.iter()
+            .find(|(frozen, channel, _)| {
+                *frozen == automation_id && (*channel == channel_id || *channel == PENDING_GROUP)
+            })
+            .map(|(_, _, since_ms)| *since_ms)
     };
     let mut claims = Vec::new();
     for (subscription, channel_id) in watch.subscriptions.iter().zip(&channels) {
@@ -1240,10 +1312,11 @@ fn watch_automation_groups_in_tx(
                 !*frozen && *automation_id == subscription.automation_id && channel == channel_id
             })
             .map(|(_, _, since_ms, _)| *since_ms);
-        let kept = start_of(&handed_over, &subscription.automation_id)
+        let since_ms = handed_start(&subscription.automation_id)
             .or(still_running)
-            .or_else(|| start_of(&pending, &subscription.automation_id));
-        let since_ms = kept.unwrap_or(now_ms).max(floor_ms);
+            .or_else(|| kept_start(&subscription.automation_id, channel_id))
+            .unwrap_or(now_ms)
+            .max(floor_ms);
         insert_group_row(
             conn,
             workspace_id,
@@ -1252,8 +1325,7 @@ fn watch_automation_groups_in_tx(
             since_ms,
             false,
         )?;
-        if still_running.is_none() || start_of(&handed_over, &subscription.automation_id).is_some()
-        {
+        if still_running.is_none() || handed_start(&subscription.automation_id).is_some() {
             let watch = GroupWatch {
                 automation_id: &subscription.automation_id,
                 starts_with: subscription.starts_with.as_deref(),
@@ -1263,11 +1335,18 @@ fn watch_automation_groups_in_tx(
             claims.extend(claim_stored_group_messages(conn, workspace_id, &watch)?);
         }
     }
+    let pending: Vec<(&str, i64)> = if import.is_some() {
+        handed_over.clone()
+    } else {
+        kept.iter()
+            .filter(|(_, channel_id, _)| *channel_id == PENDING_GROUP)
+            .map(|(automation_id, _, since_ms)| (*automation_id, *since_ms))
+            .collect()
+    };
     // What a handover named and this computer cannot watch yet keeps its start.
     let room = MAX_AUTOMATION_GROUP_HANDOVER_AUTOMATIONS.saturating_sub(watch.subscriptions.len());
-    for (automation_id, since_ms) in handed_over
+    for (automation_id, since_ms) in pending
         .iter()
-        .chain(&pending)
         .filter(|(automation_id, _)| !automations.contains(automation_id))
         .take(room)
     {
@@ -1285,6 +1364,8 @@ fn watch_automation_groups_in_tx(
             true,
         )?;
     }
+    // The replay's decisions stay within the bounds too.
+    maintain_group_coverage(conn, workspace_id, now_ms)?;
     Ok(AutomationGroupWatched {
         needs_handover: false,
         claims,

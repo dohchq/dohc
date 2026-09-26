@@ -1421,10 +1421,28 @@ async fn group_messages_written_here_claim_through_rpc() {
         &handle,
         &mut id,
         "automations.watchGroups",
-        next(Some(handover)),
+        next(Some(json!({
+            "state": "fetched",
+            "generation": 2,
+            "floorMs": handover["floorMs"],
+            "automations": handover["automations"],
+        }))),
     )
     .await;
     assert_eq!(took, json!({ "needsHandover": false }));
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.watchGroups",
+        next(Some(json!({ "state": "lost" }))),
+    )
+    .await;
+    assert_eq!(
+        unknown.code,
+        ErrorCode::InvalidParams,
+        "only the relay's three answers"
+    );
 }
 
 /// A button press and a schedule step claim through RPC: a new press

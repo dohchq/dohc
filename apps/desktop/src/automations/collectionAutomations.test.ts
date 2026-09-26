@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupHandoverState, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
@@ -107,7 +107,7 @@ async function world(options: {
   const subscriptions = new Map<string, StoredSubscription>();
   // The host generation the engine last took Group subscriptions at, and each handover it took.
   let groupGeneration = 0;
-  const tookHandovers: Array<AutomationGroupHandover | null> = [];
+  const tookHandovers: AutomationGroupHandoverState[] = [];
   const frozenGroups = new Map<string, StoredSubscription>();
   const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
@@ -210,7 +210,7 @@ async function world(options: {
       if (generation > groupGeneration && handover === undefined) return { needsHandover: true };
       if (generation > groupGeneration) {
         groupGeneration = generation;
-        tookHandovers.push(handover ?? null);
+        if (handover !== undefined) tookHandovers.push(handover);
       }
       for (const [automationId, subscription] of [...subscriptions]) {
         if ("groupId" in subscription) subscriptions.delete(automationId);
@@ -489,7 +489,7 @@ async function world(options: {
       },
     },
     groupHost: async () => (options.runsGroupTriggers ?? true ? 0 : null),
-    groupHandover: async () => null,
+    groupHandover: async () => ({ state: "unchanged" }),
     requestHost: async () => { hostRequests += 1; },
     readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
     postNotice: async (notice, signal) => {
@@ -3409,8 +3409,8 @@ describe("Collection automations that a Group message starts", () => {
     onRelease?: () => void;
     down?: boolean;
     checkIns?: number;
-    // Each release's Group handover, by the generation it starts.
-    groups: Map<number, unknown>;
+    // The last release's Group handover, for the computer it named.
+    kept: { generation: number; forInstall: string; groups: AutomationGroupHandover } | null;
   };
   // One of the owner's computers: its host module and executor, wired as main.ts wires them.
   const ownersComputer = (installId: string, w: World, relay: Relay, workspace: Workspace) => {
@@ -3432,7 +3432,11 @@ describe("Collection automations that a Group message starts", () => {
         if (request.action === "release" && relay.row !== null) {
           relay.onRelease?.();
           relay.row = { ...relay.row, generation: relay.row.generation + 1, handoverFrom: null, releasedThroughMs: request.body.releasedThroughMs };
-          relay.groups.set(relay.row.generation, request.body.groups);
+          relay.kept = {
+            generation: relay.row.generation,
+            forInstall: relay.row.installId,
+            groups: request.body.groups as AutomationGroupHandover,
+          };
         }
         return { status: 200, body: { ok: true, host: relay.row } };
       },
@@ -3455,11 +3459,14 @@ describe("Collection automations that a Group message starts", () => {
     });
     const executor = w.makeExecutor({
       groupHost: () => automationHostGeneration(workspace, () => hosts.runsAt("ws")),
-      // The relay answers only for the current generation.
+      // The relay answers only for the current generation, as main.ts reads it.
       groupHandover: async (generation) => {
         if (relay.down) throw new TypeError("fetch failed");
         if (relay.row?.generation !== generation) throw new Error("The relay answered the Group handover read with 409.");
-        return (relay.groups.get(generation) ?? null) as AutomationGroupHandover | null;
+        if (relay.kept === null) return { state: "unchanged" };
+        return relay.kept.forInstall === relay.row.installId
+          ? { state: "fetched", generation: relay.kept.generation, ...relay.kept.groups }
+          : { state: "missing" };
       },
       requestHost: () => hosts.admit("ws"),
     });
@@ -3472,7 +3479,7 @@ describe("Collection automations that a Group message starts", () => {
   // The laptop opens first and its Group trigger records it as the host; the desk opens after.
   async function laptopAndDesk() {
     const workspace = { rootPath: "", remote: {} };
-    const relay: Relay = { row: null, groups: new Map() };
+    const relay: Relay = { row: null, kept: null };
     const laptop = await world({ channels: [TRIP], automations: { Tasks: task } });
     const desk = await world({ channels: [TRIP], automations: { Tasks: task } });
     const onLaptop = ownersComputer("laptop", laptop, relay, workspace);
@@ -3511,8 +3518,8 @@ describe("Collection automations that a Group message starts", () => {
     next!.done = true;
     next!.wake();
     await desk.until(() => subscribed(desk));
-    expect(desk.tookHandovers).toEqual([relay.groups.get(3)]);
-    expect(relay.groups.get(3)).toMatchObject({ automations: [{ automationId: "collection:Tasks#task" }] });
+    expect(desk.tookHandovers).toEqual([{ state: "fetched", generation: 3, ...relay.kept!.groups }]);
+    expect(relay.kept?.groups).toMatchObject({ automations: [{ automationId: "collection:Tasks#task" }] });
     expect(subscribed(laptop)).toBe(false);
     expect(onDesk.armed(), "the handover ended").toEqual([]);
     expect(onLaptop.armed()).toEqual([]);
@@ -3535,7 +3542,7 @@ describe("Collection automations that a Group message starts", () => {
     onDesk.clock.ms += HOST_FRESH_MS + 1;
     onDesk.hosts.relayAnswered("ws");
     await desk.until(() => subscribed(desk));
-    expect(desk.tookHandovers).toEqual([relay.groups.get(3)]);
+    expect(desk.tookHandovers).toEqual([{ state: "fetched", generation: 3, ...relay.kept!.groups }]);
     expect(subscribed(laptop)).toBe(false);
     expect([...onLaptop.hostErrors, ...onDesk.hostErrors]).toEqual([]);
   });
@@ -3545,7 +3552,7 @@ describe("Collection automations that a Group message starts", () => {
     await mkdir(join(w.root, ".dohc"), { recursive: true });
     await recordNeverSynced(w.root);
     const workspace: Workspace = { rootPath: w.root };
-    const relay: Relay = { row: null, groups: new Map() };
+    const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
     await here.executor.open();
     await w.until(() => subscribed(w));
@@ -3561,7 +3568,7 @@ describe("Collection automations that a Group message starts", () => {
     expect(relay.row, "its Group trigger recorded it as the host").toMatchObject({ installId: "laptop" });
     expect(removals, "no gap in which a message claims nowhere").toBe(0);
     expect(subscribed(w)).toBe(true);
-    expect(w.tookHandovers, "the first host takes none").toEqual([null]);
+    expect(w.tookHandovers, "the first host finds none").toEqual([{ state: "unchanged" }]);
     expect(here.hostErrors).toEqual([]);
   });
 
@@ -3573,7 +3580,7 @@ describe("Collection automations that a Group message starts", () => {
     await mkdir(join(w.root, ".dohc"), { recursive: true });
     await recordNeverSynced(w.root);
     const workspace: Workspace = { rootPath: w.root };
-    const relay: Relay = { row: null, groups: new Map() };
+    const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
     await here.executor.open();
     await w.until(() => subscribed(w));

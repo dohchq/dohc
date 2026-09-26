@@ -581,7 +581,7 @@ export interface SyncRelayStorage {
   chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
-  readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): Record<string, unknown> | null;
+  readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): { generation: number | null; groups: Record<string, unknown> | null };
   commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;

@@ -205,16 +205,25 @@ type AutomationGroupSubscription = WorkspaceJsonObject & {
 };
 
 /**
+ * What the relay keeps for this computer at a new host generation: a
+ * handover left for it, none it has not taken already, or one left for
+ * another computer, as after a take over.
+ */
+export type AutomationGroupHandoverState =
+  | (AutomationGroupHandover & { state: "fetched"; generation: number })
+  | (WorkspaceJsonObject & { state: "unchanged" })
+  | (WorkspaceJsonObject & { state: "missing" });
+
+/**
  * Mirrors AutomationWatchGroupsParams in crates/dohc-workspace-engine: every
  * Group subscription this computer watches, at the automation host
  * generation it runs at (0 for a workspace that never synced). Without
- * `handover`, a new generation changes nothing and answers `needsHandover`;
- * `null` says the relay holds none.
+ * `handover`, a new generation changes nothing and answers `needsHandover`.
  */
 export type AutomationWatchGroupsParams = WorkspaceJsonObject & {
   generation: number;
   subscriptions: AutomationGroupSubscription[];
-  handover?: AutomationGroupHandover | null;
+  handover?: AutomationGroupHandoverState;
 };
 
 export type AutomationClaimNextParams = WorkspaceJsonObject & {

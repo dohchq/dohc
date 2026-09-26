@@ -10,19 +10,20 @@ use dohc_engine_domain::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
     AUTOMATION_GROUP_COVERAGE_MS, AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange,
     AutomationChangeKind, AutomationClaim, AutomationClaimState, AutomationFactValue,
-    AutomationFieldFact, AutomationGroupHandoverAutomation, AutomationGroupHandoverInput,
-    AutomationGroupMessage, AutomationGroupSubscription, AutomationGroupWatch,
-    AutomationGroupWatched, AutomationRetry, AutomationSettle, AutomationSubscription,
-    AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind, ChatChannelKind,
-    ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
-    MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
-    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, StartChannelThread,
-    TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
-    claim_next_pending_automation, list_automation_claims, list_automation_failures,
-    moment_author_attribution, moment_author_json, reclaim_running_automations,
-    release_automation_claim, release_automation_groups, retry_automation_claim,
-    settle_automation_claim, subscribe_automation, unsubscribe_automation, watch_automation_groups,
+    AutomationFieldFact, AutomationGroupHandover, AutomationGroupHandoverAutomation,
+    AutomationGroupHandoverInput, AutomationGroupMessage, AutomationGroupSubscription,
+    AutomationGroupWatch, AutomationGroupWatched, AutomationRetry, AutomationSettle,
+    AutomationSubscription, AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind,
+    ChatChannelKind, ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact,
+    CollectionRecordApplyFacts, DispatchClaim, DomainError, LinkedChatStore,
+    MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES,
+    MAX_AUTOMATION_SUBSCRIPTION_FIELDS, MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES,
+    NoFaults, SendMessage, StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx,
+    claim_group_message_in_tx, claim_next_pending_automation, list_automation_claims,
+    list_automation_failures, moment_author_attribution, moment_author_json,
+    reclaim_running_automations, release_automation_claim, release_automation_groups,
+    retry_automation_claim, settle_automation_claim, subscribe_automation, unsubscribe_automation,
+    watch_automation_groups,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -2174,6 +2175,14 @@ impl Computer {
     }
 }
 
+/// The handover a release left for this computer, under the relay's generation.
+fn fetched(generation: i64, handover: AutomationGroupHandover) -> AutomationGroupHandoverInput {
+    AutomationGroupHandoverInput::Fetched {
+        generation,
+        handover,
+    }
+}
+
 fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = pairs
         .iter()
@@ -2207,7 +2216,7 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     let mut desk = Computer::new();
     assert!(
         !laptop
-            .watch(1, AutomationGroupHandoverInput::Missing, 10)
+            .watch(1, AutomationGroupHandoverInput::Unchanged, 10)
             .needs_handover
     );
     let m0 = post("m0", "/task Before", 5);
@@ -2240,7 +2249,10 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
 
     let released =
         release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
-    assert_eq!(released.taken_generation, 1);
+    assert_eq!(
+        released.taken_generation, 0,
+        "the first host took no handover"
+    );
     let handover = released.handover;
     laptop.store_message(&m3);
     laptop.store_message(&m4);
@@ -2252,7 +2264,7 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
             .needs_handover
     );
     assert_eq!(group_rows(&desk.store, WS), Vec::new());
-    desk.watch(3, AutomationGroupHandoverInput::Fetched(handover), 40);
+    desk.watch(3, fetched(3, handover), 40);
     for message in [&m2, &m4, &m5] {
         desk.store_message(message);
     }
@@ -2299,7 +2311,7 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     assert_eq!(decided(ALL), ["m1", "m2", "m3", "m4", "m5"]);
     assert_eq!(decided(TASK), ["m1", "m2", "m3", "m4", "m5"]);
     let before = laptop.claimed.len();
-    laptop.watch(5, AutomationGroupHandoverInput::Fetched(back), 60);
+    laptop.watch(5, fetched(5, back), 60);
     laptop.store_message(&post("m6", "/task Six", 61));
     assert_eq!(
         sorted(laptop.claimed[before..].to_vec()),
@@ -2316,7 +2328,7 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
     let window = AUTOMATION_GROUP_COVERAGE_MS;
     let mut laptop = Computer::new();
     let mut desk = Computer::new();
-    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
     let old = post("m-old", "/task Old", 20);
     let recent = post("m-recent", "/task Recent", window + 40);
     laptop.store_message(&old);
@@ -2334,11 +2346,7 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
     }
     desk.store_message(&old);
     desk.store_message(&recent);
-    desk.watch(
-        3,
-        AutomationGroupHandoverInput::Fetched(handover),
-        window + 50,
-    );
+    desk.watch(3, fetched(3, handover), window + 50);
     assert!(desk.claimed.is_empty(), "both were decided or are too old");
 }
 
@@ -2347,7 +2355,7 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
 #[test]
 fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
     let mut laptop = Computer::new();
-    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
     let bound = MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES as i64;
     laptop
         .store
@@ -2384,7 +2392,7 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
 fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
     let mut laptop = Computer::new();
     let mut desk = Computer::new();
-    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
     let handover = release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS)
         .expect("release")
         .handover;
@@ -2394,7 +2402,7 @@ fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
         &mut desk.store,
         3,
         &[(ALL, GROUP, None)],
-        AutomationGroupHandoverInput::Fetched(handover),
+        fetched(3, handover),
         40,
     )
     .map(|watched| desk.keep(watched.claims))
@@ -2421,7 +2429,7 @@ fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
 fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_back() {
     let mut laptop = Computer::new();
     let mut desk = Computer::new();
-    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
     laptop.store_message(&post("m1", "/task One", 20));
     let first = release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
     // The desk never took generation 3, and is asked to hand over at once.
@@ -2436,7 +2444,7 @@ fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_
         sorted(laptop.claimed.clone()),
         pairs(&[(ALL, "m1"), (TASK, "m1")])
     );
-    laptop.watch(5, AutomationGroupHandoverInput::Fetched(first.handover), 40);
+    laptop.watch(5, fetched(5, first.handover), 40);
     assert_eq!(
         sorted(laptop.claimed.clone()),
         pairs(&[(ALL, "m1"), (TASK, "m1"), (ALL, "m2"), (TASK, "m2")])
@@ -2448,7 +2456,7 @@ fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_
 #[test]
 fn settling_a_message_claim_keeps_the_coverage_bounded() {
     let mut laptop = Computer::new();
-    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
     let bound = MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES as i64;
     laptop
         .store
@@ -2482,4 +2490,52 @@ fn settling_a_message_claim_keeps_the_coverage_bounded() {
     for (_, since, _) in group_rows(&laptop.store, WS) {
         assert!(since > 100, "each subscription starts after what went");
     }
+}
+
+/// A handover called off before any other computer ran: taking up again,
+/// this computer starts what it froze where it was, and claims what reached
+/// it while it had stopped. A handover it took already is not taken again.
+#[test]
+fn a_called_off_handover_starts_what_was_frozen_where_it_was() {
+    let mut laptop = Computer::new();
+    laptop.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
+    laptop.store_message(&post("m1", "/task One", 20));
+    let released =
+        release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
+    laptop.store_message(&post("m2", "/task Two", 31));
+    laptop.watch(3, AutomationGroupHandoverInput::Unchanged, 40);
+    assert_eq!(
+        sorted(laptop.claimed.clone()),
+        pairs(&[(ALL, "m1"), (TASK, "m1"), (ALL, "m2"), (TASK, "m2")])
+    );
+
+    // Taking its own handover, then seeing it again at a later generation.
+    let mut desk = Computer::new();
+    desk.watch(5, fetched(5, released.handover.clone()), 50);
+    release_automation_groups(&mut desk.store, WS, 55, &NO_FAULTS).expect("release");
+    desk.store_message(&post("m3", "/task Three", 56));
+    desk.watch(7, fetched(5, released.handover), 60);
+    assert_eq!(
+        sorted(desk.claimed.clone()),
+        pairs(&[(ALL, "m3"), (TASK, "m3")]),
+        "the same handover is not taken twice; what it froze starts where it was"
+    );
+}
+
+/// After a take over, which has no handover, what this computer froze in an
+/// earlier turn starts from now: it replays nothing the last host may have
+/// decided.
+#[test]
+fn after_a_take_over_what_was_frozen_starts_from_now() {
+    let mut desk = Computer::new();
+    desk.watch(1, AutomationGroupHandoverInput::Unchanged, 10);
+    release_automation_groups(&mut desk.store, WS, 20, &NO_FAULTS).expect("release");
+    // Another computer ran for a while and stopped answering.
+    desk.store_message(&post("m1", "/task Decided elsewhere", 30));
+    desk.watch(5, AutomationGroupHandoverInput::Missing, 100);
+    assert!(desk.claimed.is_empty());
+    assert_eq!(
+        group_rows(&desk.store, WS),
+        vec![(ALL.to_owned(), 100, false), (TASK.to_owned(), 100, false)]
+    );
 }
