@@ -2,7 +2,7 @@ import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
-import { effectiveDatasetOperations, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
+import { effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -33,6 +33,46 @@ function revision(): DatasetRevision {
 function binding(rev = revision()): AppDatasetBinding {
   return { kind: "dataset", datasetId: rev.datasetId, revision: rev.revision, revisionSha256: rev.revisionSha256, operationIds: rev.definition.operations.map(operation => operation.operationId) };
 }
+
+it.each([false, true])("does not let a forged digest plant a generated verdict (generated: %s)", generated => {
+  const approved = revision();
+  approved.definition.name = `Cache poisoning ${generated}`;
+  if (generated) approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const forged = { ...approved, operationsSha256: generated ? "f".repeat(64) : hash(generateDatasetOperations(approved.definition)) };
+  expect(hasGeneratedDatasetRevision(forged)).toBe(!generated);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(generated);
+  expect(hasGeneratedDatasetRevision(forged)).toBe(!generated);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(generated);
+});
+
+it("does not trust a definition carrying another definition's digest", () => {
+  const approved = revision();
+  approved.definition.name = "Definition cache poisoning";
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const forged = structuredClone(approved);
+  forged.definition.operations[1]!.access = "owner";
+  expect(hasGeneratedDatasetRevision(forged)).toBe(false);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(true);
+  expect(hasGeneratedDatasetRevision(forged)).toBe(false);
+});
+
+it("keeps generated verdicts separate when inventory order shares a revision digest", () => {
+  const approved = revision();
+  approved.definition.name = "Inventory ordering";
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const reordered = structuredClone(approved);
+  reordered.definition.operations.reverse();
+  expect(hash(datasetDefinitionDigestContent(reordered.definition))).toBe(approved.definitionSha256);
+  expect(hasGeneratedDatasetRevision(reordered)).toBe(false);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(true);
+  expect(hasGeneratedDatasetRevision(reordered)).toBe(false);
+});
 
 describe("dataset publication binding", () => {
   it("accepts explicit reversible edits and rejects reversal on other operation kinds", () => {

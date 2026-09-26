@@ -12,7 +12,7 @@ import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelation
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
-  display, initialValue, inputProblem, object, parsePage, supportsInput, supportsSort,
+  display, initialValue, inputProblem, isGeneratedRecordIdField, object, parsePage, supportsInput, supportsSort,
   type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField, type TransactionalPage, type TransactionalRow,
 } from "./transactionalCollectionModel";
 
@@ -124,7 +124,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const create = operations.find(operation => operation.kind === "create" && !operation.readOnly);
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
   const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId) &&
-    !(field.fieldId === table.primaryKeyFieldId && field.name === "Record ID" && field.type === "text")) ?? [];
+    !isGeneratedRecordIdField(field, table, dataset.operations)) ?? [];
   const createFields = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
   const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
   const canCreate = create && createFields.every(canInput);

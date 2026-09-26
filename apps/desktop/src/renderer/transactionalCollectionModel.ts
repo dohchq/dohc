@@ -3,6 +3,10 @@ import { datasetColumnFields, type DatasetColumnField, type DatasetDescription, 
 
 /** A field the table shows and edits: a column. Buttons come with their own interface. */
 export type TransactionalField = Omit<DatasetColumnField, "sqlColumn">;
+export function isGeneratedRecordIdField(field: TransactionalField, table: { tableId: string; primaryKeyFieldId?: string }, operations: readonly DatasetOperation[]): boolean {
+  return field.fieldId === table.primaryKeyFieldId && field.type === "text" &&
+    !operations.some(operation => operation.tableId === table.tableId && operation.kind === "create" && operation.fieldIds.includes(field.fieldId));
+}
 export interface TransactionalDatasetDescription {
   datasetId: string;
   name: string;

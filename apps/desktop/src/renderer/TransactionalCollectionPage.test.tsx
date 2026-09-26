@@ -49,11 +49,11 @@ it.each(["Record ID", "Membership number"])("hides only the generated primary ke
   const table = screen.getByRole("table");
   if (primaryName === "Record ID") {
     expect(within(table).queryByRole("columnheader", { name: /Record ID/ })).toBeNull();
-    expect(within(table).queryByText("generated-uuid")).toBeNull();
   } else {
-    expect(within(table).getByRole("columnheader", { name: /Membership number/ })).toBeTruthy();
+    expect(within(table).queryByRole("columnheader", { name: /Membership number/ })).toBeNull();
     expect(within(table).getByRole("columnheader", { name: /Record ID/ })).toBeTruthy();
   }
+  expect(within(table).queryByText("generated-uuid")).toBeNull();
   expect(description.operations.find(operation => operation.kind === "read")!.fieldIds).toContain(primary.fieldId);
 });
 

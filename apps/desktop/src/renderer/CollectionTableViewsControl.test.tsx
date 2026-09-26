@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act,cleanup,fireEvent,render,screen,waitFor } from "@testing-library/react";
+import { act,cleanup,fireEvent,render,screen,waitFor,within } from "@testing-library/react";
 import { afterEach,expect,it,vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
@@ -9,6 +9,27 @@ vi.mock("./bridge",()=>({bridge:()=>backend}));
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const dataset:DatasetDescription={datasetId:id(1),name:"Entries",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:id(2),name:"Entries",fields:[{fieldId:id(3),name:"Status",type:"select",options:["Pending","Paid"],required:true,unique:false}]}],operations:[{operationId:id(4),name:"read",label:"Read",kind:"read",tableId:id(2),readOnly:true,access:"owner",fieldIds:[id(3)]}]};
 afterEach(()=>{cleanup();vi.clearAllMocks();localStorage.clear();});
+it.each(["Record ID", "Renamed identity"])("hides the generated key from view controls (%s)", async primaryName => {
+  const description = structuredClone(dataset);
+  const table = description.tables[0]!;
+  table.primaryKeyFieldId = id(5);
+  table.fields.push({ fieldId: id(5), name: primaryName, type: "text", required: true, unique: true },
+    { fieldId: id(6), name: "Visible field", type: "text", required: true, unique: false });
+  description.operations[0]!.fieldIds.push(id(5), id(6));
+  backend.readWorkspaceText.mockRejectedValue(Error("missing"));
+  backend.listWorkspaceFiles.mockResolvedValue({ files: [] });
+  render(<CollectionTableViewsControl workspaceId="w" dataset={description} tableId={table.tableId} onSelect={vi.fn()} onError={vi.fn()}/>);
+  await waitFor(() => expect((screen.getByRole("button", { name: "Views" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Views" }));
+  fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+  fireEvent.change(screen.getByLabelText("View layout"), { target: { value: "board" } });
+  for (const label of ["Sort view by", "Filter 1 field", "Board group field"]) {
+    const control = within(screen.getByLabelText(label));
+    expect(control.queryByRole("option", { name: primaryName })).toBeNull();
+    expect(control.getByRole("option", { name: "Visible field" })).toBeTruthy();
+  }
+});
 it("creates, reloads, renames, deletes and restores a source-backed filtered view",async()=>{
   let text:string|null=null,version=0;
   backend.readWorkspaceText.mockImplementation(async()=>{if(text===null)throw Error("missing");return {text,contentHash:String(version).padStart(64,"0"),truncated:false};});

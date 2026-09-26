@@ -1,24 +1,30 @@
 import { createHash } from "node:crypto";
 import { parseAppBackendCaller, type AppBackendCaller } from "./appBackend";
-import { parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, type DatasetRevision, type AppDatasetBinding, type AppDatasetCapability, type DatasetOperation } from "./dataset";
+import { parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, datasetDefinitionDigestContent, datasetRevisionDigestContent, type DatasetRevision, type AppDatasetBinding, type AppDatasetCapability, type DatasetOperation } from "./dataset";
 import { generateDatasetOperations } from "./datasetOperations";
 
 function fail(): never { throw new Error("Invalid dataset metadata."); }
 
 const generatedRevisions = new Map<string, boolean>();
 
-/** The host-approved revision digest identifies immutable definition and artifact bytes. */
+/** Cache only content identities recomputed from the supplied metadata. */
 export function hasGeneratedDatasetRevision(approved: DatasetRevision): boolean {
-  const key = approved.revisionSha256;
-  const cached = generatedRevisions.get(key);
+  const hash = (content: string) => createHash("sha256").update(content).digest("hex");
+  const verified = hash(datasetDefinitionDigestContent(approved.definition)) === approved.definitionSha256 &&
+    hash(datasetRevisionDigestContent(approved)) === approved.revisionSha256;
+  // Revision hashing sorts inventories; generated source retains their order.
+  const key = `${approved.revisionSha256}:${hash(JSON.stringify(approved.definition))}`;
+  const cached = verified ? generatedRevisions.get(key) : undefined;
   if (cached !== undefined) {
     generatedRevisions.delete(key);
     generatedRevisions.set(key, cached);
     return cached;
   }
-  const generated = createHash("sha256").update(generateDatasetOperations(approved.definition)).digest("hex") === approved.operationsSha256;
-  generatedRevisions.set(key, generated);
-  if (generatedRevisions.size > 32) generatedRevisions.delete(generatedRevisions.keys().next().value!);
+  const generated = hash(generateDatasetOperations(approved.definition)) === approved.operationsSha256;
+  if (verified) {
+    generatedRevisions.set(key, generated);
+    if (generatedRevisions.size > 32) generatedRevisions.delete(generatedRevisions.keys().next().value!);
+  }
   return generated;
 }
 
