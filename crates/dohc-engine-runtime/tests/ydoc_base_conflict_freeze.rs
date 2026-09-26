@@ -295,7 +295,8 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
         .expect("inspect compound resolution");
     assert_eq!(inactive, 1, "the predecessor remains addressable");
     assert_eq!(pending, 0, "a positioned bundle drains in its transaction");
-    assert_eq!(local_ops.len(), 1);
+    assert_eq!(local_ops.len(), 2);
+    assert_eq!(local_ops[1].1, "moment.append");
     assert_eq!(local_ops[0].0, 1);
     assert_eq!(local_ops[0].1, "conflict.resolve");
     let payload = &local_ops[0].2;
@@ -303,7 +304,8 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
     assert_eq!(payload["workspaceId"], WS);
     assert_eq!(payload["conflictId"], conflict_id);
     assert_eq!(payload["status"], "resolved");
-    assert_eq!(payload["effects"], serde_json::json!([]));
+    assert_eq!(payload["effects"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["effects"][0]["kind"], "write");
     assert_eq!(
         payload["lineageTransition"]["predecessorClaimId"],
         predecessor_claim

@@ -567,48 +567,24 @@ fn apply_deferred_base(
         let winner_claim_id = winner.lineage_claim_id.clone().ok_or_else(|| {
             local_corruption("parked winning Y.Doc lineage has no claim identity")
         })?;
-        let mut recovered_paths = Vec::new();
-        if let (Some(losing_claim_id), Some(markdown)) =
-            (losing_claim_id.as_deref(), losing_projection.as_deref())
-        {
-            let projection = project_ydoc_with_store(tx, &key, &incoming_doc, winner.content_kind)?;
-            if let Some(conflicts_opened) = conflict_replaced_lineage_in_tx(
-                tx, &key, &payload.path, markdown, last_settled_sha.as_deref(),
-                &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
-            )? {
-                record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, conflicts_opened)?;
-                return Ok(Some(YdocLineageReplacement {
-                    winner_lineage_claim_id: winner_claim_id,
-                    recovered_paths,
-                }));
-            }
-            let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
-                tx,
-                &key,
-                &payload.path,
-                crate::ydoc_recovery::RecoveryEnvelopeBinding {
-                    content_kind: &payload.content_kind,
-                    update_blob_sha256: &payload.update_blob_sha256,
-                    lineage_claim_id: &payload.lineage_claim_id,
-                    is_base_state: payload.is_base_state,
-                },
-                losing_claim_id,
-                markdown,
-                &origin_id,
-                origin_seq,
-                recorded_at_ms,
-                search_policy,
-            )?;
-            recovered_paths.push(recovery.path);
-            let current = validate_retryable_ydoc_identity(tx, &key, &payload.path)?;
-            if let Some(snapshot) = current.snapshot.as_ref()
-                && snapshot.blob_sha256 != hex_sha256(projection.content.as_bytes())
-                && open_sync_conflict_id(tx, &key)?.is_none()
-            {
-                let opened = open_base_conflict_in_tx(tx, &key, &payload.path, snapshot,
-                    &projection.content, &origin_id, origin_seq, recorded_at_ms)?;
-                record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
-            }
+        let projection = project_ydoc_with_store(tx, &key, &incoming_doc, winner.content_kind)?;
+        let (conflict, recovered_paths) = preserve_base_sides_in_tx(
+            tx, &key, &payload.path,
+            crate::ydoc_recovery::RecoveryEnvelopeBinding {
+                content_kind: &payload.content_kind,
+                update_blob_sha256: &payload.update_blob_sha256,
+                lineage_claim_id: &payload.lineage_claim_id,
+                is_base_state: payload.is_base_state,
+            },
+            losing_claim_id.as_deref(), losing_projection.as_deref(), last_settled_sha.as_deref(),
+            &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
+        )?;
+        if let Some(opened) = conflict {
+            record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
+            return Ok(Some(YdocLineageReplacement {
+                winner_lineage_claim_id: winner_claim_id,
+                recovered_paths,
+            }));
         }
         project_and_write_in_tx(
             tx,
@@ -2190,6 +2166,107 @@ fn open_base_conflict_in_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn preserve_base_sides_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    incoming: crate::ydoc_recovery::RecoveryEnvelopeBinding<'_>,
+    losing_claim_id: Option<&str>,
+    losing_projection: Option<&str>,
+    last_settled_sha: Option<&str>,
+    incoming_content: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<(Option<i64>, Vec<String>), SyncError> {
+    let mut recovered_paths = Vec::new();
+    // Equal projections need neither a choice nor a second copy.
+    if let (Some(claim), Some(local)) = (losing_claim_id, losing_projection)
+        && hex_sha256(local.as_bytes()) != hex_sha256(incoming_content.as_bytes())
+    {
+        if let Some(opened) = conflict_replaced_lineage_in_tx(
+            tx,
+            key,
+            path,
+            local,
+            last_settled_sha,
+            incoming_content,
+            origin_id,
+            origin_seq,
+            now_ms,
+            search_policy,
+        )? {
+            return Ok((Some(opened), recovered_paths));
+        }
+        let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
+            tx,
+            key,
+            path,
+            incoming,
+            claim,
+            local,
+            origin_id,
+            origin_seq,
+            now_ms,
+            search_policy,
+        )?;
+        recovered_paths.push(recovery.path);
+    }
+    // A shipped fork snapshot preserves its source metadata in
+    // `fork_base_snapshots`. Copy that existing ancestry marker onto
+    // the newly claimed target lineage only while the current head is
+    // still the exact fork materialization.
+    tx.execute(
+        "UPDATE ydoc_docs SET last_settled_sha=(
+                     SELECT f.blob_sha256 FROM fork_base_snapshots f
+                     JOIN snapshots s
+                       ON s.workspace_id=f.workspace_id
+                      AND s.version_id=f.version_id
+                      AND s.object_id=f.object_id
+                      AND s.path=f.path
+                      AND s.blob_sha256=f.blob_sha256
+                      AND s.latest_moment_id=f.latest_moment_id
+                    WHERE f.workspace_id=?1 AND f.version_id=?2 AND f.object_id=?3
+                      AND f.path=?4 AND f.metadata_origin='ydoc'
+                 ) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                       AND last_settled_sha IS NULL",
+        params![key.workspace_id, key.version_id, key.object_id, path],
+    )
+    .map_err(SyncError::persist)?;
+
+    let current = validate_retryable_ydoc_identity(tx, key, path)?;
+    let head_settled_by_this_lineage: Option<String> = tx.query_row(
+        "SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    if let Some(snapshot) = current.snapshot.as_ref() {
+        let head_is_preserved = head_settled_by_this_lineage.as_deref()
+            == Some(snapshot.blob_sha256.as_str())
+            || last_settled_sha == Some(snapshot.blob_sha256.as_str())
+            || losing_projection
+                .is_some_and(|local| hex_sha256(local.as_bytes()) == snapshot.blob_sha256);
+        if !head_is_preserved
+            && snapshot.blob_sha256 != hex_sha256(incoming_content.as_bytes())
+            && open_sync_conflict_id(tx, key)?.is_none()
+        {
+            let opened = open_base_conflict_in_tx(
+                tx,
+                key,
+                path,
+                snapshot,
+                incoming_content,
+                origin_id,
+                origin_seq,
+                now_ms,
+            )?;
+            return Ok((Some(opened), recovered_paths));
+        }
+    }
+    Ok((None, recovered_paths))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn conflict_replaced_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -3056,7 +3133,7 @@ pub fn apply_ydoc_envelope(
             // the base arrives. Retrying after the later delete/rename is
             // convergence-safe; refusing and ACKing would lose the base
             // forever on this receiver.
-            let current = validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
+            validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![claim_key.workspace_id, claim_key.object_id, op.recorded_at_ms],
@@ -3220,157 +3297,33 @@ pub fn apply_ydoc_envelope(
                 .lineage_claim_id
                 .clone()
                 .ok_or_else(|| local_corruption("winning Y.Doc lineage has no claim identity"))?;
-            let mut recovered_paths = Vec::new();
-            if let (Some(losing_claim_id), Some(markdown)) =
-                (losing_claim_id.as_deref(), losing_projection.as_deref())
-            {
-                let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
-                if let Some(conflicts_opened) = conflict_replaced_lineage_in_tx(
-                    tx,
-                    &claim_key,
-                    &base_path,
-                    markdown,
-                    losing_last_settled_sha.as_deref(),
-                    &projection.content,
-                    &op.origin_id,
-                    op.origin_seq,
-                    op.recorded_at_ms,
-                    search_policy.as_ref(),
-                )? {
-                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
-                    return Ok(YdocApplyResult {
-                        deferred: false,
-                        reason: Some("ydoc-base-conflict"),
-                        conflicts_opened,
-                        lineage_replacement: Some(YdocLineageReplacement {
-                            winner_lineage_claim_id,
-                            recovered_paths,
-                        }),
-                        record_facts: Vec::new(),
-                    });
-                }
-                let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
-                    tx,
-                    &claim_key,
-                    &base_path,
-                    incoming.clone(),
-                    losing_claim_id,
-                    markdown,
-                    &op.origin_id,
-                    op.origin_seq,
-                    op.recorded_at_ms,
-                    search_policy.as_ref(),
-                )?;
-                recovered_paths.push(recovery.path);
-            }
-            // A shipped fork snapshot preserves its source metadata in
-            // `fork_base_snapshots`. Copy that existing ancestry marker onto
-            // the newly claimed target lineage only while the current head is
-            // still the exact fork materialization.
-            tx.execute(
-                "UPDATE ydoc_docs SET last_settled_sha=(
-                     SELECT f.blob_sha256 FROM fork_base_snapshots f
-                     JOIN snapshots s
-                       ON s.workspace_id=f.workspace_id
-                      AND s.version_id=f.version_id
-                      AND s.object_id=f.object_id
-                      AND s.path=f.path
-                      AND s.blob_sha256=f.blob_sha256
-                      AND s.latest_moment_id=f.latest_moment_id
-                    WHERE f.workspace_id=?1 AND f.version_id=?2 AND f.object_id=?3
-                      AND f.path=?4 AND f.metadata_origin='ydoc'
-                 ) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-                       AND last_settled_sha IS NULL",
-                params![
-                    claim_key.workspace_id,
-                    claim_key.version_id,
-                    claim_key.object_id,
-                    base_path
-                ],
-            )
-            .map_err(SyncError::persist)?;
-            // The first base is not a CRDT merge: a local head that no shared
-            // lineage ever merged (capture or an external editor wrote it, and
-            // the receiver holds no durable Y.Doc rows to union with) must not
-            // be silently replaced by the sender's projection. Keep the head,
-            // land the lineage, and open the same reviewable sync conflict the
-            // moment lane opens for a diverged file — one resolution settles
-            // both machines. A head that already equals the base's projection
-            // needs no conflict, and a lineage with durable rows takes the
-            // union path below (the projection carries the local content).
-            // Whether the head is represented in this union, not whether the
-            // lineage happens to hold rows. `lineage_has_state` was a proxy
-            // for "the head was merged" and the two come apart exactly where
-            // it matters: a local-only session that crashed leaves durable
-            // unmaterialized rows, capture then records an external disk
-            // edit, and the union is the crashed draft plus the peer's base
-            // — not the newer captured head. The proxy said "rows exist, so
-            // the CRDT is the merge" and the projection overwrote the user's
-            // external edit with no conflict at all.
-            //
-            // The fact is `last_settled_sha`: the content this lineage last
-            // put on disk. A head equal to it came from this lineage and is
-            // therefore inside the union. A head that differs was written by
-            // someone else — capture, an external editor — and nothing has
-            // merged it, which is the same reasoning that replaced
-            // `metadata_origin == "sync"` with the payload's head ids in the
-            // resolve path.
-            let head_settled_by_this_lineage: Option<String> = tx
-                .query_row(
-                    "SELECT last_settled_sha FROM ydoc_docs \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                    params![
-                        claim_key.workspace_id,
-                        claim_key.version_id,
-                        claim_key.object_id
-                    ],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .map_err(SyncError::corrupt)?
-                .flatten();
-            let head_is_in_the_union = current.snapshot.as_ref().is_some_and(|snapshot| {
-                head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
-                    || losing_last_settled_sha.as_deref() == Some(snapshot.blob_sha256.as_str())
-            });
-            let head_was_recovered = current.snapshot.as_ref().is_some_and(|snapshot| {
-                losing_projection.as_ref().is_some_and(|markdown| {
-                    dohc_engine_storage::hex_sha256(markdown.as_bytes()) == snapshot.blob_sha256
-                })
-            });
-            if !head_was_recovered
-                && !head_is_in_the_union
-                && let Some(snapshot) = current.snapshot.as_ref()
-            {
-                let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
-                let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
-                if snapshot.blob_sha256 != projected_sha {
-                    let conflicts_opened = open_base_conflict_in_tx(
-                        tx,
-                        &claim_key,
-                        &base_path,
-                        snapshot,
-                        &projection.content,
-                        &op.origin_id,
-                        op.origin_seq,
-                        op.recorded_at_ms,
-                    )?;
-                    // Immutable per-envelope record of what this coordinate
-                    // opened: a later delta coalesces the conflict and
-                    // rewrites its incoming anchor, so a crash-redelivery
-                    // recount must not depend on the mutable conflict row.
-                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
-                    return Ok(YdocApplyResult {
-                        deferred: false,
-                        reason: Some("ydoc-base-conflict"),
-                        conflicts_opened,
-                        lineage_replacement: replaced.then_some(YdocLineageReplacement {
-                            winner_lineage_claim_id,
-                            recovered_paths,
-                        }),
-                        record_facts: Vec::new(),
-                    });
-                }
+            let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
+            let (conflict, recovered_paths) = preserve_base_sides_in_tx(
+                tx,
+                &claim_key,
+                &base_path,
+                incoming.clone(),
+                losing_claim_id.as_deref(),
+                losing_projection.as_deref(),
+                losing_last_settled_sha.as_deref(),
+                &projection.content,
+                &op.origin_id,
+                op.origin_seq,
+                op.recorded_at_ms,
+                search_policy.as_ref(),
+            )?;
+            if let Some(conflicts_opened) = conflict {
+                record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
+                return Ok(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-base-conflict"),
+                    conflicts_opened,
+                    lineage_replacement: replaced.then_some(YdocLineageReplacement {
+                        winner_lineage_claim_id,
+                        recovered_paths,
+                    }),
+                    record_facts: Vec::new(),
+                });
             }
             // A fresh base-only replica gets its FILE, not just CRDT rows.
             project_and_write_in_tx(

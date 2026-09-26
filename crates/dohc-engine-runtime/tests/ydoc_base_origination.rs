@@ -3457,20 +3457,13 @@ async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_rev
             CancellationToken::new(),
         )
         .await;
-    assert!(matches!(
-        opened,
-        Err(RuntimeError::Domain(
-            dohc_engine_domain::DomainError::InvalidInput {
-                reason: "ydoc-conflict-open"
-            }
-        ))
-    ));
+    assert!(matches!(opened, Err(RuntimeError::YdocOpenConflict { .. })));
     supervisor.close(&a).unwrap();
-    let mut store = EngineStore::open(&a, 600).unwrap();
+    let store = EngineStore::open(&a, 600).unwrap();
     assert_eq!(
         deferred_rows(&store, &key),
-        2,
-        "refused opens retain queued events"
+        0,
+        "refused opens finish the drain so resolution can proceed"
     );
     let sides: (String, String) = store
         .read_with(|conn| {
@@ -3488,16 +3481,43 @@ async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_rev
             "remote seed plus remote edit".to_owned()
         )
     );
-    let drained = drain_deferred_ydoc_for_key(
-        &mut store,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &key,
-        &NoFaults,
-    )
-    .unwrap();
+    let conflict_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT conflict_id FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    drop(store);
+    let actor = supervisor.open(&a, 700).unwrap().actor;
+    let resolved = actor
+        .conflict_resolve(
+            dohc_engine_domain::ResolveTextConflict {
+                workspace_id: WS_TWO_DEVICES.into(),
+                conflict_id,
+                resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+                object_id: OBJECT.into(),
+                write_moment_id: "resolve-after-open".into(),
+                delete_moment_id: "delete-after-open".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 800,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            std::sync::Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        drained.conflicts_opened, 1,
-        "the next pull reports the conflict after a refused open"
+        resolved.conflict.status,
+        dohc_engine_domain::ConflictStatus::Resolved
     );
-    assert_eq!(deferred_rows(&store, &key), 0);
+    supervisor.close(&a).unwrap();
 }

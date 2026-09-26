@@ -542,265 +542,318 @@ fn lower_relay_base_recovers_a_third_copy_as_one_ordinary_sibling() {
 
 #[test]
 fn different_scene_seeds_open_a_version_conflict() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    let scene = |element_id: &str| {
-        json!({
-            "type": "excalidraw",
-            "version": 2,
-            "source": "https://excalidraw.com",
-            "elements": [{
-                "id": element_id,
-                "type": "rectangle",
-                "version": 1,
-                "versionNonce": 1,
-                "isDeleted": false,
-                "index": "a0"
-            }],
-            "appState": {},
-            "files": {}
-        })
-        .to_string()
-    };
-    let path = "drawings/arbitrated.excalidraw";
-    let loser_portable = scene("losing-rectangle");
-    seed_text_head(
-        &mut engine,
-        "object-arbitrated-scene",
-        path,
-        &loser_portable,
-    );
-    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-arbitrated-scene")
-        .expect("scene key");
-    let loser = dohc_engine_collab::Ydoc::wire();
-    loser
-        .apply(
-            &dohc_engine_collab::import_portable_scene(&loser_portable)
-                .expect("losing scene import")
-                .initial_update,
-        )
-        .expect("losing scene applies");
-    let loser_bytes = loser.encode_full_state();
-    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
-    assert!(matches!(
-        dohc_engine_collab::claim_base_at_relay(
+    for deferred in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("main version");
+        let scene = |element_id: &str| {
+            json!({
+                "type": "excalidraw",
+                "version": 2,
+                "source": "https://excalidraw.com",
+                "elements": [{
+                    "id": element_id,
+                    "type": "rectangle",
+                    "version": 1,
+                    "versionNonce": 1,
+                    "isDeleted": false,
+                    "index": "a0"
+                }],
+                "appState": {},
+                "files": {}
+            })
+            .to_string()
+        };
+        let path = "drawings/arbitrated.excalidraw";
+        let loser_portable = scene("losing-rectangle");
+        seed_text_head(
             &mut engine,
-            &key,
-            dohc_engine_collab::ContentKind::Scene,
-            &loser_bytes,
-            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
-                .expect("loser coordinate"),
-            &NoFaults,
-            1_100,
-        ),
-        Ok(TxnOutcome::Committed(
-            dohc_engine_collab::ClaimOutcome::Claimed { .. }
-        ))
-    ));
-    engine
-        .write_with(&NoFaults, |tx| {
-            crate::ydoc_apply::project_and_write_in_tx(
-                tx,
-                &key,
-                path,
-                &loser,
-                dohc_engine_collab::ContentKind::Scene,
-                "loser",
-                0,
-                1_100,
-                None,
+            "object-arbitrated-scene",
+            path,
+            &loser_portable,
+        );
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "object-arbitrated-scene")
+            .expect("scene key");
+        let loser = dohc_engine_collab::Ydoc::wire();
+        loser
+            .apply(
+                &dohc_engine_collab::import_portable_scene(&loser_portable)
+                    .expect("losing scene import")
+                    .initial_update,
             )
-        })
-        .expect("settle the losing scene projection");
+            .expect("losing scene applies");
+        let loser_bytes = loser.encode_full_state();
+        let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+        assert!(matches!(
+            dohc_engine_collab::claim_base_at_relay(
+                &mut engine,
+                &key,
+                dohc_engine_collab::ContentKind::Scene,
+                &loser_bytes,
+                &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                    .expect("loser coordinate"),
+                &NoFaults,
+                1_100,
+            ),
+            Ok(TxnOutcome::Committed(
+                dohc_engine_collab::ClaimOutcome::Claimed { .. }
+            ))
+        ));
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::project_and_write_in_tx(
+                    tx,
+                    &key,
+                    path,
+                    &loser,
+                    dohc_engine_collab::ContentKind::Scene,
+                    "loser",
+                    0,
+                    1_100,
+                    None,
+                )
+            })
+            .expect("settle the losing scene projection");
 
-    let moments_before: i64 = engine
-        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
-        .unwrap();
-    let winner = dohc_engine_collab::Ydoc::wire();
-    winner
-        .apply(
-            &dohc_engine_collab::import_portable_scene(&scene("winning-rectangle"))
-                .expect("winning scene import")
-                .initial_update,
+        let moments_before: i64 = engine
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+            .unwrap();
+        let winner = dohc_engine_collab::Ydoc::wire();
+        winner
+            .apply(
+                &dohc_engine_collab::import_portable_scene(&scene("winning-rectangle"))
+                    .expect("winning scene import")
+                    .initial_update,
+            )
+            .expect("winning scene applies");
+        let winner_bytes = winner.encode_full_state();
+        let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+        let mut incoming = envelope(
+            "winner",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": key.object_id,
+                "path": path,
+                "contentKind": "scene",
+                "updateBlobSha256": winner_claim,
+                "lineageClaimId": winner_claim,
+                "isBaseState": true
+            }),
+        );
+        incoming.relay_seq = Some(10);
+        let applied = apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            if deferred { &AlwaysLive } else { &NoLiveLeases },
         )
-        .expect("winning scene applies");
-    let winner_bytes = winner.encode_full_state();
-    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
-    let mut incoming = envelope(
-        "winner",
-        0,
-        "ydoc.update",
-        json!({
-            "versionId": "main",
-            "objectId": key.object_id,
-            "path": path,
-            "contentKind": "scene",
-            "updateBlobSha256": winner_claim,
-            "lineageClaimId": winner_claim,
-            "isBaseState": true
-        }),
-    );
-    incoming.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(
-        &mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &incoming,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("winning scene base applies");
-    let ApplyOutcome {
-        primary: ApplyDisposition::Applied(result),
-        refusals: ref outcome_refusals,
-        sharing_declined: ref outcome_sharing_declined,
-    } = applied
-    else {
-        panic!("winning scene base did not apply: {applied:?}");
-    };
-    assert!(outcome_refusals.is_empty());
-    assert!(outcome_sharing_declined.is_empty());
-    let replacement = result
-        .lineage_replacement
-        .expect("scene replacement result");
-    assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
-    assert!(replacement.recovered_paths.is_empty());
-    assert_eq!(result.conflicts_opened, 1);
-    assert_eq!(result.reason, Some("ydoc-base-conflict"));
-    let (current, incoming_text, head, recoveries): (String, String, String, i64) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT c.text,i.text,h.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
+        .expect("winning scene base applies");
+        let ApplyOutcome {
+            primary: ApplyDisposition::Applied(result),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } = applied
+        else {
+            panic!("winning scene base did not apply: {applied:?}");
+        };
+        assert!(outcome_refusals.is_empty());
+        assert!(outcome_sharing_declined.is_empty());
+        let result = if deferred {
+            let drain = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .unwrap();
+            crate::YdocApplyResult {
+                deferred: false,
+                reason: Some("ydoc-base-conflict"),
+                conflicts_opened: drain.conflicts_opened,
+                lineage_replacement: drain.lineage_replacements.into_iter().next(),
+                record_facts: drain.record_facts,
+            }
+        } else {
+            result
+        };
+        let replacement = result
+            .lineage_replacement
+            .expect("scene replacement result");
+        assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
+        assert!(replacement.recovered_paths.is_empty());
+        assert_eq!(result.conflicts_opened, 1);
+        assert_eq!(result.reason, Some("ydoc-base-conflict"));
+        let (current, incoming_text, head, recoveries): (String, String, String, i64) = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT c.text,i.text,h.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
             FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
             JOIN blobs i ON i.sha256=f.incoming_blob_sha256
             JOIN snapshots s ON s.object_id=f.current_object_id
             JOIN blobs h ON h.sha256=s.blob_sha256 WHERE f.status='open'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-        })
-        .expect("visible scene conflict");
-    assert_eq!(head, current);
-    assert_eq!(recoveries, 0);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&current).unwrap()["elements"][0]["id"],
-        "losing-rectangle"
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&incoming_text).unwrap()["elements"][0]["id"],
-        "winning-rectangle"
-    );
-    let moments_after: i64 = engine
-        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
-        .unwrap();
-    assert_eq!(
-        moments_after, moments_before,
-        "a settled local scene needs no new history entry"
-    );
-    assert_ne!(loser_claim, winner_claim);
-    resolve_seed_conflict(&mut engine, &key, true);
-    assert_eq!(
-        VersionedTextStore::new(&mut engine)
-            .read_text("ws", "main", path)
-            .unwrap()
-            .unwrap()
-            .text,
-        current
-    );
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("visible scene conflict");
+        assert_eq!(head, current);
+        assert_eq!(recoveries, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&current).unwrap()["elements"][0]["id"],
+            "losing-rectangle"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&incoming_text).unwrap()["elements"][0]["id"],
+            "winning-rectangle"
+        );
+        let moments_after: i64 = engine
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(
+            moments_after, moments_before,
+            "a settled local scene needs no new history entry"
+        );
+        assert_ne!(loser_claim, winner_claim);
+        resolve_seed_conflict(&mut engine, &key, true);
+        assert_eq!(
+            VersionedTextStore::new(&mut engine)
+                .read_text("ws", "main", path)
+                .unwrap()
+                .unwrap()
+                .text,
+            current
+        );
+    }
 }
 
 #[test]
-fn distinct_lineages_conflict_even_when_their_current_text_matches() {
-    let (_scratch, _path, mut engine) = open_store();
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(
-        &mut engine,
-        "object-matching-lineages",
-        "notes/matching-lineages.md",
-        "same text",
-    );
-    let key =
-        dohc_engine_collab::DocKey::new("ws", "main", "object-matching-lineages").expect("doc key");
-    let loser = dohc_engine_collab::Ydoc::wire();
-    loser.plaintext_insert(0, "same text");
-    let loser_bytes = loser.encode_full_state();
-    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
-    assert!(matches!(
-        dohc_engine_collab::claim_base_at_relay(
+fn distinct_lineages_with_identical_text_keep_the_winner_without_conflict() {
+    for deferred in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("main version");
+        seed_text_head(
             &mut engine,
-            &key,
-            dohc_engine_collab::ContentKind::Plaintext,
-            &loser_bytes,
-            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
-                .expect("loser coordinate"),
-            &NoFaults,
-            1_100,
-        ),
-        Ok(TxnOutcome::Committed(
-            dohc_engine_collab::ClaimOutcome::Claimed { .. }
-        ))
-    ));
+            "object-matching-lineages",
+            "notes/matching-lineages.md",
+            "same text",
+        );
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "object-matching-lineages")
+            .expect("doc key");
+        let loser = dohc_engine_collab::Ydoc::wire();
+        loser.plaintext_insert(0, "same text");
+        let loser_bytes = loser.encode_full_state();
+        let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+        assert!(matches!(
+            dohc_engine_collab::claim_base_at_relay(
+                &mut engine,
+                &key,
+                dohc_engine_collab::ContentKind::Plaintext,
+                &loser_bytes,
+                &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                    .expect("loser coordinate"),
+                &NoFaults,
+                1_100,
+            ),
+            Ok(TxnOutcome::Committed(
+                dohc_engine_collab::ClaimOutcome::Claimed { .. }
+            ))
+        ));
 
-    let winner = dohc_engine_collab::Ydoc::wire();
-    winner.plaintext_insert(0, "same text");
-    let winner_bytes = winner.encode_full_state();
-    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
-    assert_ne!(
-        winner_claim, loser_claim,
-        "the test needs independent lineages"
-    );
-    let mut incoming = envelope(
-        "winner",
-        0,
-        "ydoc.update",
-        json!({
-            "versionId": "main",
-            "objectId": "object-matching-lineages",
-            "path": "notes/matching-lineages.md",
-            "contentKind": "plaintext",
-            "updateBlobSha256": winner_claim,
-            "lineageClaimId": winner_claim,
-            "isBaseState": true
-        }),
-    );
-    incoming.relay_seq = Some(10);
-    let ApplyOutcome {
-        primary: ApplyDisposition::Applied(result),
-        refusals: ref outcome_refusals,
-        sharing_declined: ref outcome_sharing_declined,
-    } = apply_ydoc_envelope(
-        &mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &incoming,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("winning base applies")
-    else {
-        panic!("winning base did not apply");
-    };
-    assert!(outcome_refusals.is_empty());
-    assert!(outcome_sharing_declined.is_empty());
-    let replacement = result.lineage_replacement.expect("replacement result");
-    assert!(replacement.recovered_paths.is_empty());
-    assert_eq!(result.conflicts_opened, 1);
-    let (current, incoming_text): (String, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT c.text,i.text FROM conflicts f
-            JOIN blobs c ON c.sha256=f.current_blob_sha256
-            JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE status='open'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+        let winner = dohc_engine_collab::Ydoc::wire();
+        winner.plaintext_insert(0, "same text");
+        let winner_bytes = winner.encode_full_state();
+        let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+        assert_ne!(
+            winner_claim, loser_claim,
+            "the test needs independent lineages"
+        );
+        let mut incoming = envelope(
+            "winner",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-matching-lineages",
+                "path": "notes/matching-lineages.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": winner_claim,
+                "lineageClaimId": winner_claim,
+                "isBaseState": true
+            }),
+        );
+        incoming.relay_seq = Some(10);
+        let ApplyOutcome {
+            primary: ApplyDisposition::Applied(result),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } = apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            if deferred { &AlwaysLive } else { &NoLiveLeases },
+        )
+        .expect("winning base applies")
+        else {
+            panic!("winning base did not apply");
+        };
+        assert!(outcome_refusals.is_empty());
+        assert!(outcome_sharing_declined.is_empty());
+        let result = if deferred {
+            let drain = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
             )
-        })
-        .unwrap();
-    assert_eq!(current, "same text");
-    assert_eq!(incoming_text, current);
+            .unwrap();
+            crate::YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: drain.conflicts_opened,
+                lineage_replacement: drain.lineage_replacements.into_iter().next(),
+                record_facts: drain.record_facts,
+            }
+        } else {
+            result
+        };
+        let replacement = result.lineage_replacement.expect("replacement result");
+        assert!(replacement.recovered_paths.is_empty());
+        assert_eq!(result.conflicts_opened, 0);
+        let counts: (i64, i64) = engine
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(counts, (0, 0));
+        assert_eq!(
+            dohc_engine_collab::read_marker(&engine, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id,
+            Some(winner_claim)
+        );
+        assert_eq!(
+            VersionedTextStore::new(&mut engine)
+                .read_text("ws", "main", "notes/matching-lineages.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "same text"
+        );
+    }
 }
 
 #[test]
@@ -4366,6 +4419,26 @@ fn resolve_seed_conflict(
     key: &dohc_engine_collab::DocKey,
     keep_current: bool,
 ) {
+    resolve_seed_conflict_with_faults(
+        engine,
+        key,
+        keep_current,
+        &NoFaults,
+        false,
+        "resolved-seed",
+        10_000,
+    );
+}
+
+fn resolve_seed_conflict_with_faults(
+    engine: &mut EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    keep_current: bool,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    crash_after_commit: bool,
+    write_moment_id: &str,
+    now_ms: i64,
+) {
     use dohc_engine_domain::{ResolveConflictKind, ResolveTextConflict};
     let conflict_id = engine
         .read_with(|conn| {
@@ -4385,13 +4458,13 @@ fn resolve_seed_conflict(
             ResolveConflictKind::ApplyIncoming
         },
         object_id: key.object_id.clone(),
-        write_moment_id: "resolved-seed".into(),
+        write_moment_id: write_moment_id.into(),
         delete_moment_id: "resolved-seed-delete".into(),
         metadata_origin: "sync".into(),
         metadata_summary: None,
         metadata_correlation_id: None,
         author_json: None,
-        now_ms: 10_000,
+        now_ms,
         request_id: None,
         conflict_answer_budget_bytes: usize::MAX,
     };
@@ -4400,22 +4473,445 @@ fn resolve_seed_conflict(
             error,
         ))
     };
-    let result = VersionedTextStore::new(engine)
-        .resolve_text_conflict_with(
-            &input,
-            &NoFaults,
-            |tx, conflict, _| {
-                crate::prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
-                    .map_err(map_error)
-            },
-            |tx, result, prepared| {
-                crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
-                    .map_err(map_error)
-            },
-        )
-        .expect("either version-conflict choice must resolve");
+    let result = VersionedTextStore::new(engine).resolve_text_conflict_with(
+        &input,
+        faults,
+        |tx, conflict, _| {
+            crate::prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict).map_err(map_error)
+        },
+        |tx, result, prepared| {
+            crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result).map_err(map_error)
+        },
+    );
+    if crash_after_commit {
+        assert!(
+            result.is_err(),
+            "the committed resolution must lose its acknowledgement"
+        );
+        return;
+    }
+    let result = result.expect("either version-conflict choice must resolve");
     assert_eq!(
         result.conflict.status,
         dohc_engine_domain::ConflictStatus::Resolved
     );
+}
+
+fn seed_resolution_head(store: &mut EngineStore, object: &str, path: &str, text: &str) {
+    use dohc_engine_domain::WriteText;
+    VersionedTextStore::new(store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: object.into(),
+                path: path.into(),
+                text: text.into(),
+                moment_id: format!("seed-{}", dohc_engine_storage::hex_sha256(text.as_bytes())),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+}
+
+fn copy_seed_blobs(source: &EngineStore, target: &mut EngineStore) {
+    let text: Vec<(String, String)> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT sha256,text FROM blobs")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap();
+    let binary: Vec<Vec<u8>> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap();
+    for bytes in binary {
+        target.put_binary_blob(&bytes).unwrap();
+    }
+    target
+        .write_with(&NoFaults, |tx| {
+            for (sha, text) in text {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+fn seed_resolution_ops(store: &EngineStore, origin: &str) -> Vec<ReplicationEnvelope> {
+    let rows: Vec<(String,String,i64)> = store.read_with(|conn| {
+        conn.prepare("SELECT op_kind,payload_json,recorded_at_ms FROM replication_pending_conflict_ops ORDER BY bundle_order,op_index")?
+            .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?.collect::<Result<_,_>>()
+    }).unwrap();
+    assert!(!rows.is_empty());
+    rows.into_iter()
+        .enumerate()
+        .map(|(seq, (kind, payload, at))| {
+            let mut op = envelope(
+                origin,
+                seq as i64,
+                &kind,
+                serde_json::from_str(&payload).unwrap(),
+            );
+            op.recorded_at_ms = at;
+            op
+        })
+        .collect()
+}
+
+#[test]
+fn seed_resolution_converges_on_both_peers_in_both_delivery_orders_after_restart() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    for keep_current in [false, true] {
+        for resolve_first in [false, true] {
+            let (_a_scratch, a_path, mut a) = open_store();
+            let (_b_scratch, _b_path, mut b) = open_store();
+            let key = DocKey::new("ws", "main", "two-seeds").unwrap();
+            let path = "notes/two-seeds.md";
+            let a_doc = Ydoc::wire();
+            a_doc.plaintext_insert(0, "local seed");
+            let b_doc = Ydoc::wire();
+            b_doc.plaintext_insert(0, "remote seed");
+            let a_bytes = a_doc.encode_full_state();
+            let b_bytes = b_doc.encode_full_state();
+            let mut bases = Vec::new();
+            for (store, doc, origin, relay, text) in [
+                (&mut a, &a_bytes, "loser", 20, "local seed"),
+                (&mut b, &b_bytes, "winner", 10, "remote seed"),
+            ] {
+                seed_identity(store);
+                VersionedTextStore::new(store)
+                    .ensure_main_version("ws", "main", 1000, &NoFaults)
+                    .unwrap();
+                seed_resolution_head(store, &key.object_id, path, text);
+                dohc_engine_collab::claim_base_at_relay(
+                    store,
+                    &key,
+                    ContentKind::Plaintext,
+                    doc,
+                    &dohc_engine_collab::BaseRelayCoordinate::new(origin, 0, relay).unwrap(),
+                    &NoFaults,
+                    1100,
+                )
+                .unwrap();
+                let sha = store.put_binary_blob(doc).unwrap();
+                let mut op = envelope(
+                    origin,
+                    0,
+                    "ydoc.update",
+                    json!({
+                        "versionId":"main","objectId":key.object_id,"path":path,"contentKind":"plaintext",
+                        "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+                    }),
+                );
+                op.relay_seq = Some(relay);
+                bases.push(op);
+            }
+            copy_seed_blobs(&b, &mut a);
+            copy_seed_blobs(&a, &mut b);
+            apply_ydoc_envelope(
+                &mut a,
+                &mut WriterDocCache::new(),
+                &bases[1],
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            if !resolve_first {
+                apply_ydoc_envelope(
+                    &mut b,
+                    &mut WriterDocCache::new(),
+                    &bases[0],
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+            }
+            resolve_seed_conflict_with_faults(
+                &mut a,
+                &key,
+                keep_current,
+                ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck).as_ref(),
+                true,
+                "resolved-seed",
+                10_000,
+            );
+            // Restart after the local commit, before any resolution delivery.
+            drop(a);
+            let mut a = EngineStore::open(&a_path, 11000).unwrap();
+            let ops = seed_resolution_ops(&a, "resolver");
+            copy_seed_blobs(&a, &mut b);
+            for op in &ops {
+                let outcome = crate::apply_replication_envelope(
+                    &mut b,
+                    &mut WriterDocCache::new(),
+                    op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                assert!(
+                    matches!(outcome.primary, ApplyDisposition::Applied(_)),
+                    "{outcome:?}"
+                );
+                assert!(outcome.refusals.is_empty());
+            }
+            if resolve_first {
+                apply_ydoc_envelope(
+                    &mut b,
+                    &mut WriterDocCache::new(),
+                    &bases[0],
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+            }
+            for op in &ops {
+                let outcome = crate::apply_replication_envelope(
+                    &mut b,
+                    &mut WriterDocCache::new(),
+                    op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                assert!(matches!(outcome.primary, ApplyDisposition::Skipped));
+            }
+            assert_eq!(
+                dohc_engine_collab::read_marker(&a, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id,
+                dohc_engine_collab::read_marker(&b, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id
+            );
+            for store in [&a, &b] {
+                let (text,conflicts):(String,i64)=store.read_with(|conn| conn.query_row(
+                    "SELECT b.text,(SELECT COUNT(*) FROM conflicts WHERE status='open') FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='two-seeds'", [],
+                    |row| Ok((row.get(0)?,row.get(1)?)))).unwrap();
+                assert_eq!(
+                    text,
+                    if keep_current {
+                        "local seed"
+                    } else {
+                        "remote seed"
+                    }
+                );
+                assert_eq!(conflicts, 0);
+            }
+
+            assert_seed_heads_and_delete_converge(&mut a, &mut b, &key, path);
+        }
+    }
+}
+
+#[test]
+fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choices() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    for same_choice in [true, false] {
+        let (_sa, _pa, mut a) = open_store();
+        let (_sb, _pb, mut b) = open_store();
+        let key = DocKey::new("ws", "main", "concurrent-seeds").unwrap();
+        let path = "notes/concurrent-seeds.md";
+        let loser = Ydoc::wire();
+        loser.plaintext_insert(0, "local seed");
+        let winner = Ydoc::wire();
+        winner.plaintext_insert(0, "remote seed");
+        for store in [&mut a, &mut b] {
+            seed_identity(store);
+            VersionedTextStore::new(store)
+                .ensure_main_version("ws", "main", 1000, &NoFaults)
+                .unwrap();
+            seed_resolution_head(store, &key.object_id, path, "local seed");
+            dohc_engine_collab::claim_base_at_relay(
+                store,
+                &key,
+                ContentKind::Plaintext,
+                &loser.encode_full_state(),
+                &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20).unwrap(),
+                &NoFaults,
+                1100,
+            )
+            .unwrap();
+            let sha = store.put_binary_blob(&winner.encode_full_state()).unwrap();
+            let mut op = envelope(
+                "winner",
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId":"main","objectId":key.object_id,"path":path,"contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+                }),
+            );
+            op.relay_seq = Some(10);
+            apply_ydoc_envelope(
+                store,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+        }
+        resolve_seed_conflict_with_faults(
+            &mut a,
+            &key,
+            true,
+            &NoFaults,
+            false,
+            "resolution-write-a",
+            10_000,
+        );
+        resolve_seed_conflict_with_faults(
+            &mut b,
+            &key,
+            same_choice,
+            &NoFaults,
+            false,
+            "resolution-write-b",
+            10_001,
+        );
+        let a_ops = seed_resolution_ops(&a, "resolution-a");
+        let b_ops = seed_resolution_ops(&b, "resolution-b");
+        copy_seed_blobs(&a, &mut b);
+        copy_seed_blobs(&b, &mut a);
+        for (store, ops, expected) in [
+            (&mut a, &b_ops, "local seed"),
+            (
+                &mut b,
+                &a_ops,
+                if same_choice {
+                    "local seed"
+                } else {
+                    "remote seed"
+                },
+            ),
+        ] {
+            for op in ops {
+                let applied = crate::apply_replication_envelope(
+                    store,
+                    &mut WriterDocCache::new(),
+                    op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap();
+                assert!(
+                    matches!(applied.primary, ApplyDisposition::Applied(_)),
+                    "{applied:?}"
+                );
+            }
+            let reviews: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(reviews, if same_choice { 0 } else { 1 });
+            let doc = dohc_engine_collab::load_persisted(store, &key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(doc.doc.plaintext_string(), expected);
+        }
+        if same_choice {
+            assert_eq!(
+                dohc_engine_collab::read_marker(&a, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id,
+                dohc_engine_collab::read_marker(&b, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id
+            );
+            assert_seed_heads_and_delete_converge(&mut a, &mut b, &key, path);
+        }
+    }
+}
+
+fn assert_seed_heads_and_delete_converge(
+    a: &mut EngineStore,
+    b: &mut EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    path: &str,
+) {
+    let head = |store: &EngineStore| {
+        store.read_with(|conn| conn.query_row("SELECT latest_moment_id FROM snapshots WHERE workspace_id='ws' AND object_id=?1",[&key.object_id],|row| row.get::<_,String>(0))).unwrap()
+    };
+    assert_eq!(head(a), head(b), "resolution adopts the same history head");
+    VersionedTextStore::new(a)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: path.into(),
+                moment_id: "after-resolution-delete".into(),
+                request_id: None,
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 12_000,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let payload = a
+        .write_with(&NoFaults, |tx| {
+            crate::outbound::moment_append_payload_in_tx(tx, "ws", "after-resolution-delete")
+        })
+        .unwrap();
+    let TxnOutcome::Committed((payload, at)) = payload else {
+        panic!("delete payload")
+    };
+    let mut op = envelope("after-resolution", 0, "moment.append", payload);
+    op.recorded_at_ms = at;
+    let result = crate::apply_replication_envelope(
+        b,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(result.primary, ApplyDisposition::Applied(_)),
+        "{result:?}"
+    );
+    let (heads, conflicts): (i64, i64) = b
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE object_id=?1",
+                    [&key.object_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!((heads, conflicts), (0, 0));
 }

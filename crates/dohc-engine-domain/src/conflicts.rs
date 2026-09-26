@@ -876,6 +876,27 @@ impl VersionedTextStore<'_> {
             let mut binary_write = None;
             let (choice, resolution) = match &input.resolution {
                 ResolveConflictKind::KeepCurrent => {
+                    if keep_current_needs_lineage_effect(tx, &conflict)?
+                        && let Some(current) = &conflict.current.snapshot
+                    {
+                        let mut kept = write_input(
+                            input,
+                            &conflict.target_version_id,
+                            &conflict.path,
+                            &current.text,
+                            &input.write_moment_id,
+                        );
+                        kept.object_id = current.object_id.clone();
+                        validate_write_input(&kept)?;
+                        let result = write_text_in_tx(tx, &kept)?;
+                        enqueue_write(
+                            tx,
+                            &result,
+                            conflict_state_preimage(&conflict.current),
+                            "resolve",
+                        )?;
+                        write = Some(result);
+                    }
                     (ConflictChoice::Current, ConflictResolution::KeptCurrent)
                 }
                 ResolveConflictKind::ApplyIncoming => {
@@ -1027,6 +1048,19 @@ impl VersionedTextStore<'_> {
         })?;
         committed(outcome)
     }
+}
+
+/// A shared lineage resolution needs a durable head that every peer can adopt.
+#[doc(hidden)]
+pub fn keep_current_needs_lineage_effect(
+    tx: &Transaction<'_>,
+    conflict: &TextConflict,
+) -> Result<bool, DomainError> {
+    let Some(current) = &conflict.current.snapshot else {
+        return Ok(false);
+    };
+    tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_status='exact')",
+        params![conflict.workspace_id,conflict.target_version_id,current.object_id],|row| row.get(0)).map_err(DomainError::sql_corrupt)
 }
 
 #[doc(hidden)]

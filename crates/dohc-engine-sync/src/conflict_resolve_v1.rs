@@ -879,7 +879,9 @@ fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
         ));
     }
     match payload.resolution {
-        ResolutionV1::KeptCurrent if payload.current != payload.result => {
+        ResolutionV1::KeptCurrent
+            if !same_object_and_projected_content(&payload.current, &payload.result) =>
+        {
             return Err(invalid(
                 "conflict.resolve kept-current result does not equal current",
             ));
@@ -1269,6 +1271,7 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportedHeadDisposition {
     ExactCurrent,
+    ReviewedSide,
     AlreadyResult,
     Diverged,
 }
@@ -1305,12 +1308,41 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         })
         .transpose()?;
     ensure_no_live_ydoc_session(payload, leases)?;
+    if let (Some(key), Some(transition)) = (key.as_ref(), payload.lineage_transition.as_ref())
+        && let Some(marker) =
+            dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?
+        && marker.lineage_parent_claim_id.as_deref()
+            == Some(transition.predecessor_claim_id.as_str())
+        && marker.lineage_claim_id.as_deref()
+            != transition
+                .successor
+                .as_ref()
+                .map(|successor| successor.lineage_claim_id.as_str())
+    {
+        // A different local resolution is a new decision, even if it kept a reviewed side.
+        disposition = ImportedHeadDisposition::Diverged;
+    }
     if disposition != ImportedHeadDisposition::Diverged
         && payload.lineage_transition.is_none()
         && !unbound_receiver_lineages_match_reviewed_sides(tx, payload)?
     {
         disposition = ImportedHeadDisposition::Diverged;
     }
+    let successor_already_installed = if let (Some(key), Some(successor)) = (
+        key.as_ref(),
+        payload
+            .lineage_transition
+            .as_ref()
+            .and_then(|transition| transition.successor.as_ref()),
+    ) {
+        dohc_engine_collab::read_marker_in(tx, key)
+            .map_err(map_local_collab_error)?
+            .is_some_and(|marker| {
+                marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+            })
+    } else {
+        false
+    };
     if disposition != ImportedHeadDisposition::Diverged {
         preflight_imported_lineage(tx, payload, key.as_ref(), disposition)?;
     }
@@ -1330,6 +1362,29 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
             close_imported_conflict(tx, payload)?;
         }
+        ImportedHeadDisposition::ReviewedSide => {
+            for shadow in &validated.shadows {
+                crate::moment_apply::record_conflict_parent_shadow_in_tx(
+                    tx,
+                    &payload.workspace_id,
+                    shadow,
+                )?;
+            }
+            let shadow = validated
+                .shadows
+                .last()
+                .ok_or_else(|| invalid("reviewed text resolution has no write effect"))?;
+            materialization_changes.extend(
+                crate::moment_apply::adopt_conflict_parent_text_result_in_tx(
+                    tx,
+                    envelope,
+                    shadow,
+                    search_policy,
+                )?,
+            );
+            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            close_imported_conflict(tx, payload)?;
+        }
         ImportedHeadDisposition::AlreadyResult => {
             for shadow in &validated.shadows {
                 crate::moment_apply::record_conflict_parent_shadow_in_tx(
@@ -1338,8 +1393,35 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            if payload.lineage_transition.is_none() {
-                reconcile_unbound_receiver_lineages(tx, payload, envelope.recorded_at_ms)?;
+            if payload
+                .lineage_transition
+                .as_ref()
+                .is_some_and(|transition| transition.successor.is_some())
+                && let Some(result) = payload.result.present()
+                && let Some(current) = live.present()
+                && current.latest_moment_id != result.latest_moment_id
+                && (!successor_already_installed
+                    || result.latest_moment_id < current.latest_moment_id)
+            {
+                let shadow = validated
+                    .shadows
+                    .last()
+                    .ok_or_else(|| invalid("resolved text has no write effect"))?;
+                materialization_changes.extend(
+                    crate::moment_apply::adopt_conflict_parent_text_result_in_tx(
+                        tx,
+                        envelope,
+                        shadow,
+                        search_policy,
+                    )?,
+                );
+            }
+            if payload
+                .lineage_transition
+                .as_ref()
+                .is_none_or(|transition| transition.successor.is_some())
+            {
+                commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
             }
             close_imported_conflict(tx, payload)?;
         }
@@ -1624,6 +1706,15 @@ fn classify_imported_head(
                 || same_object_and_projected_content(&current_live, &payload.result)
             {
                 ImportedHeadDisposition::AlreadyResult
+            } else if payload
+                .lineage_transition
+                .as_ref()
+                .is_some_and(|transition| transition.successor.is_some())
+                && [&payload.current, &payload.incoming]
+                    .iter()
+                    .any(|side| same_object_and_projected_content(&current_live, side))
+            {
+                ImportedHeadDisposition::ReviewedSide
             } else {
                 ImportedHeadDisposition::Diverged
             },
@@ -1689,31 +1780,23 @@ fn preflight_imported_lineage(
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
     })?;
-    if disposition == ImportedHeadDisposition::AlreadyResult {
-        if let Some(successor) = transition.successor.as_ref() {
-            let marker = dohc_engine_collab::read_marker_in(tx, key)
-                .map_err(map_local_collab_error)?
-                .ok_or(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-missing",
-                })?;
-            if marker.lineage_claim_status != LineageClaimStatus::Exact
-                || marker.lineage_claim_id.as_deref() != Some(successor.lineage_claim_id.as_str())
-            {
-                return Err(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-mismatch",
-                });
-            }
-            let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
-            if doc.has_pending_dependencies()
-                || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
-                    != successor.state_vector_blob_sha256
-            {
-                return Err(SyncError::RetryableState {
-                    reason: "ydoc-lineage-result-mismatch",
-                });
-            }
-            return Ok(());
+    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?;
+    if let (Some(marker), Some(successor)) = (marker.as_ref(), transition.successor.as_ref())
+        && marker.lineage_claim_status == LineageClaimStatus::Exact
+        && marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+    {
+        let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
+        if doc.has_pending_dependencies()
+            || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
+                != successor.state_vector_blob_sha256
+        {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc-lineage-result-mismatch",
+            });
         }
+        return Ok(());
+    }
+    if disposition == ImportedHeadDisposition::AlreadyResult && transition.successor.is_none() {
         let archived: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages \
@@ -2313,7 +2396,7 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         incoming_path_ref,
         incoming_binary_updated_at_ms,
     )?;
-    let (result_path, result, result_text) = planned_result(input, conflict, &current)?;
+    let (result_path, result, result_text) = planned_result(tx, input, conflict, &current)?;
     let result_path_ref = intern_path(&mut paths, &result_path);
     let result = with_path_ref(result, result_path_ref);
     let effects = planned_effects(input, &current, &result);
@@ -2551,20 +2634,31 @@ fn head_from_conflict_side(
 }
 
 fn planned_result(
+    tx: &Transaction<'_>,
     input: &ResolveTextConflict,
     conflict: &TextConflict,
     current: &HeadV1,
 ) -> Result<(String, HeadV1, Option<String>), SyncError> {
     match &input.resolution {
-        ResolveConflictKind::KeepCurrent => Ok((
-            conflict.current.path.clone(),
-            current.clone(),
-            conflict
-                .current
-                .snapshot
-                .as_ref()
-                .map(|head| head.text.clone()),
-        )),
+        ResolveConflictKind::KeepCurrent => {
+            let mut result = current.clone();
+            if dohc_engine_domain::conflicts::keep_current_needs_lineage_effect(tx, conflict)
+                .map_err(map_local_domain_error)?
+                && let HeadV1::Present(head) = &mut result
+            {
+                head.latest_moment_id = input.write_moment_id.clone();
+                head.updated_at_ms = input.now_ms;
+            }
+            Ok((
+                conflict.current.path.clone(),
+                result,
+                conflict
+                    .current
+                    .snapshot
+                    .as_ref()
+                    .map(|head| head.text.clone()),
+            ))
+        }
         ResolveConflictKind::ApplyIncoming => {
             let side = &conflict.incoming;
             let object_id = if side.path == conflict.current.path {

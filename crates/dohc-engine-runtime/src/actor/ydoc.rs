@@ -1514,10 +1514,8 @@ pub(super) fn ydoc_open_state_on_store(
     // preserves the head against — the user types into unreviewed content
     // and resolution rewrites the lineage under the live client. Refuse
     // with the same reason the settle freeze uses; resolution lifts both.
-    // The check runs before the lineage clear and the deferred drain below:
-    // both mutate durable state, and a drain whose open then refuses would
-    // consume the parked rows — and the record facts persisted on them —
-    // with no caller left to emit their events.
+    // Refuse an existing conflict before changing the lineage or draining.
+    // If the drain opens a conflict, return its record facts with the refusal.
     if expected_key_matches
         && store
             .read_with(|conn| {
@@ -1608,6 +1606,7 @@ pub(super) fn ydoc_open_state_on_store(
         let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
             store, doc_cache, &key, &NoFaults,
         )?;
+        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
         if store
             .read_with(|conn| {
                 dohc_engine_sync::open_sync_conflict_for_object(
@@ -1619,13 +1618,10 @@ pub(super) fn ydoc_open_state_on_store(
             })?
             .is_some()
         {
-            // Keep the queue rows so the next pull can emit their record facts.
-            return Err(dohc_engine_domain::DomainError::InvalidInput {
-                reason: "ydoc-conflict-open",
-            }
-            .into());
+            return Err(RuntimeError::YdocOpenConflict {
+                record_facts: drained.record_facts,
+            });
         }
-        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
         for declined in &drained.sharing_declined {
             eprintln!("engine: {declined}");
         }
