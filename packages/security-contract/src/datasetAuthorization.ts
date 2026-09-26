@@ -1,40 +1,26 @@
 import { createHash } from "node:crypto";
 import { parseAppBackendCaller, type AppBackendCaller } from "./appBackend";
-import { parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, datasetDefinitionDigestContent, datasetRevisionDigestContent, type DatasetRevision, type AppDatasetBinding, type AppDatasetCapability, type DatasetOperation } from "./dataset";
+import { parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, type DatasetRevision, type AppDatasetBinding, type AppDatasetCapability, type DatasetOperation } from "./dataset";
 import { generateDatasetOperations } from "./datasetOperations";
 
 function fail(): never { throw new Error("Invalid dataset metadata."); }
 
-const generatedRevisions = new Map<string, boolean>();
+/** Only hosts reading artifact-verified catalog revisions may supply this lookup. */
+export type GeneratedDatasetVerdictLookup = (approved: DatasetRevision) => boolean;
 
-/** Cache only content identities recomputed from the supplied metadata. */
-export function hasGeneratedDatasetRevision(approved: DatasetRevision): boolean {
-  const hash = (content: string) => createHash("sha256").update(content).digest("hex");
-  const verified = hash(datasetDefinitionDigestContent(approved.definition)) === approved.definitionSha256 &&
-    hash(datasetRevisionDigestContent(approved)) === approved.revisionSha256;
-  // Revision hashing sorts inventories; generated source retains their order.
-  const key = `${approved.revisionSha256}:${hash(JSON.stringify(approved.definition))}`;
-  const cached = verified ? generatedRevisions.get(key) : undefined;
-  if (cached !== undefined) {
-    generatedRevisions.delete(key);
-    generatedRevisions.set(key, cached);
-    return cached;
-  }
-  const generated = hash(generateDatasetOperations(approved.definition)) === approved.operationsSha256;
-  if (verified) {
-    generatedRevisions.set(key, generated);
-    if (generatedRevisions.size > 32) generatedRevisions.delete(generatedRevisions.keys().next().value!);
-  }
-  return generated;
+/** Untrusted revisions are checked directly unless the caller supplies its private lookup. */
+export function hasGeneratedDatasetRevision(approved: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): boolean {
+  if (lookup) return lookup(approved);
+  return createHash("sha256").update(generateDatasetOperations(approved.definition)).digest("hex") === approved.operationsSha256;
 }
 
-export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
+export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetBinding {
   const approved = parseDatasetRevision(approvedRevision);
   const result = parseDatasetBindingReference(value);
   if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
   const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
   if (result.operationIds.some(id => !operations.has(id))) fail();
-  if (result.linkReads?.length && !hasGeneratedDatasetRevision(approved)) fail();
+  if (result.linkReads?.length && !hasGeneratedDatasetRevision(approved, lookup)) fail();
   for (const read of result.linkReads ?? []) {
     const operation = approved.definition.operations.find(operation => operation.operationId === read.operationId);
     const table = approved.definition.tables.find(table => table.tableId === operation?.tableId);
@@ -51,9 +37,9 @@ export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRev
 }
 
 /** The caller supplies a revision obtained from the owner's approved host catalog. */
-export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
+export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
   const approved = parseDatasetRevision(approvedRevision);
-  const binding = parseDatasetBinding(value, approved);
+  const binding = parseDatasetBinding(value, approved, lookup);
   const selected = new Set(binding.operationIds);
   return parseAppDatasetCapability({ ...binding, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
     .map(({ operationId, name, access, readOnly, kind, fieldIds, tableId }) => ({ operationId, name, access, readOnly,
@@ -61,18 +47,18 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
         .filter(field => fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) } : {}) })) });
 }
 
-export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
+export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
   const parsed = parseAppDatasetCapability(value);
   const { operations: _, ...binding } = parsed;
-  const expected = resolveAppDatasetCapability(binding, approvedRevision);
+  const expected = resolveAppDatasetCapability(binding, approvedRevision, lookup);
   if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
   return expected;
 }
 
 /** Caller must be derived from current host credentials, never request JSON. */
-export function effectiveDatasetOperations(binding: unknown, approvedRevision: DatasetRevision, caller: AppBackendCaller): DatasetOperation[] {
+export function effectiveDatasetOperations(binding: unknown, approvedRevision: DatasetRevision, caller: AppBackendCaller, lookup?: GeneratedDatasetVerdictLookup): DatasetOperation[] {
   const approved = parseDatasetRevision(approvedRevision);
-  const parsed = parseDatasetBinding(binding, approved);
+  const parsed = parseDatasetBinding(binding, approved, lookup);
   const principal = parseAppBackendCaller(caller);
   const allowed = new Set(parsed.operationIds);
   const reads = new Set(parsed.linkReads?.map(read => read.operationId));

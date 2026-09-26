@@ -23,7 +23,7 @@ export function datasetDefinitionFromDrafts(input: {
   const tableId = input.tableId ?? crypto.randomUUID();
   const primaryFieldId = crypto.randomUUID();
   const primary: DatasetColumnField = {
-    fieldId: primaryFieldId, name: "Record ID", sqlColumn: "id", type: "text", required: true, unique: true,
+    fieldId: primaryFieldId, name: "Record ID", sqlColumn: "id", type: "text", required: true, unique: true, generated: "record-id",
   };
   const fields: DatasetColumnField[] = [primary, ...input.fields.map(draft => {
     const fieldId = crypto.randomUUID();

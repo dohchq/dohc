@@ -175,6 +175,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
+  // Only artifact-verified revisions read from this host's catalog reach this cache.
+  const generatedVerdicts = new Map<string, boolean>();
+  function generatedRevision(approved: DatasetRevision): boolean {
+    const cached = generatedVerdicts.get(approved.revisionSha256);
+    if (cached !== undefined) return cached;
+    const verdict = hasGeneratedDatasetRevision(approved);
+    if (generatedVerdicts.size >= 64) generatedVerdicts.delete(generatedVerdicts.keys().next().value!);
+    generatedVerdicts.set(approved.revisionSha256, verdict);
+    return verdict;
+  }
   const migrationCandidates=new Map<string,{candidate:DatasetMigrationCandidate;authorityKey:string;approved:DatasetRevision;previous:DatasetRevision;schemaSql:string;source:string}>();
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
@@ -285,7 +295,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
-      operations = effectiveDatasetOperations(binding, boundRevision, verified.caller)
+      operations = effectiveDatasetOperations(binding, boundRevision, verified.caller, generatedRevision)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
       createFields = binding.createFields; linkReads = binding.linkReads;
@@ -393,6 +403,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           if(options.accountMigration)synchronous(()=>options.accountMigration!(context,{...key,bytes:allocation.bytes-allocation.stagedCreditBytes+delta,capacityBytes:allocation.capacityBytes,capacityDeltaBytes:allocation.capacityDeltaBytes}));
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,saved.previous.revision,row.revision_json,row.artifacts_json);
           db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson,artifactsJson,key.workspaceId,key.datasetId);
+          generatedVerdicts.delete(saved.previous.revisionSha256);
         }});
       authorize();migrationCandidates.delete(raw.candidateId);return {revision:saved.approved,cursor};
     },
@@ -420,6 +431,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(reason) - Buffer.byteLength(current.reason) + (current.generation === 0 ? 256 : 0) }));
         db.prepare("INSERT INTO dohc_dataset_lifecycle VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id) DO UPDATE SET archived=1,generation=excluded.generation,reason=excluded.reason,archived_at_ms=excluded.archived_at_ms")
           .run(key.workspaceId,key.datasetId,1,generation,reason,Date.now());
+        generatedVerdicts.clear();
         return { archived: true, generation, reason };
       });
     },
@@ -605,6 +617,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             capacityBytes: allocation.capacityBytes, capacityDeltaBytes: allocation.capacityDeltaBytes }));
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,previous.revision,row.revision_json,row.artifacts_json);
           db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson, artifactsJson, key.workspaceId, key.datasetId);
+          generatedVerdicts.delete(previous.revisionSha256);
         } });
       return { revision: approved, cursor };
     },
@@ -624,7 +637,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           if (!existing && db.prepare("SELECT 1 FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND app_id!=? LIMIT 1").get(key.workspaceId, key.datasetId, appId)) {
             throw new DatasetHostError("conflict", "A response is pending in another app. Confirm it there before publishing this app.");
           }
-          const binding = parseDatasetBinding(raw.binding, approved);
+          const binding = parseDatasetBinding(raw.binding, approved, generatedRevision);
           const json = JSON.stringify(binding);
           if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(json) + Buffer.byteLength(appId) + 256 - previousBytes }));
           db.prepare("INSERT INTO dohc_dataset_bindings VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,app_id) DO UPDATE SET binding_json=excluded.binding_json,token=excluded.token")
@@ -800,7 +813,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const approvedLinkRead = permitted.authority.caller.kind !== "owner" && permitted.linkReads?.some(read => read.operationId === operationId);
       const table = permitted.revision.definition.tables.find(table => table.tableId === operation.tableId)!;
       if (approvedLinkRead) {
-        if (!hasGeneratedDatasetRevision(permitted.revision)) denied();
+        if (!hasGeneratedDatasetRevision(permitted.revision, generatedRevision)) denied();
         if (hash(artifacts(key).operationSource) !== permitted.revision.operationsSha256) denied();
         journal.head(key, authorize);
       }

@@ -62,6 +62,11 @@ export function generateDatasetSchema(definition: DatasetDefinition): string {
 /** Generates initial, editable sources. Callers must never replace existing sources with this output. */
 export function generateDatasetSources(value: DatasetDefinition): { definition: DatasetDefinition; files: Record<string, string> } {
   const definition = parseDatasetDefinition(value);
+  for (const table of definition.tables) {
+    const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey)!;
+    const creates = definition.operations.filter(operation => operation.tableId === table.tableId && operation.kind === "create");
+    if (primary.type === "text" && creates.length && creates.every(operation => !operation.fieldIds.includes(primary.fieldId))) primary.generated = "record-id";
+  }
   for (const operation of definition.operations) if (operation.kind === "edit") operation.reversible = true;
   if (definition.operations.some(operation => operation.kind === "action")) throw new Error("Custom actions need authored operation source. Create that source before approving this Collection.");
   if (definition.tables.some(table => datasetColumnFields(table).some(field => field.sqlColumn.toLowerCase() === versionColumn))) throw new Error("The field column _record_version is reserved. Choose another column name.");

@@ -28,6 +28,8 @@ export interface DatasetColumnField {
   type: DatasetColumnFieldType;
   required: boolean;
   unique: boolean;
+  /** Set by the source generator for its internal record identity. */
+  generated?: "record-id";
   default?: AppBackendJson;
   options?: string[];
   relation?: DatasetRelation;
@@ -208,10 +210,14 @@ function field(value: unknown): DatasetField {
   return isButtonRow(value) ? button(value) : columnField(value);
 }
 function columnField(value: unknown, allowWithheldRelation = false): DatasetColumnField {
-  const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation"]);
+  const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation", "generated"]);
   if (!fieldTypes.has(row.type as DatasetColumnFieldType)) fail();
   const result: DatasetColumnField = { fieldId: uuid(row.fieldId), name: text(row.name), sqlColumn: sqlName(row.sqlColumn), type: row.type as DatasetColumnFieldType,
     required: boolean(row.required), unique: boolean(row.unique) };
+  if (Object.hasOwn(row, "generated")) {
+    if (row.generated !== "record-id" || result.type !== "text" || !result.required || !result.unique || Object.hasOwn(row, "default")) fail();
+    result.generated = "record-id";
+  }
   if (result.type === "select" || result.type === "multi-select") {
     result.options = boundedArray(row.options, 100, 1).map(value => text(value, 200));
     unique(result.options);
@@ -236,6 +242,7 @@ function table(value: unknown): DatasetTable {
   unique(result.fields.map(field => field.name));
   const primary = columns.find(field => field.sqlColumn === result.primaryKey);
   if (!primary || !["text", "number"].includes(primary.type) || !primary.required || !primary.unique || Object.hasOwn(primary, "default")) fail();
+  if (columns.some(field => field.generated && field !== primary)) fail();
   return result;
 }
 function operation(value: unknown): DatasetOperation {
@@ -274,6 +281,7 @@ function definition(value: unknown): DatasetDefinition {
     const table = tables.get(operation.tableId);
     // An operation reads and writes columns. A button has none.
     if (!table || operation.fieldIds.some(id => !datasetColumnFields(table).some(field => field.fieldId === id))) fail();
+    if (operation.kind === "create" && operation.fieldIds.some(id => datasetColumnFields(table).some(field => field.fieldId === id && field.generated))) fail();
     if (operation.kind === "edit" && operation.fieldIds.some(id => datasetColumnFields(table).some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
   }
   return result;
@@ -299,7 +307,7 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
       const table = record(value, ["tableId", "name", "fields"], ["primaryKeyFieldId"]);
       const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map((value): DatasetDescribedField => {
         if (isButtonRow(value)) return button(value);
-        const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation"]);
+        const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation", "generated"]);
         const { sqlColumn: _column, ...parsed } = columnField({ ...metadata, sqlColumn: "field" }, true);
         return parsed;
       });
@@ -307,6 +315,7 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
       const primaryKeyFieldId = table.primaryKeyFieldId === undefined ? undefined : uuid(table.primaryKeyFieldId);
       if (primaryKeyFieldId !== undefined && !fields.some(field => field.fieldId === primaryKeyFieldId &&
           field.type !== "button" && field.required && field.unique)) fail();
+      if (fields.some(field => field.type !== "button" && field.generated && field.fieldId !== primaryKeyFieldId)) fail();
       return { tableId: uuid(table.tableId), name: text(table.name), fields,
         ...(primaryKeyFieldId === undefined ? {} : { primaryKeyFieldId }) };
     }),

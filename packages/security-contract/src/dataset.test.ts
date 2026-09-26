@@ -474,3 +474,41 @@ it("gives named app recipients approved reads alongside link creates without hel
   const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
   expect(effectiveDatasetOperations(request, approved, { kind: "named", userId: "u", grantId: "g", access: "view", helper: false }).map(operation => operation.name)).toEqual(["submit", "list"]);
 });
+
+it("preserves the generator marker through filtered descriptions and includes it in revision identity", () => {
+  const approved = revision();
+  const unmarkedDefinition = approved.definitionSha256;
+  const unmarkedRevision = approved.revisionSha256;
+  column(approved.definition.tables[0]!.fields[0]).generated = "record-id";
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  expect(approved.definitionSha256).not.toBe(unmarkedDefinition);
+  expect(approved.revisionSha256).not.toBe(unmarkedRevision);
+  const reads = approved.definition.operations.filter(operation => operation.kind === "read");
+  const described = parseDatasetDescription(describeApprovedDataset(approved, reads));
+  expect(datasetColumnFields(described.tables[0]!)[0]!.generated).toBe("record-id");
+  const hidden = parseDatasetDescription(describeApprovedDataset(approved, [{ ...reads[0]!, fieldIds: [id(4)] }]));
+  expect(hidden.tables[0]!.primaryKeyFieldId).toBeUndefined();
+  expect(datasetColumnFields(hidden.tables[0]!).every(field => !field.generated)).toBe(true);
+  const malformed = structuredClone(described);
+  delete malformed.tables[0]!.primaryKeyFieldId;
+  expect(() => parseDatasetDescription(malformed)).toThrow();
+});
+
+it("rejects generated identity markers on other fields and user-supplied keys", () => {
+  const value = definition();
+  const primary = column(value.tables[0]!.fields[0]);
+  primary.generated = "record-id";
+  expect(parseDatasetDefinition(value)).toEqual(value);
+  for (const patch of [{ type: "number" }, { required: false }, { unique: false }, { default: "fixed" }, { generated: false }]) {
+    const invalid = structuredClone(value);
+    Object.assign(invalid.tables[0]!.fields[0]!, patch);
+    expect(() => parseDatasetDefinition(invalid)).toThrow();
+  }
+  const invalid = structuredClone(value);
+  column(invalid.tables[0]!.fields[1]).generated = "record-id";
+  column(invalid.tables[0]!.fields[1]).unique = true;
+  expect(() => parseDatasetDefinition(invalid)).toThrow();
+  value.operations[0]!.fieldIds.push(primary.fieldId);
+  expect(() => parseDatasetDefinition(value)).toThrow();
+});

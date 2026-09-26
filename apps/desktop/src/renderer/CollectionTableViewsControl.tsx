@@ -18,7 +18,7 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
   const current=useRef(0),controller=useRef(new AbortController()),saving=useRef(false);
   const selectionKey=JSON.stringify(["dohc-collection-view",workspaceId,dataset.datasetId,tableId]);
   const table=dataset.tables.find(table=>table.tableId===tableId),read=dataset.operations.find(operation=>operation.tableId===tableId&&operation.kind==="read"&&operation.readOnly);
-  const fields=table?datasetColumnFields(table).filter(field=>read?.fieldIds.includes(field.fieldId)&&!isGeneratedRecordIdField(field,table,dataset.operations)):[];
+  const fields=table?datasetColumnFields(table).filter(field=>read?.fieldIds.includes(field.fieldId)&&!isGeneratedRecordIdField(field)):[];
   const filterFields=fields.filter(field=>!["relation","attachment","multi-select"].includes(field.type));
   function select(view:CollectionTableView|null) {
     try {if(view)validateTableView(view,dataset,tableId);setSelected(view?.viewId??"");props.onSelect(view);localStorage.setItem(selectionKey,view?.viewId??"");}

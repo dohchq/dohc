@@ -1,3 +1,5 @@
+import * as datasetAuthorization from "@dohc/security-contract/dataset-authorization";
+import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -355,4 +357,26 @@ it("keeps the publication candidate unchanged when no read is approved", async (
   const candidate = JSON.parse(String(publication[2]!.body)).candidate;
   expect(hash(JSON.stringify(candidate))).toBe(prepared.candidateDigest);
   expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("fields");
+});
+
+it("checks relay-returned revisions directly on every publication preparation", async () => {
+  const h = withDataset(harness(), true);
+  const verify = vi.spyOn(datasetAuthorization, "hasGeneratedDatasetRevision");
+  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
+  try {
+    await h.prepare();
+    const calls = generate.mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    await h.prepare();
+    expect(generate.mock.calls.length).toBeGreaterThan(calls);
+    expect(verify).toHaveBeenCalled();
+    expect(verify.mock.calls.every(([, lookup]) => lookup === undefined)).toBe(true);
+    h.approved.revision.definition.operations.reverse();
+    const forged = await h.prepare();
+    expect(forged.capabilities[0]).toMatchObject({ kind: "dataset" });
+    const capability = forged.capabilities[0]!;
+    if (capability.kind !== "dataset") throw new Error("Expected dataset capability");
+    expect(capability.operations.find(operation => operation.operationId === id(6))).not.toHaveProperty("fields");
+    expect(verify.mock.calls.every(([, lookup]) => lookup === undefined)).toBe(true);
+  } finally { verify.mockRestore(); generate.mockRestore(); }
 });

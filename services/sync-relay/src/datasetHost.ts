@@ -8,8 +8,8 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
-import { type AppDatasetCapability } from "@dohc/security-contract/dataset";
-import { verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import { type AppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -43,6 +43,16 @@ export interface RelayDatasetHostOptions {
 /** The existing relay connection owns every authoritative dataset transaction. */
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const {storage, limits} = options, nowMs = options.nowMs ?? Date.now;
+  // Only artifact-verified revisions read from this host's catalog reach this cache.
+  const generatedVerdicts = new Map<string, boolean>();
+  function generatedRevision(approved: DatasetRevision): boolean {
+    const cached = generatedVerdicts.get(approved.revisionSha256);
+    if (cached !== undefined) return cached;
+    const verdict = hasGeneratedDatasetRevision(approved);
+    if (generatedVerdicts.size >= 64) generatedVerdicts.delete(generatedVerdicts.keys().next().value!);
+    generatedVerdicts.set(approved.revisionSha256, verdict);
+    return verdict;
+  }
   const maxParticipantsPerGrant = options.maxParticipantsPerGrant ?? 1000;
   if (!Number.isSafeInteger(maxParticipantsPerGrant) || maxParticipantsPerGrant < 1) throw new Error("Invalid dataset participant limit.");
   const standing = storage.captureStanding();
@@ -140,7 +150,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   function capability(candidate: AppPublicationCandidate, workspaceId: string, datasetId: string): AppDatasetCapability {
     const requested = candidate.capabilities.find(value => value.kind === "dataset" && value.datasetId === datasetId);
     if (!requested || requested.kind !== "dataset") throw notFound();
-    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(storage.db,{workspaceId,datasetId},requested));
+    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(storage.db,{workspaceId,datasetId},requested), generatedRevision);
   }
   function app(auth: AppBackendAuth, workspaceId: string, datasetId: string, appId: string) {
     current();

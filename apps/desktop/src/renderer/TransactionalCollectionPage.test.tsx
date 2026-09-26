@@ -42,7 +42,7 @@ it.each(["Record ID", "Membership number"])("hides only the generated primary ke
   const userField = definition.tables[0]!.fields[1]!;
   if (primaryName !== "Record ID") userField.name = "Record ID";
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SELECT 1;", operationSource: "globalThis.operations={};" });
-  const description = transactionalDescription(parseDatasetDescription(describeApprovedDataset(revision, definition.operations)));
+  const description = transactionalDescription(parseDatasetDescription(describeApprovedDataset(revision, definition.operations.filter(operation => operation.kind !== "create"))));
   const invoke = vi.fn(async () => ({ result: { rows: [{ id: "generated-uuid", version: 1, values: { [primary.fieldId]: "generated-uuid", [userField.fieldId]: "Alice" } }], nextCursor: null } }));
   setup({ dataset: description, tableId: definition.tables[0]!.tableId, invoke });
   await screen.findByText("Alice");
@@ -55,6 +55,25 @@ it.each(["Record ID", "Membership number"])("hides only the generated primary ke
   }
   expect(within(table).queryByText("generated-uuid")).toBeNull();
   expect(description.operations.find(operation => operation.kind === "read")!.fieldIds).toContain(primary.fieldId);
+});
+
+it.each([false, true])("preserves user-supplied text keys in filtered descriptions (create visible: %s)", async createVisible => {
+  const definition = datasetDefinitionFromDrafts({ name: "People", schemaPath: "schema.sql", operationsPath: "operations.js",
+    fields: [{ name: "Name", type: "text", required: true, unique: false }] });
+  const primary = definition.tables[0]!.fields[0]!;
+  if (primary.type === "button") throw new Error("Expected a column");
+  delete primary.generated;
+  primary.name = "Membership number";
+  const createOperation = definition.operations.find(operation => operation.kind === "create")!;
+  createOperation.fieldIds = [...createOperation.fieldIds, primary.fieldId];
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SELECT 1;", operationSource: "globalThis.operations={};" });
+  const operations = definition.operations.filter(operation => createVisible || operation.kind !== "create");
+  const description = transactionalDescription(parseDatasetDescription(describeApprovedDataset(revision, operations)));
+  const invoke = vi.fn(async () => ({ result: { rows: [{ id: "MEM-42", version: 1, values: { [primary.fieldId]: "MEM-42" } }], nextCursor: null } }));
+  setup({ dataset: description, tableId: definition.tables[0]!.tableId, invoke });
+  const table = await screen.findByRole("table");
+  expect(within(table).getByRole("columnheader", { name: /Membership number/ })).toBeTruthy();
+  expect(await within(table).findByText("MEM-42")).toBeTruthy();
 });
 
 it("keeps an empty multi-select visible and editable", async () => {

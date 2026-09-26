@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
+import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -36,7 +37,8 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 const scope = {workspaceId: "w", datasetId: definition.datasetId};
 const helper: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "helper", grantId: "helper-grant"};
 
-async function fixture(startupExclusive = false) {
+async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {
+  const { revision, schemaSql, operationSource } = prepared;
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
@@ -51,9 +53,9 @@ async function fixture(startupExclusive = false) {
     base.storage.tx(() => base.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
       VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
   }
-  function publish(operationIds = [id(5)]) {
+  function publish(operationIds = [id(5)], linkReads?: AppDatasetBinding["linkReads"]) {
     const previous = base.storage.readAppPublication({...scope, publicationId: base.publicationId, ownerUserId: "owner", limits});
-    const capability = resolveAppDatasetCapability({kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds}, revision);
+    const capability = resolveAppDatasetCapability({kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds, ...(linkReads ? {linkReads} : {})}, revision);
     const candidate = {...previous.candidate, capabilities: [capability], files: previous.candidate.files.filter(file => file.path === "bundle.js")};
     const digest = (domain: string, value: unknown) => createHash("sha256").update(JSON.stringify([domain, value])).digest("hex");
     candidate.bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
@@ -317,4 +319,26 @@ it("keeps a published form and its original capability alive after a field renam
   await f.host.approveMigration(owner,{...scope,candidateId:widenPreview.candidateId,checkpointSha256:widenPreview.checkpointSha256});
   expect(()=>f.host.publication(link,publicationId)).toThrow("Its owner must approve this access again");
   await expect(f.invoke(link,id(5),{name:"Forbidden"},publicationId,"forbidden")).rejects.toThrow();
+});
+
+it("caches only catalog verdicts for relay publications and still observes withdrawal", async () => {
+  const source = datasetOperations.generateDatasetOperations(definition);
+  const schema = schemaSql.replace('name TEXT NOT NULL)', 'name TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1)');
+  const approved = describeDatasetRevision({ definition, revision: 1, schemaSql: schema, operationSource: source });
+  const f = await fixture(false, { revision: approved, schemaSql: schema, operationSource: source });
+  await f.activate();
+  const publicationId = f.publish([id(6)], [{ operationId: id(6), fieldIds: [id(3), id(4)] }]);
+  const link = f.link("cached-reader");
+  await f.reopen();
+  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
+  try {
+    expect(f.host.publication(link, publicationId)).not.toBeNull();
+    expect(generate).toHaveBeenCalledTimes(1);
+    await f.invoke(link, id(6), {}, publicationId, "first-read");
+    await f.invoke(link, id(6), {}, publicationId, "second-read");
+    expect(generate).toHaveBeenCalledTimes(1);
+    f.storage.withdrawAppPublication({ ...scope, publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1 });
+    await expect(f.invoke(link, id(6), {}, publicationId, "revoked-read")).rejects.toThrow();
+    expect(generate).toHaveBeenCalledTimes(1);
+  } finally { generate.mockRestore(); }
 });

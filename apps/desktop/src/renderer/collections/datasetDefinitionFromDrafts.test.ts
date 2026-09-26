@@ -13,6 +13,7 @@ describe("datasetDefinitionFromDrafts", () => {
     vi.stubGlobal("crypto", { randomUUID: vi.fn(() => `00000000-0000-4000-8000-${String(next++).padStart(12, "0")}`) });
     const definition = datasetDefinitionFromDrafts({ name: "Fundraiser", schemaPath: "fundraiser/schema.sql", operationsPath: "fundraiser/operations.js", fields: drafts });
     expect(parseDatasetDefinition(definition).tables[0]?.fields.map(field => field.name)).toEqual(["Record ID", "Name", "Status"]);
+    expect(datasetColumnFields(parseDatasetDefinition(definition).tables[0]!)[0]?.generated).toBe("record-id");
     expect(datasetColumnFields(definition.tables[0]!)[1]?.sqlColumn).toMatch(/^f_[0-9a-f]{32}$/);
     expect(definition.operations.map(operation => [operation.kind, operation.access])).toEqual([["read", "helper"], ["create", "link"], ["edit", "helper"], ["delete", "owner"]]);
     expect(definition.operations[1]?.fieldIds).toHaveLength(2);

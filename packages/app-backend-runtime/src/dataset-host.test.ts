@@ -760,6 +760,7 @@ it("reuses the generated digest verdict across invocations but checks current ac
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
   expect(generate).toHaveBeenCalledTimes(1);
   await f.invoke("friend", id(7));
+  expect(generate).toHaveBeenCalledTimes(1);
   for (const context of ["friend", "helper", "owner"] as const) await f.invoke(context, id(7));
   expect(generate).toHaveBeenCalledTimes(1);
   f.db.prepare("UPDATE permissions SET active=0 WHERE user='friend'").run();
@@ -822,4 +823,24 @@ it("retains generated read approvals and permits fresh approval after display ch
   await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.approved, revision: 2, revisionSha256: revision.revisionSha256 } });
   await expect(f.invoke("helper", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
+});
+
+it("keeps generated verdicts private to each host and drops them on archive", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
+  const reopened = createDatasetHost({ db: f.db, transaction: f.transaction, journal: f.journal, supervisor: f.supervisor,
+    resolveAuthority() { return { principalKey: "friend", appId: "form", caller: { kind: "link", principalId: "friend", grantId: "public-link" } }; } });
+  const request = { ...scope, revision: 1, revisionSha256: f.revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "reopened", access: { kind: "app" as const, appId: "form" } };
+  await reopened.invoke("friend", request);
+  expect(generate).toHaveBeenCalledTimes(1);
+  await reopened.invoke("friend", { ...request, idempotencyKey: "second" });
+  expect(generate).toHaveBeenCalledTimes(1);
+  f.host.archiveDataset("owner", scope);
+  await expect(reopened.invoke("friend", request)).rejects.toThrow("archived");
+  f.host.restoreDataset("owner", scope);
+  await f.invoke("friend", id(7));
+  expect(generate).toHaveBeenCalledTimes(2);
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  await expect(reopened.invoke("friend", request)).rejects.toThrow("access");
 });

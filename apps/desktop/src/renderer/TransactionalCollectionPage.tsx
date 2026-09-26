@@ -124,7 +124,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const create = operations.find(operation => operation.kind === "create" && !operation.readOnly);
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
   const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId) &&
-    !isGeneratedRecordIdField(field, table, dataset.operations)) ?? [];
+    !isGeneratedRecordIdField(field)) ?? [];
   const createFields = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
   const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
   const canCreate = create && createFields.every(canInput);

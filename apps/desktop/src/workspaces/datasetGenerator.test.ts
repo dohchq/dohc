@@ -178,3 +178,18 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     expect((await app.call("read", { search: "match", filters: [{ fieldId: fields[1].fieldId, value: "match" }] })).result).toMatchObject({ rows: [{ id: row.id, version: 2 }] });
   });
 });
+
+it("marks only keys supplied by every generated create operation", () => {
+  const value = fixture();
+  const generated = generateDatasetSources(value);
+  expect(datasetColumnFields(generated.definition.tables[0]!)[0]!.generated).toBe("record-id");
+  expect(datasetColumnFields(value.tables[0]!)[0]!.generated).toBeUndefined();
+  const supplied = structuredClone(value);
+  supplied.operations[0]!.fieldIds.push(id(3));
+  expect(datasetColumnFields(generateDatasetSources(supplied).definition.tables[0]!)[0]!.generated).toBeUndefined();
+  const mixed = structuredClone(value);
+  mixed.operations.push({ ...supplied.operations[0]!, operationId: id(40), name: "import" });
+  expect(datasetColumnFields(generateDatasetSources(mixed).definition.tables[0]!)[0]!.generated).toBeUndefined();
+  const readOnly = { ...value, operations: value.operations.filter(operation => operation.kind === "read") };
+  expect(datasetColumnFields(generateDatasetSources(readOnly).definition.tables[0]!)[0]!.generated).toBeUndefined();
+});

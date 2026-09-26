@@ -9,11 +9,11 @@ vi.mock("./bridge",()=>({bridge:()=>backend}));
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const dataset:DatasetDescription={datasetId:id(1),name:"Entries",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:id(2),name:"Entries",fields:[{fieldId:id(3),name:"Status",type:"select",options:["Pending","Paid"],required:true,unique:false}]}],operations:[{operationId:id(4),name:"read",label:"Read",kind:"read",tableId:id(2),readOnly:true,access:"owner",fieldIds:[id(3)]}]};
 afterEach(()=>{cleanup();vi.clearAllMocks();localStorage.clear();});
-it.each(["Record ID", "Renamed identity"])("hides the generated key from view controls (%s)", async primaryName => {
+it.each([{ primaryName: "Record ID", generated: true }, { primaryName: "Renamed identity", generated: true }, { primaryName: "Membership number", generated: false }])("shows only user-supplied keys in view controls ($primaryName)", async ({ primaryName, generated }) => {
   const description = structuredClone(dataset);
   const table = description.tables[0]!;
   table.primaryKeyFieldId = id(5);
-  table.fields.push({ fieldId: id(5), name: primaryName, type: "text", required: true, unique: true },
+  table.fields.push({ fieldId: id(5), name: primaryName, type: "text", required: true, unique: true, ...(generated ? { generated: "record-id" as const } : {}) },
     { fieldId: id(6), name: "Visible field", type: "text", required: true, unique: false });
   description.operations[0]!.fieldIds.push(id(5), id(6));
   backend.readWorkspaceText.mockRejectedValue(Error("missing"));
@@ -26,7 +26,8 @@ it.each(["Record ID", "Renamed identity"])("hides the generated key from view co
   fireEvent.change(screen.getByLabelText("View layout"), { target: { value: "board" } });
   for (const label of ["Sort view by", "Filter 1 field", "Board group field"]) {
     const control = within(screen.getByLabelText(label));
-    expect(control.queryByRole("option", { name: primaryName })).toBeNull();
+    if (generated) expect(control.queryByRole("option", { name: primaryName })).toBeNull();
+    else expect(control.getByRole("option", { name: primaryName })).toBeTruthy();
     expect(control.getByRole("option", { name: "Visible field" })).toBeTruthy();
   }
 });
