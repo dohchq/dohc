@@ -10,6 +10,26 @@ const usage = "pnpm verify:configured-hosts --binary ABSOLUTE_ENGINE_PATH --buil
 const hash = path => createHash("sha256").update(readFileSync(path)).digest("hex");
 const nativeInputs = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crates", "vendor"];
 
+export function readConfiguredHostProof(kind, tests, evidence, binary, sha256) {
+  assert(["service", "device"].includes(kind), "Unknown configured host proof.");
+  const expectedCases = kind === "service" ? 2 : 1;
+  const result = JSON.parse(readFileSync(tests, "utf8"));
+  assert.equal(result.success, true);
+  assert.equal(result.numTotalTests, expectedCases);
+  assert.equal(result.numPassedTests, expectedCases);
+  assert.equal(result.numFailedTests, 0);
+  assert.equal(result.numPendingTests, 0);
+  assert.equal(result.numTodoTests, 0);
+  const cases = readdirSync(evidence, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith("case-"));
+  assert.equal(cases.length, expectedCases);
+  for (const entry of cases) {
+    const proof = JSON.parse(readFileSync(join(evidence, entry.name, "result.json"), "utf8"));
+    assert.equal(proof.verdict, "PASS", entry.name);
+    assert.equal(proof.sha256, sha256, entry.name);
+    assert.equal(proof.executable, binary, entry.name);
+  }
+}
+
 export async function verifyConfiguredHosts(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: { binary: { type: "string" },
     "build-receipt": { type: "string" }, help: { type: "boolean" } } });
@@ -68,16 +88,7 @@ export async function verifyConfiguredHosts(args = process.argv.slice(2)) {
       await step(kind, ["exec", "vitest", "run", "--config", `scripts/verification/${kind}-host.vitest.mjs`,
         "--maxWorkers=1", "--reporter=json", "--outputFile", tests],
       { ...process.env, [prefix + "BINARY"]: binary, [prefix + "SHA256"]: sha256, [prefix + "OUTPUT"]: evidence });
-      const result = JSON.parse(readFileSync(tests, "utf8"));
-      assert.equal(result.success, true);
-      assert.equal(result.numTotalTests, 1);
-      assert.equal(result.numPassedTests, 1);
-      assert.equal(result.numPendingTests, 0);
-      const cases = readdirSync(evidence, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith("case-"));
-      assert.equal(cases.length, 1);
-      const proof = JSON.parse(readFileSync(join(evidence, cases[0].name, "result.json"), "utf8"));
-      assert.equal(proof.verdict, "PASS");
-      assert.equal(proof.sha256, sha256);
+      readConfiguredHostProof(kind, tests, evidence, binary, sha256);
     }
     assert.equal(hash(binary), sha256);
     assert.equal(hash(buildEvidence), report.binary.buildEvidenceSha256);

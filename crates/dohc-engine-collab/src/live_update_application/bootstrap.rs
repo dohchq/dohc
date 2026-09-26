@@ -799,7 +799,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn restore_fence_commit_boundaries_reopen_without_partial_state() {
         use dohc_engine_storage::{FaultAction, FaultPoint};
@@ -915,7 +914,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn restore_fence_process_child() {
         let Some(path) = std::env::var_os("DOHC_RESTORE_FENCE_TEST_INPUT") else {
@@ -964,7 +962,6 @@ mod tests {
         panic!("process did not reach its commit boundary");
     }
 
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn restore_fence_survives_native_process_exit_before_and_after_commit() {
         for after in [false, true] {
@@ -1320,7 +1317,6 @@ mod tests {
             })
             .unwrap();
     }
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn lost_commit_ack_replays_and_precommit_crash_has_no_partial_rows() {
         use dohc_engine_storage::{FaultAction, FaultPoint};

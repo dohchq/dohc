@@ -64,6 +64,7 @@ import {
   parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+import { ipcErrorMessage } from "../ipcError";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -153,7 +154,7 @@ export interface ExplorerProps {
   onShare: (path: string) => void;
   onRefresh: () => void;
   // Failed tree operations go to the shell's error toast and Notices row.
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -854,7 +855,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
-        onError(cause instanceof Error ? cause.message : String(cause));
+        onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
         return;
       }
       try {
@@ -866,7 +867,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             succeeded.push(change);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            onError(cause instanceof Error ? cause.message : String(cause));
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -879,7 +880,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         } catch (cause) {
           // The disk change already completed. Surface the settlement error,
           // then project the successful paths so the shell matches storage.
-          onError(cause instanceof Error ? cause.message : String(cause));
+          onError(ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."), cause);
         }
         if (succeeded.length > 0) onPathsChanged(succeeded);
         onRefresh();
@@ -998,7 +999,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       void bridge()
         .exportWorkspaceZip({ workspaceId, relativePath })
         .catch((cause) =>
-          onError(cause instanceof Error ? cause.message : String(cause)),
+          onError(ipcErrorMessage(cause, "Could not export this workspace."), cause),
         );
     },
     [onError, workspaceId],

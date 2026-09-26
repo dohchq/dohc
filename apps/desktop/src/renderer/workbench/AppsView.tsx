@@ -13,12 +13,16 @@ import { bridge } from "../bridge";
 import { IconButton, PrimaryButton } from "../ui/controls";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
+import { ipcErrorMessage } from "../ipcError";
 
 type AppsLoadState =
   | { status: "loading" }
-  | { status: "ready"; apps: SitePackageInfo[] }
-  | { status: "error"; message: string };
+  | { status: "ready"; workspaceId: string; apps: SitePackageInfo[] }
+  | { status: "error"; workspaceId: string; message: string };
 
+// Every settled file listing refetches the apps. The list and its count stay
+// on screen while that runs; only a first load, or another workspace, shows
+// loading.
 function useApps(
   workspaceId: string,
   filesSettledRevision: number,
@@ -26,25 +30,25 @@ function useApps(
   const [state, setState] = useState<AppsLoadState>({ status: "loading" });
 
   useAsyncResponseEffect(
-    () => {
-      setState({ status: "loading" });
-      return bridge().listSites({ workspaceId });
-    },
+    () => bridge().listSites({ workspaceId }),
     {
       onSuccess: (result) => {
-        setState({ status: "ready", apps: result.sites });
+        setState({ status: "ready", workspaceId, apps: result.sites });
       },
       onError: (error) => {
         setState({
           status: "error",
-          message: error instanceof Error ? error.message : "Could not load apps.",
+          workspaceId,
+          message: ipcErrorMessage(error, "Could not load apps."),
         });
       },
     },
     [workspaceId, filesSettledRevision],
   );
 
-  return state;
+  return state.status !== "loading" && state.workspaceId !== workspaceId
+    ? { status: "loading" }
+    : state;
 }
 
 function appDiagnosticLabel(app: SitePackageInfo): string | null {
@@ -94,7 +98,7 @@ export function AppsView(props: {
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <Globe2 size={13} aria-hidden className="text-subtle" />
         <output data-testid="sites-count" className="font-mono text-[11px] text-muted">
-          {apps.length} app{apps.length === 1 ? "" : "s"}
+          {state.status === "ready" ? `${apps.length} app${apps.length === 1 ? "" : "s"}` : null}
         </output>
       </div>
 

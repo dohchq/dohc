@@ -359,6 +359,28 @@ it("rechecks authority before returning a structured refusal", async () => {
   await expect(f.invoke({ refuse: true })).rejects.toThrow("denied");
 });
 
+it.each(["abort","close"] as const)("stops a worker that is still starting on %s",async(kind)=>{
+  let launched!:()=>void,ended!:(signal:NodeJS.Signals|null)=>void;
+  const starting=new Promise<void>(resolve=>{launched=resolve;}),exit=new Promise<NodeJS.Signals|null>(resolve=>{ended=resolve;});
+  // A stand-in worker that never sends ready.
+  const f=await fixture({launch:options=>{
+    const child=spawn(process.execPath,["-e","setInterval(()=>{},60_000)"],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],windowsHide:true});
+    child.on("error",options.onError);child.on("close",(code,signal)=>{ended(signal);options.onExit(code);});
+    child.on("spawn",launched);
+    return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+  }});
+  const controller=new AbortController();
+  // Frozen timers keep the 30 s startup limit from ending the open, so only the cancellation can.
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
+  try {
+    const invocation=f.invoke({},{signal:controller.signal});
+    await starting;
+    if(kind==="abort")controller.abort(new Error("Request cancelled."));else void f.supervisor.close();
+    await expect(invocation).rejects.toThrow(kind==="abort" ? "Request cancelled." : "Dataset host");
+    expect(await exit).toBe("SIGKILL");
+  } finally { vi.useRealTimers(); }
+});
+
 
 it("recovers from a materialization cache and replays only its tail while retaining old retries",async()=>{
   const opened:number[]=[],replayed:number[]=[];

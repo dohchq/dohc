@@ -1,5 +1,5 @@
 import { join, relative } from "node:path";
-import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { recoverOnDiskSegments } from "./pluginCaseRecovery";
 
 async function recoverOnDiskCasing(
@@ -26,7 +26,7 @@ export interface PluginAuthoredWriteCapture {
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentAuthor,
+    author: MomentWriteAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
 }
@@ -81,7 +81,7 @@ export function createPluginAuthoredTextWriter(
 ): (
   path: string,
   text: string,
-  options: { overwrite: boolean; author: MomentAuthor },
+  options: { overwrite: boolean; author: MomentWriteAuthor },
 ) => Promise<{ path: string }> {
   return async (path, text, { overwrite, author }) => {
     const platform = input.platform ?? process.platform;

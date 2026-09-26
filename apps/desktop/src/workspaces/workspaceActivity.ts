@@ -163,6 +163,8 @@ export function createWorkspaceActivity(
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: conflictCount > 0,
+      // A retry someone asked for shows as syncing until it ends.
+      syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and
@@ -184,7 +186,7 @@ export function createWorkspaceActivity(
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
-      syncFailing: snap?.syncFailing ?? false,
+      ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
       liveSessionsGeneration,
     };
     if (historyCaptureFailure) {
@@ -453,6 +455,19 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queueSync();
   }
 
+  // The person asked to sync now, from a sync failure's Try again. Runs a
+  // pass without waiting out the backoff and settles when it ends; the
+  // outcome is in the status. No-op when the workspace has no engine.
+  function retryCloudSync(
+    state: WorkspaceActivityState,
+    reason: "person" | "reconnect",
+  ): Promise<void> {
+    return (
+      state.entry?.engine?.retryNow({ countsAsAttempt: reason === "person" }) ??
+      Promise.resolve()
+    );
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -595,6 +610,7 @@ export function createWorkspaceActivity(
     getStatus,
     isOpen,
     queueCloudSync,
+    retryCloudSync,
     queueCloudPull,
     setAgentRun,
     claimAgentRun,

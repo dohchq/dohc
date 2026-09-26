@@ -483,6 +483,32 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
   });
 
+  it("reports a failed save with the error it came from, so Copy keeps the path", async () => {
+    const user = userEvent.setup();
+    const denied = new Error(
+      "Error invoking remote method 'desktop:set-user-settings': Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\settings.json'",
+    );
+    bridge.setUserSettings.mockRejectedValueOnce(denied);
+    const onError = vi.fn();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    await screen.findByRole("radio", { name: "System" });
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(
+      "dohc could not save your settings. dohc does not have permission to use this file or folder.",
+      denied,
+    );
+  });
+
   it("rolls back optimistic appearance changes when save fails", async () => {
     const user = userEvent.setup();
     bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));

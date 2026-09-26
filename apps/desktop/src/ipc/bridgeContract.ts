@@ -385,6 +385,13 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+// Who asked for a sync pass now. A person's retry counts toward the attempts
+// a failure's notice weighs; a retry on reconnecting or waking does not.
+export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
+  reason: z.enum(["person", "reconnect"]),
+});
+export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
@@ -836,10 +843,23 @@ export const ImportWorkspaceFilesResult = z.object({
   // collision budget exhausted) — surfaced so the import summary can say
   // "2 skipped" instead of the batch silently shrinking.
   skipped: z.number().int().min(0),
-  // Some files landed before the owner lost a trustworthy completion result.
-  // This is not an ordinary skip: the Explorer must refresh before the user
-  // decides what, if anything, to retry.
+  // Some files landed before the import stopped: a copy failed, or the owner
+  // lost a trustworthy completion result. This is not an ordinary skip: the
+  // Explorer must refresh before the user decides what, if anything, to
+  // retry, and importing the same sources again would copy the landed files
+  // a second time.
   interrupted: z.literal(true).optional(),
+  // An ordinary import stopped at a failed copy: the source file's name, and
+  // either the filesystem's error code or a refusal dohc makes itself
+  // (`refusal`), with raw text that only goes into copied details.
+  stop: z
+    .object({
+      file: z.string().min(1).max(4096),
+      code: z.string().min(1).max(64).optional(),
+      detail: z.string().min(1).max(500).optional(),
+      refusal: z.enum(["dangling-link"]).optional(),
+    })
+    .optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
@@ -1223,6 +1243,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     "syncing",
     "local-changes",
     "conflict",
+    "sync-failed",
     "cloud-disconnected",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
@@ -1242,9 +1263,17 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
-  // Additive (0P-B relay sync): true after repeated non-auth sync failures.
-  // Local changes remain safe and the engine keeps retrying with backoff.
-  syncFailing: z.boolean().optional(),
+  // Why the last sync pass failed, present until a pass succeeds. Local work
+  // is saved either way, and the engine keeps retrying with backoff.
+  syncFailure: z
+    .object({
+      cause: z.enum(["server-unreachable", "unknown"]),
+      detail: z.string(),
+      // When this failure began, and how many passes have failed since.
+      sinceMs: z.number(),
+      attempts: z.number().int().positive(),
+    })
+    .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
@@ -6123,6 +6152,54 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Crash reports. Main keeps each crash on this computer as plain text and
+// sends nothing on its own. A report leaves only after the person confirms
+// in main's own dialog, which names where it goes and can show the exact
+// text. One report holds the problems recorded since the last send or
+// dismiss.
+export const CrashReportSource = z.enum(["main", "window", "gpu", "utility", "engine"]);
+export type CrashReportSource = z.infer<typeof CrashReportSource>;
+// Five problems of at most 6,000 characters each, with the header.
+export const CRASH_REPORT_MAX_CHARS = 32_768;
+export const CrashReportView = z.object({
+  // Changes whenever the text does.
+  revision: z.number().int().positive(),
+  // The last problem in this text. Dismiss removes up to it, so a newer
+  // problem stays.
+  through: z.number().int().positive(),
+  // Where the newest problem happened. The notice names it.
+  source: CrashReportSource,
+  problems: z.number().int().positive(),
+  atMs: z.number().int().nonnegative(),
+  text: z.string().min(1).max(CRASH_REPORT_MAX_CHARS),
+});
+export type CrashReportView = z.infer<typeof CrashReportView>;
+export const ReadCrashReportResult = z.object({
+  report: CrashReportView.nullable(),
+  // The host a sent report goes to. Null when this build has no report
+  // server, so the notice offers only Copy report.
+  sendTo: z.string().min(1).max(255).nullable(),
+});
+export type ReadCrashReportResult = z.infer<typeof ReadCrashReportResult>;
+export const CrashReportChangedEvent = z.undefined();
+
+export const crashReportOperations = {
+  readCrashReport: {
+    channel: "desktop:read-crash-report",
+    payload: z.object({}), result: ReadCrashReportResult, guard: "trusted-sender",
+  },
+  dismissCrashReport: {
+    channel: "desktop:dismiss-crash-report",
+    payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
+  },
+  // Opens main's dialog. Sent is true only when the person confirmed there
+  // and the server took the report.
+  sendCrashReport: {
+    channel: "desktop:send-crash-report",
+    payload: z.object({}), result: z.object({ sent: z.boolean() }), guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
@@ -6437,6 +6514,7 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof noticeOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
@@ -6843,6 +6921,8 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  // Runs a cloud sync pass now and answers with the status after it.
+  retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
@@ -6912,6 +6992,9 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the crash report changed. A poke, not the report; the
+  // subscriber reads it again. Returns an unsubscribe function.
+  onCrashReportChanged(listener: () => void): () => void;
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;

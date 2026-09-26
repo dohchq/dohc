@@ -94,7 +94,7 @@ export function NewWorkspaceCard(props: {
       });
       props.onWorkspaceReady(workspace);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
       setCreating(false);
     }
   }
