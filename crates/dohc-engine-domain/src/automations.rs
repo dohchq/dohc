@@ -181,9 +181,10 @@ pub struct AutomationGroupSubscription {
 
 /// What the next host needs so each Group message claims exactly once across
 /// a handover (ADR 0012). Messages posted before `floor_ms` claim nothing
-/// there. For each automation this computer watched: the time its messages
-/// start, and each message some host already decided for it, claimed or
-/// skipped as the automation's own post, since the floor.
+/// there, whatever an automation's start. For each automation this computer
+/// watched: the time its messages start, and each message some host already
+/// decided for it, claimed or skipped as the automation's own post, since
+/// the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationGroupHandover {
     pub floor_ms: i64,
@@ -1063,7 +1064,7 @@ fn release_automation_groups_in_tx(
             |row| {
                 Ok(AutomationGroupHandoverAutomation {
                     automation_id: row.get(0)?,
-                    since_ms: row.get::<_, i64>(1)?.max(floor_ms),
+                    since_ms: row.get(1)?,
                     decided: Vec::new(),
                 })
             },
@@ -1177,13 +1178,7 @@ fn maintain_group_coverage(
         })
         .max(stored_floor_ms);
     if floor_ms > stored_floor_ms {
-        conn.prepare_cached(
-            "INSERT INTO automation_group_state (workspace_id, floor_ms) VALUES (?1, ?2) \
-             ON CONFLICT(workspace_id) DO UPDATE SET floor_ms = excluded.floor_ms",
-        )
-        .map_err(DomainError::sql_corrupt)?
-        .execute(params![workspace_id, floor_ms])
-        .map_err(DomainError::sql_persist)?;
+        raise_group_floor(conn, workspace_id, floor_ms)?;
     }
     conn.prepare_cached(
         "DELETE FROM automation_group_subscriptions \
@@ -1201,6 +1196,23 @@ fn maintain_group_coverage(
     .execute(params![workspace_id, floor_ms])
     .map_err(DomainError::sql_persist)?;
     Ok(floor_ms)
+}
+
+/// Raises the workspace's coverage floor to `floor_ms`, never lowers it.
+fn raise_group_floor(
+    conn: &Connection,
+    workspace_id: &str,
+    floor_ms: i64,
+) -> Result<(), DomainError> {
+    conn.prepare_cached(
+        "INSERT INTO automation_group_state (workspace_id, floor_ms) VALUES (?1, ?2) \
+         ON CONFLICT(workspace_id) DO UPDATE SET \
+           floor_ms = MAX(COALESCE(floor_ms, excluded.floor_ms), excluded.floor_ms)",
+    )
+    .map_err(DomainError::sql_corrupt)?
+    .execute(params![workspace_id, floor_ms])
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
 }
 
 /// Set the Group subscriptions this computer watches, all of them, in one
@@ -1292,6 +1304,7 @@ fn watch_automation_groups_in_tx(
         .map_err(DomainError::sql_persist)?;
     }
     if let Some(handover) = import {
+        raise_group_floor(conn, workspace_id, handover.floor_ms)?;
         let mut insert = conn
             .prepare_cached(
                 "INSERT OR IGNORE INTO automation_group_coverage \
@@ -1342,12 +1355,7 @@ fn watch_automation_groups_in_tx(
         handover
             .automations
             .iter()
-            .map(|automation| {
-                (
-                    automation.automation_id.as_str(),
-                    automation.since_ms.max(handover.floor_ms),
-                )
-            })
+            .map(|automation| (automation.automation_id.as_str(), automation.since_ms))
             .collect()
     });
     let kept: Vec<(&str, &str, i64)> = if import.is_none() && resume {
@@ -1381,25 +1389,27 @@ fn watch_automation_groups_in_tx(
                 !*frozen && *automation_id == subscription.automation_id && channel == channel_id
             })
             .map(|(_, _, since_ms, _)| *since_ms);
-        let since_ms = handed_start(&subscription.automation_id)
+        let start_ms = handed_start(&subscription.automation_id)
             .or(still_running)
             .or_else(|| kept_start(&subscription.automation_id, channel_id))
-            .unwrap_or(now_ms)
-            .max(floor_ms);
+            .unwrap_or(now_ms);
         insert_group_row(
             conn,
             workspace_id,
             subscription,
             channel_id,
-            since_ms,
+            start_ms,
             false,
         )?;
         if still_running.is_none() || handed_start(&subscription.automation_id).is_some() {
+            // A replay reads from the floor: below it, a stored message may
+            // have been decided and trimmed, so it is neither claimed nor
+            // reported late.
             let watch = GroupWatch {
                 automation_id: &subscription.automation_id,
                 starts_with: subscription.starts_with.as_deref(),
                 channel_id,
-                since_ms,
+                since_ms: start_ms.max(floor_ms),
                 floor_ms,
             };
             claims.extend(claim_stored_group_messages(conn, workspace_id, &watch)?);
@@ -1430,7 +1440,7 @@ fn watch_automation_groups_in_tx(
             workspace_id,
             &pending_row,
             PENDING_GROUP,
-            (*since_ms).max(floor_ms),
+            *since_ms,
             true,
         )?;
     }

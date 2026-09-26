@@ -2335,7 +2335,7 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
         .handover;
     assert_eq!(handover.floor_ms, 30);
     for automation in &handover.automations {
-        assert_eq!(automation.since_ms, 30);
+        assert_eq!(automation.since_ms.max(handover.floor_ms), 30);
         assert_eq!(
             automation.decided,
             vec![("m-recent".to_owned(), window + 40)]
@@ -2379,7 +2379,23 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
         .find(|automation| automation.automation_id == TASK)
         .expect("task");
     assert_eq!(task.decided.len(), bound as usize);
-    assert_eq!(task.since_ms, 101);
+    assert_eq!(
+        task.since_ms, 10,
+        "the start travels as it is, beside the floor"
+    );
+
+    // On the new host, a message posted after the start but before the floor
+    // claims nothing, and the owner can hear why.
+    let mut desk = Computer::new();
+    desk.watch(3, fetched(3, handover), 6_000);
+    desk.store_message(&post("m-offline", "/task Written offline", 50));
+    assert!(desk.claimed.is_empty());
+    assert!(
+        read_automation_group_skips(&desk.store, WS)
+            .expect("skips")
+            .late_at_ms
+            .is_some()
+    );
 }
 
 /// An automation the handover names that the new host cannot watch yet, as
@@ -2500,6 +2516,13 @@ fn each_decision_keeps_the_coverage_bounded() {
     // A message from before the automations started is not theirs. One
     // posted after they started that arrives after the floor passed it
     // claims nothing, and the owner can hear why.
+    // Watching again keeps each start where it was.
+    laptop.watch(1, None, 10_001);
+    assert!(
+        group_rows(&laptop.store, WS)
+            .iter()
+            .all(|(_, since, _)| *since == 10)
+    );
     laptop.store_message(&post("m-before", "/task Before", 5));
     assert_eq!(
         read_automation_group_skips(&laptop.store, WS).expect("skips"),
