@@ -3518,8 +3518,8 @@ mod tests {
     }
 
     /// A build that knows ordinals 0 through 13 refuses a store migrated to
-    /// 15, and names 14, the first migration it does not define. Ordinals this
-    /// build does not ship yet stand in for the newer build's.
+    /// 15 and names the first migration it does not define. Stand-ins fill
+    /// the ordinals up to 15 that this build does not ship yet.
     #[test]
     fn a_build_that_knows_13_refuses_a_store_at_15() {
         let dir = tempdir();
@@ -3527,32 +3527,29 @@ mod tests {
         let ctx = MigrationContext::current(1_000);
         let mut conn = open_bare(&path);
         let mut newer = BASELINE_MIGRATIONS.to_vec();
-        while newer.len() <= 15 {
-            let ordinal = newer.len() as u32;
-            let (id, sql) = match ordinal {
+        assert_eq!(newer[13].ordinal, 13, "main ships ordinals 0 through 13");
+        while let Some(last) = newer.last().map(|m| m.ordinal)
+            && last < 15
+        {
+            let (id, sql) = match last + 1 {
                 14 => ("stand-in-14", "CREATE TABLE stand_in_14 (x INTEGER);"),
-                15 => ("stand-in-15", "CREATE TABLE stand_in_15 (x INTEGER);"),
-                other => panic!("main ships through ordinal 13, not {other}"),
+                _ => ("stand-in-15", "CREATE TABLE stand_in_15 (x INTEGER);"),
             };
             newer.push(Migration {
-                ordinal,
+                ordinal: last + 1,
                 id,
                 sql,
                 sets_user_version: None,
             });
         }
-        run_migrations(&mut conn, &newer[..=15], &ctx, &NoFaults).expect("migrate to 15");
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("migrate to 15");
 
-        let refused = newer_build_refusal(&conn, &newer[..=13])
+        let refused = newer_build_refusal(&conn, &newer[..14])
             .expect("read ledger")
             .expect("a build that knows 13 refuses the store");
         assert_eq!(refused.code(), "migrated-by-newer-build");
-        assert!(
-            refused
-                .to_string()
-                .starts_with("a newer build ran migration 14 ("),
-            "{refused}"
-        );
+        let first_unknown = format!("a newer build ran migration {} (", newer[14].ordinal);
+        assert!(refused.to_string().starts_with(&first_unknown), "{refused}");
     }
 
     /// A newer build's migration that stopped before it completed can still
