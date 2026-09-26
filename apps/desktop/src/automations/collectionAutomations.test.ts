@@ -460,6 +460,23 @@ describe("Collection automations", () => {
     });
   });
 
+  it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has(TASKS));
+
+    // A collaborator's direct write removes the automation (ADR 0013).
+    await w.writeAutomations("Tasks", "version: 1\nautomations: []\n");
+    w.executor.handlePulledPaths(["Tasks/notes.md"]);
+    // A read queued after the pull sees the index the pull left.
+    const unchanged = await w.executor.automationsIn("Tasks");
+    expect(unchanged.status === "read" && unchanged.automations.length, "a pull that names no definition file reads nothing").toBe(1);
+    expect(w.subscriptions.has(TASKS)).toBe(true);
+
+    w.executor.handlePulledPaths(["Tasks/notes.md", "Tasks/automations.yaml"]);
+    await w.until(() => !w.subscriptions.has(TASKS));
+  });
+
   it("finds records, changes each with its own values, branches, and adds records it then changes", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: [
       "  - id: sweep",
@@ -1060,6 +1077,31 @@ describe("Collection automations", () => {
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
   });
 
+  it("undoes every finished run of the definitions a stopped person wrote, and no other", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const first = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    const second = w.claim("collection:Tasks#stamp", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(second);
+    expect(w.fieldsOf(task).Count).toBe(4);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const hash = file.automations[0]!.definitionHash;
+
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: "0000000000000000" }], async () => undefined))
+      .resolves.toEqual({ undone: 0, left: 0 });
+    expect(w.fieldsOf(task).Count).toBe(4);
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
+      .resolves.toEqual({ undone: 2, left: 0 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+    // Runs already undone are passed over.
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
+      .resolves.toEqual({ undone: 0, left: 0 });
+  });
+
   it("will not run a failed run again after someone undid what it changed", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
@@ -1180,6 +1222,35 @@ describe("Collection automations", () => {
     await w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
     // Back to before the first version ran, not only before the second.
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+  });
+
+  it("undoes only a stopped person's definition among a claim's runs", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const first = await w.executor.automationsIn("Tasks");
+    if (first.status !== "read" || !first.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const firstHash = first.automations[0]!.definitionHash;
+
+    await w.writeAutomations("Tasks", STAMP.replace("record.Count + 1", "record.Count + 10"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done");
+    const second = await w.executor.automationsIn("Tasks");
+    if (second.status !== "read" || !second.automations[0]!.valid) throw new Error("expected Stamp to read");
+    expect(w.fieldsOf(task).Count).toBe(13);
+
+    // The person wrote only the second version: its run goes back, the first stays.
+    await expect(w.executor.undoRunsOf(
+      [{ automationId: "collection:Tasks#stamp", definitionHash: second.automations[0]!.definitionHash }],
+      async () => undefined,
+    )).resolves.toEqual({ undone: 1, left: 0 });
+    expect(w.fieldsOf(task).Count).toBe(3);
+    expect(second.automations[0]!.definitionHash).not.toBe(firstHash);
   });
 
   it("lets only one of an Undo and a Try again started together change a run", async () => {

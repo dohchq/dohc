@@ -69,6 +69,7 @@ describe("history diff page", () => {
       onPathResolved: noop,
       registerActiveUndo: () => {},
       onRestored: () => {},
+      onStopAndRestore: () => {},
     };
     return render(<EngineMomentDiffPage {...props} />);
   }
@@ -92,6 +93,7 @@ describe("history diff page", () => {
         onPathResolved={noop}
         registerActiveUndo={noop}
         onRestored={() => { order.push("restored"); }}
+        onStopAndRestore={() => {}}
       />,
     );
     await act(async () => {});
@@ -152,6 +154,7 @@ describe("history diff page", () => {
         onPathResolved={noop}
         registerActiveUndo={() => {}}
         onRestored={() => {}}
+        onStopAndRestore={() => {}}
       />,
     );
     await screen.findByTestId("engine-diff-lines");

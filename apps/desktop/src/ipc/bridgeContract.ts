@@ -1422,6 +1422,13 @@ export const EngineMomentRecord = z.object({
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
   automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
+  // Present when a person the owner shared with wrote the moment directly
+  // (ADR 0013): main names them from the owner's share roster. The user id
+  // picks them for Stop and restore.
+  namedAuthor: z.object({
+    userId: z.string().min(1).max(256),
+    label: z.string().min(1).max(400),
+  }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -5379,6 +5386,42 @@ export const UndoCollectionAutomationRunPayload = z.object({
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
 
+// Stop and restore (ADR 0013): the owner stops a person they shared with and
+// puts back what that person wrote directly. Main finds the person's grants
+// on this workspace from the relay; the renderer names only the person.
+export const StopAndRestorePersonPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  userId: z.string().min(1).max(256),
+}).strict();
+export type StopAndRestorePersonPayload = z.infer<typeof StopAndRestorePersonPayload>;
+export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("restored"),
+    // Each file put back, with the forward moment its Undo restores before.
+    restored: z.array(z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID })),
+    // Files left for the owner to check, each with why.
+    review: z.array(z.discriminatedUnion("reason", [
+      z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+    ])),
+    // Runs of the person's automations undone, and those Undo could not undo.
+    runsUndone: z.number().int().nonnegative(),
+    runsLeft: z.number().int().nonnegative(),
+    // What stopped the restore part way; the files above were restored.
+    errorMessage: z.string().nullable(),
+  }).strict(),
+  // Access stopped, but this computer has not received every change the
+  // person wrote yet. Nothing was restored; trying again continues.
+  z.object({ status: z.literal("waiting") }).strict(),
+]);
+export type StopAndRestorePersonResult = z.infer<typeof StopAndRestorePersonResult>;
+export const UndoStopAndRestorePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+}).strict();
+export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
+
 // A current editor allows a step that became reachable only because an
 // editor left. `seq` names the hold the person saw.
 export const ConfirmCollectionAutomationStepPayload = z.object({
@@ -6810,6 +6853,8 @@ export interface DohcDesktopBridge
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
+  stopAndRestorePerson(payload: StopAndRestorePersonPayload): Promise<StopAndRestorePersonResult>;
+  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;

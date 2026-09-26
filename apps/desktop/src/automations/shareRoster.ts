@@ -528,3 +528,33 @@ export function createShareRosters(dependencies: {
 
   };
 }
+
+const ACCESS_WORDS: Record<ListedGrant["access"], string> = {
+  view: "View",
+  comment: "Comment",
+  edit: "Edit",
+  "read-only": "View",
+  "read-write": "Edit",
+};
+
+/**
+ * How History names a person who wrote a Collection's own files directly
+ * (ADR 0013): their email and level from the owner's roster, as
+ * "ana@example.com (Edit)". A grant the roster no longer lists, such as a
+ * revoked one, still names the person by another grant of theirs, without
+ * a level. Anyone else is "Someone you shared with".
+ */
+export function rosterAuthorLabel(
+  roster: ShareRoster | undefined,
+  author: { userId: string; grantId: string },
+): string {
+  const grants = roster?.grants ?? [];
+  const grant = grants.find((candidate) => candidate.grantId === author.grantId);
+  if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
+    return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
+  }
+  const email = grants.find(
+    (candidate) => candidate.recipientUserId === author.userId && candidate.recipientEmail !== null,
+  )?.recipientEmail;
+  return email ?? "Someone you shared with";
+}

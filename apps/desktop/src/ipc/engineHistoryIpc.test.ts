@@ -24,6 +24,7 @@ const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
+  named: (author) => `${author.userId}@example.com (Edit)`,
 };
 
 const TEXT_SHA = "a".repeat(64);
@@ -137,6 +138,16 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     // A plugin's automation keeps the moment's origin label.
     detail.moment.author = {kind: "automation", automationId: "plugin:tools/stamp", onBehalfOf: "local", depth: 1};
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
+  });
+  it("names a person the owner shared with as main reads them from the roster", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "named", userId: "ana", grantId: "grant-1", grantGeneration: 1};
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.namedAuthor).toEqual({ userId: "ana", label: "ana@example.com (Edit)" });
+    expect(record.agentAuthorName).toBeUndefined();
+    expect(record.publicAuthor).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(

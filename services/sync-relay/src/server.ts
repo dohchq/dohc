@@ -18,6 +18,8 @@ import {
   createCollectionWriteRateLimiter,
   createCollectionWriteRoutes,
   type CollectionWriteRoute,
+  readOwnerCollectionWrites,
+  type OwnerCollectionWriteRoute,
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
@@ -198,6 +200,7 @@ type SyncRelayRoute =
   | { route: "share-discussion-moderation"; shareId: string }
   | ShareProposalRoute
   | CollectionWriteRoute
+  | OwnerCollectionWriteRoute
   | WorkspaceProposalRoute
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
@@ -867,6 +870,7 @@ export function createSyncRelayHandler({
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
       if (route.route === "owner-restore") return await respondToOwnerRestore(request, route, actor.userId);
+      if (route.route === "owner-collection-writes") return readOwnerCollectionWrites(request, route, actor.userId, storage);
 
       // The granter's half. Everything below this line is
       // owner-scoped by the one check above, which is why accept and decline
@@ -1098,6 +1102,9 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     const action = parseAutomationHostAction(parts[3]);
     if (!action) throw notFound();
     return { route: "automation-host", workspaceId, action };
+  }
+  if (parts[2] === "collection-writes" && parts.length === 4) {
+    return { route: "owner-collection-writes", workspaceId, grantId: parseShareId(parts[3]) };
   }
   if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {

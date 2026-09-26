@@ -417,13 +417,24 @@ export class CollectionAutomations {
 
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
+    this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]));
+  }
+
+  /**
+   * Files a relay pull wrote. A pull writes the owner's files itself, and
+   * need not leave a watcher batch, so a collaborator's direct change to a
+   * Collection's automations or schema (ADR 0013) is read from here.
+   */
+  handlePulledPaths(paths: readonly string[]): void {
+    this.rereadFoldersOf(paths);
+  }
+
+  private rereadFoldersOf(paths: readonly (string | undefined)[]): void {
     const folders = new Set<string>();
-    for (const event of events) {
-      for (const path of [event.path, event.fromPath]) {
-        if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
-        const folder = posix.dirname(path);
-        if (folder !== ".") folders.add(folder);
-      }
+    for (const path of paths) {
+      if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
+      const folder = posix.dirname(path);
+      if (folder !== ".") folders.add(folder);
     }
     if (folders.size === 0 || this.opened === null) return;
     void this.enqueue(async () => {
@@ -867,6 +878,8 @@ export class CollectionAutomations {
   async undo(
     input: { automationId: string; claimId: string },
     trash: (path: string) => Promise<void>,
+    // Stop and restore undoes only the runs under these definitions.
+    definitionHashes?: ReadonlySet<string>,
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
     // Held from before the first read to the end, like Try again's.
@@ -880,7 +893,11 @@ export class CollectionAutomations {
       if (claim.state !== "done" && claim.state !== "failed") {
         return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
       }
-      const { runs, unreadable } = await this.options.store.runsOf(input.automationId, input.claimId);
+      const stored = await this.options.store.runsOf(input.automationId, input.claimId);
+      const { unreadable } = stored;
+      const runs = definitionHashes
+        ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
+        : stored.runs;
       if (unreadable) {
         return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
       }
@@ -906,6 +923,36 @@ export class CollectionAutomations {
     } finally {
       this.changing.delete(input.claimId);
     }
+  }
+
+  /**
+   * Stop and restore: undoes every finished run in this computer's run
+   * history under one of these definitions, as Undo on each would, newest
+   * first as run history lists them, so each field goes back in turn. A
+   * claim's runs under other definitions stay. `left` counts the runs Undo
+   * refused, such as one still running.
+   */
+  async undoRunsOf(
+    definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
+    trash: (path: string) => Promise<void>,
+  ): Promise<{ undone: number; left: number }> {
+    const hashes = new Map<string, Set<string>>();
+    for (const { automationId, definitionHash: hash } of definitions) {
+      hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
+    }
+    const result = { undone: 0, left: 0 };
+    for (const [automationId, wanted] of hashes) {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      for (const claim of listed.claims) {
+        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+          .filter((run) => wanted.has(run.definitionHash));
+        if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
+        const undone = await this.undo({ automationId, claimId: claim.claimId }, trash, wanted);
+        result[undone.status === "undone" ? "undone" : "left"] += 1;
+      }
+    }
+    return result;
   }
 
   /** The name an engine automation id's automation has in its file, or null. */

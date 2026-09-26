@@ -1,5 +1,6 @@
 import { AgentSettingsContext } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
+import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -681,6 +682,7 @@ export function DesktopWorkspaceShell(props: {
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
+  const stopAndRestore = useStopAndRestore(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -5433,6 +5435,7 @@ export function DesktopWorkspaceShell(props: {
                   onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
+                  onStopAndRestore={stopAndRestore.open}
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (
@@ -6298,6 +6301,24 @@ export function DesktopWorkspaceShell(props: {
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
+        />
+      ) : null}
+      {stopAndRestore.session ? (
+        <StopAndRestoreDialog
+          key={stopAndRestore.session.key}
+          workspaceId={workspaceId}
+          person={stopAndRestore.session.person}
+          start={stopAndRestore.session.start}
+          receipts={stopAndRestore.receipts}
+          onRetry={stopAndRestore.retry}
+          onClose={stopAndRestore.close}
+          onBeforeRestore={beginLineageOperation}
+          onRestored={refreshAfterHistoryRestore}
+          onOpenFile={(path) => {
+            stopAndRestore.close();
+            openFile(path);
+          }}
+          onError={reportShellError}
         />
       ) : null}
       {reviewProposalId ? (

@@ -636,6 +636,90 @@ describe("round 1 of review", () => {
   });
 });
 
+describe("the owner's read of a grant's direct writes", () => {
+  async function ownerRead(r: Relay, grantId: string, query = "", as = OWNER): Promise<Response> {
+    return await r.h(request(as, `/sync/${WORKSPACE}/collection-writes/${grantId}${query}`));
+  }
+
+  it("lists each write's files from the moments it minted, oldest first, after the grant ends", async () => {
+    const r = await relay();
+    const record = "---\nTitle: Tent\n---\n";
+    await upload(r, SCHEMA_TWO, SCHEMA, record);
+    expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], { submitId: "edit" })).status).toBe(200);
+    expect((await write(r, [
+      create("trip/ideas/a.md", record),
+      create("trip/ideas/collection.yaml", SCHEMA),
+    ], { submitId: "new" })).status).toBe(200);
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: CLOCK }).ok).toBe(true);
+
+    const moments = await r.owner.directMoments();
+    const response = await ownerRead(r, r.grantId);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await json(response)).toEqual({
+      writes: [
+        {
+          submitId: "edit",
+          grantGeneration: 1,
+          committedAtMs: CLOCK,
+          firstOriginSeq: 0,
+          files: [{
+            path: `${PACKING}/collection.yaml`,
+            objectId: "object-schema",
+            momentId: moments[0]!.payload.momentId,
+            created: false,
+          }],
+        },
+        {
+          submitId: "new",
+          grantGeneration: 1,
+          committedAtMs: CLOCK,
+          firstOriginSeq: 1,
+          files: [
+            { path: "trip/ideas/collection.yaml", objectId: moments[1]!.payload.objectId, momentId: moments[1]!.payload.momentId, created: true },
+            { path: "trip/ideas/a.md", objectId: moments[2]!.payload.objectId, momentId: moments[2]!.payload.momentId, created: true },
+          ],
+        },
+      ],
+      nextAfterOriginSeq: null,
+    });
+
+    const first = await json(await ownerRead(r, r.grantId, "?limit=1"));
+    expect(first).toMatchObject({ writes: [{ submitId: "edit" }], nextAfterOriginSeq: 0 });
+    const second = await json(await ownerRead(r, r.grantId, "?limit=1&afterOriginSeq=0"));
+    expect(second).toMatchObject({ writes: [{ submitId: "new" }], nextAfterOriginSeq: null });
+  });
+
+  it("reads the ledger by grant and order, and drops the index an earlier build made", async () => {
+    const r = await relay();
+    const path = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    const db = inspectDatabase(path);
+    db.prepare(`CREATE INDEX idx_sync_relay_collection_writes_grant
+      ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms)`).run();
+    db.close();
+    closeTestStorage(reopenTestStorage(path));
+    const reopened = inspectDatabase(path);
+    const indexes = reopened.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sync_relay_collection_writes' AND sql IS NOT NULL",
+    ).all().map((row) => row.name);
+    reopened.close();
+    expect(indexes).toEqual(["idx_sync_relay_collection_writes_grant_seq"]);
+  });
+
+  it("answers only the workspace's owner, for a grant on one of its shares", async () => {
+    const r = await relay();
+    await expectCode(await ownerRead(r, r.grantId, "", RECIPIENT), 404, "not_found");
+    await expectCode(await ownerRead(r, "grant-elsewhere"), 404, "not_found");
+    await claimWorkspace(r.h, "stranger", "workspace-b");
+    const theirs = await createShare(r.h, "stranger", "workspace-b", { recipientUserId: RECIPIENT, paths: ["x"], access: "edit" });
+    const theirGrant = r.storage.listActiveShareGrantsForRecipient(theirs, RECIPIENT)[0]!.grantId;
+    await expectCode(await ownerRead(r, theirGrant), 404, "not_found");
+    await expectCode(await ownerRead(r, r.grantId, "?limit=0"), 400, "bad_request");
+    await expectCode(await ownerRead(r, r.grantId, "?cursor=1"), 400, "bad_request");
+    expect(await json(await ownerRead(r, r.grantId))).toEqual({ writes: [], nextAfterOriginSeq: null });
+  });
+});
+
 describe("the direct-write decision", () => {
   it("counts two paths one disk would hold as one file as the same path", () => {
     const selector: ShareSelector = { versionId: null, paths: ["trip"], access: "edit" };

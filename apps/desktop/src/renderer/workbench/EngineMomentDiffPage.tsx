@@ -53,6 +53,7 @@ export function EngineMomentDiffPage({
   onPathResolved,
   registerActiveUndo,
   onRestored,
+  onStopAndRestore,
 }: {
   workspaceId: string;
   tabPath: string;
@@ -64,6 +65,8 @@ export function EngineMomentDiffPage({
   onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
+  // Opens the shell's Stop and restore for a person the owner shared with.
+  onStopAndRestore: (person: { userId: string; label: string }) => void;
 }) {
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -364,6 +367,11 @@ export function EngineMomentDiffPage({
           onClick={() => setSharedRestoreOpen(true)}
           className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"
         >Restore shared file…</button>}
+        {moment.namedAuthor ? <button
+          type="button" data-testid="engine-diff-stop-and-restore" disabled={restoreBusy}
+          onClick={() => moment.namedAuthor && onStopAndRestore(moment.namedAuthor)}
+          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"
+        >Stop and restore…</button> : null}
         {undoMomentId ? (
           <button
             type="button"

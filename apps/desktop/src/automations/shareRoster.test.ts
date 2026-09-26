@@ -7,6 +7,7 @@ import {
   createShareRosters,
   listRosterGrants,
   reachRosterFor,
+  rosterAuthorLabel,
   SHARE_ROSTER_FRESH_MS,
   SHARE_ROSTER_REFRESH_MS,
   type ListedGrant,
@@ -617,5 +618,27 @@ describe("keeping the roster current", () => {
     r.open("ws-local");
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe("a direct write's author in History", () => {
+  const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
+    ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
+  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")] };
+
+  it("names the person and the level of the grant they wrote through", () => {
+    expect(rosterAuthorLabel(roster, { userId: "ana", grantId: "g-1" })).toBe("ana@example.com (Edit)");
+  });
+
+  it("names the person without a level when that grant is gone", () => {
+    expect(rosterAuthorLabel(roster, { userId: "ben", grantId: "revoked" })).toBe("ben@example.com");
+  });
+
+  it("names nobody it cannot match", () => {
+    expect(rosterAuthorLabel(roster, { userId: "cy", grantId: "revoked" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel(roster, { userId: "cy", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel(undefined, { userId: "ana", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel({ version: 1, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
+      .toBe("Someone you shared with");
   });
 });
