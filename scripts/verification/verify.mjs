@@ -219,6 +219,9 @@ export async function verify(args) {
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
         if (!gates.js) throw error;
+        // Keep the Rust cause visible while JS runs, and in result.json if JS fails too.
+        report.rustError = error.message; save();
+        console.error(`[verification] Rust job failed; running the JS job anyway: ${error.message}`);
         await checkTree("rust-failure");
         rustFailure = error;
       }

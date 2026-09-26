@@ -588,6 +588,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
         assert.equal(report.verdict, "FAIL");
         assert.ok(report.steps.every(step => ["PASS", "FAIL"].includes(step.verdict)));
+        if (fault === "rust-and-js") assert.match(report.rustError, /fixture Rust failed/);
         const messages = {
           source: /Source changed during verification/,
           "rust-source": /Source changed during verification/,
