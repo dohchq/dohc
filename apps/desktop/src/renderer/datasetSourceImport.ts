@@ -61,14 +61,15 @@ function tableFromRows(headers: string[], rows: Array<Record<string, unknown>>, 
   return { headers, rows: cells, literalValues, rowErrors, cellErrors };
 }
 
-/** Converts indexed document properties. Markdown bodies and frontmatter outside the schema are excluded. */
+/** Converts indexed document properties. Markdown bodies, button fields, and frontmatter outside the schema are excluded. */
 export function collectionRecordsToCsv(schema: CollectionSchema, records: readonly CollectionRecord[]): CsvTable {
-  const headers = schema.fields.map(field => field.name);
+  const fields = schema.fields.filter(field => field.type !== "button");
+  const headers = fields.map(field => field.name);
   const errors: string[] = [];
   const cellErrors: string[][] = [];
   const rows = records.map((record, index) => {
     if (record.conflicted) errors[index] = "This document has a conflict. Resolve it before importing.";
-    cellErrors[index] = schema.fields.map(field => {
+    cellErrors[index] = fields.map(field => {
       const value = record.values.find(value => value.field === field.name);
       if (value?.validation.status === "flagged") return `Correct ${field.name} in the source document first.`;
       if (field.type === "relation" && value?.value != null) return `Skip ${field.name}. Document relations need new target record keys.`;

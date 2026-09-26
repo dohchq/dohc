@@ -1455,7 +1455,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     let lateAliasJob: Promise<void> | undefined;
     try {
       surface = await ensureFromSurface(setup.pipeline, "runtime-id");
-      expect(surface.result.ok).toBe(true);
+      expect(
+        surface.result.ok,
+        surface.result.ok
+          ? undefined
+          : `Plugin startup failed at ${surface.result.error.stage}: ${surface.result.error.code}`,
+      ).toBe(true);
       expect(setup.host.currentRecord("runtime-id")).toBeDefined();
       const preflight = await setup.pipeline.uninstallPreflight(
         "original-id",

@@ -18,6 +18,7 @@ import type {
 } from "../ipc/bridgeContract";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
+import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
 type LinkAccess = "view" | "comment" | "edit";
@@ -56,7 +57,9 @@ type LinkMutationBusy = {
 
 type LinkRequestBusy =
   | { kind: "create" }
-  | { kind: "add"; shareId: string };
+  | { kind: "add"; shareId: string }
+  // Asking which automations an Edit link would stop; no shareId for a new link.
+  | { kind: "check"; shareId: string | null };
 
 type MintedLinkResult = {
   grantId: string;
@@ -407,6 +410,8 @@ export function useRelayShareLinkPane(props: {
   const [supportedLinkAccess, setSupportedLinkAccess] = useState<readonly LinkAccess[]>(["view", "comment"]);
   const availableLinkAccess = props.target.kind === "version" ? supportedLinkAccess.filter(access => access !== "edit") : supportedLinkAccess;
   const [linkAccess, setLinkAccess] = useState<LinkAccess>("view");
+  const automationCheck = useAutomationShareCheck(props.workspaceId, props.target);
+  const newLinkNote = automationCheck.noteFor({ recipientEmail: null, access: linkAccess });
   const [addAccessByShareId, setAddAccessByShareId] = useState<
     Record<string, LinkAccess>
   >({});
@@ -1413,6 +1418,28 @@ export function useRelayShareLinkPane(props: {
     }
   }
 
+  // An Edit link makes an editor of whoever opens it, which can stop
+  // automation steps. Resolves true when the link may be made now.
+  async function checkAutomations(share: AutomationShare): Promise<boolean> {
+    if (!automationCheck.asks(share)) return true;
+    if (linkBusy || mutationBusy !== null || confirmation !== null) return false;
+    const scopeGeneration = linkScopeGeneration.current;
+    const requestId = ++latestMintRequest.current;
+    const current = () =>
+      isCurrentLinkScope(scopeGeneration) && latestMintRequest.current === requestId;
+    setLinkBusy(true);
+    setLinkRequestBusy({ kind: "check", shareId: share.shareId ?? null });
+    setLinkError(null);
+    try {
+      return (await automationCheck.mayShare(share, current)) && current();
+    } finally {
+      if (current()) {
+        setLinkBusy(false);
+        setLinkRequestBusy(null);
+      }
+    }
+  }
+
   async function createLink() {
     let payload: CreateRelayShareLinkPayload;
     if (props.target.kind === "version") {
@@ -1421,11 +1448,13 @@ export function useRelayShareLinkPane(props: {
     } else {
       payload = {workspaceId: props.workspaceId, paths: props.target.paths, access: linkAccess};
     }
+    if (!(await checkAutomations({ recipientEmail: null, access: linkAccess }))) return;
     await mintLink({ kind: "create" }, () => bridge().createRelayShareLink(payload));
   }
 
   async function addLink(shareId: string) {
     const access = addAccessByShareId[shareId] ?? "view";
+    if (!(await checkAutomations({ recipientEmail: null, access, shareId }))) return;
     await mintLink({ kind: "add", shareId }, () =>
       bridge().addRelayShareLink({
         workspaceId: props.workspaceId,
@@ -1656,17 +1685,22 @@ export function useRelayShareLinkPane(props: {
             A separate share of this selection, with its own comments.
           </p>
         ) : null}
+        <AutomationShareNote note={newLinkNote} />
         <PrimaryButton
           type="button"
           aria-label="Create link"
           disabled={linkBusy || mutationBusy !== null || confirmation !== null}
           onClick={() => void createLink()}
         >
-          {linkRequestBusy?.kind === "create"
-            ? "Creating link…"
-            : hasMatchingShare
-              ? "Create separate link"
-              : "Create link"}
+          {linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null
+            ? "Checking automations…"
+            : linkRequestBusy?.kind === "create"
+              ? "Creating link…"
+              : newLinkNote?.warning
+                ? "Create link anyway"
+                : hasMatchingShare
+                  ? "Create separate link"
+                  : "Create link"}
         </PrimaryButton>
 
         {linkError ? (
@@ -1705,6 +1739,7 @@ export function useRelayShareLinkPane(props: {
           {visibleLinkGroups.map((group) => {
             const canAdd = eligibleShareIds.has(group.shareId);
             const addAccess = addAccessByShareId[group.shareId] ?? "view";
+            const addNote = automationCheck.noteFor({ recipientEmail: null, access: addAccess, shareId: group.shareId });
             const ownerDiscussion =
               ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
             const ownerDraftInvalid =
@@ -2233,6 +2268,7 @@ export function useRelayShareLinkPane(props: {
                         }))
                       }
                     />
+                    <AutomationShareNote note={addNote} />
                     <SecondaryButton
                       disabled={
                         linkBusy ||
@@ -2241,10 +2277,15 @@ export function useRelayShareLinkPane(props: {
                       }
                       onClick={() => void addLink(group.shareId)}
                     >
-                      {linkRequestBusy?.kind === "add" &&
+                      {linkRequestBusy?.kind === "check" &&
                       linkRequestBusy.shareId === group.shareId
-                        ? "Adding link…"
-                        : "Add link"}
+                        ? "Checking automations…"
+                        : linkRequestBusy?.kind === "add" &&
+                            linkRequestBusy.shareId === group.shareId
+                          ? "Adding link…"
+                          : addNote?.warning
+                            ? "Add link anyway"
+                            : "Add link"}
                     </SecondaryButton>
                   </div>
                 ) : null}

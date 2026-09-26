@@ -19,7 +19,8 @@
     "invalid-relation-target",
     "unknown-field-reference",
     "schema-collection-limit-exceeded",
-    "record-too-large-for-adoption"
+    "record-too-large-for-adoption",
+    "unsupported-field-reference"
   ],
   "fieldValueReasonCodes": [
     "expected-text",
@@ -34,6 +35,7 @@
     "duplicate-value",
     "empty-person-id",
     "invalid-record-id",
-    "invalid-url"
+    "invalid-url",
+    "expected-empty"
   ]
 }

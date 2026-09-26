@@ -697,7 +697,7 @@ mod tests {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
-        assert!(matches!(applied, ApplicationResult::Applied(_)));
+        assert!(matches!(applied, ApplicationResult::Applied(..)));
         let result: Result<_, ApplicationError> = with_settlement(
             &mut f.store,
             &f.handle,

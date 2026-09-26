@@ -140,7 +140,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   messageId: string;
   title?: string;
   lane?: ChatThreadLane;
-  authorKind: "human" | "agent";
+  authorKind: ChatMessageAuthorKind;
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
@@ -149,6 +149,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   needsDecision?: boolean;
   options?: string[];
   attachments?: ChatLocalAttachmentParams[];
+  automation?: ChatMessageAutomationParams;
   nowMs?: number;
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
@@ -166,10 +167,17 @@ type ChatThreadParams = ChatsJsonObject & { threadId: string };
 type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
+// Only the automation executor names an automation, and the engine accepts an
+// automation author only with it.
+type ChatMessageAuthorKind = "human" | "agent" | "automation";
+type ChatMessageAutomationParams = ChatsJsonObject & {
+  automationId: string;
+  chainDepth: number;
+};
 type ChatMessageSendParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
-  authorKind: "human" | "agent";
+  authorKind: ChatMessageAuthorKind;
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
@@ -179,6 +187,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   needsDecision?: boolean;
   options?: string[];
   attachments?: ChatLocalAttachmentParams[];
+  automation?: ChatMessageAutomationParams;
   nowMs?: number;
 };
 type ChatMessagesListParams = ChatsJsonObject & {
@@ -442,7 +451,9 @@ const NonnegativeInt = Schema.Natural;
 const AnyInt = Schema.Int;
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
-const ActorKindSchema = Schema.Literals(["human", "agent"]);
+// Message and mention authors. Reaction authors stay human or agent.
+const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation"]);
+const ReactorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
 const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
 const FollowTargetKindSchema = Schema.Literals([
@@ -454,8 +465,12 @@ const FollowTargetKindSchema = Schema.Literals([
 const NextCursorFields = { nextCursor: NullableString } as const;
 
 const ChatActorSchema = mutableStruct({
-  kind: ActorKindSchema,
+  kind: MessageAuthorKindSchema,
   displayName: Schema.String,
+});
+const ChatMessageAutomationSchema = mutableStruct({
+  automationId: Schema.String,
+  collectionPath: Schema.String,
 });
 const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
@@ -496,6 +511,7 @@ const ChatMessageSchema = mutableStruct({
   origin: Schema.optionalKey(Schema.Literal("cli")),
   body: Schema.String,
   createdAtMs: AnyInt,
+  automation: Schema.optionalKey(ChatMessageAutomationSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
 });
 const ChatDecisionSchema = mutableStruct({
@@ -509,7 +525,7 @@ const ChatDecisionSchema = mutableStruct({
 });
 const ChatReactionAuthorSchema = mutableStruct({
   authorId: Schema.String,
-  kind: ActorKindSchema,
+  kind: ReactorKindSchema,
   displayName: Schema.String,
 });
 const ChatReactionSchema = mutableStruct({
@@ -657,7 +673,7 @@ const ChatMentionSchema = mutableStruct({
   threadId: Schema.String,
   messageId: Schema.String,
   handle: Schema.String,
-  authorKind: ActorKindSchema,
+  authorKind: MessageAuthorKindSchema,
   createdAtMs: AnyInt,
 });
 const ChatChannelOpeningMessageSchema = mutableStruct({
@@ -667,6 +683,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   authorUserId: Schema.optionalKey(Schema.String),
   createdAtMs: AnyInt,
   bodySnippet: Schema.String,
+  automation: Schema.optionalKey(ChatMessageAutomationSchema),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 });
 const ChatChannelThreadSummarySchema = mutableStruct({

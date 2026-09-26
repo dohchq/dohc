@@ -46,10 +46,11 @@ describe("RelationPicker", () => {
     const executor = makeExecutor();
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={executor}
-        emit={vi.fn()}
+        emit={vi.fn(() => 1)}
         close={vi.fn()}
       />,
     );
@@ -74,11 +75,13 @@ describe("RelationPicker", () => {
         makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
       )
       .mockResolvedValueOnce(makeQueryResult([TARGETS[1]!]));
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     const close = vi.fn();
 
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={executor}
@@ -115,10 +118,11 @@ describe("RelationPicker", () => {
     );
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={executor}
-        emit={vi.fn()}
+        emit={vi.fn(() => 1)}
         close={vi.fn()}
       />,
     );
@@ -131,10 +135,12 @@ describe("RelationPicker", () => {
   });
 
   it("single: picking a record emits its id and closes", async () => {
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     const close = vi.fn();
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={makeExecutor()}
@@ -148,10 +154,12 @@ describe("RelationPicker", () => {
   });
 
   it("single: Clear emits null and closes", async () => {
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     const close = vi.fn();
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value="rec-a"
         executor={makeExecutor()}
@@ -168,10 +176,12 @@ describe("RelationPicker", () => {
   });
 
   it("many: toggling adds and removes ids without closing", async () => {
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     const close = vi.fn();
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={MANY}
         value={["rec-a"]}
         executor={makeExecutor()}
@@ -183,19 +193,21 @@ describe("RelationPicker", () => {
     expect(design.checked).toBe(true);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
-    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
+    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"], expect.any(Array));
 
     // The second toggle composes with the first optimistically; the host's
     // serialized writes have not refreshed the value prop yet.
     fireEvent.click(design);
-    expect(emit).toHaveBeenLastCalledWith(["rec-b"]);
+    expect(emit).toHaveBeenLastCalledWith(["rec-b"], expect.any(Array));
     expect(close).not.toHaveBeenCalled();
   });
 
   it("many: rapid toggles before a prop refresh compose instead of clobbering", async () => {
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={MANY}
         value={[]}
         executor={makeExecutor()}
@@ -204,18 +216,19 @@ describe("RelationPicker", () => {
       />,
     );
     fireEvent.click(await screen.findByRole("checkbox", { name: "Design" }));
-    expect(emit).toHaveBeenLastCalledWith(["rec-a"]);
+    expect(emit).toHaveBeenLastCalledWith(["rec-a"], expect.any(Array));
     fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
-    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
+    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"], expect.any(Array));
   });
 
   it("filters the fetched page as the search text changes", async () => {
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={makeExecutor()}
-        emit={vi.fn()}
+        emit={vi.fn(() => 1)}
         close={vi.fn()}
       />,
     );
@@ -237,10 +250,11 @@ describe("RelationPicker", () => {
     const executor = vi.fn(() => gate.promise);
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={executor}
-        emit={vi.fn()}
+        emit={vi.fn(() => 1)}
         close={vi.fn()}
       />,
     );
@@ -258,9 +272,11 @@ describe("RelationPicker", () => {
         ? Promise.resolve(makeQueryResult(TARGETS))
         : gate.promise,
     );
-    const emit = vi.fn();
+    let writeId = 0;
+    const emit = vi.fn(() => ++writeId);
     const view = (field: RelationFieldDefinition) => (
       <RelationPicker
+        acknowledgedWriteId={0}
         field={field}
         value={null}
         executor={executor}
@@ -289,10 +305,11 @@ describe("RelationPicker", () => {
     });
     render(
       <RelationPicker
+        acknowledgedWriteId={0}
         field={SINGLE}
         value={null}
         executor={executor}
-        emit={vi.fn()}
+        emit={vi.fn(() => 1)}
         close={vi.fn()}
       />,
     );

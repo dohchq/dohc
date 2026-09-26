@@ -1,3 +1,4 @@
+import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import {
   useEffect,
   useMemo,
@@ -130,7 +131,7 @@ export function requestGuardedReload(): void {
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
   const request = ++exitRequest;
-  if (hasUnsettledCollectionWrites() && !(await settleCollectionWritesForExit())) {
+  if (hasUnsettledWrites() && !(await settleWritesForExit())) {
     return null;
   }
   if (request !== exitRequest) return null;
@@ -140,7 +141,7 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     // of this request, not a newer action. Only an action from outside the
     // round makes the result stale.
     if (request !== exitRequest && !isOwnRoundRequest(request)) return null;
-    if (!result.accepted && hasUnsettledCollectionWrites()) return null;
+    if (!result.accepted && hasUnsettledWrites()) return null;
     // Another window's recovery dialog went back, or this one's did: a
     // decision the user already made, not an install failure. The callers'
     // own flow ends here with nothing to report.
@@ -202,11 +203,12 @@ function resumeRoundIntent(
   return Promise.resolve(false);
 }
 
-function hasUnsettledCollectionWrites(): boolean {
-  return hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
+function hasUnsettledWrites(): boolean {
+  return hasPendingEditorDrafts() || hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
 }
 
-async function settleCollectionWritesForExit(): Promise<boolean> {
+async function settleWritesForExit(): Promise<boolean> {
+  if (!(await settlePendingEditorDrafts())) return false;
   const settled = await settleCollectionFieldWrites(undefined, {
     stallMs: COLLECTION_WRITE_STALL_MS,
   });
@@ -223,7 +225,7 @@ async function settleCollectionWritesForExit(): Promise<boolean> {
 // instead of racing a second resume against the first.
 let pendingWritesDrain: { pending: PendingUnload | null; request: number } | null = null;
 
-function holdUnloadForCollectionWrites(pending: PendingUnload | null): void {
+function holdUnloadForWrites(pending: PendingUnload | null): void {
   if (pendingWritesDrain) {
     pendingWritesDrain.pending = pending;
     pendingWritesDrain.request = exitRequest;
@@ -232,7 +234,7 @@ function holdUnloadForCollectionWrites(pending: PendingUnload | null): void {
   const drain = { pending, request: exitRequest };
   pendingWritesDrain = drain;
   void (async () => {
-    const settled = await settleCollectionWritesForExit();
+    const settled = await settleWritesForExit();
     if (pendingWritesDrain !== drain) return;
     pendingWritesDrain = null;
     if (drain.request !== exitRequest) return;
@@ -283,11 +285,11 @@ async function beginInstall(): Promise<UpdateActionResult> {
   const request = exitRequest;
   for (;;) {
     const result = await attemptInstall();
-    if (result.accepted || !hasUnsettledCollectionWrites()) return result;
+    if (result.accepted || !hasUnsettledWrites()) return result;
     if (request !== exitRequest) return result;
     // Main can observe an edit accepted after the renderer's first drain.
     // A refused install has not consumed the updater's one-shot latch.
-    if (!(await settleCollectionWritesForExit()) || request !== exitRequest) return result;
+    if (!(await settleWritesForExit()) || request !== exitRequest) return result;
   }
 }
 
@@ -381,7 +383,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     const round = closeWarning?.round;
     setCloseWarning(null);
     if (round !== undefined && activeRound?.id === round) {
-      answerRound(round, hasUnsettledCollectionWrites() ? "cancel" : "clear");
+      answerRound(round, hasUnsettledWrites() ? "cancel" : "clear");
     }
     // closeWarning is read once, at the moment the count reaches zero.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -419,14 +421,14 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // page, and if it is blocked the dialog now owns the answer.
       const pending = pendingUnload;
       pendingUnload = null;
-      if (hasUnsettledCollectionWrites()) {
+      if (hasUnsettledWrites()) {
         // An accepted collection cell edit has not reached its record yet.
         // Stop the unload, land the queue, then rerun EXACTLY the requested
         // action — whose own beforeunload re-checks the drafts. The draft
         // approval is NOT consumed here: this is the same attempt, resumed.
         event.preventDefault();
         void bridge().holdQuit();
-        holdUnloadForCollectionWrites(pending);
+        holdUnloadForWrites(pending);
         return;
       }
       if (!hasUnapprovedDrafts()) {
@@ -508,10 +510,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       };
       const resume = intent.resume;
       pendingUnload = intent;
-      if (hasUnsettledCollectionWrites()) {
+      if (hasUnsettledWrites()) {
         answerRound(round.id, "hold");
         void bridge().holdQuit();
-        holdUnloadForCollectionWrites({
+        holdUnloadForWrites({
           kind: round.kind,
           // The drain lands, then answers this round — if it is still the
           // one main is waiting on. A cancelled or superseded round is not
