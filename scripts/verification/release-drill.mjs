@@ -386,11 +386,18 @@ export async function runDrill({
         failures.push(error);
       }
     }
-    // Keep result.json when cleanup failed, so the failure has its evidence.
-    if (result.passed && !keep && failures.length === 0) remove(evidence);
-    // A drill that already failed keeps its own error; cleanup failures are only printed.
-    for (const error of failures) console.error(`release drill cleanup: ${error instanceof Error ? error.message : String(error)}`);
-    if (failures.length > 0 && !result.error) throw failures[0];
+    if (failures.length > 0) {
+      // Keep result.json, marked failed, so the cleanup failure has its evidence.
+      result.passed = false;
+      result.cleanupErrors = failures.map((error) => (error instanceof Error ? error.message : String(error)));
+      writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}
+`);
+      for (const message of result.cleanupErrors) console.error(`release drill cleanup: ${message}`);
+      // A drill that already failed keeps its own error.
+      if (!("error" in result)) throw failures[0];
+    } else if (result.passed && !keep) {
+      remove(evidence);
+    }
   }
   return result;
 }
