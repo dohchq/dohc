@@ -170,7 +170,7 @@ function WorkspaceRow(props: {
       data-testid="workspace-manager-row"
       data-workspace-id={props.workspace.workspaceId}
       className={`group relative flex items-center gap-2 rounded-lg px-3 py-2.5 transition-colors ${
-        props.current ? "bg-panel-2" : "hover:bg-panel-2"
+        props.current ? "bg-selected" : "hover:bg-hover"
       }`}
     >
       <button
@@ -257,7 +257,7 @@ function WorkspaceRow(props: {
               data-selected={selected === 0 || undefined}
               onMouseEnter={() => setSelected(0)}
               onClick={() => runItem("reveal")}
-              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink data-selected:bg-panel-2 data-selected:text-ink"
+              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink data-selected:bg-selected data-selected:text-ink"
             >
               Reveal in folder
             </button>
@@ -269,7 +269,7 @@ function WorkspaceRow(props: {
               data-selected={selected === 1 || undefined}
               onMouseEnter={() => setSelected(1)}
               onClick={() => runItem("forget")}
-              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-danger data-selected:bg-panel-2 data-selected:text-danger"
+              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-danger data-selected:bg-selected data-selected:text-danger"
             >
               Forget
             </button>

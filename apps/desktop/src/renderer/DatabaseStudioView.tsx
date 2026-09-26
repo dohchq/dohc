@@ -338,8 +338,8 @@ export function DatabaseStudioView(props: {
                   onClick={() => selectTable(table.name)}
                   className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                     active?.name === table.name
-                      ? "bg-line text-ink"
-                      : "text-muted hover:bg-panel-2 hover:text-ink"
+                      ? "bg-selected text-ink"
+                      : "text-muted hover:bg-hover hover:text-ink"
                   }`}
                 >
                   <Database
@@ -486,7 +486,7 @@ function Header({ path, onShare }: { path: string; onShare?: () => void }) {
           aria-label="Share file"
           title="Share file"
           onClick={onShare}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           <Share2 size={13} aria-hidden />
         </button>
@@ -543,7 +543,7 @@ function DatabaseGrid(props: {
                     type="button"
                     data-testid={`db-sort-${column.name}`}
                     onClick={() => props.onSort(column.name)}
-                    className={`inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-line/50 ${
+                    className={`inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-hover ${
                       numeric.has(column.name) ? "ml-auto" : ""
                     }`}
                   >

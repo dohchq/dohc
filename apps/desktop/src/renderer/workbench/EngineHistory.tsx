@@ -202,7 +202,7 @@ function MomentRow(props: {
       title={`Open diff for ${moment.path}`}
       aria-label={`Open diff for ${moment.path}`}
       onClick={() => props.onOpenMoment(moment.id, moment.path)}
-      className={`block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+      className={`block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
         props.nested ? "pl-8" : ""
       }`}
     >
@@ -281,7 +281,7 @@ function GroupRow(props: {
         data-testid="engine-moment-group-toggle"
         aria-expanded={expanded}
         onClick={props.onToggle}
-        className="block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+        className="block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
       >
         <span className="flex min-w-0 items-start gap-2">
           {expanded ? (
@@ -428,7 +428,7 @@ export function EngineHistoryView(props: {
               aria-label="Clear history search"
               title="Clear history search"
               onClick={() => setQuery("")}
-              className="grid size-5 shrink-0 place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink"
+              className="grid size-5 shrink-0 place-items-center rounded-md text-subtle hover:bg-hover hover:text-ink"
             >
               <X size={12} aria-hidden />
             </button>
@@ -519,7 +519,7 @@ export function EngineHistoryView(props: {
               data-testid="engine-history-load-more"
               disabled={props.loadingMore}
               onClick={props.onLoadMore}
-              className="block w-full cursor-pointer px-3 py-2 text-center text-[11px] text-muted hover:bg-line/25 hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="block w-full cursor-pointer px-3 py-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {props.loadingMore ? "Loading…" : "Show earlier changes"}
             </button>

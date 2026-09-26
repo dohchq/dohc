@@ -131,7 +131,7 @@ function RunRow(props: {
               type="button"
               aria-expanded={open}
               onClick={() => setOpen((value) => !value)}
-              className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
+              className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
             >
               {open ? "Hide changes" : `Show ${count(run.writes.length, "change", "changes")}`}
             </button>

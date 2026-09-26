@@ -58,9 +58,9 @@ function RailButton(props: {
 }) {
   const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
     props.active
-      ? "bg-line/60 text-ink"
+      ? "bg-selected text-ink"
       : props.onClick
-        ? "text-subtle hover:bg-line/50 hover:text-ink"
+        ? "text-subtle hover:bg-hover hover:text-ink"
         : "text-subtle"
   }`;
   const content = (

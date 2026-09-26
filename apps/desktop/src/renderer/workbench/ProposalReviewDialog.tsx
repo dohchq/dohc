@@ -305,7 +305,7 @@ export function ProposalReviewDialog(props: {
             data-testid="proposal-review-later"
             disabled={settling}
             onClick={props.onClose}
-            className="mr-auto h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="mr-auto h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             Finish later
           </button>
@@ -320,7 +320,7 @@ export function ProposalReviewDialog(props: {
             data-testid="proposal-review-decline"
             disabled={settling}
             onClick={() => void settle("decline")}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             Decline
           </button>
