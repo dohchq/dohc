@@ -1231,6 +1231,7 @@ const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
+  "migrated-by-newer-build",
 ] as const satisfies readonly EngineStoreRefusal[];
 type AssertNever<T extends never> = T;
 type _AllEngineStoreRefusalsRepresented = AssertNever<
@@ -1355,16 +1356,26 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "dohc cannot read this workspace's data store.";
     case "migration-failed":
       return "dohc could not update this workspace's data store to this version.";
+    case "migrated-by-newer-build":
+      return "A newer version of dohc updated this workspace's data store.";
   }
 }
 
 // What the refusal needs. A store from another format, or a file that is not
 // a dohc database, is rebuilt from the workspace files. A store this build
-// could not migrate is intact and waits for a build that can open it.
+// could not migrate, or one a newer build migrated, is intact and waits for a
+// build that can open it.
 export function engineStoreRefusalRecovery(
   cause: EngineStoreRefusal,
 ): "rebuild" | "update" {
-  return cause === "migration-failed" ? "update" : "rebuild";
+  switch (cause) {
+    case "unsupported-fingerprint":
+    case "foreign-database":
+      return "rebuild";
+    case "migration-failed":
+    case "migrated-by-newer-build":
+      return "update";
+  }
 }
 
 export const ENGINE_STORE_UPDATE_NEXT_STEP =

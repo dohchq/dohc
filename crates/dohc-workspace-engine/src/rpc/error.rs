@@ -138,16 +138,18 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Storage(
         refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
         | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }),
+        | dohc_engine_storage::StorageError::MigrationFailed { .. }
+        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
     ) = &error
     {
         eprintln!("engine: store refused: {}", error_chain(refused));
-        // A failed migration names its cause after the code, the way other
+        // A migration refusal names its cause after the code, the way other
         // refusals carry a detail: the desktop matches the code prefix and
         // shows the rest. The cause is the storage crate's constant text
         // plus a migration id, never a path or content.
         let message = match refused {
-            dohc_engine_storage::StorageError::MigrationFailed { .. } => {
+            dohc_engine_storage::StorageError::MigrationFailed { .. }
+            | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. } => {
                 format!("{}: {}", refused.code(), error_chain(refused))
             }
             _ => refused.code().to_string(),
@@ -538,6 +540,12 @@ mod tests {
             )),
             RuntimeError::LiveApplication(ApplicationError::Storage(
                 StorageError::MigrationFailed { source: None },
+            )),
+            RuntimeError::LiveApplication(ApplicationError::Storage(
+                StorageError::MigratedByNewerBuild {
+                    ordinal: 5,
+                    id: "from-a-newer-build".to_owned(),
+                },
             )),
         ] {
             let expected = match &error {

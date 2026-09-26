@@ -1302,6 +1302,58 @@ mod tests {
         );
     }
 
+    /// A store a newer build migrated is refused under its own name, so the
+    /// desktop stops the workspace and asks for an update instead of offering
+    /// a rebuild.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_store_a_newer_build_migrated_names_the_refusal() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let engine_dir = scratch.path().join(".dohc").join("engine");
+        std::fs::create_dir_all(&engine_dir).expect("engine dir");
+        let db_path = engine_dir.join("engine.db");
+        drop(dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fresh store"));
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open ledger");
+            conn.execute(
+                "INSERT INTO engine_migrations \
+                 (ordinal, id, checksum, engine_build, protocol_version, \
+                  transactional, started_at, completed_at, integrity_ok) \
+                 SELECT MAX(ordinal) + 1, 'from-a-newer-build', 'newer', 'newer', 1, 1, 2, 2, 1 \
+                 FROM engine_migrations",
+                [],
+            )
+            .expect("a newer build's ledger row");
+        }
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "newer-build-repro",
+                }),
+            )
+            .await
+            .expect_err("the fence must refuse a store a newer build migrated");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert!(
+            refused
+                .message
+                .starts_with("migrated-by-newer-build: a newer build ran migration "),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused
+                .message
+                .ends_with(" (from-a-newer-build), which this build does not define"),
+            "{}",
+            refused.message
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
         let scratch = ScratchDir::new().expect("scratch");

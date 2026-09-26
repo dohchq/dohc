@@ -67,6 +67,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
+  type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -2102,6 +2103,18 @@ const activity = {
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
+  recordShareViewStoreRefusal: (
+    workspaceId: string,
+    refusal: EngineStoreRefusal | null,
+    detail: string | null,
+  ): void =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.recordShareViewStoreRefusal(
+        lease.state.activity,
+        refusal,
+        detail,
+      ),
+    ),
   listOpenWorkspaceIds: () =>
     workspaceAuthorities.workspaceIds().filter((workspaceId) =>
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -4843,6 +4856,7 @@ function registerIpcHandlers(): void {
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
+    recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
   });
 
   // ---- Share mounts ----

@@ -4173,6 +4173,17 @@ export function DesktopWorkspaceShell(props: {
       }
       return outcome.status !== "ended";
     } catch (error) {
+      // A store only a newer dohc opens stops the whole workspace, and the
+      // stop state already says so. A toast would repeat it.
+      const status = await bridge()
+        .getSyncStatus({ workspaceId })
+        .catch(() => null);
+      if (
+        status?.engineStoreRefused != null &&
+        engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
+      ) {
+        return false;
+      }
       reportShellError("Couldn't refresh the shared view.", error);
       return false;
     } finally {
@@ -4697,28 +4708,32 @@ export function DesktopWorkspaceShell(props: {
     setStoreUpdateCheckError(null);
     setStoreDetailsOpen(false);
   }, [workspaceId]);
+  // A store this build could not migrate, or one a newer build migrated, is
+  // intact. Nothing in this workspace can run against it, so the workspace
+  // stops here until a build that opens it. Other workspaces keep their own
+  // stores.
+  const storeUpdateRefusal =
+    syncStatus?.engineStoreRefused != null &&
+    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update"
+      ? syncStatus.engineStoreRefused
+      : null;
+  const storeUpdateRequired = storeUpdateRefusal !== null;
+  storeUpdateRequiredRef.current = storeUpdateRequired;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
-      ["Problem", engineStoreRefusalSentence("migration-failed")],
-      ["Code", "migration-failed"],
+      ["Problem", storeUpdateRefusal && engineStoreRefusalSentence(storeUpdateRefusal)],
+      ["Code", storeUpdateRefusal],
       ["Engine", syncStatus?.engineStoreRefusedDetail],
       ["Workspace id", props.workspace.workspaceId],
       ["Data store", `${props.workspace.rootPath}/.dohc/engine`],
       ...reportFacts(),
     ],
-    [syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
+    [storeUpdateRefusal, syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
   );
   const storeDetailsText = useMemo(
     () => errorDetails(storeDetailFields),
     [storeDetailFields],
   );
-  // A store this build could not migrate is intact. Nothing in this
-  // workspace can run against it, so the workspace stops here until a build
-  // that opens it. Other workspaces keep their own stores.
-  const storeUpdateRequired =
-    syncStatus?.engineStoreRefused != null &&
-    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
-  storeUpdateRequiredRef.current = storeUpdateRequired;
   // Dialogs float above the stop state and could still write to the
   // stopped workspace. A stop closes them; a running workspace is unchanged.
   useEffect(() => {
@@ -5846,7 +5861,7 @@ export function DesktopWorkspaceShell(props: {
         ) : null}
         </div>
       </div>
-      {storeUpdateRequired ? (
+      {storeUpdateRefusal !== null ? (
         <div
           data-testid="workspace-update-required"
           role="alert"
@@ -5863,7 +5878,7 @@ export function DesktopWorkspaceShell(props: {
             </h2>
             <div className="space-y-1">
               <p className="m-0 text-[13px] leading-relaxed text-muted">
-                {engineStoreRefusalSentence("migration-failed")} Your files are
+                {engineStoreRefusalSentence(storeUpdateRefusal)} Your files are
                 unchanged.
               </p>
               <p className="m-0 text-[13px] leading-relaxed text-muted">
