@@ -127,7 +127,7 @@ export interface MigrateDatasetInput extends Omit<ActivateDatasetInput, "capacit
   migrationSql: string;
 }
 type StoredGrant = DatasetDataGrant;
-type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean; createFields?: AppDatasetBinding["createFields"] };
+type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean; linkReads?: AppDatasetBinding["linkReads"]; createFields?: AppDatasetBinding["createFields"] };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function text(value: string, maximum = 256): string {
   if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new DatasetHostError("invalid", "Invalid Collection id.");
@@ -266,7 +266,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = authority(context, key, through), approved = revision(key);
     const state = lifecycle(key);
     if (state.archived && !(includeArchived && verified.caller.kind === "owner" && through.kind === "data")) throw new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it.");
-    let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"];
+    let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"], linkReads: AppDatasetBinding["linkReads"];
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
       if (!row) denied();
@@ -286,7 +286,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       operations = effectiveDatasetOperations(binding, boundRevision, verified.caller)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
-      createFields = binding.createFields;
+      createFields = binding.createFields; linkReads = binding.linkReads;
     } else if (verified.caller.kind !== "owner") {
       const row = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
       if (!row) denied();
@@ -297,7 +297,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         revisionSha256: approved.revisionSha256, operationIds: grant.operationIds }, approved, verified.caller);
       token = String(row.token); discover = grant.discover;
     }
-    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields };
+    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields, linkReads };
   }
   function describePermission(permission: Permission): DatasetDescription {
     return describeApprovedDataset(permission.revision, permission.operations);
@@ -795,11 +795,48 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       authorize();
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
       const committedBy = actor(permitted.authority);
-      return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
-        operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
+      const approvedLinkRead = permitted.authority.caller.kind === "link" && permitted.linkReads?.some(read => read.operationId === operationId);
+      const response = await options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
+        operation: operation.name, caller: approvedLinkRead ? { ...permitted.authority.caller, approvedRead: operationId } : permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
         files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize,
         recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }) });
+      if (approvedLinkRead) {
+        const result = response.result;
+        if (!result || typeof result !== "object" || Array.isArray(result)) denied();
+        const scalar = (value: JsonValue | undefined) => value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number";
+        const cursor = (value: JsonValue | undefined, grouped = false): JsonValue => {
+          if (value === null || value === undefined) return null;
+          if (typeof value !== "object" || Array.isArray(value) || !scalar(value.value) ||
+              (!grouped && typeof value.id !== "string" && !Number.isSafeInteger(value.id)) ||
+              Object.keys(value).some(key => !["id", "value"].includes(key))) denied();
+          return value;
+        };
+        if (typeof result.groupBy === "string" && operation.fieldIds.includes(result.groupBy) && Array.isArray(result.groups) && result.groups.every(scalar)) {
+          authorize();
+          return { ...response, result: { groupBy: result.groupBy, groups: result.groups, nextGroupCursor: cursor(result.nextGroupCursor, true) } };
+        }
+        if (!Array.isArray(result.rows)) denied();
+        const rows = result.rows.map(row => {
+          if (!row || typeof row !== "object" || Array.isArray(row) || !row.values || typeof row.values !== "object" || Array.isArray(row.values) ||
+              Object.keys(row.values).some(fieldId => !operation.fieldIds.includes(fieldId)) ||
+              (typeof row.id !== "string" && !Number.isSafeInteger(row.id)) || !Number.isSafeInteger(row.version)) denied();
+          return { id: row.id, version: row.version, values: row.values };
+        });
+        const metadata: Record<string, JsonValue> = {};
+        for (const key of ["range", "group"] as const) {
+          const value = result[key];
+          if (value === undefined) continue;
+          if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.fieldId !== "string" || !operation.fieldIds.includes(value.fieldId)) denied();
+          if (key === "group") {
+            if (!scalar(value.value) || Object.keys(value).some(name => !["fieldId", "value"].includes(name))) denied();
+          } else if (typeof value.start !== "string" || typeof value.end !== "string" || Object.keys(value).some(name => !["fieldId", "start", "end"].includes(name))) denied();
+          metadata[key] = value;
+        }
+        authorize();
+        return { ...response, result: { rows, nextCursor: cursor(result.nextCursor), ...metadata } };
+      }
+      return response;
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */
     async readOperation<T>(context: Context, raw: InvokeDatasetInput, read: (result: JsonValue, revision: number) => T): Promise<T> {

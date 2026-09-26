@@ -11,7 +11,7 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
-import { verifyAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { resolveAppDatasetCapability, verifyAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
@@ -59,11 +59,22 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         ? dependencies.resolveDatasetRevision(operation.workspace, binding, operation.signal)
         : resolveRemoteDatasetRevision(remoteData, binding));
       clearExpired();
-      const remember = (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }) => {
+      const remember = async (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }) => {
+        session.assertCurrent(); operation.signal.throwIfAborted();
+        const candidate = prepared.candidate;
+        const capabilities = await Promise.all(candidate.capabilities.map(async capability => {
+          if (capability.kind !== "dataset" || reactivation) return capability;
+          const revision = await resolveDatasetRevision(capability);
+          return { ...capability, operations: capability.operations.map(operation => {
+            const read = revision.definition.operations.find(read => read.operationId === operation.operationId && read.kind === "read" && read.access === "helper");
+            if (!read) return operation;
+            return { ...operation, fields: revision.definition.tables.find(table => table.tableId === read.tableId)!.fields
+              .filter(field => read.fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) };
+          }) };
+        }));
         session.assertCurrent(); operation.signal.throwIfAborted();
         for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();
         if (pending.size >= 8) throw new Error("Too many apps await publication. Cancel another preparation and try again.");
-        const candidate = prepared.candidate;
         const approvalId = randomUUID(), candidateDigest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
         const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
         const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
@@ -71,7 +82,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear, reactivation });
         operation.signal.addEventListener("abort", clear, { once: true });
         return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
-          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: candidate.capabilities, externalNetwork: true });
+          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities, externalNetwork: true });
       };
       if (input.action === "reviewReactivation") {
         if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
@@ -86,7 +97,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));
         const selection = OwnerAppPublicationRequest.parse({ action: "prepare", workspaceId: input.workspaceId, appRoot: candidate.appRoot, shareId: row.owner.shareId, grantId: row.owner.grantId });
         if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
-        return remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! });
+        return await remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! });
       }
       if (input.action === "list") {
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
@@ -126,11 +137,23 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (input.candidateDigest !== entry.candidateDigest) throw new Error("The app candidate changed. Review it again.");
         // Consume before the first upload so duplicate approvals cannot race.
         entry.clear();
-        const { prepared } = entry, { candidate } = prepared;
+        const { prepared } = entry;
+        const candidate = structuredClone(prepared.candidate);
+        if (input.linkReads !== undefined) {
+          if (entry.reactivation) throw new Error("Prepare the app again to change its link access.");
+          const capability = candidate.capabilities.find(value => value.kind === "dataset");
+          if (!capability) throw new Error("This app has no Collection access to approve.");
+          if (input.linkReads.length) capability.linkReads = input.linkReads;
+        }
         await dependencies.beforeSharedPublish?.(operation.workspace, candidate, operation.signal);
         session.assertCurrent(); operation.signal.throwIfAborted();
         const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
-        if (dataset) verifyAppDatasetCapability(dataset, await resolveRemoteDatasetRevision(remoteData, dataset));
+        if (dataset) {
+          const revision = await resolveRemoteDatasetRevision(remoteData, dataset);
+          const { operations: _operations, ...binding } = dataset;
+          candidate.capabilities[candidate.capabilities.indexOf(dataset)] = input.linkReads?.length
+            ? resolveAppDatasetCapability(binding, revision) : verifyAppDatasetCapability(dataset, revision);
+        }
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
           if (published.kind !== "published") throw new Error("Invalid publication result.");
@@ -224,7 +247,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       if (publishEnvelopeBytes > APP_PUBLICATION_MAX_REQUEST_BYTES || prepared.files.some(file => file.byteLength > APP_PUBLICATION_MAX_BLOB_BYTES)) {
         throw new Error("This app exceeds the supported publication size. Choose a smaller build.");
       }
-      return remember(prepared, input);
+      return await remember(prepared, input);
       } finally {
         if (preparing.get(callerKey) === preparation) preparing.delete(callerKey);
       }

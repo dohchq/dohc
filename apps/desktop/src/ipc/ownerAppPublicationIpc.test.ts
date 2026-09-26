@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
@@ -35,7 +36,7 @@ function harness() {
     const body = JSON.parse(String(init!.body));
     if (path.endsWith("/collection-approval")) return { publicationId, authorityRevision: body.expectedAuthorityRevision + 1, capability: body.capability };
     if (body.expectedGrantGeneration !== grant.generation) throw new Error("grant conflict");
-    return { publicationId, candidate: body.candidate, active: true, authorityRevision: 1, owner: {
+    return { publicationId, candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS), active: true, authorityRevision: 1, owner: {
       workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
   });
   const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => {});
@@ -55,17 +56,18 @@ function harness() {
 const collection = { kind: "collection-create", collectionPath: "app/responses", allowedFields: ["name", "destination"], requiredFields: ["destination"], readFields: ["name", "destination"] };
 const collectionSchema = "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-function withDataset(h: ReturnType<typeof harness>) {
+function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
   const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Responses", schemaPath: "private/schema.sql", operationsPath: "private/actions.js",
     tables: [{ tableId: id(2), name: "Responses", sqlName: "responses", primaryKey: "id", fields: [
       { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
       { fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
     ] }], operations: [{ operationId: id(5), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] }] };
+  if (includeRead) definition.operations.push({ operationId: id(6), name: "list", label: "List", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(4)] });
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE" });
   const approved = { revision, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE", active: true,
     cursor: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
   h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
-    dataset: { kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
+    dataset: { kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: includeRead ? [id(5), id(6)] : [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
   const original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => {
     if (args[1].endsWith("/artifacts")) return approved;
@@ -88,7 +90,7 @@ describe("owner app publication", () => {
     expect(prepared.capabilities[0]).toMatchObject({ kind: "dataset", operations: [{ name: "submit", access: "link" }] });
     expect(prepared.sourcePaths).toEqual(["app/app.publish.json", "app/index.js"]);
     expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 1 });
-    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/artifacts"))).toHaveLength(2);
+    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/artifacts"))).toHaveLength(3);
     expect(h.relay.mock.calls.some(call => call[1].endsWith("/collection-approval") || call[1].endsWith(`/datasets/${id(1)}/activate`))).toBe(false);
     expect(h.relay.mock.calls.at(-1)![1]).toMatch(/backend\/activate$/);
   });
@@ -329,4 +331,27 @@ describe("owner app publication", () => {
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
   });
+});
+
+it("publishes only the link read and fields explicitly selected by the owner", async () => {
+  const h = withDataset(harness(), true), prepared = await h.prepare();
+  const linkReads = [{ operationId: id(6), fieldIds: [id(4)] }];
+  await h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest, linkReads });
+  const publication = h.relay.mock.calls.find(call => call[1].endsWith("/app-publications"))!;
+  expect(JSON.parse(String(publication[2]!.body)).candidate.capabilities[0].linkReads).toEqual(linkReads);
+});
+it("rejects forged link read fields before uploading publication artifacts", async () => {
+  const h = withDataset(harness(), true), prepared = await h.prepare();
+  await expect(h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest,
+    linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] })).rejects.toThrow();
+  expect(h.upload).not.toHaveBeenCalled();
+});
+
+it("keeps the publication candidate unchanged when no read is approved", async () => {
+  const h = withDataset(harness(), true), prepared = await h.prepare();
+  await h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest, linkReads: [] });
+  const publication = h.relay.mock.calls.find(call => call[1].endsWith("/app-publications"))!;
+  const candidate = JSON.parse(String(publication[2]!.body)).candidate;
+  expect(hash(JSON.stringify(candidate))).toBe(prepared.candidateDigest);
+  expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("fields");
 });

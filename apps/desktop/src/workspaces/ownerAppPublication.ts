@@ -146,7 +146,8 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
     const approved = await dependencies.resolveDatasetRevision(declared.dataset);
     assertCurrent(); signal.throwIfAborted();
-    capabilities.push(resolveAppDatasetCapability(declared.dataset, approved));
+    const { linkReads: _requestedReads, ...binding } = declared.dataset;
+    capabilities.push(resolveAppDatasetCapability(binding, approved));
   }
   if (declared.collection && schemaPath) {
     const file = selected.files.find(file => file.path === schemaPath);

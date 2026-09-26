@@ -388,3 +388,24 @@ it("permits only display names and source locations in access-preserving revisio
     expect(datasetRevisionsPreserveAccess(before,changed)).toBe(false);
   }
 });
+
+it("allows only the explicitly approved link reads and their exact fields", () => {
+  const approved = revision(), request = binding(approved);
+  request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
+  const caller = { kind: "link" as const, grantId: "g", principalId: "p" };
+  expect(effectiveDatasetOperations(request, approved, caller)).toEqual([{ ...approved.definition.operations[1], access: "link" }]);
+  const capability = resolveAppDatasetCapability(request, approved);
+  expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
+  expect(capability.operations.find(operation => operation.operationId === id(6))?.fields).toEqual([
+    { fieldId: id(3), name: "Record ID" }, { fieldId: id(4), name: "Name" },
+  ]);
+  for (const linkReads of [
+    [{ operationId: id(5), fieldIds: [id(4)] }],
+    [{ operationId: id(7), fieldIds: [] }],
+    [{ operationId: id(99), fieldIds: [] }],
+    [{ operationId: id(6), fieldIds: [id(3), id(4), id(99)] }],
+    [{ operationId: id(6), fieldIds: [id(4)] }],
+  ]) expect(() => parseDatasetBinding({ ...request, linkReads }, approved)).toThrow();
+  expect(() => parseDatasetBinding({ ...request, operationIds: [id(5)] }, approved)).toThrow();
+  expect(effectiveDatasetOperations({ ...request, linkReads: [] }, approved, caller).map(operation => operation.name)).toEqual(["submit"]);
+});

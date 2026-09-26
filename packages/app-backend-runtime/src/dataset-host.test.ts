@@ -678,3 +678,36 @@ it("connects schema history to immutable source and reverses rules forward witho
   expect(() => f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 })).toThrow();
 
 });
+
+it("reads current approved fields through a link, denies writes and other reads, and withdraws access", async () => {
+  const f = await fixture();
+  const operationSource = `globalThis.operations={
+    create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?)',[ctx.requestId,input.value,'private']);return {accepted:true};},
+    read(ctx,input){
+      if(ctx.caller.approvedRead!=='${id(7)}')ctx.refuse('forbidden','Missing host approval');
+      if(input.extra)return {rows:[{id:'one',version:1,values:{['${id(5)}']:'private'}}]};
+      if(input.group)return {groupBy:'${id(4)}',groups:['First'],nextGroupCursor:null};
+      return {rows:ctx.db.query('SELECT id,value FROM items ORDER BY id').map(row=>({id:row.id,version:1,values:{['${id(4)}']:row.value}})),nextCursor:null};}
+  };`;
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql, operationSource });
+  const binding = { ...f.binding([id(6), id(7), id(8), id(9)]), revisionSha256: revision.revisionSha256 };
+  const invoke = (context: Context, operationId: string, input = {}, app = false) => f.host.invoke(context, {
+    ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: crypto.randomUUID(),
+    ...(app ? { access: { kind: "app" as const, appId: "form" } } : {}),
+  });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding });
+  await expect(invoke("friend", id(7), {}, true)).rejects.toThrow("access");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...binding, linkReads: [{ operationId: id(7), fieldIds: [id(3), id(4)] }] } });
+  await invoke("owner", id(6), { value: "First" });
+  const first = await invoke("friend", id(7), {}, true);
+  expect(first.result).toMatchObject({ rows: [{ values: { [id(4)]: "First" } }] });
+  expect(JSON.stringify(first.result)).not.toContain("private");
+  await expect(invoke("friend", id(7), { extra: true }, true)).rejects.toThrow("access");
+  expect((await invoke("friend", id(7), { group: true }, true)).result).toEqual({ groupBy: id(4), groups: ["First"], nextGroupCursor: null });
+  await invoke("owner", id(6), { value: "Later" });
+  expect(JSON.stringify((await invoke("friend", id(7), {}, true)).result)).toContain("Later");
+  for (const operationId of [id(6), id(8), id(9)]) await expect(invoke("friend", operationId, {}, true)).rejects.toThrow("access");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  await expect(invoke("friend", id(7), {}, true)).rejects.toThrow("access");
+});

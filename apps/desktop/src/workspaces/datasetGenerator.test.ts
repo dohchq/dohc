@@ -88,6 +88,7 @@ describe("initial dataset source", { timeout: 60_000 }, () => {
     const app = await runtime();
     await app.call("submit", { values: { [id(4)]: "Alice" } }, link);
     await expect(app.call("read", {}, link)).rejects.toThrow("do not have access");
+    expect((await app.call("read", {}, { ...link, approvedRead: id(21) })).result).toMatchObject({ rows: [expect.objectContaining({ values: expect.objectContaining({ [id(4)]: "Alice" }) })] });
     await expect(app.call("read", {}, { kind: "named", userId: "reader", grantId: "g", access: "edit", helper: false })).rejects.toThrow("do not have access");
     expect((await app.call("read", {}, { kind: "named", userId: "helper", grantId: "g", access: "view", helper: true })).result).toMatchObject({ rows: [{ values: { [id(4)]: "Alice" } }] });
     await expect(app.call("public", { filters: [{ fieldId: id(5), value: "Pending" }] }, link)).rejects.toThrow("Check the fields");
