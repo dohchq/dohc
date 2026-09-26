@@ -168,6 +168,7 @@ export async function verify(args) {
     });
   }
   let database;
+  let rustFailure;
   let desktopEnvironment = process.env;
   async function checkedStep(row, action) {
     await cancellation.checkpoint();
@@ -208,13 +209,19 @@ export async function verify(args) {
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
     await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
     if (mode === "pr" && gates.rust) {
-      const pins = require("js-yaml").load(workflow).env;
-      for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
-        const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
-        if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
+      try {
+        const pins = require("js-yaml").load(workflow).env;
+        for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
+          const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
+          if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
+        }
+        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], buildEnvironment());
+        await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
+      } catch (error) {
+        if (!gates.js) throw error;
+        await checkTree("rust-failure");
+        rustFailure = error;
       }
-      await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], buildEnvironment());
-      await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
     }
     const preparedOptions = {engineOnly: !needs.desktop};
     if (needs.engine || needs.desktop) {
@@ -267,6 +274,7 @@ export async function verify(args) {
     }
     if (needs.engine || needs.desktop) await measure("prepared-build:finish", () => assertPrepared(preparedOptions));
     await checkTree("finish");
+    if (rustFailure) throw rustFailure;
     report.verdict = "PASS";
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
