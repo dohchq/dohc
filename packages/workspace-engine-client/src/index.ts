@@ -8,6 +8,7 @@ export {
   engineStoreRefusalDetailOf,
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
+  isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
@@ -50,6 +51,7 @@ export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {
   VERSIONED_METHOD,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretMomentRecord,
   type VersionedComparisonRecord,
@@ -64,7 +66,7 @@ export {
   type KeyEnvelopeUploadResult,
 } from "./relay/keyEnvelopeWireContract";
 
-export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
+export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimSummary, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
 
 export {
   OwnerYDocOutbox,

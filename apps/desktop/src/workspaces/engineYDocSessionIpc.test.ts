@@ -79,6 +79,7 @@ function providerSession(
       throw new Error("settleNow is not used by this IPC adapter fixture");
     }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
+    applyDecidedLocalUpdate: vi.fn(async () => false),
     readArtifactAsset: vi.fn(async (descriptor) => ({
       descriptor,
       bytes: new Uint8Array([1, 2, 3]),
@@ -1271,7 +1272,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const doc = markdownToYDoc(markdown);
       return providerSession({
         doc,
-        applyLocalUpdate: vi.fn(async (update: Uint8Array, onArmed?: () => void) => {
+        applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
           trace.push("apply");
           Y.applyUpdate(doc, update);
           onArmed?.();

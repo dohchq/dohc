@@ -104,7 +104,13 @@ async function fixture() {
     const doc = new Y.Doc(); documents.push(doc);
     return {
       doc, initialUpdate: Y.encodeStateAsUpdate(doc), path, contentKind: "richdoc",
-      async applyLocalUpdate(update, armed, options) { Y.applyUpdate(doc, update); journal.push(options); armed?.(); },
+      applyLocalUpdate(update, armed, options) { Y.applyUpdate(doc, update); journal.push(options); armed?.(); },
+      async applyDecidedLocalUpdate(decide, armed, options) {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); journal.push(options); armed?.();
+        return true;
+      },
       settleNow: async () => ({ momentId: "moment", path, content: null, sha256: "fixture", materialized: true,
         projection: { contentKind: "richdoc", sourceStateVectorSha256: "fixture", destructive: false } }),
       close: async () => undefined,
@@ -303,8 +309,11 @@ describe("desktop plugin SDK runtime ownership", () => {
       const created = await f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" });
       expect(created).toEqual({ path: "tasks/new.md", recordId: expect.stringMatching(/^rec_[a-z2-7]{26}$/) });
       await expect(readFile(join(f.workspace.rootPath, "tasks", "new.md"), "utf8")).resolves.toBe(`---\nid: ${(created as { recordId: string }).recordId}\n---\n`);
-      expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin:plugin/triage",
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}` })));
+      expect(f.journal).toEqual([["0", "status"], ["1", "title"]].map(([ordinal, field]) => ({ actorOriginId: "plugin:plugin/triage",
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}/${field}` })));
+      // The automation creates the file itself as the moment's author, so the added record's claim carries its depth.
+      expect(f.writeCapture).toHaveBeenCalledWith(join(f.workspace.rootPath, "tasks", "new.md"), expect.any(String),
+        { kind: "automation", automationId: "plugin:plugin/triage", onBehalfOf: "local", depth: 3 }, expect.objectContaining({ createOnly: true }));
       expect(f.documents.map(doc => doc.getMap("frontmatter").toJSON())).toEqual([{ status: "done" }, { title: "Created" }]);
       expect(vi.mocked(f.dependencies.collectionEditContextFor).mock.calls.map(call => call[1])).toEqual(
         vi.mocked(f.dependencies.workerDatabaseReader).mock.calls.slice(1).map(call => call[0]));

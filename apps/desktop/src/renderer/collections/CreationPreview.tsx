@@ -1,5 +1,5 @@
 import { Check, FileText, ListChecks, Paperclip, Search, Table2 } from "lucide-react";
-import type { DatasetField } from "@dohc/security-contract/dataset";
+import type { DatasetColumnField } from "@dohc/security-contract/dataset";
 import { FieldTypeIcon } from "./FieldTypeIcon";
 import { inputClass, selectClass } from "./FieldForm";
 
@@ -30,7 +30,7 @@ export function CollectionCreationPreview({ name, fields, documents }: {
   </section>;
 }
 
-export function DatasetFormPreview({ title, fields }: { title: string; fields: readonly Omit<DatasetField, "sqlColumn">[] }) {
+export function DatasetFormPreview({ title, fields }: { title: string; fields: readonly Omit<DatasetColumnField, "sqlColumn">[] }) {
   return <section aria-label="Form preview" className="min-w-0 bg-panel-2 p-5 min-[900px]:overflow-y-auto">
     <div className="mb-4 flex items-center justify-between text-[12px] text-muted"><span>Preview</span><span className="font-mono">{fields.length} fields</span></div>
     <div className="rounded-lg border border-line bg-bg p-5">

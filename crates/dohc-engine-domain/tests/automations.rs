@@ -3,19 +3,23 @@
 //! containment, self-skip, depth cap, trigger-key dedupe, workspace
 //! scoping), the facts a claim carries, per-executor draining, the
 //! pending -> running -> done | failed machine with retry, the claim history
-//! and its retention, and the startup reaper's requeue-or-exhaust rule.
+//! and its retention, the startup reaper's requeue-or-exhaust rule, and
+//! Group message claims.
 
 use dohc_engine_domain::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
     AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange, AutomationChangeKind, AutomationClaim,
-    AutomationClaimState, AutomationFactValue, AutomationFieldFact, AutomationRetry,
-    AutomationSettle, AutomationSubscription, AutomationTrigger, ChangeActorKind,
-    ChangeAttribution, CollectionFieldChangeFact, CollectionRecordApplyFacts, DomainError,
-    MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
-    MAX_FIELD_FACT_VALUE_BYTES, NoFaults, TxnOutcome, claim_automation_triggers_in_tx,
-    claim_next_pending_automation, list_automation_claims, list_automation_failures,
-    reclaim_running_automations, retry_automation_claim, settle_automation_claim,
-    subscribe_automation, unsubscribe_automation,
+    AutomationClaimState, AutomationFactValue, AutomationFieldFact, AutomationGroupMessage,
+    AutomationGroupSubscription, AutomationRetry, AutomationSettle, AutomationSubscription,
+    AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind, ChatChannelKind,
+    ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
+    DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
+    MAX_AUTOMATION_SUBSCRIPTION_FIELDS, MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES,
+    NoFaults, SendMessage, StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx,
+    claim_group_message_in_tx, claim_next_pending_automation, list_automation_claims,
+    list_automation_failures, reclaim_running_automations, release_automation_claim,
+    retry_automation_claim, settle_automation_claim, subscribe_automation,
+    subscribe_automation_group, unsubscribe_automation, unsubscribe_automation_group,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -278,15 +282,25 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
         subscribe_automation(&mut store, WS, &filter, 10, &NO_FAULTS).expect("subscribe");
     }
 
+    // A record is added when reconcile binds it. The apply that writes its
+    // first fields is a field change like any other.
     let mut created = field_change(1, &["status", "title"]);
     created.created = true;
     let claims = claim_for(&mut store, WS, &created, 20);
     assert_eq!(
         claimed_ids(&claims),
-        vec!["collection:tasks#added"],
-        "the apply that writes a record's first fields is an added record"
+        vec![
+            "collection:tasks#any-field",
+            "collection:tasks#split",
+            "collection:tasks#status",
+        ],
+        "writing a record's first fields is a changed record"
     );
-    assert_eq!(claims[0].change.kind, AutomationChangeKind::Added);
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.change.kind == AutomationChangeKind::Changed)
+    );
 
     let title = claim_for(&mut store, WS, &field_change(2, &["title"]), 30);
     assert_eq!(
@@ -447,7 +461,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         vec![
             AutomationFieldFact {
                 field_name: "body".to_owned(),
-                history_id: 11,
+                history_id: Some(11),
                 previous: Some(AutomationFactValue::Truncated {
                     truncated: true,
                     bytes: big.len(),
@@ -459,7 +473,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
             },
             AutomationFieldFact {
                 field_name: "status".to_owned(),
-                history_id: 12,
+                history_id: Some(12),
                 previous: None,
                 next: Some(AutomationFactValue::Whole {
                     value: json!("done"),
@@ -1138,6 +1152,66 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
     );
 }
 
+/// An executor that cannot run a claim yet hands it back: pending again,
+/// with the attempts it had before the serve and the same run, and served
+/// again by the next `claimNext`. Only a running claim can be released, and
+/// a claim whose holder dies after being served again still goes to the
+/// reaper.
+#[test]
+fn a_released_claim_is_pending_again_without_an_attempt() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, "plugin:triage", "tasks");
+    let claims = claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
+    let claim_id = claims[0].claim_id.clone();
+    let release = |store: &mut EngineStore, now_ms| {
+        release_automation_claim(store, WS, &claim_id, now_ms, &NO_FAULTS)
+    };
+    let refused = |result: Result<AutomationClaim, DomainError>| {
+        matches!(result, Err(DomainError::InvalidInput { .. }))
+    };
+    assert!(
+        refused(release(&mut store, 21)),
+        "a pending claim is refused"
+    );
+
+    let served = claim_next(&mut store, "plugin:", 22).expect("served");
+    assert_eq!((served.attempts, served.run), (1, 1));
+    let released = release(&mut store, 23).expect("release");
+    assert_eq!(released.state, AutomationClaimState::Pending);
+    assert_eq!(
+        (released.attempts, released.run),
+        (claims[0].attempts, 1),
+        "a release is not an attempt"
+    );
+
+    let again = claim_next(&mut store, "plugin:", 24).expect("served again");
+    assert_eq!(again.claim_id, claim_id);
+    assert_eq!((again.attempts, again.run), (1, 1));
+    let reclaimed = reclaim_running_automations(&mut store, WS, None, 3, 24, 100, &NO_FAULTS)
+        .expect("reclaim running");
+    assert_eq!(
+        reclaimed
+            .iter()
+            .map(|claim| (claim.claim_id.as_str(), claim.state))
+            .collect::<Vec<_>>(),
+        vec![(claim_id.as_str(), AutomationClaimState::Pending)],
+        "the reaper requeues a claim whose holder died"
+    );
+
+    claim_next(&mut store, "plugin:", 110).expect("served after the reaper");
+    settle_automation_claim(
+        &mut store,
+        WS,
+        &claim_id,
+        &AutomationSettle::Done,
+        111,
+        &NO_FAULTS,
+    )
+    .expect("settle done");
+    assert!(refused(release(&mut store, 112)), "a done claim is refused");
+}
+
 #[test]
 fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1203,5 +1277,381 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
             .expect("reclaim again")
             .is_empty(),
         "a claim running since t=200 is younger than the bound and is left alone: {fresh:?}"
+    );
+}
+
+// ------------------------------------------------------- Group messages
+
+const GROUP: &str = "gen-1";
+const TASK: &str = "collection:Trip/Tasks#task";
+const ALL: &str = "collection:Trip/Tasks#all";
+
+fn open_group(scratch: &ScratchDir) -> EngineStore {
+    let mut store = open_store(scratch);
+    LinkedChatStore::new(&mut store)
+        .ensure_general_channel(WS, GROUP, 5, &NO_FAULTS)
+        .expect("Group");
+    store
+}
+
+fn subscribe_group(
+    store: &mut EngineStore,
+    automation_id: &str,
+    channel_id: &str,
+    starts_with: Option<&str>,
+) -> Result<bool, DomainError> {
+    subscribe_automation_group(
+        store,
+        WS,
+        &AutomationGroupSubscription {
+            automation_id: automation_id.to_owned(),
+            channel_id: channel_id.to_owned(),
+            starts_with: starts_with.map(str::to_owned),
+        },
+        10,
+        &NO_FAULTS,
+    )
+}
+
+/// Ada's new post in the Group.
+fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
+    StartChannelThread {
+        workspace_id: WS.to_owned(),
+        channel_id: GROUP.to_owned(),
+        thread_id: format!("t-{message_id}"),
+        message_id: message_id.to_owned(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("user-ada".to_owned()),
+        origin: None,
+        body: body.to_owned(),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        automation: None,
+        now_ms,
+        request_id: None,
+    }
+}
+
+/// Store a post and return the claims its write took.
+fn posted(store: &mut EngineStore, input: &StartChannelThread) -> Vec<AutomationClaim> {
+    let mut chats = LinkedChatStore::new(store);
+    chats.start_channel_thread(input, &NO_FAULTS).expect("post");
+    chats.take_automation_claims()
+}
+
+fn settle_done(store: &mut EngineStore, claim_id: &str, now_ms: i64) {
+    settle_automation_claim(
+        store,
+        WS,
+        claim_id,
+        &AutomationSettle::Done,
+        now_ms,
+        &NO_FAULTS,
+    )
+    .expect("settle");
+}
+
+#[test]
+fn group_subscriptions_belong_to_collection_automations_and_validate() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
+            .expect("DM");
+        chats
+            .ensure_agent_channel(WS, "agent-1", 5, &NO_FAULTS)
+            .expect("agent channel");
+    }
+    // Only a Group this computer has can be watched: not a DM, the agent
+    // channel, or an id nothing names.
+    for channel_id in ["dm-1", "agent-1", "no-such-group"] {
+        assert!(
+            matches!(
+                subscribe_group(&mut store, TASK, channel_id, None),
+                Err(DomainError::InvalidInput {
+                    reason: "A Group subscription names a Group on this computer."
+                })
+            ),
+            "{channel_id}"
+        );
+    }
+    assert!(subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("subscribe"));
+    assert!(
+        !subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("again"),
+        "the same subscription again changes nothing"
+    );
+    assert!(
+        subscribe_group(&mut store, TASK, GROUP, None).expect("replace"),
+        "a new starting text replaces the old one"
+    );
+    for (automation_id, starts_with) in [
+        ("plugin:triage", None),
+        ("collection:../Secrets#task", None),
+        (TASK, Some("")),
+        (TASK, Some(" /task")),
+    ] {
+        assert!(
+            matches!(
+                subscribe_group(&mut store, automation_id, GROUP, starts_with),
+                Err(DomainError::InvalidInput { .. })
+            ),
+            "{automation_id} {starts_with:?}"
+        );
+    }
+    assert!(
+        matches!(
+            subscribe_automation(
+                &mut store,
+                WS,
+                &subscription(TASK, "Trip/Tasks", &[AutomationChangeKind::Message], None),
+                10,
+                &NO_FAULTS,
+            ),
+            Err(DomainError::InvalidInput { .. })
+        ),
+        "a record subscription cannot name messages"
+    );
+    assert!(unsubscribe_automation_group(&mut store, WS, TASK, GROUP, &NO_FAULTS).expect("remove"));
+    assert!(!unsubscribe_automation_group(&mut store, WS, TASK, GROUP, &NO_FAULTS).expect("again"));
+}
+
+/// A Group message claims once for each subscription whose starting text it
+/// begins with, in the write that stores it, and the executor gets the
+/// message with the claim. A removed subscription and a second store of the
+/// same message claim nothing.
+#[test]
+fn a_group_message_claims_each_matching_subscription_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("task");
+    subscribe_group(&mut store, ALL, GROUP, None).expect("all");
+
+    let claims = posted(&mut store, &post("m1", "  /task Buy tickets", 20));
+    assert_eq!(claimed_ids(&claims), vec![ALL, TASK]);
+    let claim = claims[1].clone();
+    assert_eq!(
+        claim.trigger,
+        AutomationTrigger::Key {
+            key: "message:m1".to_owned()
+        }
+    );
+    assert_eq!(claim.record_id, None);
+    assert_eq!(claim.collection_path, "Trip/Tasks");
+    assert_eq!(claim.depth, 0);
+    assert_eq!(
+        claim.change,
+        AutomationChange {
+            kind: AutomationChangeKind::Message,
+            author_origin_id: None,
+            actor_kind: Some(ChangeActorKind::Human),
+            on_behalf_of: Some("user-ada".to_owned()),
+        }
+    );
+    assert_eq!(claim.state, AutomationClaimState::Pending);
+    assert_eq!(claim.created_at_ms, 20);
+
+    // The starting text is case-sensitive, and a reply claims like a post.
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .send_message(
+            &SendMessage {
+                workspace_id: WS.to_owned(),
+                thread_id: "t-m1".to_owned(),
+                message_id: "m2".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ana".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: Some("user-ana".to_owned()),
+                parent_message_id: Some("m1".to_owned()),
+                origin: None,
+                body: "/Task later".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                automation: None,
+                now_ms: 25,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("reply");
+    let reply_claims = chats.take_automation_claims();
+    assert_eq!(claimed_ids(&reply_claims), vec![ALL]);
+    assert_eq!(
+        reply_claims[0].change.on_behalf_of.as_deref(),
+        Some("user-ana")
+    );
+
+    let (served, facts) = claim_next_pending_automation(&mut store, WS, TASK, 30, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the task claim");
+    assert_eq!(served.claim_id, claim.claim_id);
+    assert!(facts.fields.is_empty());
+    assert_eq!(
+        facts.message,
+        Some(json!({
+            "id": "m1",
+            "threadId": "t-m1",
+            "groupId": GROUP,
+            "lane": "posts",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "user-ada",
+            "createdAtMs": 20,
+            "body": "  /task Buy tickets",
+        }))
+    );
+    let (_, reply_facts) = claim_next_pending_automation(&mut store, WS, ALL, 31, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the first all claim");
+    assert_eq!(reply_facts.message.expect("message")["id"], "m1");
+    let (_, reply_facts) = claim_next_pending_automation(&mut store, WS, ALL, 32, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the reply's claim");
+    assert_eq!(
+        reply_facts.message.expect("message")["parentMessageId"],
+        "m1"
+    );
+
+    // The same message stored again, by an echo or a second lane, claims
+    // nothing.
+    let again = store
+        .write_with(&NO_FAULTS, |tx| {
+            claim_group_message_in_tx(
+                tx,
+                WS,
+                &AutomationGroupMessage {
+                    message_id: "m1",
+                    thread_id: "t-m1",
+                    parent_message_id: None,
+                    author_kind: "human",
+                    author_display_name: "Ada",
+                    author_owner_display_name: None,
+                    author_user_id: Some("user-ada"),
+                    body: "  /task Buy tickets",
+                    created_at_ms: 20,
+                    automation_id: None,
+                    chain_depth: None,
+                },
+            )
+        })
+        .expect("claim again");
+    assert!(matches!(again, TxnOutcome::Committed(claims) if claims.is_empty()));
+
+    unsubscribe_automation_group(&mut store, WS, TASK, GROUP, &NO_FAULTS).expect("unsubscribe");
+    let claims = posted(&mut store, &post("m3", "/task Pack", 40));
+    assert_eq!(claimed_ids(&claims), vec![ALL]);
+}
+
+/// An automation's post never claims for that automation, carries its
+/// depth, and at the cap records the stop instead of a run.
+#[test]
+fn an_automations_message_skips_its_writer_and_stops_at_the_cap() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    subscribe_group(&mut store, TASK, GROUP, None).expect("task");
+    subscribe_group(&mut store, ALL, GROUP, None).expect("all");
+    let by_task = |message_id: &str, chain_depth: u32| StartChannelThread {
+        author_kind: ChatActorKind::Automation,
+        author_display_name: "Add a task".to_owned(),
+        author_owner_display_name: Some("Ice".to_owned()),
+        automation: Some(ChatMessageAutomation {
+            automation_id: TASK.to_owned(),
+            chain_depth,
+        }),
+        ..post(message_id, "Added", 20)
+    };
+
+    let claims = posted(&mut store, &by_task("m1", 1));
+    assert_eq!(claimed_ids(&claims), vec![ALL]);
+    assert_eq!(claims[0].depth, 1);
+    assert_eq!(claims[0].change.author_origin_id.as_deref(), Some(TASK));
+    assert_eq!(
+        claims[0].change.actor_kind,
+        Some(ChangeActorKind::Automation)
+    );
+
+    let stopped = posted(&mut store, &by_task("m2", AUTOMATION_CHAIN_DEPTH_CAP));
+    assert_eq!(claimed_ids(&stopped), vec![ALL]);
+    assert!(stopped[0].chain_stopped());
+    assert_eq!(stopped[0].error.as_deref(), Some(AUTOMATION_CHAIN_STOPPED));
+    let kept: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT message_json FROM automation_claims WHERE claim_id = ?1",
+                [&stopped[0].claim_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("stopped claim");
+    assert_eq!(kept, None, "a stopped chain keeps no message");
+    assert_eq!(
+        claim_next(&mut store, ALL, 30).map(|claim| claim.claim_id),
+        Some(claims[0].claim_id.clone())
+    );
+    assert!(
+        claim_next(&mut store, ALL, 31).is_none(),
+        "a stopped claim never runs"
+    );
+}
+
+/// A body too long for the claim budget travels as its size, and
+/// `get_message` reads it whole. Past the claim history, a settled message
+/// claim keeps its key without its message, so the message never claims
+/// twice.
+#[test]
+fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    subscribe_group(&mut store, ALL, GROUP, None).expect("all");
+    let long = "x".repeat(MAX_MESSAGE_BODY_BYTES);
+    posted(&mut store, &post("m-long", &long, 20));
+    let (claim, facts) = claim_next_pending_automation(&mut store, WS, ALL, 21, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the long claim");
+    let message = facts.message.expect("message");
+    assert_eq!(
+        message["body"],
+        json!({ "truncated": true, "bytes": MAX_MESSAGE_BODY_BYTES })
+    );
+    assert_eq!(message["id"], "m-long");
+    assert!(serde_json::to_vec(&message).expect("json").len() <= MAX_AUTOMATION_FIELD_FACTS_BYTES);
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .get_message(WS, "m-long")
+            .expect("the whole message")
+            .body,
+        long
+    );
+    settle_done(&mut store, &claim.claim_id, 22);
+
+    for index in 0..AUTOMATION_CLAIM_HISTORY_LIMIT {
+        posted(&mut store, &post(&format!("m{index}"), "Hi", 30 + index));
+        let claim = claim_next(&mut store, ALL, 1_000 + index).expect("pending claim");
+        settle_done(&mut store, &claim.claim_id, 1_000 + index);
+    }
+    let kept: (i64, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MAX(message_json) FROM automation_claims \
+                 WHERE workspace_id = ?1 AND trigger_key = 'message:m-long'",
+                [WS],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("kept claim");
+    assert_eq!(kept, (1, None));
+    assert_eq!(
+        list_automation_claims(&store, WS, ALL)
+            .expect("history")
+            .len(),
+        AUTOMATION_CLAIM_HISTORY_LIMIT as usize
     );
 }

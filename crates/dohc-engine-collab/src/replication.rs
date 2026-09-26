@@ -181,6 +181,11 @@ pub fn apply_remote_update(
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
         }
         record_facts = facts;
+        // A parked update from elsewhere changes the document when it
+        // applies, whatever its parking counted. A dedupe changes nothing.
+        if matches!(outcome, ReplicationApplyOutcome::Applied { .. }) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
+        }
         Ok::<_, CollabError>(outcome)
     })?;
     cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes, candidate);

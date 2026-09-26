@@ -12,6 +12,7 @@ import {
   NOTICE_TITLE_MAX_CHARS,
   type NoticeKind,
   type NoticeMark,
+  type PostableNoticeKind,
   type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
 import { accountDisplayName } from "./discussionRoutes";
@@ -42,6 +43,7 @@ export function createNoticeRoutes(
   nowMs: () => number,
   lookupUserDisplayName: ((userId: string) => Promise<string | null> | string | null) | undefined,
   claimPendingShares: (userId: string, signal?: AbortSignal) => Promise<void>,
+  deliverPendingShareNotices: (userId: string) => Promise<void>,
   postRateLimiter: TokenBucketLimiter,
 ) {
   return async function respondToNotices(
@@ -50,6 +52,7 @@ export function createNoticeRoutes(
     userId: string,
   ): Promise<Response> {
     if (route.route === "notices" && request.method === "GET") {
+      await deliverPendingShareNotices(userId);
       const url = new URL(request.url);
       const page = storage.readNoticeChanges({
         recipientUserId: userId,
@@ -73,7 +76,7 @@ export function createNoticeRoutes(
       storage.postNotice({
         ...notice,
         senderUserId: userId,
-        senderLabel: await accountDisplayName(lookupUserDisplayName, userId),
+        senderLabel: (await accountDisplayName(lookupUserDisplayName, userId)) ?? "Unnamed",
         nowMs: nowMs(),
       });
       return jsonResponse({ ok: true }, 200);
@@ -93,8 +96,11 @@ export function createNoticeRoutes(
 type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs">;
 
 function parsePostNotice(body: Record<string, unknown>): PostedNotice {
-  if (typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind)) {
-    throw badRequest("kind is not a notice kind");
+  if (
+    typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind) ||
+    NOTICE_KINDS[body.kind as NoticeKind].recipients === "relay"
+  ) {
+    throw badRequest("kind is not a notice kind anyone may post");
   }
   if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
   if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
@@ -104,7 +110,7 @@ function parsePostNotice(body: Record<string, unknown>): PostedNotice {
     noticeId: body.noticeId,
     recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS),
     reach: parseReach(body),
-    kind: body.kind as NoticeKind,
+    kind: body.kind as PostableNoticeKind,
     title: body.title,
     body: body.body,
     target: body.target,

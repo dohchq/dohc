@@ -2017,8 +2017,9 @@ it("journals a keyed write on a dead session under its own key once the daemon i
   state.daemonAlive = true;
   const before = Y.encodeStateVector(rendererDoc);
   rendererDoc.getText("plainText").insert(rendererDoc.getText("plainText").length, "KEYED");
-  await session.applyLocalUpdate(
-    Y.encodeStateAsUpdate(rendererDoc, before),
+  const keyedBytes = Y.encodeStateAsUpdate(rendererDoc, before);
+  await session.applyDecidedLocalUpdate(
+    () => keyedBytes,
     undefined,
     { idempotencyKey: "claim/1/0" },
   );
@@ -2057,13 +2058,13 @@ it("sends a keyed write again under its key after its daemon died, so the key st
     path: "note.md",
     onRemoteUpdate: () => undefined,
   });
-  await session.applyLocalUpdate(keyedUpdate(session.doc, "FIRST "), undefined, {
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "FIRST "), undefined, {
     idempotencyKey: "claim/1/0",
   });
 
   state.applyFaults.push("drop");
   await expect(
-    session.applyLocalUpdate(keyedUpdate(session.doc, "CHANGED "), undefined, {
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "CHANGED "), undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("idempotency-key-reuse-mismatch");
@@ -2071,7 +2072,7 @@ it("sends a keyed write again under its key after its daemon died, so the key st
 
   // A fresh key that meets a dead daemon lands once, under that key.
   state.applyFaults.push("drop");
-  await session.applyLocalUpdate(keyedUpdate(session.doc, "NEXT"), undefined, {
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "NEXT"), undefined, {
     idempotencyKey: "claim/1/1",
   });
   expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
@@ -2106,7 +2107,7 @@ it("answers success when a keyed write's answer was lost and its resend finds th
   // update its doc holds; the real client sends nothing then, which
   // workspaceEngineYDocSession.test.ts covers.
   state.applyFaults.push("commit-then-drop");
-  await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
     idempotencyKey: "claim/1/0",
   });
 
@@ -2123,7 +2124,7 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   );
   state.applyFaults.push("drop", "commit-then-die");
   await expect(
-    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("may have been recorded");
@@ -2145,14 +2146,14 @@ it("says a keyed write may have been recorded after two sends went unanswered", 
   // not prove the engine never recorded it, so the caller is not told so.
   state.applyFaults.push("drop", "drop");
   await expect(
-    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("may have been recorded");
   expect(session.doc.getText("plainText").toString()).toBe("");
 
   // The caller's retry under the key lands the write once.
-  await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
     idempotencyKey: "claim/1/0",
   });
   expect(state.journalKeys).toEqual(["claim/1/0"]);
@@ -2165,13 +2166,13 @@ it("keeps the key's refusal as the answer when the session then fails to release
   const { capture, session, state, errors } = await keyedFaultCapture(
     "dohc-ydoc-keyed-refusal-release-",
   );
-  await session.applyLocalUpdate(keyedUpdate(session.doc, "FIRST "), undefined, {
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "FIRST "), undefined, {
     idempotencyKey: "claim/1/0",
   });
 
   state.failRelease = true;
   await expect(
-    session.applyLocalUpdate(keyedUpdate(session.doc, "CHANGED"), undefined, {
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "CHANGED"), undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("idempotency-key-reuse-mismatch");
@@ -2206,7 +2207,7 @@ it("rejects a keyed write on a dead session while the daemon is still down, and 
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
 
   await expect(
-    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
       idempotencyKey: "claim/1/0",
     }),
   ).rejects.toThrow("The engine did not record this write");

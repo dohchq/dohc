@@ -85,7 +85,7 @@ export function createNamedDesktopLiveCapture(options: {
       let localTransaction = false;
       const update = (bytes: Uint8Array) => { if (!localTransaction && !closed) input.onRemoteUpdate(bytes); };
       session.doc.on("update", update);
-      return {
+      const provider: EngineYDocSessionProvider = {
         doc: session.doc, initialUpdate: Y.encodeStateAsUpdate(session.doc), contentKind: "richdoc", path: input.path,
         objectId: first.selection.objectId, versionId: "main", artifactAssets: [],
         get lineageClaimId() { return session.state().binding?.lineageClaimId; },
@@ -103,7 +103,14 @@ export function createNamedDesktopLiveCapture(options: {
           if (session.state().status === "live" && session.state().pendingUpdates === 0) {
             for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted);
           }
-          return Promise.resolve();
+        },
+        // A shared session applies each edit at once, so the decision and
+        // the edit see the same doc.
+        async applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
+          const bytes = decide(session.doc);
+          if (bytes === null) return false;
+          provider.applyLocalUpdate(bytes, onArmed, applyOptions);
+          return true;
         },
         async readArtifactAsset() { throw new Error("Shared Markdown has no live artifact assets."); },
         async close() {
@@ -115,6 +122,7 @@ export function createNamedDesktopLiveCapture(options: {
           closed = true; unsubscribe(); credentials.signal.removeEventListener("abort", abort); session.doc.off("update", update); transport.close();
         },
       };
+      return provider;
     },
   };
 }

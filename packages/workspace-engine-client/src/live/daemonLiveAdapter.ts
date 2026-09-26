@@ -143,6 +143,13 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   );
 }
 
+// The engine refused a request's input as its domain states it. The daemon
+// keeps the domain's reason to itself and sends only this discriminator, so
+// a caller reads it for a request whose only such refusal it knows.
+export function isInvalidInputRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "invalid-input";
+}
+
 export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }

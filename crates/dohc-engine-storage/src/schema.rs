@@ -186,9 +186,17 @@ const REQUIRED_TABLES: &[&str] = &[
     "share_view_cursors",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
+    // Item 12: the direct lane's position and per-file decisions.
+    "share_direct_write_state",
+    "share_direct_write_marks",
+    "share_direct_write_plan",
     "chat_conversation_revisions",
     "automation_subscriptions",
     "automation_claims",
+    "merged_moments",
+    "automation_presses",
+    "automation_schedule_marks",
+    "remote_changes",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

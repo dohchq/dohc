@@ -105,7 +105,7 @@ fn ack(
     result: ApplicationResult,
 ) -> dohc_engine_collab::live_update_application::LiveUpdateHostApplicationAck {
     match result {
-        ApplicationResult::Applied(value) => value,
+        ApplicationResult::Applied(value, _) => value,
         other => panic!("expected ACK: {other:?}"),
     }
 }

@@ -260,6 +260,7 @@ fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body
     chats
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: channel_id.to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -288,6 +289,7 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
     chats
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),
@@ -1883,7 +1885,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     assert!(matches!(
         apply_chat_envelope(&mut store, &thread, &NO_FAULTS),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1891,7 +1893,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     assert!(matches!(
         apply_chat_envelope(&mut store, &message, &NO_FAULTS),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()

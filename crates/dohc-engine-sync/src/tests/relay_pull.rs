@@ -1619,7 +1619,7 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -2134,6 +2134,7 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
                         path: "early.md",
                         text: "edited during join",
                     },
+                    None,
                     None,
                     1_203,
                 )

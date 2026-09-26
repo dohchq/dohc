@@ -85,7 +85,10 @@ export interface CommitOperationInput {
   authorize: Authorize;
   /** The host validates and accounts attachments here, using the same transaction. */
   accountAndAttach?: (allocation: Readonly<{ revision: number; bytes: number; attachedFileIds: readonly string[] }>) => unknown;
+  /** The host records what the commit changed here, using the same transaction. A receipt replay never reaches it. */
+  recordCommit?: (commit: Readonly<JournalCommit>) => unknown;
 }
+export interface JournalCommit { cursor: DatasetCursor; changeset: Uint8Array }
 export interface TransitionCheckpointInput extends Omit<InitializeDatasetInput,"scope"|"account"> {
   expected: DatasetCursor;
   /** Trusted, schema-validated checkpoint without a worker's private cursor marker. */
@@ -573,8 +576,8 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     commitOperation(input) {
       const expected=cursor(input.expected),proposalId=text(input.proposalId,256),operation=text(input.operation,256),callerKey=text(input.callerKey,1024),idempotencyKey=text(input.idempotencyKey,128);
       const payloadSha256=digest(input.payloadSha256),resultJson=resultText(input.resultJson),changeset=copyBytes(input.changeset,maxEvent),changesetSha256=digest(input.changesetSha256);
-      const attachedFileIds=fileIds(input.attachedFileIds),recordedAtMs=integer(input.recordedAtMs??now()),authorize=input.authorize,accountAndAttach=input.accountAndAttach;
-      synchronous(authorize);if(accountAndAttach)synchronous(accountAndAttach);
+      const attachedFileIds=fileIds(input.attachedFileIds),recordedAtMs=integer(input.recordedAtMs??now()),authorize=input.authorize,accountAndAttach=input.accountAndAttach,recordCommit=input.recordCommit;
+      synchronous(authorize);if(accountAndAttach)synchronous(accountAndAttach);if(recordCommit)synchronous(recordCommit);
       if(hash(changeset)!==changesetSha256)invalid("Changeset digest mismatch.");
       const metadata={proposalId,operation,callerKey,idempotencyKey,payloadSha256,resultJson,changesetSha256,attachedFileIds,recordedAtMs};
       const storageBytes=changeset.byteLength+Buffer.byteLength(JSON.stringify([expected,metadata]))+Buffer.byteLength(JSON.stringify([expected.workspaceId,expected.datasetId,callerKey,idempotencyKey,payloadSha256,resultJson]))+1024;
@@ -595,6 +598,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         db.prepare("INSERT INTO dohc_dataset_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
           .run(expected.workspaceId,expected.datasetId,revision,expected.digest,event.cursor.digest,expected.hostEpoch,expected.approvedRevisionHash,
             proposalId,operation,callerKey,idempotencyKey,payloadSha256,resultJson,changeset,changesetSha256,JSON.stringify(attachedFileIds),recordedAtMs,storageBytes);
+        if(recordCommit)callback(()=>recordCommit(Object.freeze({cursor:event.cursor,changeset})));
         db.prepare("INSERT INTO dohc_dataset_receipts VALUES(?,?,?,?,?,?,?)").run(expected.workspaceId,expected.datasetId,callerKey,idempotencyKey,payloadSha256,revision,resultJson);
         const updated=db.prepare(`UPDATE dohc_dataset_journals SET revision=?,digest=? WHERE workspace_id=? AND dataset_id=?
           AND revision=? AND digest=? AND host_epoch=? AND approved_revision_hash=? AND active=1`)

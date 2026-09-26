@@ -40,7 +40,11 @@ interface FakeSessionLog {
   updates: Uint8Array[];
 }
 
-function fakeSession(options: { settleError?: Error } = {}): {
+function fakeSession(options: {
+  settleError?: Error;
+  /** Runs just before each update's turn on the session chain, as a remote update would land. */
+  beforeTurn?: (doc: Y.Doc) => void;
+} = {}): {
   session: WorkspaceEngineYDocProviderSession;
   log: FakeSessionLog;
 } {
@@ -49,12 +53,29 @@ function fakeSession(options: { settleError?: Error } = {}): {
   // The engine's rule (durable.rs): a key already journaled with other
   // update bytes refuses, so a re-run that reuses a key with a new update fails.
   const journaledKeys = new Map<string, string>();
+  // Local updates take turns on one chain, as the real session's do.
+  let chain: Promise<unknown> = Promise.resolve();
   const session = {
     doc,
     get initialUpdate() {
       return Y.encodeStateAsUpdate(doc);
     },
-    async applyLocalUpdate(
+    applyDecidedLocalUpdate(
+      decide: (current: Y.Doc) => Uint8Array | null,
+      onArmed?: () => void,
+      applyOptions?: { actorOriginId?: string; attribution?: ChangeAttributionWire; idempotencyKey?: string },
+    ): Promise<boolean> {
+      const turn = chain.then(() => {
+        options.beforeTurn?.(doc);
+        const update = decide(doc);
+        if (update === null) return false;
+        session.applyLocalUpdate(update, onArmed, applyOptions);
+        return true;
+      });
+      chain = turn.catch(() => undefined);
+      return turn;
+    },
+    applyLocalUpdate(
       update: Uint8Array,
       onArmed?: () => void,
       applyOptions?: {
@@ -67,7 +88,7 @@ function fakeSession(options: { settleError?: Error } = {}): {
       const bytes = Buffer.from(update).toString("base64");
       if (key !== undefined && journaledKeys.has(key)) {
         if (journaledKeys.get(key) !== bytes) {
-          throw new Error("idempotency key reused with different content");
+          throw new Error("idempotency-key-reuse-mismatch");
         }
         return;
       }
@@ -80,6 +101,7 @@ function fakeSession(options: { settleError?: Error } = {}): {
       onArmed?.();
     },
     async settleNow() {
+      await chain;
       log.order.push("settle");
       if (options.settleError) throw options.settleError;
       return { materialized: true };
@@ -87,22 +109,31 @@ function fakeSession(options: { settleError?: Error } = {}): {
     async close() {
       log.order.push("close");
     },
-  } as unknown as WorkspaceEngineYDocProviderSession;
-  return { session, log };
+  };
+  return { session: session as unknown as WorkspaceEngineYDocProviderSession, log };
 }
 
 function contextFor(
   root: string,
   session: WorkspaceEngineYDocProviderSession,
   overrides: Partial<CollectionRecordEditContext> = {},
-): CollectionRecordEditContext & { openedPaths: string[] } {
+): CollectionRecordEditContext & { openedPaths: string[]; authoredWrites: Array<{ path: string; author: unknown }> } {
   const openedPaths: string[] = [];
+  const authoredWrites: Array<{ path: string; author: unknown }> = [];
   return {
     openedPaths,
+    authoredWrites,
     capture: {
       async openYDocSession(input) {
         openedPaths.push(input.path);
         return session;
+      },
+      // The engine writes the file with its author on the moment.
+      async writeAuthoredTextFile(absolutePath, text, author, options) {
+        authoredWrites.push({ path: absolutePath, author });
+        await mkdir(join(absolutePath, ".."), { recursive: true });
+        await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
+        return { resolvedAbsolutePath: absolutePath };
       },
     },
     workspaceRoot: root,
@@ -201,7 +232,7 @@ afterEach(() => {
 });
 
 describe("setCollectionRecordFields", () => {
-  it("sets every field in one transaction with the agent's actor origin, settles, then releases", async () => {
+  it("journals each field as its own update with the agent's actor origin, settles once, then releases", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const context = contextFor(root, session);
@@ -215,17 +246,18 @@ describe("setCollectionRecordFields", () => {
     ).resolves.toEqual({
       path: "tasks/one.md",
       replaced: { status: null, estimate: null },
+      kept: {},
     });
 
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
-    // One journaled update carrying the agent's origin, settled before release.
-    expect(log.order).toEqual(["apply", "settle", "close"]);
-    expect(log.journaled).toEqual([
-      {
-        actorOriginId: "plugin:notes",
-        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
-      },
-    ]);
+    // One journaled update per field carrying the agent's origin, then one
+    // settle before release.
+    expect(log.order).toEqual(["apply", "apply", "settle", "close"]);
+    const journaled = {
+      actorOriginId: "plugin:notes",
+      attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+    };
+    expect(log.journaled).toEqual([journaled, journaled]);
     const frontmatter = log.doc.getMap("frontmatter");
     expect(frontmatter.get("status")).toBe("done");
     expect(frontmatter.get("estimate")).toBe(3);
@@ -239,7 +271,7 @@ describe("setCollectionRecordFields", () => {
       recordPath: "tasks/one.md",
       fields: { status: "done" },
       author: AUTOMATION,
-      idempotencyKey: "claim-7/1/0",
+      idempotencyKeyPrefix: "claim-7/1/0",
     });
 
     // The actor origin IS the engine subscription id, so the engine's
@@ -248,7 +280,7 @@ describe("setCollectionRecordFields", () => {
       {
         actorOriginId: AUTOMATION.automationId,
         attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
-        idempotencyKey: "claim-7/1/0",
+        idempotencyKey: "claim-7/1/0/status",
       },
     ]);
     expect(actorOriginIdFor(AUTOMATION)).toBe(AUTOMATION.automationId);
@@ -273,17 +305,18 @@ describe("setCollectionRecordFields", () => {
       path: "tasks/one.md",
       // A field the record did not have reads as null, as record history shows it.
       replaced: { status: "open", owner: null },
+      kept: {},
     });
 
-    // The one journaled update touches only the changed fields.
-    expect(log.updates).toHaveLength(1);
+    // The journaled updates touch only the changed fields, one each.
+    expect(log.updates).toHaveLength(2);
     const replica = new Y.Doc();
     Y.applyUpdate(replica, before);
     const touched: string[] = [];
     replica.getMap("frontmatter").observe((event) => {
       touched.push(...event.keysChanged);
     });
-    Y.applyUpdate(replica, log.updates[0]!);
+    for (const update of log.updates) Y.applyUpdate(replica, update);
     expect(touched.sort()).toEqual(["owner", "status"]);
     expect(frontmatter.toJSON()).toEqual({
       status: "done",
@@ -305,9 +338,9 @@ describe("setCollectionRecordFields", () => {
         recordPath: "tasks/one.md",
         fields: { meta: { points: [1, 2], due: "2026-09-24" }, status: "done" },
         author: AGENT,
-        idempotencyKey: "claim-7/1/0",
+        idempotencyKeyPrefix: "claim-7/1/0",
       }),
-    ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {}, kept: {} });
     expect(log.order).toEqual(["close"]);
   });
 
@@ -329,14 +362,14 @@ describe("setCollectionRecordFields", () => {
         fields: { tags: ["a", "b"], owner: { name: "Ana" } },
         author: AGENT,
       }),
-    ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {}, kept: {} });
     await expect(
       setCollectionRecordFields(context, {
         recordPath: "tasks/one.md",
         fields: { tags: ["a"], owner: { name: "Ana" } },
         author: AGENT,
       }),
-    ).resolves.toEqual({ path: "tasks/one.md", replaced: { tags: ["a", "b"] } });
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { tags: ["a", "b"] }, kept: {} });
     expect(log.order).toEqual(["close", "apply", "settle", "close"]);
   });
 
@@ -351,7 +384,7 @@ describe("setCollectionRecordFields", () => {
         fields: { due: null, status: null },
         author: AGENT,
       }),
-    ).resolves.toEqual({ path: "tasks/one.md", replaced: { status: "open" } });
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { status: "open" }, kept: {} });
     expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: null });
   });
 
@@ -384,6 +417,7 @@ describe("setCollectionRecordFields", () => {
           controller.abort();
           return session;
         },
+        writeAuthoredTextFile: vi.fn(),
       },
     });
 
@@ -406,12 +440,13 @@ describe("setCollectionRecordFields", () => {
         recordPath: "tasks/one.md",
         fields: { status: "done", finishedOn: "2026-09-24" },
         author: AUTOMATION,
-        idempotencyKey: `claim-7/${number}/0`,
+        idempotencyKeyPrefix: `claim-7/${number}/0`,
       });
 
     await expect(attempt(1)).resolves.toEqual({
       path: "tasks/one.md",
       replaced: { status: null, finishedOn: null },
+      kept: {},
     });
     // The run stops before it settles its claim, and someone reopens the
     // task before the engine hands the claim out again.
@@ -419,20 +454,69 @@ describe("setCollectionRecordFields", () => {
     await expect(attempt(2)).resolves.toEqual({
       path: "tasks/one.md",
       replaced: { status: "open" },
+      kept: {},
     });
     await expect(attempt(3)).resolves.toEqual({
       path: "tasks/one.md",
       replaced: {},
+      kept: {},
     });
 
     expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
-      "claim-7/1/0",
-      "claim-7/2/0",
+      "claim-7/1/0/status",
+      "claim-7/1/0/finishedOn",
+      "claim-7/2/0/status",
     ]);
     expect(log.doc.getMap("frontmatter").toJSON()).toEqual({
       status: "done",
       finishedOn: "2026-09-24",
     });
+  });
+
+  it("writes a field still at its expected value, and keeps one someone changed since", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const frontmatter = log.doc.getMap("frontmatter");
+    // An earlier attempt landed Count; someone then changed Owner by hand.
+    frontmatter.set("Count", 3);
+    frontmatter.set("Owner", "ana");
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { Count: 3, Owner: "bob", Due: "2026-09-30" },
+        author: AUTOMATION,
+        idempotencyKeyPrefix: "claim-7/hash/0/rec_one",
+        expectedBefore: { Count: 2, Owner: null, Due: null },
+      }),
+    ).resolves.toEqual({
+      path: "tasks/one.md",
+      replaced: { Due: null },
+      kept: { Owner: "ana" },
+    });
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual(["claim-7/hash/0/rec_one/Due"]);
+    expect(frontmatter.toJSON()).toEqual({ Count: 3, Owner: "ana", Due: "2026-09-30" });
+  });
+
+  it("compares each field when it is written, so a change that lands after the session opens is kept", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    // Undo's case: put Note back to "old" only while it still holds the run's "new".
+    const { session, log } = fakeSession({
+      // A remote edit lands after the open and before the field's turn.
+      beforeTurn: (doc) => doc.getMap("frontmatter").set("Note", "theirs"),
+    });
+    log.doc.getMap("frontmatter").set("Note", "new");
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { Note: "old" },
+        author: { kind: "user", userId: "local" },
+        expectedBefore: { Note: "new" },
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {}, kept: { Note: "theirs" } });
+    expect(log.doc.getMap("frontmatter").get("Note")).toBe("theirs");
+    expect(log.order).toEqual(["close"]);
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {
@@ -582,7 +666,7 @@ describe("createCollectionRecord", () => {
         name: "two",
         fields: { status: "open" },
         author: AUTOMATION,
-        idempotencyKey: `claim-7/${number}/0`,
+        idempotencyKeyPrefix: `claim-7/${number}/0`,
         recordId,
       });
 
@@ -600,8 +684,11 @@ describe("createCollectionRecord", () => {
       recordId,
     });
     expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
-      "claim-7/1/0",
+      "claim-7/1/0/status",
     ]);
+    // The automation's file carries it as the moment's author, so the added
+    // record's claim knows the automation and its depth.
+    expect(context.authoredWrites).toEqual([{ path: join(root, "tasks", "two.md"), author: AUTOMATION }]);
     await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe(
       `---\nid: ${recordId}\n---\n`,
     );
