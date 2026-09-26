@@ -100,15 +100,12 @@ describe("workspaceActivity capture hooks", () => {
 
     await writeFile(join(root, "changed.md"), "changed");
 
-    await vi.waitFor(
-      () => {
-        expect(notify).toHaveBeenCalledWith({
-          workspaceId: "activity-test",
-          paths: ["changed.md"],
-        });
-      },
-      { timeout: 3_000 },
-    );
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith({
+        workspaceId: "activity-test",
+        paths: ["changed.md"],
+      });
+    });
     await activity.stopAll();
   });
 
@@ -256,6 +253,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queuePull: () => {},
       snapshot: () => ({
         syncing: false,
         lastSyncedAtMs: null,
@@ -289,6 +287,32 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("reads an engine stopped on the relay API version as disconnected, naming the side to update", async () => {
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      snapshot: () => ({
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 2,
+        conflictCount: 0,
+        authExpired: false,
+        updateRequired: "server" as const,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.state).toBe("cloud-disconnected");
+    expect(status.updateRequired).toBe("server");
+    await activity.stopAll();
+  });
+
   // Failed-join rollback (0P-C gate fix): close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
   it("close stops and forgets a single workspace", async () => {
@@ -296,6 +320,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queuePull: () => {},
       snapshot: () => ({
         syncing: false,
         lastSyncedAtMs: null,
@@ -344,7 +369,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineBuilds += 1;
         return {
           start: async () => undefined,
-          queueSync: () => undefined,
+          queueSync: () => undefined, queuePull: () => undefined,
           snapshot: () => ({
             syncing: false,
             lastSyncedAtMs: null,
@@ -399,7 +424,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         },
         engineFor: () => ({
           start: async () => undefined,
-          queueSync: () => undefined,
+          queueSync: () => undefined, queuePull: () => undefined,
           snapshot: () => ({
             syncing: false,
             lastSyncedAtMs: null,
@@ -565,7 +590,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       }),
       engineFor: () => ({
         start: async () => undefined,
-        queueSync: () => undefined,
+        queueSync: () => undefined, queuePull: () => undefined,
         snapshot: () => ({
           syncing: false,
           lastSyncedAtMs: null,

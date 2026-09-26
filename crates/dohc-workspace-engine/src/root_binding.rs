@@ -51,40 +51,69 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
         .map_err(|_| RootBindingError::Malformed)
 }
 
-/// Mint and record a binding for a root that has none. Two opens racing on
-/// one fresh root both reach here; `create_new` lets exactly one write, and
-/// the other binds to the token it finds. A marker whose write failed is
-/// removed again, so the next mint starts clean instead of reading it.
+/// Serialize competing mints, then atomically publish a complete token.
+/// An interrupted mint leaves only a pending file that the next owner replaces.
 pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
+    write_new_root_binding_with_hook(root, || {})
+}
+
+fn write_new_root_binding_with_hook(
+    root: &Path,
+    before_lock: impl FnOnce(),
+) -> Result<String, RootBindingError> {
+    let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
+    create_binding_dir(&marker)?;
+    let anchor = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(marker.with_extension("lock"))
+        .map_err(|_| RootBindingError::Unwritable)?;
+    before_lock();
+    fs4::FileExt::lock(&anchor).map_err(|_| RootBindingError::Unwritable)?;
+    // The lock file stays in place so every process locks the same inode.
+    // Read the marker only after the previous owner finishes publication.
+    if let Some(token) = read_root_binding(root)? {
+        sync_binding_dir(&marker)?;
+        return Ok(token);
+    }
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| RootBindingError::Unwritable)?;
     let token = dohc_engine_storage::hex(&bytes);
-    let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
-    create_binding_dir(&marker)?;
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return match read_root_binding(root)? {
-                Some(token) => Ok(token),
-                // An empty marker left by an interrupted mint: take it over.
-                None => std::fs::write(&marker, &token)
-                    .map(|()| token)
-                    .map_err(|_| RootBindingError::Unwritable),
-            };
-        }
+    let pending = marker.with_extension("pending");
+    match std::fs::remove_file(&pending) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(RootBindingError::Unwritable),
-    };
-    use std::io::Write as _;
-    if file.write_all(token.as_bytes()).is_err() {
+    }
+    let publish = (|| {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
         drop(file);
-        let _ = std::fs::remove_file(&marker);
+        std::fs::rename(&pending, &marker)
+    })();
+    if publish.is_err() {
+        let _ = std::fs::remove_file(&pending);
         return Err(RootBindingError::Unwritable);
     }
+    sync_binding_dir(&marker)?;
     Ok(token)
+}
+
+fn sync_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
+    #[cfg(unix)]
+    std::fs::File::open(marker.parent().ok_or(RootBindingError::Unwritable)?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RootBindingError::Unwritable)?;
+    #[cfg(not(unix))]
+    let _ = marker;
+    Ok(())
 }
 
 /// Record `token` as the root's binding. A test that hand-builds a store
@@ -171,6 +200,62 @@ mod tests {
         let first = write_new_root_binding(scratch.path()).expect("first mint");
         let second = write_new_root_binding(scratch.path()).expect("second mint");
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn competing_mints_publish_one_token() {
+        for empty_marker in [false, true] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let marker = scratch.join(ROOT_BINDING_RELATIVE_PATH);
+            if empty_marker {
+                create_binding_dir(&marker).unwrap();
+                std::fs::write(&marker, b"").unwrap();
+            }
+            let barrier = std::sync::Barrier::new(3);
+            let tokens = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..3)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            write_new_root_binding_with_hook(scratch.path(), || {
+                                barrier.wait();
+                            })
+                            .unwrap()
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|thread| thread.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert!(tokens.iter().all(|token| token == &tokens[0]));
+            assert_eq!(
+                read_root_binding(scratch.path()).unwrap(),
+                Some(tokens[0].clone())
+            );
+            assert_eq!(write_new_root_binding(scratch.path()).unwrap(), tokens[0]);
+        }
+    }
+
+    #[test]
+    fn interrupted_pending_token_is_replaced_before_publication() {
+        for empty_marker in [false, true] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let marker = scratch.join(ROOT_BINDING_RELATIVE_PATH);
+            create_binding_dir(&marker).unwrap();
+            if empty_marker {
+                std::fs::write(&marker, b"").unwrap();
+            }
+            let pending = marker.with_extension("pending");
+            std::fs::write(&pending, b"incomplete").unwrap();
+            let token = write_new_root_binding(scratch.path()).unwrap();
+            assert_eq!(
+                read_root_binding(scratch.path()).unwrap(),
+                Some(token.clone())
+            );
+            assert!(!pending.exists());
+            assert_eq!(write_new_root_binding(scratch.path()).unwrap(), token);
+        }
     }
 
     #[test]

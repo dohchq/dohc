@@ -418,7 +418,7 @@ describe("invokePluginSdkHost", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("attributes an automation run's collection writes to the automation with the claim id plus write ordinal as the key", async () => {
+  it("attributes an automation run's collection writes to the automation, keyed by claim id, run, and write ordinal", async () => {
     const root = await createTestScratch("dohc-plugin-sdk-host-");
     const calls: unknown[] = [];
     const tasksCollection = {
@@ -433,7 +433,8 @@ describe("invokePluginSdkHost", () => {
       automationClaimId: "claim-7",
       automationRun: {
         claimId: "claim-7",
-        automationId: "hello-plugin/triage",
+        automationId: "plugin:hello-plugin/triage",
+        run: 2,
         onBehalfOf: "local",
         depth: 1,
         writes: 0,
@@ -464,7 +465,7 @@ describe("invokePluginSdkHost", () => {
     });
     const automationAuthor = {
       kind: "automation",
-      automationId: "hello-plugin/triage",
+      automationId: "plugin:hello-plugin/triage",
       onBehalfOf: "local",
       depth: 1,
     };
@@ -472,14 +473,17 @@ describe("invokePluginSdkHost", () => {
       expect.objectContaining({
         recordPath: "tasks/one.md",
         author: automationAuthor,
-        idempotencyKey: "claim-7/0",
+        idempotencyKeyPrefix: "claim-7/2/0",
       }),
       expect.objectContaining({
         collectionPath: "tasks",
         author: automationAuthor,
-        idempotencyKey: "claim-7/1",
+        idempotencyKeyPrefix: "claim-7/2/1",
       }),
     ]);
+    // A plugin handler has no stable step identity, so its create does not
+    // name a record id.
+    expect(calls[1]).not.toHaveProperty("recordId");
 
     // A read in the same run context stays a read: no author override applies.
     await expect(

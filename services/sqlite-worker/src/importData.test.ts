@@ -25,6 +25,67 @@ async function readTable(bytesBase64: string, table: string) {
 }
 
 describe('sqlite worker data imports', () => {
+  it.each([
+    { headers: 'name,name,name_2', expected: { name: 'first', name_3: 'second', name_2: 'third' } },
+    { headers: 'name_2,name,name', expected: { name_2: 'first', name: 'second', name_3: 'third' } },
+    { headers: 'Name,name,NAME_2', expected: { Name: 'first', name_3: 'second', NAME_2: 'third' } },
+  ])('preserves colliding CSV columns: $headers', async ({ headers, expected }) => {
+    const engine = await createSqliteEngine()
+    const result = await engine.materializeImport({ name: 'data.csv', mediaType: 'text/csv',
+      body: `${headers}\nfirst,second,third`, tableName: 'rows' })
+    if (!result.ok) throw new Error(result.message)
+    expect(await readTable(result.bytes.toString('base64'), result.tableName)).toEqual([
+      { id: 'row_1', ...expected },
+    ])
+  })
+
+  it.each(['json', 'jsonl'])('keeps normalized keys distinct and stable across %s rows', async format => {
+    const rows = [
+      { id: 'a', 'a-b': 'first', 'a b': 'second', a_b_2: 'third' },
+      { id: 'b', 'a b': 'fourth', a_b_2: 'fifth', 'a-b': 'sixth' },
+      { id: 'c', 'a b': 'seventh' },
+    ]
+    const engine = await createSqliteEngine()
+    const result = await engine.materializeImport({ name: `data.${format}`, mediaType: 'application/json',
+      body: format === 'json' ? JSON.stringify(rows) : rows.map(row => JSON.stringify(row)).join('\n'), tableName: 'rows' })
+    if (!result.ok) throw new Error(result.message)
+    expect(await readTable(result.bytes.toString('base64'), result.tableName)).toEqual([
+      { id: 'a', a_b: 'first', a_b_3: 'second', a_b_2: 'third' },
+      { id: 'b', a_b: 'sixth', a_b_3: 'fourth', a_b_2: 'fifth' },
+      { id: 'c', a_b: null, a_b_3: 'seventh', a_b_2: null },
+    ])
+  })
+
+  it.each(['csv', 'json', 'jsonl'])('preserves integer boundaries in mixed %s columns', async format => {
+    const values = ['42', '9007199254740991', '9007199254740992', '9007199254740993',
+      '-9007199254740991', '-9007199254740992', '-9007199254740993', '9223372036854775808']
+    const rows = values.map((value, index) => ({ id: String(index), value }))
+    const body = format === 'csv' ? 'id,value\n' + rows.map(row => `${row.id},${row.value}`).join('\n')
+      : format === 'json' ? JSON.stringify(rows) : rows.map(row => JSON.stringify(row)).join('\n')
+    const engine = await createSqliteEngine()
+    const result = await engine.materializeImport({ name: `data.${format}`, mediaType: format === 'csv' ? 'text/csv' : 'application/json', body, tableName: 'rows' })
+    if (!result.ok) throw new Error(result.message)
+    expect(await readTable(result.bytes.toString('base64'), result.tableName)).toEqual(rows)
+  })
+
+  it.each(['json', 'jsonl'])('preserves unquoted large integer tokens in %s', async format => {
+    const records = ['{"id":"a","value":42}', '{"id":"b","value":9007199254740993}', '{"id":"c","value":-9007199254740993}']
+    const engine = await createSqliteEngine()
+    const result = await engine.materializeImport({ name: `data.${format}`, mediaType: 'application/json',
+      body: format === 'json' ? `[${records.join(',')}]` : records.join('\n'), tableName: 'rows' })
+    if (!result.ok) throw new Error(result.message)
+    expect(await readTable(result.bytes.toString('base64'), result.tableName)).toEqual([
+      { id: 'a', value: '42' }, { id: 'b', value: '9007199254740993' }, { id: 'c', value: '-9007199254740993' },
+    ])
+  })
+
+  it.each(['integer', 'real'] as const)('refuses a supplied %s schema that would coerce preserved integer text', async type => {
+    const engine = await createSqliteEngine()
+    await expect(engine.materializeImport({ name: 'data.csv', mediaType: 'text/csv',
+      body: 'id,value\na,9007199254740993', tableName: 'rows', mode: 'provided-schema', schema: { value: type } }))
+      .resolves.toMatchObject({ ok: false, code: 'invalid-import-schema' })
+  })
+
   it('keeps raw materialization usable when the encoded response fails', async () => {
     const engine = await createSqliteEngine()
     const input = {

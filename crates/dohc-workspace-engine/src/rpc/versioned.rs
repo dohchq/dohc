@@ -343,6 +343,11 @@ impl EngineService {
             .await;
         drop(session_serial);
         let result = result.map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &result.automation_claims,
+        );
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": snapshot_json(&result.snapshot),
@@ -764,6 +769,11 @@ impl EngineService {
             .await;
         drop(session_serial);
         let result = result.map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &result.automation_claims,
+        );
         Ok(json!({
             "rolledBack": true,
             "deduped": result.deduped,
@@ -966,6 +976,7 @@ mod tests {
             workspace: Some(handle.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({
                 "versionId": "main",
                 "path": "scoped.bin",

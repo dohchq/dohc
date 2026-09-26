@@ -11,6 +11,8 @@ export function useCollectionFolders(
   workspaceId: string,
   workspaceIsReady: boolean,
   isShareView: boolean,
+  // An Edit share view reads its Collections; others read none.
+  shareViewReadsCollections = false,
 ) {
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
@@ -60,14 +62,14 @@ export function useCollectionFolders(
     return () => { collectionsRequest.current++; datasetRequest.current++; };
   }, [workspaceId]);
   useEffect(() => {
-    if (!workspaceIsReady || isShareView) return;
+    if (!workspaceIsReady || (isShareView && !shareViewReadsCollections)) return;
     // First load; afterwards the list rides the files+history activity
     // coalescer below. listCollections is one cheap index read, so no path
     // filter: a new collection appears through collection.yaml writes, a
     // rename or delete arrives as ordinary path activity, and a scope-free
     // event (no paths) must refresh too.
     void refreshCollections();
-  }, [workspaceIsReady, isShareView, refreshCollections]);
+  }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
   return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived };
 }

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { evaluateAppOperation, initializeAppDatabase, type JsonValue } from "@dohc/app-backend-runtime";
-import { type DatasetDefinition, type DatasetField, type DatasetOperation } from "@dohc/security-contract/dataset";
-import { generateDatasetSources } from "./datasetGenerator";
+import { datasetColumnFields, type DatasetDefinition, type DatasetField, type DatasetOperation } from "@dohc/security-contract/dataset";
+import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const field = (n: number, sqlColumn: string, extra: Partial<DatasetField> = {}): DatasetField => ({ fieldId: id(n), sqlColumn, name: sqlColumn, type: "text", required: false, unique: false, ...extra });
@@ -37,7 +37,9 @@ async function runtime(definition = fixture()) {
   };
 }
 
-describe("initial dataset source", { timeout: 30_000 }, () => {
+// Each test drives a real app runtime through dozens of worker calls; a loaded
+// gate host stretched one past 30 s while it passes alone in a few seconds.
+describe("initial dataset source", { timeout: 60_000 }, () => {
   it("keeps field identity through display renames and requires authored actions", () => {
     const definition = fixture(), first = generateDatasetSources(definition);
     expect(first.definition.operations.find(operation => operation.kind === "edit")!.reversible).toBe(true);
@@ -48,8 +50,19 @@ describe("initial dataset source", { timeout: 30_000 }, () => {
     expect(() => generateDatasetSources(definition)).toThrow("Custom actions need authored");
   });
 
+  it("writes buttons only to dataset.json, so a button leaves the schema and generated actions unchanged", () => {
+    const plain = fixture(), buttons = fixture(), button = { fieldId: id(30), name: "Send receipt", type: "button" as const };
+    buttons.tables[0].fields.push(button);
+    const before = generateDatasetSources(plain), after = generateDatasetSources(buttons);
+    expect(after.files[buttons.schemaPath]).toBe(before.files[plain.schemaPath]);
+    expect(after.files[buttons.operationsPath]).toBe(before.files[plain.operationsPath]);
+    expect(JSON.parse(after.files["data/registrations/dataset.json"]!).tables[0].fields.at(-1)).toEqual(button);
+    expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]!, after.definition)).toBe(true);
+    expect(hasGeneratedDatasetOperations(before.files[plain.operationsPath]! + "\n// edited", after.definition)).toBe(false);
+  });
+
   it("refuses a create operation that cannot fill a private required field", () => {
-    const definition = fixture(); delete definition.tables[0].fields[2].default;
+    const definition = fixture(); delete datasetColumnFields(definition.tables[0])[2]!.default;
     expect(() => generateDatasetSources(definition)).toThrow("cannot fill a required field");
   });
 
@@ -156,7 +169,7 @@ describe("initial dataset source", { timeout: 30_000 }, () => {
     const definition = fixture();
     const fields = [definition.tables[0].fields[0], ...Array.from({ length: 127 }, (_, i) => field(100 + i, `field_${i}`))];
     definition.tables[0].fields = fields;
-    for (const operation of definition.operations) operation.fieldIds = operation.kind === "delete" ? [] : fields.filter(field => field.sqlColumn !== "id").map(field => field.fieldId);
+    for (const operation of definition.operations) operation.fieldIds = operation.kind === "delete" ? [] : fields.filter(field => field.type !== "button" && field.sqlColumn !== "id").map(field => field.fieldId);
     const app = await runtime(definition);
     const values = Object.fromEntries(fields.slice(1).map(field => [field.fieldId, "match"]));
     const row = (await app.call("submit", { values })).result as { id: string };

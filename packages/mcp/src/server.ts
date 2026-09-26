@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { DatasetRequest } from "@dohc/cli/dataset";
+import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -20,17 +21,18 @@ import {
   createRecord,
   dataset,
   createWorkspaceDirectory,
-  listChannels,
+  listGroups,
   queryCollection,
   readRecord,
   setRecordFields,
   listFileChats,
   readChat,
   replyToChat,
-  startChannelChat,
+  startGroupChat,
   createSite,
   deleteWorkspacePath,
   detectSites,
+  editDocument,
   importData,
   listWorkspaceFiles,
   listChanges,
@@ -38,6 +40,7 @@ import {
   moveWorkspacePath,
   queryDatabase,
   readChange,
+  readDocument,
   readWorkspaceFile,
   searchWorkspaceFiles,
   testSite,
@@ -87,7 +90,7 @@ function text(structuredContent: Record<string, unknown>) {
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: "dohc", version: "0.1.0" });
+  const server = new McpServer({ name: "dohc", version: "0.2.0" });
 
   // A share view's write surface is its access level. The write tools
   // come in two tiers, and a tier the level does not grant is never registered
@@ -98,8 +101,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   //   any level a shared view: NO write tool of any kind
   //
   // #646 PR2 deliberately registers no chat write tool at any level. The two
-  // that exist — `dohc_start_channel_chat` and `dohc_reply_to_chat` — are
-  // CHANNEL tools, and a shared view refuses every channel write before the
+  // that exist — `dohc_start_group_chat` and `dohc_reply_to_chat` — are
+  // GROUP tools, and a shared view refuses every group write before the
   // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
   // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
   // a tool its own workspace always refuses is a promise the surface cannot
@@ -202,11 +205,45 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
 
+  server.registerTool(
+    "dohc_read_document",
+    {
+      description:
+        "Read a Markdown document as it is now, including edits an open editor has not saved to the file yet. Read it before dohc_edit_document: edits match this text.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await readDocument(ctx, args)),
+  );
+
+  // The client names itself in the MCP handshake. A name the document door
+  // accepts becomes the author of this agent's edits; no name is invented.
+  const agentName = (): string | undefined => {
+    const named = documentAgentNameSchema.safeParse(server.server.getClientVersion()?.name);
+    return named.success ? named.data : undefined;
+  };
+
+  registerWrite(
+    "dohc_edit_document",
+    {
+      description:
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        find: documentEditTextSchema.min(1).optional(),
+        replacement: documentEditTextSchema,
+        requestId: requestIdSchema.optional(),
+      },
+    },
+    async (args) => text(await editDocument(ctx, args, agentName())),
+  );
+
   registerWrite(
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown and Excalidraw documents must be edited in dohc and are refused here. The desktop watcher captures file history while open, or on the next open.",
+        "Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -348,13 +385,13 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_list_channels",
+    "dohc_list_groups",
     {
       description:
-        "List the workspace's Chats channels (including the default #general) with each channel's chats and their ids. Requires the workspace engine.",
+        "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
     },
-    async () => text(await listChannels(ctx)),
+    async () => text(await listGroups(ctx)),
   );
 
   const chatWriteInput = {
@@ -366,24 +403,24 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   };
 
   registerWrite(
-    "dohc_start_channel_chat",
+    "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a channel as the agent. `channel` accepts a channel name, #slug, or id. No title needed — the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
-        channel: z.string().min(1).max(200),
+        group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
     },
-    async (args) => text(await startChannelChat(ctx, args)),
+    async (args) => text(await startGroupChat(ctx, args)),
   );
 
   registerWrite(
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_channel_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
@@ -459,7 +496,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields. The engine adopts the file, mints its record id, and returns it.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),

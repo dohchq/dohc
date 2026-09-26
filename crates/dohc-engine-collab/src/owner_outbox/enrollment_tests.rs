@@ -114,6 +114,24 @@ fn enroll(
         _ => panic!("unexpected fault"),
     }
 }
+fn remote_changes(store: &EngineStore) -> i64 {
+    store
+        .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+        .unwrap()
+}
+
+/// A host checkpoint holding another computer's edit replaces the native
+/// state with changes this computer never had: one change from elsewhere.
+#[test]
+fn enrollment_onto_a_checkpoint_with_changes_from_elsewhere_counts_once() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let remote = Ydoc::wire();
+    remote.apply(&checkpoint).unwrap();
+    remote.richdoc_append_paragraph("another computer's edit");
+    let input = input(&store, &observed, bounded(&remote).unwrap());
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(remote_changes(&store), 1);
+}
 #[test]
 fn converged_enrollment_reopens_without_pending_and_uncertain_retry_discovers_commit() {
     let (dir, mut store, observed, checkpoint) = fixture();
@@ -121,6 +139,7 @@ fn converged_enrollment_reopens_without_pending_and_uncertain_retry_discovers_co
     let result = enroll(&mut store, &input, &observed.limits).unwrap();
     assert_eq!(result.pending_bytes, 0);
     assert!(result.outbox_id.is_none());
+    assert_eq!(remote_changes(&store), 0, "the host had nothing new");
     assert!(enroll(&mut store, &input, &observed.limits).is_err());
     drop(store);
     let store = EngineStore::open(&dir.join("engine.db"), 11).unwrap();
@@ -153,6 +172,11 @@ fn divergent_enrollment_retains_exact_local_state_and_replaces_only_accepted_nat
     let local_bytes = bounded(&local).unwrap();
     let result = enroll(&mut store, &input, &observed.limits).unwrap();
     assert_eq!(result.pending_bytes, local_bytes.len() as i64);
+    assert_eq!(
+        remote_changes(&store),
+        0,
+        "only this computer's pending edit differs"
+    );
     assert!(result.native_head_sequence > input.captured.native_head_sequence);
     store
         .read_with(|conn| {

@@ -7,11 +7,14 @@ import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
-export const CLI_PROTOCOL_VERSION = 3;
-export const CLI_JSON_SCHEMA_VERSION = 1;
+export const CLI_PROTOCOL_VERSION = 4;
+export const CLI_JSON_SCHEMA_VERSION = 2;
 
+// Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
+// Who wrote a message the CLI reads back.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -23,9 +26,9 @@ const argsBase = {
   actor: cliActorSchema,
 };
 
-const channelsArgsSchema = z.object(argsBase).strict();
+const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
-  .object({ ...argsBase, channel: z.string().min(1) })
+  .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
 const showArgsSchema = z
@@ -35,7 +38,7 @@ const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
-    channel: z.string().min(1),
+    group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
@@ -69,7 +72,7 @@ const grepArgsSchema = z
   .object({
     ...argsBase,
     pattern: z.string().min(1),
-    channel: z.string().min(1).optional(),
+    group: z.string().min(1).optional(),
     thread: z.string().min(1).optional(),
     from: z.string().min(1).optional(),
     since: z.string().min(1).optional(),
@@ -82,7 +85,7 @@ const grepArgsSchema = z
   .strict();
 const exportScopeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
-  z.object({ kind: z.literal("channel"), channel: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("group"), group: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("thread"), thread: z.string().min(1) }).strict(),
 ]);
 const exportArgsSchema = z
@@ -109,7 +112,44 @@ const fileChatsArgsSchema = z
 const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
-const channelsFullArgsSchema = z.object(argsBase).strict();
+const groupsFullArgsSchema = z.object(argsBase).strict();
+
+const documentPathArg = z.string().min(1).max(4096);
+// Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
+// request line over 1 MiB, which JSON escaping of both sides can reach.
+const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
+function fitsUtf8Bytes(value: string, limit: number): boolean {
+  if (value.length > limit) return false;
+  return value.length * 3 <= limit || new TextEncoder().encode(value).length <= limit;
+}
+export const documentEditTextSchema = z
+  .string()
+  .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
+    message: "Document edit text is at most 256 KiB as UTF-8.",
+  });
+// A name the calling agent gives itself, recorded as the author of its edits.
+// A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const documentReadArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg })
+  .strict();
+// A key the caller chooses for one request. Sent again with the same key,
+// after a timeout for example, the request returns its first result while
+// dohc runs instead of doing its work twice.
+export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
+const documentEditArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema.optional(),
+    path: documentPathArg,
+    find: documentEditTextSchema.min(1).optional(),
+    replacement: documentEditTextSchema,
+  })
+  .strict();
 
 // Collection field values cross the CLI socket in the engine wire's JSON
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
@@ -137,7 +177,7 @@ const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
 
 const collectionPathArg = z.string().min(1).max(4096);
 const collectionFieldNameArg = z.string().min(1).max(200);
-// The engine mints record ids; the CLI only bounds the claim.
+// The engine owns record ids; the CLI only bounds the claim.
 const collectionRecordIdArg = z.string().min(1).max(200);
 const MAX_COLLECTION_QUERY_SORTS = 8;
 const MAX_COLLECTION_FIELD_WRITES = 64;
@@ -239,7 +279,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
@@ -254,8 +294,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("chat"), args: chatArgsSchema }).strict(),
   z.object({
     ...requestBase,
-    verb: z.literal("channelsFull"),
-    args: channelsFullArgsSchema,
+    verb: z.literal("groupsFull"),
+    args: groupsFullArgsSchema,
   }).strict(),
   z.object({
     ...requestBase,
@@ -277,6 +317,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     verb: z.literal("collectionCreateRecord"),
     args: collectionCreateRecordArgsSchema,
   }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -287,20 +329,20 @@ export type CliRequestWithoutToken = CliRequest extends infer Request
     : never
   : never;
 
-const cliChannelSchema = z
+const cliGroupSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1),
     slug: z.string().min(1),
-    kind: z.enum(["channel", "dm", "agent"]),
+    kind: z.enum(["group", "dm", "agent"]),
     purpose: z.string().min(1).optional(),
   })
   .strict();
-export type CliChannel = z.infer<typeof cliChannelSchema>;
+export type CliGroup = z.infer<typeof cliGroupSchema>;
 
 const cliAuthorSchema = z
   .object({
-    kind: cliActorSchema,
+    kind: cliAuthorKindSchema,
     displayName: z.string().min(1),
   })
   .strict();
@@ -319,14 +361,14 @@ const cliThreadSummarySchema = z
   .strict();
 
 const cliInboxThreadSchema = cliThreadSummarySchema
-  .extend({ channel: cliChannelSchema })
+  .extend({ group: cliGroupSchema })
   .strict();
 
 const cliInboxMentionSchema = z
   .object({
     threadId: z.string().min(1),
     messageId: z.string().min(1),
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     author: cliAuthorSchema,
     createdAtMs: z.number().int().nonnegative(),
     text: z.string(),
@@ -360,7 +402,7 @@ const cliShowThreadSchema = z
   .object({
     id: z.string().min(1),
     title: z.string(),
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     commentCount: z.number().int().nonnegative(),
     openDecisionCount: z.number().int().nonnegative(),
   })
@@ -378,7 +420,7 @@ export type CliGrepContextMessage = z.infer<typeof cliGrepContextMessageSchema>;
 
 const cliGrepMatchSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     author: cliAuthorSchema,
@@ -390,12 +432,12 @@ const cliGrepMatchSchema = z
   .strict();
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
-const channelsResultSchema = z
-  .object({ channels: z.array(cliChannelSchema) })
+const groupsResultSchema = z
+  .object({ groups: z.array(cliGroupSchema) })
   .strict();
 const threadsResultSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threads: z.array(cliThreadSummarySchema),
   })
   .strict();
@@ -413,7 +455,7 @@ const showResultSchema = z
   .strict();
 const postResultSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     title: z.string(),
@@ -465,6 +507,12 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     kind: z.literal("public"),
     principalId: z.string().min(1),
     grantId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("automation"),
+    automationId: z.string().min(1),
+    onBehalfOf: z.string().min(1),
+    depth: z.number().int().nonnegative(),
   }).strict(),
 ]);
 const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
@@ -537,7 +585,7 @@ const rawChatMessageSchema = z
   .object({
     id: rawMessageIdSchema,
     threadId: rawThreadIdSchema,
-    authorKind: cliActorSchema,
+    authorKind: cliAuthorKindSchema,
     authorDisplayName: z.string().min(1),
     authorOwnerDisplayName: z.string().min(1).optional(),
     body: z.string(),
@@ -586,17 +634,17 @@ const chatResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const channelsFullResultSchema = z.discriminatedUnion("ok", [
+const groupsFullResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      channels: z.array(
+      groups: z.array(
         z
           .object({
             id: rawChannelIdSchema,
             name: z.string().min(1),
             slug: z.string().min(1),
-            kind: z.enum(["channel", "dm", "agent"]),
+            kind: z.enum(["group", "dm", "agent"]),
             purpose: z.string().min(1).optional(),
             threadCount: z.number().int().nonnegative(),
             threads: z.array(
@@ -722,11 +770,20 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+const documentReadResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), markdown: z.string() }).strict(),
+  rawFailureSchema,
+]);
+const documentEditResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
+  rawFailureSchema,
+]);
+
 const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
-  channels: channelsResultSchema,
+  groups: groupsResultSchema,
   threads: threadsResultSchema,
   inbox: inboxResultSchema,
   show: showResultSchema,
@@ -739,11 +796,13 @@ const cliResultSchemas = {
   moment: momentResultSchema,
   fileChats: fileChatsResultSchema,
   chat: chatResultSchema,
-  channelsFull: channelsFullResultSchema,
+  groupsFull: groupsFullResultSchema,
   collectionQuery: collectionQueryResultSchema,
   collectionRecord: collectionRecordResultSchema,
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
+  documentRead: documentReadResultSchema,
+  documentEdit: documentEditResultSchema,
 } as const;
 
 export type CliResultByVerb = {

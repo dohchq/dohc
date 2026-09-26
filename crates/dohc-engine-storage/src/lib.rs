@@ -29,6 +29,7 @@ pub mod error;
 pub mod faults;
 pub mod limits;
 pub mod materialize;
+pub mod remote_changes;
 pub mod store;
 
 pub(crate) mod migration;
@@ -56,4 +57,5 @@ pub use materialize::{
     cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job, record_completed_job,
     stamp_secret_capture_owned, upsert_projection_job,
 };
+pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
 pub use store::{EngineStore, TxnOutcome};

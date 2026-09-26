@@ -554,6 +554,78 @@
       }
     },
     {
+      "name": "degraded-colon-relation-target-1-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"C:/projects\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-colon-relation-target-2-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"C:projects\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-colon-relation-target-3-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning/projects:stream\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
       "name": "degraded-c1-relation-target-salvages-siblings",
       "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning\u0085projects\"\n    many: false\n",
       "expected": {
@@ -715,6 +787,91 @@
           {
             "code": "duplicate-value",
             "path": "/views/1/name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "button-field-is-visible-but-never-sorts-groups-or-dates",
+      "yaml": "fields:\n  title:\n    type: text\n  Mark paid:\n    type: button\nviews:\n  - name: All\n    kind: table\n    visibleFields: [title, Mark paid]\n  - name: By button\n    kind: calendar\n    groupBy: Mark paid\n    sort:\n      - field: Mark paid\n        direction: asc\n      - field: title\n        direction: desc\n    dateField: Mark paid\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            },
+            {
+              "name": "Mark paid",
+              "type": "button"
+            }
+          ],
+          "views": [
+            {
+              "name": "All",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": [
+                "title",
+                "Mark paid"
+              ],
+              "dateField": null
+            },
+            {
+              "name": "By button",
+              "kind": "calendar",
+              "groupBy": null,
+              "sort": [
+                {
+                  "field": "title",
+                  "direction": "desc"
+                }
+              ],
+              "visibleFields": null,
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "unsupported-field-reference",
+            "path": "/views/1/groupBy"
+          },
+          {
+            "code": "unsupported-field-reference",
+            "path": "/views/1/sort/0/field"
+          },
+          {
+            "code": "unsupported-field-reference",
+            "path": "/views/1/dateField"
+          }
+        ]
+      }
+    },
+    {
+      "name": "button-field-takes-no-other-properties",
+      "yaml": "fields:\n  Mark paid:\n    type: button\n    options: [Paid]\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "Mark paid",
+              "type": "button"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "unknown-property",
+            "path": "/fields/Mark paid/options"
           }
         ]
       }

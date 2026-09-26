@@ -25,6 +25,7 @@ import {
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openHistoryView,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
@@ -516,7 +517,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   }
 });
 
-test("protected join rolls back for a missing passphrase, then restores exact secret and binary bytes across restart", async () => {
+test("protected join preserves a failed folder, then restores exact secret and binary bytes in a new folder across restart", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "protected-join-e2e";
@@ -529,6 +530,7 @@ test("protected join rolls back for a missing passphrase, then restores exact se
   );
   const binaryBytes = Buffer.from([0x00, 0xff, 0x80, 0x0a, 0x7f, 0x42]);
   const sourceRoot = join(temp.baseDir, "protected-source");
+  const retryRoot = join(temp.baseDir, "protected-retry");
   let relay: SyncRelayHandle | null = null;
   let sourceWorkspace: Awaited<
     ReturnType<typeof openLiveDaemonWorkspace>
@@ -612,32 +614,37 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     await page.getByTestId("join-workspace-start").click();
 
     // The missing passphrase is discovered at the public IPC boundary. The
-    // attempt must leave neither local files nor a hidden registry entry.
+    // attempt preserves its manifest but releases its registry entry.
     await expect(page.getByTestId("join-sync-passphrase")).toBeVisible();
     await expect(page.getByTestId("join-error")).toHaveText(
-      "This workspace has protected files. Enter the protected-file passphrase to join.",
+      `This workspace has protected files. Enter the protected-file passphrase. Files remain in ${temp.rootPath}. Choose another empty folder to try again.`,
     );
     await expect
       .poll(async () => (await readdir(temp.rootPath)).sort())
-      .toEqual([]);
+      .toContain(".dohc");
+    const retainedManifest = await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8");
     await expect.poll(() => workspaceIsRegistered(page, workspaceId)).toBe(false);
 
     // Retry through the same public button. Successful materialization proves
     // the envelope key was installed before the pull tried to decrypt .env.
     await page.getByTestId("join-sync-passphrase").fill(passphrase);
+    await expect(page.getByTestId("join-workspace-start")).toBeDisabled();
+    await mkdir(retryRoot);
+    await desktop.app.evaluate((_electron, path) => { process.env.DOHC_TEST_PICK_PATH = path; }, retryRoot);
+    await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
       workspaceId,
     );
     await expect
-      .poll(() => fileMatches(join(temp.rootPath, secretPath), secretBytes))
+      .poll(() => fileMatches(join(retryRoot, secretPath), secretBytes))
       .toBe(true);
     await expect
-      .poll(() => fileMatches(join(temp.rootPath, binaryPath), binaryBytes))
+      .poll(() => fileMatches(join(retryRoot, binaryPath), binaryBytes))
       .toBe(true);
     expect(
-      (await readFile(join(temp.rootPath, SECRET_KEY_RELATIVE_PATH))).length,
+      (await readFile(join(retryRoot, SECRET_KEY_RELATIVE_PATH))).length,
     ).toBeGreaterThan(0);
 
     // Relaunch with the same profile and registry. The joined key and both
@@ -647,15 +654,16 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
       workspaceId,
     );
-    expect(await fileMatches(join(temp.rootPath, secretPath), secretBytes)).toBe(
+    expect(await fileMatches(join(retryRoot, secretPath), secretBytes)).toBe(
       true,
     );
-    expect(await fileMatches(join(temp.rootPath, binaryPath), binaryBytes)).toBe(
+    expect(await fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(
       true,
     );
+    expect(await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8")).toBe(retainedManifest);
   } finally {
     await sourceCapture?.stop().catch(() => undefined);
     await sourceWorkspace?.close().catch(() => undefined);
@@ -860,6 +868,147 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
+    await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+type OpenDocumentSyncWindow = {
+  dohcDesktop: Pick<
+    DohcDesktopBridge,
+    "cloudEnableSync" | "onEngineYDocLineageReplacement"
+  >;
+  lineageReplacements: number;
+};
+
+// Turning sync on claims the open document's lineage, so main hands the editor
+// a replacement document while the person is still typing. The handoff once
+// read `process`, which the sandboxed renderer does not have, and left the
+// editor read-only until the document was reopened.
+test("typing continues while enabling sync replaces the open document", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "enable-open-doc-e2e";
+  const path = "notes/plan.md";
+  const readPlan = () =>
+    readFile(join(temp.rootPath, path), "utf8").catch(() => "");
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path, contents: "# Plan\n\nLocal draft.\n" },
+    ]);
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      userId: "e2e-user",
+    });
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: {
+        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+        DOHC_TEST_SYNC_BACKOFF_MS: "250",
+      },
+    });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await explorerRow(page, "notes").click();
+    await explorerRow(page, path).click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Before sync.");
+    await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
+
+    const enabled = await page.evaluate(async (id) => {
+      const target = window as unknown as OpenDocumentSyncWindow;
+      target.lineageReplacements = 0;
+      target.dohcDesktop.onEngineYDocLineageReplacement(() => {
+        target.lineageReplacements += 1;
+      });
+      return await target.dohcDesktop.cloudEnableSync({ workspaceId: id }).then(
+        () => "ok",
+        (error: unknown) => String(error),
+      );
+    }, workspaceId);
+    expect(enabled).toBe("ok");
+
+    // The first edit after enabling sync is what makes main hand over the
+    // replacement, so that edit is still unsaved when the handoff runs. A
+    // replacement that arrived before it would test nothing, so refuse that.
+    const replacements = () =>
+      page.evaluate(
+        () => (window as unknown as OpenDocumentSyncWindow).lineageReplacements,
+      );
+    expect(await replacements(), "the replacement arrived before any typing").toBe(0);
+    // One input event, so the marker is one update that cannot be split
+    // across the handoff.
+    await page.keyboard.insertText(" pending-marker");
+    await expect.poll(replacements, { timeout: 90_000 }).toBeGreaterThan(0);
+
+    // The marker was unsaved when the document was replaced. It must be on
+    // disk or in a stored set-aside draft, and the notice must offer it.
+    const setAsideDrafts = () =>
+      page.evaluate(() => Object.keys(localStorage)
+        .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+        .map(key => localStorage.getItem(key) ?? "").join("\n"));
+    await expect
+      .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
+        timeout: 30_000,
+      })
+      .toContain("pending-marker");
+    const setAside = !(await readPlan()).includes("pending-marker");
+    if (setAside) {
+      await expect(page.getByTestId("orphaned-draft-notice")).toBeVisible();
+    }
+
+    await expect(editor).toHaveAttribute("contenteditable", "true", {
+      timeout: 30_000,
+    });
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(" After the handoff.");
+    await expect.poll(readPlan, { timeout: 30_000 }).toContain("After the handoff.");
+    await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(
+      "data-state",
+      "read-only",
+    );
+    expect(
+      desktop.logs
+        .filter((entry) => /lineage handoff failed/.test(entry.text))
+        .map((entry) => entry.text),
+    ).toEqual([]);
+
+    // A set-aside draft outlives the app. Restart on the same profile: the
+    // stored row must load and the notice center must still offer it.
+    if (setAside) {
+      await desktop.close();
+      desktop = await launchDesktopApp({ workspace: temp });
+      const restarted = desktop.page;
+      await openWorkspaceFromFirstRun(restarted, temp);
+      expect(
+        await restarted.evaluate(
+          () => Object.keys(localStorage)
+            .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+            .map(key => localStorage.getItem(key) ?? "").join("\n"),
+        ),
+      ).toContain("pending-marker");
+      await restarted.getByTestId("notice-center-toggle").click();
+      await expect(restarted.getByTestId("notice-set-aside-edits")).toContainText(
+        "1 set-aside edit is waiting",
+      );
+    }
+  } finally {
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
   }

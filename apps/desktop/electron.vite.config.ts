@@ -49,6 +49,8 @@ export const mainBuildEntries = {
   "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
   "workspace-database-worker":
     "src/workspaces/workspaceDatabaseThread.ts",
+  "document-projection-worker":
+    "src/workspaces/documentProjectionThread.ts",
 };
 
 function effectFree(surface: "preload" | "renderer"): Plugin {

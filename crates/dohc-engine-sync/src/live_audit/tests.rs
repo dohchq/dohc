@@ -101,6 +101,7 @@ fn contact(store: &mut EngineStore) {
         store,
         "ws",
         &RelayCursor {
+            bootstrap_complete: true,
             cursor: 0,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
@@ -451,6 +452,43 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
 }
 
 #[test]
+fn origin_recovery_keeps_pending_live_exports_publishable() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let ops = operations(&f.store);
+    let relay = crate::tests::FakeRelay::default();
+    *relay.pull.lock().unwrap() = Some(crate::PullResponse {
+        next_cursor: ops.len() as i64,
+        ops,
+        has_more: false,
+    });
+    let recovery = crate::RelaySyncClient::new(relay);
+    let recovered = recovery
+        .recover_origin(&mut f.store, "ws", "recovered-owner", &NoFaults)
+        .unwrap();
+    assert_eq!(recovered.preserved_ops, 0);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            assert!(crate::workspace_replicates_with_relay_in_tx(tx, "ws")?);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    f.store = EngineStore::open(&f.path, 202).unwrap();
+    let cursor = crate::read_relay_cursor(&f.store, "ws").unwrap().unwrap();
+    assert_eq!(cursor.cursor, 0);
+    assert!(cursor.bootstrap_complete);
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .push_workspace(&mut f.store, "ws", &NoFaults, 203, 100_000_000)
+        .expect("pending exports must survive origin recovery without another pull");
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+}
+
+#[test]
 fn retained_base_export_preserves_a_different_current_marker() {
     let mut f = fixture(false);
     bootstrap(&mut f, false).unwrap();
@@ -636,7 +674,7 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
             })
         )
         .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let seq = f
         .store

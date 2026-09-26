@@ -25,7 +25,7 @@ export function createJoinedWorkspaceRunner(dependencies: {
     reservation: WorkspaceAuthorityReservation,
     cleanup: () => Promise<void>,
   ): Promise<void>;
-  cleanup(workspaceId: string, rootPath: string): Promise<void>;
+  closeRelay(workspaceId: string): Promise<void>;
   rollbackComplete(): void;
   logError(message: string, error: unknown): void;
 }) {
@@ -58,8 +58,9 @@ export function createJoinedWorkspaceRunner(dependencies: {
         error,
       );
       try {
-        const cleanup = () =>
-          dependencies.cleanup(input.workspaceId, input.rootPath);
+        // The empty-folder check cannot establish ownership of later writes.
+        // Release resources, but keep all files for recovery in this folder.
+        const cleanup = () => dependencies.closeRelay(input.workspaceId);
         if (binding) {
           await dependencies.remove(binding, cleanup);
         } else {

@@ -113,7 +113,7 @@ it("streams a 100 MiB staged checkpoint and arbitrary chunk boundaries without a
   expect(f.largestRead).toBeLessThanOrEqual(chunkBytes);
   expect(f.journal.checkpointStages({ workspaceId: "w", authorize })).toEqual([]);
   expect(() => f.journal.discardCheckpoint({ stage: sealed, authorize, account: f.account })).toThrow("Active checkpoints");
-}, 30_000);
+});
 
 it("retains staged reservations after restart and releases only the selected unactivated stage", () => {
   const f = fixture(), bytes = new Uint8Array(100).fill(9), first = stage(f, bytes), second = stage(f, bytes);

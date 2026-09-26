@@ -42,7 +42,10 @@ export function ViewsDialog(props: {
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const viewNames = props.schema.views.map((view) => view.name);
-  const fieldNames = props.schema.fields.map((field) => field.name);
+  // A board groups by stored values, and a button stores none.
+  const groupFieldNames = props.schema.fields
+    .filter((field) => field.type !== "button")
+    .map((field) => field.name);
   const dateFieldNames = props.schema.fields
     .filter((field) => field.type === "date")
     .map((field) => field.name);
@@ -227,7 +230,7 @@ export function ViewsDialog(props: {
               className={selectClass}
             >
               <option value="">Choose a field to group by</option>
-              {fieldNames.map((name) => (
+              {groupFieldNames.map((name) => (
                 <option key={name} value={name}>
                   {name}
                 </option>

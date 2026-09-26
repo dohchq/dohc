@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { AppBackendRuntimeError, createAppBackendRuntime, evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "./index.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,8 +18,11 @@ const source = `globalThis.operations = {
   inspect(ctx) { return ctx.db.query('SELECT * FROM stock'); }
 };`;
 
-async function request(overrides: Partial<EvaluateAppOperationInput> = {}): Promise<EvaluateAppOperationInput> {
-  return { tables, database: overrides.database ?? await initializeAppDatabase({ tables, schemaSql }), source, operation: "reserve",
+// Operations never modify their input snapshot, so tests share one initialized database.
+let database: Uint8Array;
+beforeAll(async () => { database = await initializeAppDatabase({ tables, schemaSql }); });
+function request(overrides: Partial<EvaluateAppOperationInput> = {}): EvaluateAppOperationInput {
+  return { tables, database, source, operation: "reserve",
     input: {quantity:1}, caller: {kind:"public",id:"verified"}, requestId:"request-1", nowMs:1000, ...overrides };
 }
 
@@ -38,7 +41,7 @@ describe("app operation runtime", () => {
     expect(()=>createAppBackendRuntime({entryPath:"relative/child.mjs"})).toThrow("absolute");
   });
   it("validates recovery snapshots against the exact approved schema in isolation", async () => {
-    const input=await request();
+    const input=request();
     const candidate=await evaluateAppOperation(input);
     await expect(validateAppDatabase({database:candidate.database,tables,schemaSql})).resolves.toBeUndefined();
     await expect(validateAppDatabase({database:candidate.database,tables,schemaSql:schemaSql.replace("CHECK(remaining>=0)","CHECK(remaining>=-1)")})).rejects.toThrow("approved schema");
@@ -46,7 +49,7 @@ describe("app operation runtime", () => {
     await expect(validateAppDatabase({database:corrupt,tables,schemaSql})).rejects.toThrow();
   });
   it("returns an isolated candidate and changeset, without modifying its baseline", async () => {
-    const input = await request();
+    const input = request();
     const baseline = Buffer.from(input.database);
     const [first, second] = await Promise.all([evaluateAppOperation(input),evaluateAppOperation(input)]);
     expect(first.result).toEqual({id:"request-1",quantity:1});
@@ -62,7 +65,7 @@ describe("app operation runtime", () => {
   });
 
   it("offers no host capabilities and freezes the verified context", async () => {
-    const input = await request({operation:"inspect",source:`globalThis.operations={inspect(ctx,input){
+    const input = request({operation:"inspect",source:`globalThis.operations={inspect(ctx,input){
       ctx.caller.id='forged'; input.quantity=42;
       return [typeof process,typeof require,typeof fetch,typeof WebAssembly,typeof __query,ctx.caller.id,input.quantity,Object.isFrozen(ctx.db)];
     }};`});
@@ -79,12 +82,12 @@ describe("app operation runtime", () => {
     "SELECT * FROM sqlite_schema",
     "DROP TABLE stock",
   ])("rejects SQL outside approved data: %s", async sql => {
-    const input = await request({source:`globalThis.operations={reserve(ctx){return ctx.db.execute(${JSON.stringify(sql)})}};`});
+    const input = request({source:`globalThis.operations={reserve(ctx){return ctx.db.execute(${JSON.stringify(sql)})}};`});
     await expect(evaluateAppOperation(input)).rejects.toThrow();
   });
 
   it("refuses writes from reads, and rolls back candidates after exceptions", async () => {
-    const input = await request({readOnly:true});
+    const input = request({readOnly:true});
     await expect(evaluateAppOperation(input)).rejects.toThrow();
     await expect(evaluateAppOperation({...input,readOnly:false,source:`globalThis.operations={reserve(ctx){ctx.db.query('DELETE FROM stock RETURNING id');return true}}`})).rejects.toThrow();
     const read = await evaluateAppOperation({...input,operation:"inspect"});
@@ -97,18 +100,19 @@ describe("app operation runtime", () => {
     "return {toJSON(){while(true){}}}",
     "const rows=[];while(true)rows.push('x'.repeat(10000));",
   ])("bounds guest execution and serialization: %s", async body => {
-    const input = await request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:2*1024*1024}});
-    await expect(evaluateAppOperation(input)).rejects.toThrow();
+    const input = request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:16*1024*1024}});
+    // The guest limit must stop it. The worker deadline kill reports "exceeded its deadline" instead.
+    await expect(evaluateAppOperation(input)).rejects.toThrow(/^App operation (?:failed\.|needed more than its 16 MiB memory limit, so it stopped\.)$/);
   });
 
   it("kills a native SQL runaway and accepts a following operation", async () => {
-    const input = await request({source:`globalThis.operations={reserve(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n')}}`, limits:{deadlineMs:1500,evaluationMs:100}});
+    const input = request({source:`globalThis.operations={reserve(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n')}}`, limits:{deadlineMs:1500,evaluationMs:100}});
     await expect(evaluateAppOperation(input)).rejects.toThrow("deadline");
     expect((await evaluateAppOperation({...input,source,operation:"inspect",limits:undefined})).result).toEqual([{id:"item",remaining:1}]);
   });
 
   it("cancels queued and running operations", async () => {
-    const input=await request();
+    const input=request();
     await expect(evaluateAppOperation({...input,signal:AbortSignal.abort()})).rejects.toThrow("cancelled");
     const controller=new AbortController();
     const pending=evaluateAppOperation({...input,signal:controller.signal,source:"globalThis.operations={reserve(){while(true){}}}"});
@@ -117,12 +121,12 @@ describe("app operation runtime", () => {
   });
 
   it("uses the supplied request secret without exposing it to unrelated results", async () => {
-    const input=await request({secret:"a".repeat(43),source:"globalThis.operations={reserve(ctx){return ctx.secret}}"});
+    const input=request({secret:"a".repeat(43),source:"globalThis.operations={reserve(ctx){return ctx.secret}}"});
     expect((await evaluateAppOperation(input)).result).toBe("a".repeat(43));
   });
 
   it("bounds rows, statements, and returned JSON", async () => {
-    const input = await request();
+    const input = request();
     for(const [body,limits] of [
       ["return ctx.db.query('SELECT 1 UNION ALL SELECT 2')",{queryRows:1}],
       ["ctx.db.query('SELECT 1');return ctx.db.query('SELECT 2')",{statements:1}],
@@ -130,8 +134,14 @@ describe("app operation runtime", () => {
     ] as const) await expect(evaluateAppOperation({...input,source:`globalThis.operations={reserve(ctx){${body}}}`,limits})).rejects.toThrow();
   });
 
+  it("names the memory limit an operation reached and accepts only limits QuickJS can start in", async () => {
+    const input = request({source:"globalThis.operations={reserve(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}"});
+    await expect(evaluateAppOperation(input)).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+    for(const memoryBytes of [2*1024*1024,20*1024*1024+1,32*1024*1024]) await expect(evaluateAppOperation({...input,limits:{memoryBytes}})).rejects.toThrow("Invalid app runtime limit.");
+  });
+
   it("preserves a structured refusal even if guest code catches it", async () => {
-    const input=await request({source:`globalThis.operations={reserve(ctx){
+    const input=request({source:`globalThis.operations={reserve(ctx){
       ctx.db.execute('DELETE FROM stock');
       try {ctx.refuse('capacity_full','This session is full.')}catch{}
       return {ok:true};
@@ -144,7 +154,7 @@ describe("app operation runtime", () => {
 
   it("attaches only admitted file metadata, without exposing file bytes", async () => {
     const file={fileId:"receipt-1",name:"receipt.png",contentType:"image/png",byteLength:123,sha256:"a".repeat(64)};
-    const input=await request({files:[file],source:`globalThis.operations={reserve(ctx){const file=ctx.files.attach('receipt-1');return {file,frozen:Object.isFrozen(file)}}}`});
+    const input=request({files:[file],source:`globalThis.operations={reserve(ctx){const file=ctx.files.attach('receipt-1');return {file,frozen:Object.isFrozen(file)}}}`});
     const result=await evaluateAppOperation(input);
     expect(result.result).toEqual({file,frozen:true});
     expect(result.attachedFileIds).toEqual(["receipt-1"]);
@@ -163,7 +173,7 @@ describe("app operation runtime", () => {
 
   it("supports constraints, indexes, and triggers", async () => {
     const database=await initializeAppDatabase({tables:["items"],schemaSql:`CREATE TABLE items(id INTEGER PRIMARY KEY, amount INTEGER CHECK(amount>=0)); CREATE INDEX items_amount ON items(amount); CREATE TRIGGER bounded BEFORE INSERT ON items WHEN new.amount>5 BEGIN SELECT RAISE(ABORT,'limit'); END;`});
-    const input=await request({tables:["items"],database,source:`globalThis.operations={reserve(ctx){ctx.db.execute('INSERT INTO items VALUES(1,6)');return true}}`});
+    const input=request({tables:["items"],database,source:`globalThis.operations={reserve(ctx){ctx.db.execute('INSERT INTO items VALUES(1,6)');return true}}`});
     await expect(evaluateAppOperation(input)).rejects.toThrow();
   });
 });

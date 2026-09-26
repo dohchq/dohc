@@ -28,34 +28,30 @@ function linkIn(message: EmailMessage): URL {
   return new URL(match[0]);
 }
 
-async function postgresReachable(): Promise<boolean> {
-  const probe = new Client({
-    connectionString: POSTGRES_URL,
-    connectionTimeoutMillis: 2000,
-  });
-  try {
-    await probe.connect();
-    await probe.end();
-    return true;
-  } catch {
-    return false;
+// A refused connection fails at once, so a run without Postgres still skips
+// immediately. The timeout covers only a slow answer: under the full JS gate a
+// 2 s bound timed out against a healthy database.
+const probe = new Client({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 30_000 });
+let pgAvailable = false;
+try {
+  await probe.connect();
+  await probe.end();
+  pgAvailable = true;
+} catch (error) {
+  // Self-skipping is right for local dev, and wrong anywhere this suite is the
+  // thing standing between a change and the collab surface's authorization
+  // behaviour. In CI a Postgres that failed to start would otherwise skip every
+  // test here and report green -- a hollow pass. DOHC_REQUIRE_POSTGRES turns an
+  // unreachable database into a failure instead.
+  if (process.env.DOHC_REQUIRE_POSTGRES === "1") {
+    throw new Error(
+      `DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}. ` +
+        "These tests apply the real 0001_better_auth.sql migration and exercise " +
+        "session/authorization behaviour through it; skipping them here would " +
+        "report green without checking anything.",
+      { cause: error },
+    );
   }
-}
-
-const pgAvailable = await postgresReachable();
-
-// Self-skipping is right for local dev, and wrong anywhere this suite is the
-// thing standing between a change and the collab surface's authorization
-// behaviour. In CI a Postgres that failed to start would otherwise skip every
-// test here and report green -- a hollow pass. DOHC_REQUIRE_POSTGRES turns an
-// unreachable database into a failure instead.
-if (!pgAvailable && process.env.DOHC_REQUIRE_POSTGRES === "1") {
-  throw new Error(
-    `DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}. ` +
-      "These tests apply the real 0001_better_auth.sql migration and exercise " +
-      "session/authorization behaviour through it; skipping them here would " +
-      "report green without checking anything.",
-  );
 }
 
 const describeWithPostgres = describe.skipIf(!pgAvailable);

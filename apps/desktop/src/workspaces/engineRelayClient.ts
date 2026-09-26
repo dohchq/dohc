@@ -1,5 +1,6 @@
 import { runInKeyedLane } from "../keyedLane";
 import {
+  RelayApiVersionError,
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -23,6 +24,8 @@ import {
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
+  type DirectWriteReport,
+  type PushDirectWritesResult,
   type SubmitShareProposalResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
@@ -283,6 +286,38 @@ function nullableStringField(
   return field;
 }
 
+function directWriteReport(value: JsonValue, method: string): DirectWriteReport {
+  const write = resultRecord(value, method);
+  if (
+    !Array.isArray(write.paths) ||
+    write.paths.length === 0 ||
+    !write.paths.every((path) => typeof path === "string")
+  ) {
+    throw new Error(`Rust engine ${method} returned a write with no paths.`);
+  }
+  const paths = write.paths as string[];
+  switch (write.result) {
+    case "written":
+      return { paths, result: "written" };
+    case "stale":
+      return {
+        paths,
+        result: "stale",
+        stalePath: stringField(write, "stalePath", method),
+        currentBlobSha256: nullableStringField(write, "currentBlobSha256", method),
+      };
+    case "refused":
+      // The relay's own sentence. It may be empty, and the desktop words the
+      // refusal itself either way.
+      if (typeof write.reason !== "string") {
+        throw new Error(`Rust engine ${method}.reason must be a string.`);
+      }
+      return { paths, result: "refused", reason: write.reason };
+    default:
+      throw new Error(`Rust engine ${method} returned an unknown write result.`);
+  }
+}
+
 function booleanField(
   value: Record<string, JsonValue | undefined>,
   key: string,
@@ -439,6 +474,10 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
+    if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
+    if (error.message === "relay-api-version-too-new") throw new RelayApiVersionError("server");
+  }
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
@@ -469,7 +508,7 @@ function translateRelayError(method: string, error: unknown): never {
   // the code, decides which noun the reader sees. Proposal submission is a
   // file-share operation, so this reads as the file.
   if (
-    method === "share.proposal.submit" &&
+    (method === "share.proposal.submit" || method === "share.direct.push") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "share-read-only"
   ) {
@@ -501,6 +540,10 @@ export interface EngineRelayWorkspaceClient {
   pullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
+    // Called after each page whose ops the engine applied. The engine commits
+    // a page before the next one is requested, so a caller learns of applied
+    // ops even when a later page fails.
+    onApplied?: () => void;
   }): Promise<PullSharedChannelResult>;
   pushSharedChannel(input: {
     shareId: string;
@@ -541,7 +584,7 @@ export interface EngineRelayWorkspaceClient {
   //
   // The identity components are minted by the ENGINE, the same way sync.claim
   // mints its own. The origin is a REPLICA id — the relay namespaces this
-  // recipient's ops as `share:<shareId>:<originId>` — so it must never be the
+  // recipient's ops by share, authenticated member, and replica — so it must never be the
   // recipient's user id, which two of their devices would share. Minting it
   // engine-side is also what makes a refresh safe: the durable row is the
   // record, so nothing here has to remember an id between calls.
@@ -568,6 +611,18 @@ export interface EngineRelayWorkspaceClient {
     // instead of opening a second one.
     submitId: string;
   }): Promise<SubmitShareProposalResult>;
+
+  // This replica's changes to a Collection's own files, written directly
+  // into the granter's workspace (ADR 0013). Every other change stays for
+  // Send changes. The engine writes nothing below `edit`.
+  pushDirectWrites(input: {
+    shareId: string;
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+  }): Promise<PushDirectWritesResult>;
 }
 
 export interface EngineRelayClientOptions {
@@ -892,7 +947,7 @@ export class EngineRelayClient {
             workspaceId: workspace.workspaceId,
           }),
         ),
-      pullSharedChannel: async ({ shareId, channelWireId }) => {
+      pullSharedChannel: async ({ shareId, channelWireId, onApplied }) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
@@ -925,9 +980,11 @@ export class EngineRelayClient {
           );
           previousCursor = pageCursor;
           nextCursor = pageCursor;
+          const pageApplied = numberField(result, "applied", "share.channel.pull");
           fetched += numberField(result, "fetched", "share.channel.pull");
-          applied += numberField(result, "applied", "share.channel.pull");
+          applied += pageApplied;
           skipped += numberField(result, "skipped", "share.channel.pull");
+          if (pageApplied > 0) onApplied?.();
           if (!hasMore) break;
         }
         return {
@@ -1020,6 +1077,28 @@ export class EngineRelayClient {
             "share.proposal.submit",
           ),
           morePending: booleanField(result, "morePending", "share.proposal.submit"),
+        };
+      },
+      pushDirectWrites: async ({ shareId, grantedSelector }) => {
+        const method = "share.direct.push";
+        const result = resultRecord(
+          await request(method, {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+          }),
+          method,
+        );
+        if (!Array.isArray(result.writes)) {
+          throw new Error(`Rust engine ${method} returned no writes.`);
+        }
+        return {
+          writes: result.writes.map((write) => directWriteReport(write, method)),
+          morePending: booleanField(result, "morePending", method),
         };
       },
       pullShareView: async ({

@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import {
   CSS_TOKEN_NAMES,
   IDENTITY_HUES,
+  fonts,
   identityHues,
   palette,
   type ThemeTokens,
@@ -64,6 +66,10 @@ describe("WCAG AA contrast, both modes", () => {
     // at 4.27 — the physical ceiling while the mark itself holds 3:1 against
     // the selected-row bg (bold weight carries the remaining gap).
     { fg: "ink", bg: "match", min: 4.2 },
+    // Labels on filled buttons use the paper color: primary on accent, and
+    // destructive confirms on danger. White on dark-theme danger was 2.7:1.
+    { fg: "bg", bg: "accent", min: 4.5 },
+    { fg: "bg", bg: "danger", min: 4.5 },
   ];
 
   for (const mode of ["light", "dark"] as const) {
@@ -119,6 +125,34 @@ describe("styles.css mirrors tokens.ts", () => {
       for (const [name, value] of expected) {
         expect(blocks[mode], name).toContain(`${name}: ${value};`);
       }
+    });
+  }
+
+  it("type stacks match", () => {
+    for (const [name, value] of Object.entries(fonts)) {
+      expect(blocks.light, name).toContain(`${name}: ${value};`);
+    }
+  });
+});
+
+// main.tsx bundles both families through fontsource. A stack whose first name
+// is not the one the package's @font-face rules declare fails silently: every
+// surface renders in the system fallback and nothing reports it.
+describe("the type stacks name the bundled families", () => {
+  const require = createRequire(import.meta.url);
+  const declaredFamilies = (specifier: string) =>
+    new Set(
+      [...readFileSync(require.resolve(specifier), "utf8").matchAll(/font-family:\s*['"]?([^'";]+)['"]?;/g)]
+        .map((match) => match[1]),
+    );
+  const firstFamily = (stack: string) => stack.split(",")[0].trim().replace(/^"|"$/g, "");
+
+  for (const [token, specifier] of [
+    ["--font-sans", "@fontsource-variable/inter"],
+    ["--font-mono", "@fontsource/ibm-plex-mono/400.css"],
+  ] as const) {
+    it(`${token} is the family ${specifier} declares`, () => {
+      expect(declaredFamilies(specifier)).toEqual(new Set([firstFamily(fonts[token])]));
     });
   }
 });

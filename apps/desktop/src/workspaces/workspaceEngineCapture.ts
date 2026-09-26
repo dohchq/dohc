@@ -18,6 +18,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import {
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
@@ -241,7 +242,7 @@ export interface WorkspaceEngineMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: "text" | "binary";
   byteLength?: number;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   author?: MomentAuthor;
   momentOrder: number;
   protected: boolean;
@@ -375,8 +376,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // state without them, falling back to device attribution — the same
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
-  // claim id plus its write ordinal), so a re-run handler's identical write
-  // dedupes engine-side.
+  // claim id, attempt, and write ordinal), so a retried request of the same
+  // write dedupes engine-side.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -386,6 +387,21 @@ export type WorkspaceEngineYDocProviderSession = Omit<
       idempotencyKey?: string;
     },
   ): void;
+  // A local update decided when its turn on this session's chain comes:
+  // `decide` reads the canonical doc as it stands then and returns the
+  // update, or null for none. A check it makes and the write it chooses see
+  // the same state, which a caller comparing against `initialUpdate` cannot
+  // promise. Resolves whether an update was journaled; rejects when the
+  // session closed before its turn or `decide` threw.
+  applyDecidedLocalUpdate(
+    decide: (doc: Y.Doc) => Uint8Array | null,
+    onArmed?: () => void,
+    options?: {
+      actorOriginId?: string;
+      attribution?: ChangeAttributionWire;
+      idempotencyKey?: string;
+    },
+  ): Promise<boolean>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
@@ -1265,7 +1281,7 @@ function assertEngineWritablePath(
   // The disk-materialize boundary runs Check A + Check B (win32): a name that
   // cannot be written on this disk is refused here (and surfaced) while
   // classification/capture/store writes stayed permissive (Check A only).
-  const check = validateUserMaterializePath(path);
+  const check = validateUserMaterializePath(path, { platform: process.platform });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }
@@ -2193,6 +2209,113 @@ export function createWorkspaceEngineCapture(
     const openedHead = current.head;
     const openedLineage = current.lineage;
 
+    // Journals one local update on this session's chain. `decide` runs when
+    // the update's turn comes and reads the canonical doc as it stands then,
+    // with every remote update this process has received, so a check it
+    // makes and the update it returns cannot be split by one. It returns
+    // null to journal nothing. Resolves whether an update was journaled; a
+    // failure after deciding is this session's to recover, and is reported
+    // here rather than to the caller.
+    const journalLocalUpdate = (
+      decide: (doc: Y.Doc) => Uint8Array | null,
+      onArmed: (() => void) | undefined,
+      applyOptions: Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2],
+    ): Promise<boolean> => {
+      // One announcement per update, at the first provider call that arms a
+      // settle carrying it. Three calls can be that first one — the live
+      // generation's own, a dead session's revive replay, and a failed
+      // generation's recovery replay — and which one gets there depends on
+      // how the generation failed. Handing the same once-guarded function to
+      // all three is what stops that from mattering: the count can neither
+      // lead the armed settle (a "Saved" over content it never carried) nor
+      // lag it (a settle that saves the edit while vouching for a seq below
+      // it, leaving the document on "Saving…" with nothing left to arm
+      // another settle). #514, and its two review rounds.
+      const armed = announceOnce(onArmed);
+      let decided = false;
+      return append(async () => {
+        if (canonicalDoc === null || closed) throw closedError();
+        const doc = canonicalDoc;
+        const update = decide(doc);
+        decided = true;
+        if (update === null) return false;
+        // The renderer has already accepted this update, so the canonical doc
+        // — the renderer's truth — records it before anything else may fail.
+        // A daemon generation is rebuilt around that text, never instead of
+        // it: dropping the update here is exactly how visible typing vanished
+        // once a generation died.
+        if (current === null) {
+          Y.applyUpdate(doc, update);
+          // The revive replays the canonical doc — this update included —
+          // into the new generation. It announces the update when that
+          // replay is ARMED, not when its journal RPC returns.
+          await reviveDeadSession(doc, armed);
+          return true;
+        }
+        const generation = current;
+        try {
+          // The provider journals and arms its settle synchronously inside
+          // this call, so the update is covered from here. Announce it before
+          // awaiting the journal round trip: the settle it just armed may
+          // start before that round trip returns.
+          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          armed();
+          await journaled;
+          Y.applyUpdate(doc, update);
+          // A successful record can promote a local-only lineage. Retain
+          // the durable claim now; later deltas change the full-state hash.
+          if (
+            canonicalLineageClaimId === null &&
+            generation.lineageClaimId != null
+          ) {
+            canonicalLineageClaimId = generation.lineageClaimId;
+          }
+        } catch (error) {
+          // A live refusal still owns its lease and must close first; a
+          // transport restart opens first because the old daemon is gone.
+          //
+          // A SYNCHRONOUS refusal threw before the line above, so nothing was
+          // armed and nothing announced. The recovery replay below is then
+          // the first and only settle that will carry this edit, and the
+          // once-guard makes announcing there a no-op when the failure was
+          // asynchronous and the count already rose.
+          Y.applyUpdate(doc, update);
+          // This is an invariant breach, not a reconnect. Rebinding would
+          // replace this still-visible editor with the winner and silently
+          // discard the refused keystroke. Keep the old document visible
+          // and report the failure; the server's live-session drain rule
+          // makes this branch unreachable in an ordinary arbitration.
+          if (isLineageChangedCause(error)) throw error;
+          // A transient refusal is not a broken generation, and rebinding
+          // for one is worse than doing nothing. The provider holds what the
+          // engine refused and has already re-armed its own ladder to resend
+          // it; closing that provider cancels the retry, and if the
+          // replacement's replay meets the same busy store the session is
+          // marked dead with no timer behind it — canonical text in memory
+          // only, the.md stale until some unrelated edit.
+          //
+          // Absorbed, therefore, rather than recovered from: the retry
+          // already exists one layer down. Every other class here really
+          // does need a new generation — a dropped transport, a quarantined
+          // session, a session the daemon no longer knows — so this stays
+          // narrow and everything else still rebinds.
+          if (isTransientEngineCause(error)) {
+            armed();
+            return true;
+          }
+          await rebind(generation, {
+            releaseBeforeOpen: !isEngineSessionReconnectError(error),
+            onReplayArmed: armed,
+          });
+        }
+        return true;
+      }).catch((error: unknown) => {
+        if (!decided) throw error;
+        onError(`Y.Doc local update of ${input.path}`, error);
+        return true;
+      });
+    };
+
     const restartSafeSession: RestartSafeYDocSession = {
       get nativeOwner() {
         const captured = current;
@@ -2234,92 +2357,12 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
-        // One announcement per update, at the first provider call that arms a
-        // settle carrying it. Three calls can be that first one — the live
-        // generation's own, a dead session's revive replay, and a failed
-        // generation's recovery replay — and which one gets there depends on
-        // how the generation failed. Handing the same once-guarded function to
-        // all three is what stops that from mattering: the count can neither
-        // lead the armed settle (a "Saved" over content it never carried) nor
-        // lag it (a settle that saves the edit while vouching for a seq below
-        // it, leaving the document on "Saving…" with nothing left to arm
-        // another settle). #514, and its two review rounds.
-        const armed = announceOnce(onArmed);
-        void append(async () => {
-          if (canonicalDoc === null || closed) throw closedError();
-          const doc = canonicalDoc;
-          // The renderer has already accepted this update, so the canonical doc
-          // — the renderer's truth — records it before anything else may fail.
-          // A daemon generation is rebuilt around that text, never instead of
-          // it: dropping the update here is exactly how visible typing vanished
-          // once a generation died.
-          if (current === null) {
-            Y.applyUpdate(doc, update);
-            // The revive replays the canonical doc — this update included —
-            // into the new generation. It announces the update when that
-            // replay is ARMED, not when its journal RPC returns.
-            await reviveDeadSession(doc, armed);
-            return;
-          }
-          const generation = current;
-          try {
-            // The provider journals and arms its settle synchronously inside
-            // this call, so the update is covered from here. Announce it before
-            // awaiting the journal round trip: the settle it just armed may
-            // start before that round trip returns.
-            const journaled = generation.applyLocalUpdate(update, applyOptions);
-            armed();
-            await journaled;
-            Y.applyUpdate(doc, update);
-            // A successful record can promote a local-only lineage. Retain
-            // the durable claim now; later deltas change the full-state hash.
-            if (
-              canonicalLineageClaimId === null &&
-              generation.lineageClaimId != null
-            ) {
-              canonicalLineageClaimId = generation.lineageClaimId;
-            }
-          } catch (error) {
-            // A live refusal still owns its lease and must close first; a
-            // transport restart opens first because the old daemon is gone.
-            //
-            // A SYNCHRONOUS refusal threw before the line above, so nothing was
-            // armed and nothing announced. The recovery replay below is then
-            // the first and only settle that will carry this edit, and the
-            // once-guard makes announcing there a no-op when the failure was
-            // asynchronous and the count already rose.
-            Y.applyUpdate(doc, update);
-            // This is an invariant breach, not a reconnect. Rebinding would
-            // replace this still-visible editor with the winner and silently
-            // discard the refused keystroke. Keep the old document visible
-            // and report the failure; the server's live-session drain rule
-            // makes this branch unreachable in an ordinary arbitration.
-            if (isLineageChangedCause(error)) throw error;
-            // A transient refusal is not a broken generation, and rebinding
-            // for one is worse than doing nothing. The provider holds what the
-            // engine refused and has already re-armed its own ladder to resend
-            // it; closing that provider cancels the retry, and if the
-            // replacement's replay meets the same busy store the session is
-            // marked dead with no timer behind it — canonical text in memory
-            // only, the.md stale until some unrelated edit.
-            //
-            // Absorbed, therefore, rather than recovered from: the retry
-            // already exists one layer down. Every other class here really
-            // does need a new generation — a dropped transport, a quarantined
-            // session, a session the daemon no longer knows — so this stays
-            // narrow and everything else still rebinds.
-            if (isTransientEngineCause(error)) {
-              armed();
-              return;
-            }
-            await rebind(generation, {
-              releaseBeforeOpen: !isEngineSessionReconnectError(error),
-              onReplayArmed: armed,
-            });
-          }
-        }).catch((error: unknown) => {
+        void journalLocalUpdate(() => update, onArmed, applyOptions).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         });
+      },
+      applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
+        return journalLocalUpdate(decide, onArmed, applyOptions);
       },
       settleNow(settleOptions) {
         return append(async () => {
@@ -4451,6 +4494,10 @@ export function createWorkspaceEngineCapture(
           applyLocalUpdate: (update, onArmed, applyOptions) => {
             noteUpdate();
             return session.applyLocalUpdate(update, onArmed, applyOptions);
+          },
+          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => {
+            noteUpdate();
+            return session.applyDecidedLocalUpdate(decide, onArmed, applyOptions);
           },
           settleNow: (opts) => session.settleNow(opts),
           close: closeEntry,

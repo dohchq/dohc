@@ -4,10 +4,84 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FIELD_VALUE_REASON_CODES } from "@dohc/workspace-contracts";
 import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
-import { CellEditor, FieldCell, FLAGGED_REASON_TITLES } from "./cells";
-import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
+import { CellEditor, FieldCell, fieldDisplayText, FLAGGED_REASON_TITLES } from "./cells";
+import {
+  V1_FIELDS,
+  flaggedValue,
+  indexedValue,
+  makeQueryResult,
+  makeRecord,
+} from "../testSupport";
 
 afterEach(cleanup);
+
+it.each(["relation", "multi-select"] as const)("keeps a later %s write intact when an earlier write is discarded", async (kind) => {
+  let nextId = 0;
+  let discard!: (writeId: number) => void;
+  const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
+  const selectionField: FieldDefinition = kind === "relation"
+    ? { name: "links", type: "relation", collection: "tasks", many: true }
+    : field("tags");
+  const names = kind === "relation" ? ["a", "b", "c"] : ["alpha", "beta", "gamma"];
+  const executor = vi.fn(async () => makeQueryResult(names.map(id => makeRecord(id, [indexedValue("title", id)]))));
+  const editor = (value: string[], acknowledgedWriteId = 0) => <CellEditor
+    field={selectionField} indexed={indexedValue(selectionField.name, value)} acknowledgedWriteId={acknowledgedWriteId}
+    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
+    emit={emit} close={() => {}} relationExecutor={executor} />;
+  const view = render(editor([]));
+  fireEvent.click(await screen.findByRole("checkbox", { name: names[0] }));
+  fireEvent.click(screen.getByRole("checkbox", { name: names[1] }));
+  expect(emit.mock.calls[1]?.[0]).toEqual(names.slice(0, 2));
+  // The queue retains failed write 1 while the full value of write 2 waits.
+  act(() => discard(1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[0] }).checked).toBe(true);
+  // An external selection must still survive replay of the remaining write.
+  view.rerender(editor([names[2]!]));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[2] }).checked).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: names[2] }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(names.slice(0, 2));
+  view.rerender(editor(names.slice(0, 2), 2));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[0] }).checked).toBe(true);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[1] }).checked).toBe(true);
+});
+
+it("keeps later relation choices across partial acknowledgments", async () => {
+  let nextId = 0;
+  const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
+  const relation: FieldDefinition = { name: "links", type: "relation", collection: "tasks", many: true };
+  const executor = vi.fn(async () => makeQueryResult(["a", "b", "c"].map(id => makeRecord(id, [indexedValue("title", id)]))));
+  const editor = (value: string[], acknowledgedWriteId: number) => <CellEditor
+    field={relation} indexed={indexedValue("links", value)} acknowledgedWriteId={acknowledgedWriteId}
+    emit={emit} close={() => {}} relationExecutor={executor} />;
+  const { rerender } = render(editor([], 0));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "a" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "b" }));
+  rerender(editor(["a"], 1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "b" }).checked).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: "c" }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(["a", "b", "c"]);
+});
+
+it("keeps a later removal after discarding its predecessor and retires it on discard", () => {
+  let discard!: (writeId: number) => void;
+  const emit = writeEmitter();
+  const editor = (value: string[]) => <CellEditor
+    field={field("tags")} indexed={indexedValue("tags", value)} acknowledgedWriteId={0}
+    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
+    emit={emit} close={() => {}} />;
+  const view = render(editor(["alpha", "beta"]));
+  fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta", "gamma"]);
+  act(() => discard(1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+  view.rerender(editor(["alpha"]));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(false);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+  act(() => discard(2));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(true);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+});
 
 function field(name: string): FieldDefinition {
   const match = V1_FIELDS.find((entry) => entry.name === name);
@@ -87,6 +161,21 @@ describe("FieldCell display", () => {
   it("renders a url value", () => {
     render(<FieldCell field={field("link")} indexed={indexedValue("link", "https://dohc.dev")} />);
     expect(screen.getByText("https://dohc.dev")).toBeDefined();
+  });
+
+  it("shows a button field's name and never a value kept under it", () => {
+    const button: FieldDefinition = { name: "Mark paid", type: "button" };
+    const stray = flaggedValue("Mark paid", true, "expected-empty");
+    const { container } = render(
+      <FieldCell field={button} indexed={stray} onEditStart={() => {}} />,
+    );
+    expect(screen.getByText("Mark paid")).toBeDefined();
+    expect(screen.queryByText("true")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container.querySelector("[data-flagged='true']")?.getAttribute("title")).toBe(
+      FLAGGED_REASON_TITLES["expected-empty"],
+    );
+    expect(fieldDisplayText(button, stray)).toBe("");
   });
 
   it("marks a flagged value and leaves valid and untyped values unmarked", () => {
@@ -521,7 +610,7 @@ describe("CellEditor", () => {
       collectionPath: "tasks",
       limit: 100,
     });
-    expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"]);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"], [["rec-a"]]);
   });
 
   it("trims a person edit and commits a whitespace-only one as null", () => {

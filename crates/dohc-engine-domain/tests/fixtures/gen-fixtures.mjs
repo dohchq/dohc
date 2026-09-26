@@ -314,6 +314,27 @@ views:
     many: false
 `,
   },
+  ...["C:/projects", "C:projects", "planning/projects:stream"].map((collection, index) => ({
+    name: `degraded-colon-relation-target-${index + 1}-salvages-siblings`,
+    yaml: `fields:
+  title:
+    type: text
+  project:
+    type: relation
+    collection: "${collection}"
+    many: false
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [],
+      },
+      reasons: [{ code: "invalid-relation-target", path: "/fields/project/collection" }],
+    },
+  })),
   {
     name: "degraded-c1-relation-target-salvages-siblings",
     yaml: `fields:
@@ -392,6 +413,80 @@ views:
     visibleFields: invalid
     dateField: missing
 `,
+  },
+  {
+    name: "button-field-is-visible-but-never-sorts-groups-or-dates",
+    yaml: `fields:
+  title:
+    type: text
+  Mark paid:
+    type: button
+views:
+  - name: All
+    kind: table
+    visibleFields: [title, Mark paid]
+  - name: By button
+    kind: calendar
+    groupBy: Mark paid
+    sort:
+      - field: Mark paid
+        direction: asc
+      - field: title
+        direction: desc
+    dateField: Mark paid
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "Mark paid", type: "button" },
+        ],
+        views: [
+          {
+            name: "All",
+            kind: "table",
+            groupBy: null,
+            sort: [],
+            visibleFields: ["title", "Mark paid"],
+            dateField: null,
+          },
+          {
+            name: "By button",
+            kind: "calendar",
+            groupBy: null,
+            sort: [{ field: "title", direction: "desc" }],
+            visibleFields: null,
+            dateField: null,
+          },
+        ],
+      },
+      reasons: [
+        { code: "unsupported-field-reference", path: "/views/1/groupBy" },
+        { code: "unsupported-field-reference", path: "/views/1/sort/0/field" },
+        { code: "unsupported-field-reference", path: "/views/1/dateField" },
+      ],
+    },
+  },
+  {
+    name: "button-field-takes-no-other-properties",
+    yaml: `fields:
+  Mark paid:
+    type: button
+    options: [Paid]
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "Mark paid", type: "button" }],
+        views: [],
+      },
+      reasons: [{ code: "unknown-property", path: "/fields/Mark paid/options" }],
+    },
   },
   {
     name: "view-sort-one-over-query-limit-flags-and-keeps-first-eight",
@@ -534,6 +629,9 @@ const fieldValues = [
   ["url-valid", { name: "website", type: "url" }, "https://dohc.dev/path"],
   ["url-flagged", { name: "website", type: "url" }, "dohc.dev/path"],
   ["null-valid-for-every-field", { name: "title", type: "text" }, "null"],
+  ["button-null-valid", { name: "Mark paid", type: "button" }, "null"],
+  ["button-flagged", { name: "Mark paid", type: "button" }, "true"],
+  ["button-flagged-empty-text", { name: "Mark paid", type: "button" }, '""'],
 ].map(([name, field, valueYaml]) => {
   const value = loadFixtureYamlValue(valueYaml);
   return { name, field, valueYaml, expected: validateFieldValue(field, value) };

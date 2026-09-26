@@ -1067,7 +1067,7 @@ export class WorkspaceGraphIndex {
     const invalidationAtStart = this.#invalidation;
     const listed = await source.list();
     const visible = listed.files.filter(
-      (file) => classifyEngineFilePathForRead(file.path).kind === "tracked",
+      (file) => classifyEngineFilePathForRead(file.path, process.platform).kind === "tracked",
     );
     const graphFiles = visible.slice(0, MAX_GRAPH_FILES);
     const graphPaths = graphFiles.map((file) => file.path);

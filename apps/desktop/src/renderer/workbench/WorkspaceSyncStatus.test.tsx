@@ -120,4 +120,25 @@ describe("sync status surface", () => {
     });
     expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
   });
+
+  it.each([
+    ["app", "Update dohc to sync"],
+    ["server", "Server needs an update"],
+  ] as const)("names the side to update when sync stopped on the relay API version (%s)", (updateRequired, label) => {
+    renderStatus({
+      syncStatus: {
+        state: "cloud-disconnected",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        updateRequired,
+      },
+    });
+    const status = screen.getByTestId("sync-status");
+    expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
+    expect(status.getAttribute("aria-label")).toBe(label);
+    expect(status.textContent).toBe(label);
+  });
 });

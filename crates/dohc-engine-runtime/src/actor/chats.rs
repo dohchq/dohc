@@ -14,6 +14,23 @@ use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
+    /// Run one chat call on the actor, then announce the Group automation
+    /// claims its committed writes took, including those of parked messages
+    /// a write released.
+    async fn run_chats<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut LinkedChatStore<'_>) -> Result<R, RuntimeError> + Send + 'static,
+    ) -> Result<R, RuntimeError> {
+        let claims = self.claims.clone();
+        self.run(move |store, _| {
+            let mut chats = LinkedChatStore::new(store);
+            let result = work(&mut chats);
+            claims.announce(&chats.take_automation_claims());
+            result
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn chat_channel_create(
         &self,
@@ -25,11 +42,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .create_group(
                         &workspace_id,
                         &channel_id,
@@ -52,11 +69,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -71,11 +88,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -87,8 +104,8 @@ impl ActorHandle {
         &self,
         workspace_id: String,
     ) -> Result<Vec<ChatChannelSummary>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_channels(&workspace_id)
                 .map_err(RuntimeError::from)
         })
@@ -100,8 +117,8 @@ impl ActorHandle {
         workspace_id: String,
         slug: String,
     ) -> Result<Option<ChatChannel>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .find_channel_by_slug(&workspace_id, &slug)
                 .map_err(RuntimeError::from)
         })
@@ -113,24 +130,26 @@ impl ActorHandle {
         workspace_id: String,
         channel_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .get_channel_wire_id(&workspace_id, &channel_id)
                 .map_err(RuntimeError::from)
         })
         .await
     }
 
+    /// Also returns the Group automation claims the write took, for the
+    /// caller to announce after commit.
     pub async fn chat_thread_start(
         &self,
         input: StartChannelThread,
         token: CancellationToken,
     ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .start_channel_thread(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -143,11 +162,11 @@ impl ActorHandle {
         input: CreateFileThread,
         token: CancellationToken,
     ) -> Result<ChatThread, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .create_thread(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -159,8 +178,8 @@ impl ActorHandle {
         &self,
         workspace_id: String,
     ) -> Result<Vec<ChatThread>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_threads(&workspace_id)
                 .map_err(RuntimeError::from)
         })
@@ -174,8 +193,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatThread>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_threads_for_file(&workspace_id, &object_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -190,8 +209,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_channel_threads_in_lane(&workspace_id, &channel_id, lane, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -203,8 +222,8 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .find_thread_channel_id(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
@@ -217,8 +236,8 @@ impl ActorHandle {
         thread_id: String,
         linked_file_access: ChatProjectionFileAccess,
     ) -> Result<ChatThreadProjection, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .get_thread_projection(&workspace_id, &thread_id, linked_file_access)
                 .map_err(RuntimeError::from)
         })
@@ -232,8 +251,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAttachment>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_thread_attachments(&workspace_id, &thread_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -248,8 +267,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatFileMention>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_file_mentions(
                     &workspace_id,
                     object_id.as_deref(),
@@ -267,11 +286,11 @@ impl ActorHandle {
         workspace_id: String,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .backfill_mentions(&workspace_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -287,8 +306,8 @@ impl ActorHandle {
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -302,11 +321,11 @@ impl ActorHandle {
         at_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .record_eligible_triggers(
                         &workspace_id,
                         verified_user_id.as_deref(),
@@ -319,19 +338,34 @@ impl ActorHandle {
         .await
     }
 
+    /// Also returns the Group automation claims the write took, for the
+    /// caller to announce after commit.
     pub async fn chat_message_send(
         &self,
         input: SendMessage,
         token: CancellationToken,
     ) -> Result<ChatMessage, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .send_message(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
+        })
+        .await
+    }
+
+    pub async fn chat_message_get(
+        &self,
+        workspace_id: String,
+        message_id: String,
+    ) -> Result<ChatMessage, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .get_message(&workspace_id, &message_id)
+                .map_err(RuntimeError::from)
         })
         .await
     }
@@ -341,11 +375,11 @@ impl ActorHandle {
         input: ResolveDecision,
         token: CancellationToken,
     ) -> Result<ChatDecision, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .resolve_decision(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -360,8 +394,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatDecision>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_thread_decisions(&workspace_id, &thread_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -373,11 +407,11 @@ impl ActorHandle {
         input: SetReaction,
         token: CancellationToken,
     ) -> Result<ChatReaction, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .set_reaction(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -392,8 +426,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatReaction>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_reactions(&workspace_id, &thread_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -407,8 +441,8 @@ impl ActorHandle {
         limit: i64,
         after_message_order: Option<i64>,
     ) -> Result<ChatMessagePage, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_messages(&workspace_id, &thread_id, limit, after_message_order)
                 .map_err(RuntimeError::from)
         })
@@ -420,8 +454,8 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<i64, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .conversation_revision(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
@@ -438,11 +472,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_thread_read(
                         &workspace_id,
                         &thread_id,
@@ -462,8 +496,8 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .read_state(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
@@ -476,8 +510,8 @@ impl ActorHandle {
         after_thread_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<UnreadFileThread>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
                 .map_err(RuntimeError::from)
         })
@@ -490,8 +524,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_agent_unread_threads(&workspace_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -509,11 +543,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatAgentReadState, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_thread_read_by_agent(
                         &workspace_id,
                         &thread_id,
@@ -534,11 +568,11 @@ impl ActorHandle {
         input: SetFollow,
         token: CancellationToken,
     ) -> Result<ChatFollow, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .set_follow(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -552,8 +586,8 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_follows(&workspace_id, &owner_user_id, state.as_deref())
                 .map_err(RuntimeError::from)
         })
@@ -566,11 +600,11 @@ impl ActorHandle {
         owner_user_id: String,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .ensure_default_channel_follows(&workspace_id, &owner_user_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -584,8 +618,8 @@ impl ActorHandle {
         owner_user_id: String,
         bookmark_id: String,
     ) -> Result<Option<ChatBookmark>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
                 .map_err(RuntimeError::from)
         })
@@ -599,8 +633,8 @@ impl ActorHandle {
         limit: i64,
         after: Option<(i64, String)>,
     ) -> Result<Vec<PendingBookmarkRow>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_pending_bookmarks_page(&workspace_id, &owner_user_id, limit, after)
                 .map_err(RuntimeError::from)
         })
@@ -616,11 +650,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatFeedReadState, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_feed_seen(
                         &workspace_id,
                         &owner_user_id,
@@ -642,8 +676,8 @@ impl ActorHandle {
         limit: Option<i64>,
         cursor: Option<String>,
     ) -> Result<ChatFeedPage, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_personal_feed(&workspace_id, &owner_user_id, limit, cursor.as_deref())
                 .map_err(RuntimeError::from)
         })
@@ -655,11 +689,11 @@ impl ActorHandle {
         input: SaveBookmark,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .save_bookmark(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -673,8 +707,8 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatBookmark>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
                 .map_err(RuntimeError::from)
         })
@@ -693,11 +727,11 @@ impl ActorHandle {
         projection_path: Option<String>,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_bookmark_ready(
                         &workspace_id,
                         &owner_user_id,
@@ -722,11 +756,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .archive_bookmark(
                         &workspace_id,
                         &owner_user_id,
@@ -750,11 +784,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_bookmark_pending(
                         &workspace_id,
                         &owner_user_id,
@@ -780,11 +814,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_bookmark_failed(
                         &workspace_id,
                         &owner_user_id,
@@ -811,11 +845,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_bookmark_stale(
                         &workspace_id,
                         &owner_user_id,
@@ -839,11 +873,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .enqueue_dispatch(
                         &workspace_id,
                         &trigger_message_id,
@@ -867,11 +901,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<Option<DispatchClaim>, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .claim_next_pending(
                         &workspace_id,
                         &run_id,
@@ -892,8 +926,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_pending_dispatches(&workspace_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -906,8 +940,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchClaim>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_open_dispatch_runs(&workspace_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -921,8 +955,8 @@ impl ActorHandle {
         after_message_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_run_messages(&workspace_id, &run_id, after_message_id, limit)
                 .map_err(RuntimeError::from)
         })
@@ -934,8 +968,8 @@ impl ActorHandle {
         workspace_id: String,
         message_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .dispatch_run_id_for_message(&workspace_id, &message_id)
                 .map_err(RuntimeError::from)
         })
@@ -951,8 +985,8 @@ impl ActorHandle {
         after: Option<(i64, String, String)>,
         page_limit: i64,
     ) -> Result<Vec<RunRecordLink>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .run_records_for_thread(&workspace_id, &thread_id, run_limit, after, page_limit)
                 .map_err(RuntimeError::from)
         })
@@ -964,8 +998,8 @@ impl ActorHandle {
         workspace_id: String,
         run_id: String,
     ) -> Result<Option<AgentRunRecord>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .get_run_record(&workspace_id, &run_id)
                 .map_err(RuntimeError::from)
         })
@@ -977,8 +1011,8 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<bool, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .thread_dispatch_paused(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
@@ -990,8 +1024,8 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<Option<ThreadDispatchPause>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .get_thread_dispatch_pause_state(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
@@ -1004,8 +1038,8 @@ impl ActorHandle {
         thread_id: String,
         since_ms: f64,
     ) -> Result<i64, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .recent_dispatch_count(&workspace_id, &thread_id, since_ms)
                 .map_err(RuntimeError::from)
         })
@@ -1021,11 +1055,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .fail_pending_for_thread(&workspace_id, &thread_id, &reason, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -1040,11 +1074,11 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .record_run_message(&workspace_id, &message_id, &run_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -1062,11 +1096,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ThreadDispatchPause, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .set_thread_dispatch_paused(
                         &workspace_id,
                         &thread_id,
@@ -1087,11 +1121,11 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<AgentRunRecord, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -1107,11 +1141,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .requeue_failed_trigger(
                         &workspace_id,
                         &trigger_message_id,
@@ -1131,8 +1165,8 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .list_app_quit_recoveries(&workspace_id, after, limit)
                 .map_err(RuntimeError::from)
         })
@@ -1147,11 +1181,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .complete_dispatch(&workspace_id, &run_id, exit_code, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -1168,11 +1202,11 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store, _| {
+        self.run_chats(move |chats| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
+                chats
                     .fail_dispatch(
                         &workspace_id,
                         &run_id,
@@ -1193,8 +1227,8 @@ impl ActorHandle {
         max_attempts: i64,
         now_ms: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        self.run(move |store, _| {
-            LinkedChatStore::new(store)
+        self.run_chats(move |chats| {
+            chats
                 .reclaim_running_dispatches(&workspace_id, max_attempts, now_ms, &NoFaults)
                 .map_err(RuntimeError::from)
         })

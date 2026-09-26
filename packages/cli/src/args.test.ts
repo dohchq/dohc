@@ -3,10 +3,10 @@ import { parseCliArguments } from "./args";
 
 describe("parseCliArguments", () => {
   it("parses the read verbs and global actor options", () => {
-    expect(parseCliArguments(["chat", "channels"], {})).toEqual({
+    expect(parseCliArguments(["chat", "groups"], {})).toEqual({
       actor: "human",
       json: false,
-      verb: "channels",
+      verb: "groups",
     });
     expect(
       parseCliArguments(["--json", "chat", "show", "msg_ab", "--peek"], {
@@ -23,7 +23,7 @@ describe("parseCliArguments", () => {
       actor: "agent",
       json: false,
       verb: "threads",
-      channel: "engineering",
+      group: "engineering",
     });
     expect(parseCliArguments(["chat", "inbox"], {})).toEqual({
       actor: "human",
@@ -42,7 +42,7 @@ describe("parseCliArguments", () => {
       actor: "human",
       json: false,
       verb: "post",
-      channel: "trip",
+      group: "trip",
       attachments: [],
       needsDecision: true,
       options: ["7am direct", "2pm with a stop"],
@@ -91,7 +91,7 @@ describe("parseCliArguments", () => {
       actor: "human",
       json: false,
       verb: "post",
-      channel: "engineering",
+      group: "engineering",
       title: "Conflict policy",
       attachments: ["plans/q3.md", "notes.md"],
       needsDecision: true,
@@ -139,7 +139,7 @@ describe("parseCliArguments", () => {
           "chat",
           "grep",
           "BlockId",
-          "--channel",
+          "--group",
           "engineering",
           "--thread",
           "th_8",
@@ -162,7 +162,7 @@ describe("parseCliArguments", () => {
       json: false,
       verb: "grep",
       pattern: "BlockId",
-      channel: "engineering",
+      group: "engineering",
       thread: "th_8",
       from: "agent",
       since: "7d",
@@ -173,10 +173,10 @@ describe("parseCliArguments", () => {
       regex: true,
     });
     expect(
-      parseCliArguments(["chat", "export", "--channel", "eng", "--out", "exports"], {}),
+      parseCliArguments(["chat", "export", "--group", "eng", "--out", "exports"], {}),
     ).toMatchObject({
       verb: "export",
-      scope: { kind: "channel", channel: "eng" },
+      scope: { kind: "group", group: "eng" },
       outDir: "exports",
     });
   });
@@ -226,7 +226,7 @@ describe("parseCliArguments", () => {
       actor: "human",
       json: true,
       verb: "post",
-      channel: "general",
+      group: "general",
       title: "--json",
       attachments: ["--as-agent"],
       needsDecision: false,
@@ -247,6 +247,70 @@ describe("parseCliArguments", () => {
       thread: "th_one",
       body: "Reply body",
     });
+  });
+
+  it("asks for help without parsing the verb's arguments", () => {
+    expect(parseCliArguments([], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["-h"], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["chat"], {})).toEqual({ help: ["chat"] });
+    expect(parseCliArguments(["--help", "dataset"], {})).toEqual({ help: ["dataset"] });
+    expect(parseCliArguments(["chat", "reply", "--help"], {})).toEqual({ help: ["chat", "reply"] });
+    expect(parseCliArguments(["chat", "--help", "post"], {})).toEqual({ help: ["chat", "post"] });
+  });
+
+  it("reads --help as verb input once operands start", () => {
+    expect(parseCliArguments(["chat", "post", "general", "Use", "-h", "for", "help"], {})).toMatchObject({
+      verb: "post",
+      body: "Use -h for help",
+    });
+    expect(() => parseCliArguments(["chat", "post", "general", "--help", "me"], {})).toThrow(
+      "unknown chat post option '--help'; put options first, then --, then text that starts with a dash",
+    );
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "---", "Report"], {})).toThrow(
+      "unknown chat reply option '---'; put options first, then --, then text that starts with a dash",
+    );
+    expect(parseCliArguments(["chat", "reply", "th_a", "--needs-decision", "--as-agent", "--", "--- Report"], {})).toMatchObject({
+      actor: "agent",
+      verb: "reply",
+      needsDecision: true,
+      body: "--- Report",
+    });
+    expect(() => parseCliArguments(["dataset", "list", "--foo"], {})).toThrow(/^unknown dataset list option '--foo'$/);
+    expect(() => parseCliArguments(["app", "prepare", "-h", "{}"], {})).toThrow("app prepare does not accept '{}'");
+  });
+
+  it("reads --help as text after the terminator or as a flag value", () => {
+    expect(parseCliArguments(["chat", "post", "general", "--", "--help"], {})).toMatchObject({
+      verb: "post",
+      body: "--help",
+    });
+    expect(parseCliArguments(["chat", "post", "general", "--title", "--help", "Body"], {})).toMatchObject({
+      verb: "post",
+      title: "--help",
+      body: "Body",
+    });
+  });
+
+  it("requires the fields the CLI cannot ask for later", () => {
+    expect(() =>
+      parseCliArguments(["dataset", "prepareRecovery", JSON.stringify({ workspaceId: "w" })], {}),
+    ).toThrow("dataset prepareRecovery requires sourcePath");
+    expect(() =>
+      parseCliArguments(["dataset", "list", JSON.stringify({ workspaceId: "w", action: "delete" })], {}),
+    ).toThrow("dataset list arguments must not name another action");
+  });
+
+  it("accepts a renamed app verb's own name or its request action", () => {
+    const selection = { workspaceId: "w", grantId: "g" };
+    for (const action of ["responses", "list"]) {
+      expect(parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action })], {})).toMatchObject({
+        verb: "ownerAppResponses",
+        request: { action: "list" },
+      });
+    }
+    expect(() =>
+      parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action: "undo" })], {}),
+    ).toThrow("app responses arguments must not name another action");
   });
 
   it("returns distinct input errors", () => {

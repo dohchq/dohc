@@ -15,7 +15,8 @@ description = "SQLite storage for the workspace engine: one writable connection 
 fault-injection = []
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled"] }
+# `hooks` for the progress handler that counts a store open's work.
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a

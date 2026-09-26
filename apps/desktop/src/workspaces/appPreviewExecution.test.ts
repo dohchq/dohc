@@ -2,7 +2,11 @@ import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppPreviewExecution } from "./appPreviewExecution";
-import type { SitePreviewExecutionInput } from "../ipc/sitePreviewIpc";
+import {
+  createStartSitePreviewHandler,
+  type SitePreviewExecutionInput,
+  type SitePreviewResultBody,
+} from "../ipc/sitePreviewIpc";
 import type { SitePackageInfo } from "./sitePackage";
 import { buildSite, startSiteDevServer, startStaticSitePreview, type SiteLogEntry, type SiteProcessHandle } from "./siteRunner";
 import { createSitePreviewLifecycle, START_CANCELLED_MESSAGE } from "./sitePreviewLifecycle";
@@ -298,12 +302,12 @@ describe("app preview execution", () => {
     h.input.mode = "dev";
     h.app.scripts = { dev: "node server.js" };
     const allowOrigin = vi.fn(() => () => undefined);
-    const lifecycle = createSitePreviewLifecycle({ allowOrigin });
+    const lifecycle = createSitePreviewLifecycle<Awaited<ReturnType<typeof h.execute>>["result"]>({ allowOrigin });
     cleanups.push(() => lifecycle.stopAll());
     const reached = deferred<void>();
     const release = deferred<void>();
     vi.mocked(startSiteDevServer).mockImplementation(async () => { reached.resolve(); await release.promise; return h.devHandle; });
-    const pending = lifecycle.start<Awaited<ReturnType<typeof h.execute>>["result"]>({ senderId: 7, workspaceId: "workspace-a", siteRoot: "portal", isCurrent: h.input.isCurrent, prepare: async () => (signal) => h.execute({ ...h.input, signal }) });
+    const pending = lifecycle.start({ senderId: 7, workspaceId: "workspace-a", siteRoot: "portal", isCurrent: h.input.isCurrent, prepare: async () => (signal) => h.execute({ ...h.input, signal }) });
     const rejected = expect(pending).rejects.toThrow(START_CANCELLED_MESSAGE);
     try {
       await reached.promise;
@@ -315,5 +319,51 @@ describe("app preview execution", () => {
     expect(vi.mocked(startSiteDevServer).mock.calls[0]![0].signal?.aborted).toBe(true);
     expect(h.devHandle.stop).toHaveBeenCalledTimes(1);
     expect(allowOrigin).not.toHaveBeenCalled();
+  });
+
+  it("finishes a shared build after the window that asked first closes, for the window still holding it", async () => {
+    const h = await harness();
+    h.app.scripts = { build: "node build.js" };
+    const lifecycle = createSitePreviewLifecycle<SitePreviewResultBody>({ allowOrigin: () => () => undefined });
+    cleanups.push(() => lifecycle.stopAll());
+    const open = new Map([[1, true], [2, true]]);
+    const handler = createStartSitePreviewHandler({
+      authority: {
+        requireTrustedSender: (event: { sender: { id: number } }) => event.sender,
+        withActiveWorkspace: (sender, _workspaceId, _subject, _action, work) =>
+          work({
+            workspace: { workspaceId: "workspace-a", rootPath: h.workspaceRoot },
+            session: { isCurrent: () => open.get(sender.id) === true },
+          }),
+      },
+      catalog: { list: async () => [h.app], get: async () => h.app },
+      lifecycle,
+      isSharedView: () => false,
+      execute: h.execute,
+    });
+    const building = deferred<void>();
+    const release = deferred<void>();
+    vi.mocked(buildSite).mockImplementationOnce(async () => {
+      building.resolve();
+      await release.promise;
+      return { ok: true, command: "node", args: ["build.js"], outputPath: join(h.workspaceRoot, "portal", "dist"), logs: [log("Built")], exitCode: 0 };
+    });
+    const start = (senderId: number, holderId: string) => handler(
+      { sender: { id: senderId } },
+      { workspaceId: "workspace-a", siteRoot: "portal", mode: "build", holderId, restart: false },
+    );
+    const asked = start(1, "tab");
+    asked.catch(() => undefined);
+    await building.promise;
+    const joined = start(2, "pin");
+    // The tab's window closes while the build runs.
+    open.set(1, false);
+    lifecycle.cancelSender(1);
+    release.resolve();
+    const shown = await joined;
+    if ("replaced" in shown) throw new Error("The start was replaced.");
+    expect(shown).toMatchObject({ siteRoot: "portal", mode: "build", exited: false });
+    await expect(fetch(shown.url).then((response) => response.text())).resolves.toBe("<h1>Built app</h1>");
+    expect(buildSite).toHaveBeenCalledOnce();
   });
 });

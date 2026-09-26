@@ -443,6 +443,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -511,6 +512,7 @@ dependencies = [
  "dohc-engine-testkit",
  "dohc-workspace-engine",
  "file-id",
+ "fs4",
  "getrandom 0.4.3",
  "libc",
  "proptest",

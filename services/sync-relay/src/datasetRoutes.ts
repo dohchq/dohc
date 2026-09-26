@@ -68,8 +68,16 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
       if (cursor.workspaceId !== scope.workspaceId || cursor.datasetId !== scope.datasetId || !Number.isSafeInteger(cursor.revision) || Number(cursor.revision) < 0) throw badRequest("Invalid recovery source cursor.");
       const sourceCursor = {workspaceId: scope.workspaceId, datasetId: scope.datasetId, hostEpoch: text(cursor.hostEpoch), approvedRevisionHash: digest(cursor.approvedRevisionHash), revision: Number(cursor.revision), digest: digest(cursor.digest)};
       const manifestSha256 = digest(request.headers.get("x-dohc-dataset-manifest-sha256"));
-      const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(120_000)]);
       const release = admit({dataset: JSON.stringify([scope.workspaceId, scope.datasetId]), participant: auth.userId, organizer: true}, "restore", options.nowMs());
+      const deadline = new AbortController();
+      const signal = AbortSignal.any([request.signal, storage.unavailable, deadline.signal]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const renewDeadline = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => deadline.abort(new DOMException("Recovery import timed out", "TimeoutError")), 120_000);
+        timer.unref();
+      };
+      renewDeadline();
       try {
         const body = request.body;
         async function* stream() {
@@ -80,13 +88,17 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
             for (;;) {
               signal.throwIfAborted();
               if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
-              const item = await reader.read(); if (item.done) break;
+              const item = await reader.read();
+              signal.throwIfAborted();
+              // Bound idle receipt, then give installation its own deadline.
+              if (item.done) { renewDeadline(); break; }
+              if (item.value.byteLength) renewDeadline();
               for (let offset = 0; offset < item.value.byteLength; offset += 1024 * 1024) yield item.value.subarray(offset, offset + 1024 * 1024);
             }
           } finally {signal.removeEventListener("abort", aborted); await reader.cancel().catch(() => {}); reader.releaseLock();}
         }
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
-      } finally {release();}
+      } finally {clearTimeout(timer); release();}
     }
     const read = ["list", "describe", "artifacts", "permissions", "history", "history-revision", "lifecycle", "pending-attempts", "delete-preview", "deletion-status"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");

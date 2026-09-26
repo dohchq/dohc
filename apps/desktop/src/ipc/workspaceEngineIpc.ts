@@ -1,4 +1,3 @@
-import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -9,7 +8,7 @@ import {
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { engineMomentDetailForIpc, listEngineMomentsForIpc } from "./engineHistoryIpc";
+import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import type { WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -45,6 +44,8 @@ export function createWorkspaceEngineIpc<
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
   localAgentDisplayName(): string;
+  /** An automation author as History shows it, in one workspace. */
+  automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   requireWorkspace(workspaceId: string): Workspace;
@@ -68,7 +69,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -141,12 +142,15 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
-    // unit-tested); main only injects the display-name rule below.
-    // The same display-name rule the chat rail uses. AgentIntegration
-    // stamps onBehalfOf "local" for local runs, which use the configured
-    // agent name. Other labels display as stored.
-    function agentAuthorDisplayName(author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>): string {
-      return author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf;
+    // unit-tested); main only injects how authors read below. An agent takes
+    // the display-name rule the chat rail uses: AgentIntegration stamps
+    // onBehalfOf "local" for local runs, which use the configured agent name,
+    // and other labels display as stored. An automation reads as main names it.
+    function authorNames(workspaceId: string): EngineMomentAuthorNames {
+      return {
+        agent: (author) => author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf,
+        automation: (automationId) => automationAuthor(workspaceId, automationId),
+      };
     }
 
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
@@ -164,7 +168,7 @@ export function createWorkspaceEngineIpc<
               ? { beforeMomentOrder: input.beforeMomentOrder }
               : {}),
           }),
-        agentAuthorDisplayName,
+        authorNames(input.workspaceId),
       );
     });
 
@@ -178,7 +182,7 @@ export function createWorkspaceEngineIpc<
       const moment = await capture.readMoment(input.momentId);
       return ReadEngineMomentResult.parse({
         moment: moment
-          ? engineMomentDetailForIpc(moment, agentAuthorDisplayName)
+          ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
           : null,
       });
     });

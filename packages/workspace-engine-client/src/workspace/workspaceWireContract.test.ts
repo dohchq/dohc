@@ -180,6 +180,22 @@ describe("workspace wire schemas", () => {
     ).toThrow(ProtocolShapeError);
   });
 
+  it("decodes a button field definition", () => {
+    const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+      path: "invoices",
+      status: "valid",
+      reasons: [],
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "Mark paid", type: "button" }],
+        views: [],
+      },
+      recordCount: 0,
+    });
+    expect(result.schema.fields).toEqual([{ name: "Mark paid", type: "button" }]);
+  });
+
   it("accepts the shared full collection reason-code set", () => {
     for (const code of reasonCodes.schemaReasonCodes) {
       expect(() =>
@@ -544,17 +560,45 @@ describe("workspace wire schemas", () => {
 });
 
 describe("automations wire schemas", () => {
-  const claim = {
+  const summary = {
     claimId: "claim-1",
-    automationId: "hello-plugin/triage",
+    automationId: "plugin:hello-plugin/triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
     depth: 0,
+    change: {
+      kind: "changed",
+      authorOriginId: "agent-editor",
+      actorKind: "agent",
+      onBehalfOf: "user:ice",
+    },
     state: "pending",
     attempts: 1,
+    run: 1,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
+  };
+  const claim = {
+    ...summary,
+    change: {
+      ...summary.change,
+      fields: [
+        {
+          field: "body",
+          historyId: 11,
+          previous: null,
+          next: { truncated: true, bytes: 9_000 },
+        },
+        {
+          field: "status",
+          historyId: 12,
+          previous: { value: "open" },
+          next: { value: null },
+        },
+      ],
+      fieldsOmitted: 0,
+    },
   };
 
   it("decodes the subscription round trip", () => {
@@ -570,7 +614,7 @@ describe("automations wire schemas", () => {
     ).toEqual({ unsubscribed: false });
   });
 
-  it("decodes a coordinate-keyed claim from claimNext", () => {
+  it("decodes a claim from claimNext with its change's field facts", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
     ).toEqual(claim);
@@ -582,21 +626,73 @@ describe("automations wire schemas", () => {
     ).toBeNull();
   });
 
-  it("decodes a history-keyed failed claim from settle", () => {
+  it("decodes a history-keyed failed claim from settle and retry without facts", () => {
     const failed = {
-      ...claim,
+      ...summary,
       trigger: { historyId: 41 },
+      change: {
+        kind: "added",
+        authorOriginId: null,
+        actorKind: null,
+        onBehalfOf: null,
+      },
       state: "failed",
       error: "handler threw",
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, failed),
     ).toEqual(failed);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
+    ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary),
+    ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 3 }),
+    ).toEqual({ applied: 3 });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 1.5 }),
+    ).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
+    ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes a removed record's claim keyed by its moment", () => {
+    const removed = {
+      ...claim,
+      trigger: { momentOrder: 42 },
+      change: {
+        ...claim.change,
+        kind: "removed",
+        fields: [
+          { field: "status", historyId: null, previous: { value: "done" }, next: null },
+        ],
+      },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, removed),
+    ).toEqual(removed);
+  });
+
+  it("decodes the claim history", () => {
+    const history = { claims: [summary, { ...summary, state: "done" }] };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history),
+    ).toEqual(history);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, {
+        claims: [],
+      }),
+    ).toEqual({ claims: [] });
   });
 
   it("decodes the failure listing and refuses a row without a generation", () => {
     const failure = {
-      automationId: "hello-plugin/triage",
+      automationId: "plugin:hello-plugin/triage",
+      claimId: "claim-1",
+      chainStopped: true,
       error: "chain-stopped",
       updatedAtMs: 2_000,
       generation: 3,
@@ -613,23 +709,135 @@ describe("automations wire schemas", () => {
     ).toEqual({ failures: [] });
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
-        failures: [{ automationId: "hello-plugin/triage", error: "x" }],
+        failures: [
+          { automationId: "plugin:hello-plugin/triage", claimId: "claim-1", error: "x" },
+        ],
       }),
     ).toThrow(ProtocolShapeError);
   });
 
-  it("refuses a claim with an unknown state or a malformed trigger", () => {
+  it("decodes keyed claims for a message, a press, and a due time", () => {
+    const keyed = (key: string, kind: string, recordId: string | null) => ({
+      ...claim,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key },
+      recordId,
+      change: { ...claim.change, kind, fields: [], fieldsOmitted: 0 },
+    });
+    const pressed = keyed("press:press-1", "button", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const due = keyed("schedule:1790000000000", "schedule", null);
+    const facts = {
+      id: "m1",
+      threadId: "t1",
+      groupId: "trip",
+      lane: "chat",
+      authorKind: "human",
+      authorDisplayName: "Ada",
+      createdAtMs: 20,
+      body: "/task Buy tickets",
+    };
+    const withMessage = (fields: Record<string, unknown>) => ({
+      ...keyed("message:m1", "message", null),
+      change: { ...keyed("message:m1", "message", null).change, message: fields },
+    });
+    const message = withMessage(facts);
+    const long = withMessage({
+      ...facts,
+      body: { truncated: true, bytes: 70_000 },
+      parentMessageId: "m0",
+      authorOwnerDisplayName: "Ice",
+      authorUserId: "ada",
+    });
+    for (const served of [pressed, due, message, long]) {
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, served)).toEqual(served);
+    }
+    const { id: _id, ...withoutId } = facts;
+    for (const malformed of [
+      { ...due, trigger: { key: "" } },
+      keyed("message:m1", "message", null),
+      withMessage({}),
+      withMessage(withoutId),
+      withMessage({ ...facts, authorKind: "robot" }),
+      withMessage({ ...facts, lane: "posts-and-chat" }),
+      withMessage({ ...facts, body: { truncated: false, bytes: 1 } }),
+      withMessage({ ...facts, createdAtMs: "20" }),
+      withMessage({ ...facts, extra: true }),
+      { ...pressed, change: { ...pressed.change, message: facts } },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes a press answer: its claim, or busy with none", () => {
+    const pressed = {
+      ...summary,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key: "press:press-1" },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada" },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
+    ).toEqual({ busy: false, claim: pressed });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: true, claim: null }),
+    ).toEqual({ busy: true, claim: null });
+    for (const malformed of [{ busy: true, claim: pressed }, { busy: false, claim: null }, { claim: pressed }]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, malformed)).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes a schedule step and the schedule marks", () => {
+    const mark = { automationId: "collection:Invoices#weekday-report", scheduleHash: "h1", throughMs: 3_000 };
+    const due = {
+      ...summary,
+      automationId: mark.automationId,
+      trigger: { key: "schedule:2000" },
+      recordId: null,
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),
+    ).toEqual({ claims: [due], mark });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsScheduleMarks, { marks: [mark] }),
+    ).toEqual({ marks: [mark] });
     expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, {
-        ...claim,
-        state: "paused",
-      }),
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
     ).toThrow(ProtocolShapeError);
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
+  });
+
+  it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
+    for (const malformed of [
+      { ...claim, state: "paused" },
+      { ...claim, trigger: { originId: "origin-a" } },
+      { ...claim, change: { ...claim.change, kind: "moved" } },
+      { ...claim, change: { ...claim.change, actorKind: "robot" } },
+      { ...claim, run: undefined },
+      {
         ...claim,
-        trigger: { originId: "origin-a" },
-      }),
-    ).toThrow(ProtocolShapeError);
+        change: {
+          ...claim.change,
+          fields: [{ field: "status", historyId: 1, previous: "open", next: null }],
+        },
+      },
+      {
+        ...claim,
+        change: {
+          ...claim.change,
+          fields: [
+            {
+              field: "status",
+              historyId: 1,
+              previous: { truncated: false, bytes: 1 },
+              next: null,
+            },
+          ],
+        },
+      },
+    ]) {
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed),
+      ).toThrow(ProtocolShapeError);
+    }
   });
 });

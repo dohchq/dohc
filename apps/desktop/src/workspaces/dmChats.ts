@@ -2,7 +2,7 @@ import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // WS-MU-C3 — desktop DM orchestration, kept out of main.ts so it is unit
-// testable. A DM is a `kind:"dm"` channel plus one MU-C4 chat-channel grant
+// testable. A DM is a `kind:"dm"` channel plus one MU-C4 chat grant
 // per participant, riding the shared-channel lane (`syncSharedChannel.ts` /
 // `shared_channel_*`) unchanged:
 //   - the OWNER minted the channel locally (its wire id IS its channel id);
@@ -54,14 +54,14 @@ export async function requireShareableChatChannel(input: {
   const channel = (await input.store.listChannels({ workspaceId: input.workspaceId })).find(
     (candidate) => candidate.id === input.channelId,
   );
-  if (!channel) throw new Error("This channel no longer exists.");
+  if (!channel) throw new Error("This group no longer exists.");
   if (channel.kind === "dm") {
     throw new Error(
-      "Direct messages can't be shared as channels. Start a direct message to choose its participants.",
+      "A direct message can't be shared as a group. Start a direct message to choose its participants.",
     );
   }
   if (channel.kind !== "channel") {
-    throw new Error("Only ordinary channels can be shared.");
+    throw new Error("Only groups can be shared.");
   }
   return channel;
 }
@@ -200,7 +200,7 @@ export function shareIdsToWithholdFromOrdinaryInvites(input: {
   );
 }
 
-// Peek a received chat-channel grant's KIND without mutating the local store
+// Peek a received chat grant's KIND without mutating the local store
 // to classify it as a pending DM request or an ordinary shared-channel invite.
 // The share filter serves the
 // channel.create as the join bootstrap, so the earliest served op carries the
@@ -325,7 +325,7 @@ export function dmChannelNameFor(recipients: string[]): string {
 }
 
 // A DM's true identity is its live grant recipient set — the set of live
-// chat-channel grant recipients on the channel's wire — not its (truncatable,
+// chat grant recipients on the channel's wire — not its (truncatable,
 // collidable) display name. Reuse an existing DM channel only when its live
 // grant recipients exactly equal the requested normalized recipient set;
 // otherwise the caller must create a fresh channel, even if the derived name
