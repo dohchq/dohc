@@ -115,10 +115,16 @@ fn relay_claim_refusal_survives_restart_until_successful_retry() {
         drop(engine);
 
         let mut reopened = EngineStore::open(&path, 2_000).unwrap();
-        assert_eq!(reopened.read_with(|conn| conn.query_row(
-            "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
-            [], |row| row.get::<_, String>(0),
-        )).unwrap(), "account-a");
+        assert_eq!(
+            reopened
+                .read_with(|conn| conn.query_row(
+                    "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ))
+                .unwrap(),
+            "account-a"
+        );
         let restarted = RelaySyncClient::new(ClaimRelay::default());
         assert_eq!(
             restarted.push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
@@ -150,10 +156,16 @@ fn relay_claim_refusal_survives_restart_until_successful_retry() {
             .claim_workspace(&mut reopened, request.clone(), Some("account-a"), &NoFaults)
             .unwrap();
         assert_eq!(read_sync_identity(&reopened, "ws").unwrap(), Some(identity));
-        assert_eq!(reopened.read_with(|conn| conn.query_row(
-            "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
-            [], |row| row.get::<_, Option<String>>(0),
-        )).unwrap(), None);
+        assert_eq!(
+            reopened
+                .read_with(|conn| conn.query_row(
+                    "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                ))
+                .unwrap(),
+            None
+        );
         drop(reopened);
         let mut reopened = EngineStore::open(&path, 2_004).unwrap();
         restarted

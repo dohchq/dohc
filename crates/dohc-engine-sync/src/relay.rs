@@ -1589,21 +1589,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &req.replication_epoch,
             &req.stream_identity,
         )?;
-        let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| {
-            match store.write_with(faults, |tx| {
-                let changed = tx.execute(
-                    "UPDATE sync_identity SET \
+        let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
+            .write_with(faults, |tx| {
+                let changed = tx
+                    .execute(
+                        "UPDATE sync_identity SET \
                      claim_account_id=CASE WHEN ?3 THEN claim_account_id ELSE ?4 END, \
                      claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END \
                      WHERE workspace_id=?1",
-                    params![req.workspace_id, state, keep_refusal, state.and(account_id)],
-                ).map_err(SyncError::persist)?;
-                if changed != 1 { return Err(SyncError::CoordinateDiverged); }
+                        params![req.workspace_id, state, keep_refusal, state.and(account_id)],
+                    )
+                    .map_err(SyncError::persist)?;
+                if changed != 1 {
+                    return Err(SyncError::CoordinateDiverged);
+                }
                 Ok(())
-            }).map_err(local)? {
-                TxnOutcome::Committed(()) => Ok(()),
-                TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
-            }
+            })
+            .map_err(local)?
+        {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
         };
         // A crash or lost response must leave this identity waiting for claim.
         save(store, Some("pending"), true)?;

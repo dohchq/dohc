@@ -1053,7 +1053,8 @@ impl EngineService {
         Self::read_under_ctx(
             &cancellation,
             "sync.resetClaimRefusal",
-            open.actor.reset_claim_refusal(open.workspace_id.clone(), params.account_id),
+            open.actor
+                .reset_claim_refusal(open.workspace_id.clone(), params.account_id),
         )
         .await?;
         Ok(json!({ "reset": true }))

@@ -1145,13 +1145,15 @@ impl ActorHandle {
                      WHERE workspace_id=?1 AND claim_state <> 'pending' \
                      AND (?2 IS NULL OR claim_account_id IS NOT ?2)",
                     rusqlite::params![workspace_id, account_id],
-                ).map_err(dohc_engine_storage::StorageError::persist_public)?;
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })? {
                 TxnOutcome::Committed(()) => Ok(()),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
-        }).await
+        })
+        .await
     }
 
     /// How many changes that did not originate on this computer the engine

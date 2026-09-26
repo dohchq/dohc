@@ -2252,10 +2252,15 @@ async fn account_change_resets_only_refused_claims_without_contacting_relay() {
         json!({ "workspaceId": workspace_id, "accountId": "account-a" }),
     )
     .await;
-    assert_eq!(db.query_row(
-        "SELECT claim_state FROM sync_identity WHERE workspace_id=?1", [workspace_id],
-        |row| row.get::<_, String>(0),
-    ).unwrap(), "workspace-unavailable");
+    assert_eq!(
+        db.query_row(
+            "SELECT claim_state FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "workspace-unavailable"
+    );
     call(
         &transport,
         &handle,
