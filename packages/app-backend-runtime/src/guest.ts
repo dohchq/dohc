@@ -211,7 +211,7 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
       if (!hasStatement(sql)) throw new Error("SQL statement is empty.");
-      if(options.persistentConnection && write && insertsImplicitRowid(sql,persistentRowidTables.get(db)!)) throw new Error("Implicit rowid access is unavailable for journaled datasets.");
+      if(options.persistentConnection && write && insertsImplicitRowid(sql,persistentRowidTables.get(db)!)) throw new Error("Collection actions cannot use the implicit rowid. Use the table's primary key.");
       const paramsJson = boundedText(vm.getString(paramsValue), request.limits.inputBytes, "SQL parameters");
       const params: unknown = JSON.parse(paramsJson);
       if (!Array.isArray(params) || params.length > 128 || params.some(value => value !== null && typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value)))) throw new Error("SQL parameters must be scalar values.");

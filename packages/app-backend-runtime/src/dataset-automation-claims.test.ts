@@ -544,8 +544,8 @@ it("takes an automation's identity from its context, and grants it no owner admi
   // History names the automation behind its change, and only that change.
   await f.invoke("owner", CREATE, "by-hand");
   expect(f.host.history("owner", scope).entries.map(entry => entry.automation ?? null)).toEqual([null, { automationId: "collection:signups#a", depth: 2 }]);
-  await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("not permitted");
-  await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("not permitted");
-  expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("not permitted");
+  await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("You do not have access to this Collection.");
+  await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("You do not have access to this Collection.");
+  expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("You do not have access to this Collection.");
   expect(f.storage.bytes).toBe(retained(f.db));
 });

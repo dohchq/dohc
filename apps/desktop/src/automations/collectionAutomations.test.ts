@@ -1178,7 +1178,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim).toMatchObject({
       state: "failed",
-      error: "Automations cannot use Donations yet, because it keeps its records in a dataset.",
+      error: "Automations cannot use Donations yet, because its records change only through its Collection actions.",
     });
     expect(w.authored).toEqual([]);
   });

@@ -260,7 +260,7 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
 export type DatasetFindFilter = { field: string; value: Extract<FindQuery, { match: "field" }>["value"] };
 
 const DATASET_FIND_SHAPE =
-  'A Find on a dataset can check fields with ==, such as record.Status == "Doing" && record.Paid == false.';
+  'This Collection needs a Find that checks fields with ==. Use a condition such as record.Status == "Doing" && record.Paid == false.';
 
 /**
  * Reads a Find condition on a dataset: `true`, or `record.F == value` terms
@@ -304,7 +304,7 @@ export function operationsOf(automation: Automation): string[] {
   return [...names];
 }
 
-const DATASET_GROUP_TRIGGER_UNSUPPORTED = "Automations on dataset Collections can't start from Group messages.";
+const DATASET_GROUP_TRIGGER_UNSUPPORTED = "This Collection's automations cannot start from Group messages. Choose a record change as the trigger.";
 export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
 
 /**
@@ -313,7 +313,7 @@ export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a 
  * reason for the rest.
  */
 export function unsupportedReason(automation: Automation): string | null {
-  const DATASET = "Only a dataset Collection's automations can name tables and operations.";
+  const DATASET = "This document Collection's automations cannot name a table or a Collection action. Remove those names from the automation.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   for (const { step } of stepsInOrder(automation)) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) return DATASET;

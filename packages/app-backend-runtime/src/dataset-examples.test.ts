@@ -132,13 +132,13 @@ it("preserves fundraiser rollback, receipt privacy, manual entry, and revocation
   const registered = listing.records.find((row: Result) => row.hasReceipt);
   expect(await f.result("receiptAccess", { id: registered.id }, "helper", "admin")).toEqual({ fileId: receipt.fileId });
   for (const name of ["receiptAccess", "listRegistrations", "tableRegistrations"]) {
-    await expect(f.call(name, { id: registered.id }, "friend", "admin")).rejects.toThrow("not permitted");
+    await expect(f.call(name, { id: registered.id }, "friend", "admin")).rejects.toThrow("You do not have access to this Collection.");
   }
-  await expect(f.call("listRegistrations", {}, "owner", "form")).rejects.toThrow("not permitted");
+  await expect(f.call("listRegistrations", {}, "owner", "form")).rejects.toThrow("You do not have access to this Collection.");
   f.host.setDataGrant("owner", { ...f.scope, principalKey: "helper", grant: null });
-  await expect(f.call("receiptAccess", { id: registered.id }, "helper", "admin")).rejects.toThrow("not permitted");
+  await expect(f.call("receiptAccess", { id: registered.id }, "helper", "admin")).rejects.toThrow("You do not have access to this Collection.");
   f.host.setBinding("owner", { ...f.scope, appId: "form", binding: null });
-  await expect(f.call("listPublicSessions", {}, "friend", "form")).rejects.toThrow("not permitted");
+  await expect(f.call("listPublicSessions", {}, "friend", "form")).rejects.toThrow("You do not have access to this Collection.");
   expect((await f.result("tableRegistrations", {}, "owner")).rows).toHaveLength(2);
 });
 

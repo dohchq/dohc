@@ -36,7 +36,7 @@ describe("dataset automation steps", () => {
   it("refuses Group-message triggers on datasets", () => {
     const fromMessage = automation("      - add-record:\n          Status: New\n        operation: invoices.create\n", "group-message: Team");
     expect(datasetSubscriptionFor(fromMessage, definition))
-      .toEqual({ problem: "Automations on dataset Collections can't start from Group messages." });
+      .toEqual({ problem: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." });
   });
 
   it.each([
@@ -50,7 +50,7 @@ describe("dataset automation steps", () => {
     for (const steps of [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
       [{ kind: "if" as const, if: "false", do: base.do, otherwise: chat }]]) {
       expect(datasetAutomationProblem({ ...base, do: steps }, generated))
-        .toBe("Automations on dataset Collections can't post in chat, notify people, or wake agents.");
+        .toBe("This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.");
     }
   });
 
@@ -66,7 +66,7 @@ describe("dataset automation steps", () => {
     expect(datasetAutomationProblem(automation("      - add-record:\n          Finished on: '2026-09-25'\n        operation: invoices.create\n"), generated))
       .toBe("Budget has no approved way to add records with Finished on.");
     expect(datasetAutomationProblem(automation("      - find: contains(record.Notes, \"late\")\n        as: late\n        operation: invoices.list\n"), generated))
-      .toMatch(/^A Find on a dataset can check fields with ==/);
+      .toMatch(/^This Collection needs a Find that checks fields with ==/);
     expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), { definition, generated: false }))
       .toBe("Budget's operations were written or changed outside dohc, so automations cannot use them yet.");
     expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), generated)).toBeNull();

@@ -434,7 +434,7 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "pending");
     await f.writeAutomations(closePaid("      - set:\n          Status: Closed\n        operation: invoices.status\n      - post: Paid\n        group: Team\n"));
     f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
-    const sentence = "Automations on dataset Collections can't post in chat, notify people, or wake agents.";
+    const sentence = "This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.";
     await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(sentence));
     f.setRoster(OWNER);
     f.executor.rosterChanged();
@@ -450,7 +450,7 @@ describe("Collection automations on a dataset", () => {
       "      - add-record:\n          Status: New\n        operation: invoices.create\n");
     await f.executor.open();
     expect(await f.executor.automationsIn("Budget")).toMatchObject({ status: "read", automations: [
-      expect.objectContaining({ cannotRun: "Automations on dataset Collections can't start from Group messages." }),
+      expect.objectContaining({ cannotRun: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." }),
     ] });
     expect(f.subscribed).toEqual([]);
     expect(f.host.automations.subscriptions()).toEqual([]);

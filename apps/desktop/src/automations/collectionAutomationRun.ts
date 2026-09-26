@@ -310,7 +310,7 @@ export async function runCollectionAutomation(
   for (const target of targets.values()) {
     // A dataset's records change only through its approved operations.
     if (await dependencies.isDatasetCollection(target.path)) {
-      return failed(`Automations cannot use ${target.name} yet, because it keeps its records in a dataset.`);
+      return failed(`Automations cannot use ${target.name} yet, because its records change only through its Collection actions.`);
     }
     if (!dependencies.isCollection(target.path)) return failed(`dohc cannot find the Collection ${target.path}.`);
   }

@@ -83,7 +83,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       // main process runs its own loop, where this recheck is best effort.
       setImmediate(()=>{
         if(active!==entry || entry.progress!==seen) return;
-        fail(new PersistentRuntimeError("worker_stalled",`The dataset worker made no progress for ${duration(entry.silence)}${during(entry)}. Try again.`));
+        fail(new PersistentRuntimeError("worker_stalled",`dohc made no progress on this Collection for ${duration(entry.silence)}${during(entry)}. Try again.`));
       });
     },limitMs);
   }
@@ -96,7 +96,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     try {rmSync(budgetMarker(),{force:true});} catch {/* removed before the next launch */}
     const [kind,budgetMs]=marker.split(" ");
     const used=`more than ${duration(Number(budgetMs))} of CPU time${during(active)}`;
-    return kind==="checks" ? `The dataset's checks ran too long: they used ${used}.` : `The app's code ran too long: it used ${used}.`;
+    return kind==="checks" ? `dohc's checks of this Collection ran too long: they used ${used}.` : `The app's code ran too long: it used ${used}.`;
   }
   function fail(error:Error):void {
     stopped??=error;
@@ -111,15 +111,15 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
     watchSilence(entry);
-    entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Try again.`)),commandCapMs);
+    entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`dohc did not finish this Collection's work in ${duration(commandCapMs)}${during(entry)}. Try again.`)),commandCapMs);
     try {child.postMessage({id:entry.id,command:entry.command});}catch(error){fail(error instanceof Error ? error : new Error(String(error)));}
   }
   function send(command:PersistentCommand):Promise<PersistentResult> {
     if(stopped) return Promise.reject(stopped);
-    if(closing && command.kind!=="close") return Promise.reject(new PersistentRuntimeError("worker_closed","The dataset worker is closing."));
-    if(queue.length+(active?1:0)>=64) return Promise.reject(new PersistentRuntimeError("queue_full","The dataset worker queue is full."));
+    if(closing && command.kind!=="close") return Promise.reject(new PersistentRuntimeError("worker_closed","dohc is closing this Collection. Try again in a moment."));
+    if(queue.length+(active?1:0)>=64) return Promise.reject(new PersistentRuntimeError("queue_full","dohc has too much Collection work waiting. Try again in a moment."));
     const bytes=command.kind==="apply" ? command.input.changeset.byteLength : command.kind==="applyBatch" ? command.input.reduce((sum,event)=>sum+event.changeset.byteLength+256,0) : Buffer.byteLength(JSON.stringify(command));
-    if(retainedBytes+bytes>129*1024*1024) return Promise.reject(new PersistentRuntimeError("queue_full","The dataset worker queue byte limit is full."));
+    if(retainedBytes+bytes>129*1024*1024) return Promise.reject(new PersistentRuntimeError("queue_full","dohc has too much Collection work waiting. Try again in a moment."));
     if(command.kind==="apply") command={...command,input:{...command.input,changeset:Uint8Array.from(command.input.changeset)}};
     if(command.kind==="applyBatch") command={...command,input:command.input.map(event=>({...event,changeset:Uint8Array.from(event.changeset)}))};
     retainedBytes+=bytes;
@@ -128,13 +128,13 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     return new Promise((resolve,rejectEntry)=>{
       const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,progress:0,silence:silenceMs,timer:setTimeout(()=>{
         const index=queue.indexOf(entry);
-        if(index>=0){queue.splice(index,1);retainedBytes-=entry.bytes;rejectEntry(new PersistentRuntimeError("queue_deadline","The operation expired while waiting for the dataset worker."));}
+        if(index>=0){queue.splice(index,1);retainedBytes-=entry.bytes;rejectEntry(new PersistentRuntimeError("queue_deadline","This Collection stayed busy too long, so dohc stopped waiting. Try again."));}
       },waitMs)};
       queue.push(entry);pump();
     });
   }
   rmSync(budgetMarker(),{force:true});
-  const cancel=()=>{const reason:unknown=input.signal?.reason;fail(reason instanceof Error ? reason : new PersistentRuntimeError("worker_aborted","The dataset worker was cancelled."));};
+  const cancel=()=>{const reason:unknown=input.signal?.reason;fail(reason instanceof Error ? reason : new PersistentRuntimeError("worker_aborted","dohc stopped this Collection's work before it finished."));};
   input.signal?.addEventListener("abort",cancel,{once:true});
   try {
     // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
@@ -151,7 +151,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
           return;
         }
         const reply=message as PersistentReply;
-        if(!active || !reply || reply.id!==active.id || typeof reply.ok!=="boolean") {fail(new PersistentRuntimeError("worker_protocol","Invalid dataset worker response."));return;}
+        if(!active || !reply || reply.id!==active.id || typeof reply.ok!=="boolean") {fail(new PersistentRuntimeError("worker_protocol","dohc could not read this Collection's reply. Try again."));return;}
         const entry=active;active=undefined;settle(entry);retainedBytes-=entry.bytes;
         if(reply.ok) entry.resolve(reply.result);
         else entry.reject(reply.refusal ? new AppBackendRuntimeError(reply.refusal) : new PersistentRuntimeError(reply.code,reply.error));
@@ -160,7 +160,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         exited=true;resolveExit();
         const budget=exceededBudget();
         if(budget!==undefined) fail(new PersistentRuntimeError("worker_budget",`${budget} Try again.`));
-        else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Try again.`));
+        else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`dohc's work on this Collection stopped${during(active)}. Try again.`));
       },
     });
     if(stopped) child.kill();
@@ -235,7 +235,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         migrationSql:boundedText(input.migrationSql,config.limits.sourceBytes,"Database migration"),
         ...(input.reportPath ? {reportPath:trustedPath(input.reportPath)} : {})}}) as MigratedCheckpoint;
     },
-    async abort(reason="The dataset operation was cancelled."):Promise<void> {
+    async abort(reason="The Collection action stopped before it finished."):Promise<void> {
       closing=true;fail(new PersistentRuntimeError("worker_aborted",reason));
       if(!exited) await exitPromise;
     },

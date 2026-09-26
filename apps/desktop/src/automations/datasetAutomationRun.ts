@@ -88,13 +88,13 @@ type Row = DatasetRow;
 function rowsOf(result: DatasetInvocationResult): Row[] {
   const value = result.result;
   const rows = value !== null && typeof value === "object" && !Array.isArray(value) ? value.rows : undefined;
-  if (!Array.isArray(rows)) throw new Error("The dataset's read did not return records.");
+  if (!Array.isArray(rows)) throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
   return rows.map((row) => {
-    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error("The dataset's read did not return records.");
+    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
     const { id, version, values } = row;
     if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number" ||
       values === null || typeof values !== "object" || Array.isArray(values)) {
-      throw new Error("The dataset's read did not return records.");
+      throw new Error("This Collection returned an invalid record list. Ask the owner to check its rules.");
     }
     return { id, version, values };
   });
@@ -314,7 +314,7 @@ function datasetEffects(
             values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
           };
         }
-        if (effect.kind !== "set") throw new Error("Dataset automations cannot send chat messages.");
+        if (effect.kind !== "set") throw new Error("This Collection's automations cannot send chat messages. Remove chat steps from the automation.");
         let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
         if ("addedBy" in effect.target) {
           target = { addedBy: effect.target.addedBy };
@@ -347,7 +347,7 @@ async function applyPlan(
       if (input.stopped.aborted) return stopped;
       if (signal.aborted) return failed(DEADLINE_ERROR, true);
       const { ordinal, effect } = effects[index]!;
-      if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") return failed("This run's saved plan is not a dataset plan.");
+      if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
       let writes: RunWrite[];
       try {
         writes = await applyEffect({ dependencies, host, context, run, index, ordinal, signal, definition }, effect, automation);
@@ -406,7 +406,7 @@ async function applyEffect(
     const created = result.value.result;
     const id = created !== null && typeof created === "object" && !Array.isArray(created) ? created.id : undefined;
     const version = created !== null && typeof created === "object" && !Array.isArray(created) ? created.version : undefined;
-    if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number") throw new Error("The dataset's create did not name its record.");
+    if ((typeof id !== "string" && typeof id !== "number") || typeof version !== "number") throw new Error("This Collection did not identify the record it added. Ask the owner to check its rules.");
     return [{ kind: "dataset-created", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId: id, version }];
   }
 
@@ -426,7 +426,7 @@ async function applyEffect(
       const landed = result.value.result;
       const prior = landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.priorValues : undefined;
       const next = landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.version : undefined;
-      if (typeof next !== "number") throw new Error("The dataset's edit did not return the record's version.");
+      if (typeof next !== "number") throw new Error("This Collection did not return the updated record's version. Ask the owner to check its rules.");
       const priorValues = prior !== null && typeof prior === "object" && !Array.isArray(prior) ? prior : {};
       return [...kept, {
         kind: "dataset-edit", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, recordId, version: next,

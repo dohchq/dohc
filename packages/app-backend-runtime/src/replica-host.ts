@@ -22,7 +22,7 @@ export function createDatasetReplicaHost<Context>(options: {
   }
   function scoped(scope: DatasetScope, raw: DatasetCursor) {
     const cursor = parseRecoveryCursor(raw);
-    if (cursor.workspaceId !== scope.workspaceId || cursor.datasetId !== scope.datasetId) throw Error("The Collection copy belongs to another dataset.");
+    if (cursor.workspaceId !== scope.workspaceId || cursor.datasetId !== scope.datasetId) throw Error("This Collection copy belongs to another Collection.");
     return cursor;
   }
   return {
@@ -35,7 +35,7 @@ export function createDatasetReplicaHost<Context>(options: {
     replicaPage(context: Context, input: DatasetScope & { through: DatasetCursor; after: DatasetCursor; limit?: number }): DatasetReplicaPage {
       const authorize = access(context, input), through = scoped(input, input.through), after = scoped(input, input.after);
       const [previous] = options.journal.exportPage({ scope: input, through, afterRevision: after.revision - 1, limit: 1, authorize });
-      if (!previous || !equalRecoveryCursor(previous.cursor, after)) throw Error("The Collection copy changed. Download its current checkpoint.");
+      if (!previous || !equalRecoveryCursor(previous.cursor, after)) throw Error("The Collection copy changed. Download it again.");
       const records = options.journal.exportPage({ scope: input, through, afterRevision: after.revision, limit: input.limit, authorize });
       authorize(); return { through, after, records };
     },

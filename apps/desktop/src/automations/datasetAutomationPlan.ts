@@ -209,7 +209,7 @@ const GENERATED_ONLY = (name: string) =>
 export function datasetAutomationProblem(automation: Automation, dataset: { definition: DatasetDefinition; generated: boolean }): string | null {
   if (stepsInOrder(automation).some(({ step }) =>
     step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent")) {
-    return "Automations on dataset Collections can't post in chat, notify people, or wake agents.";
+    return "This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.";
   }
   const shape = shapeProblem(automation, (condition) => {
     const filters = datasetFindOf(condition);

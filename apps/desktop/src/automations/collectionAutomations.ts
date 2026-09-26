@@ -1534,7 +1534,7 @@ export class CollectionAutomations {
       // replays their receipts instead of writing again.
       if (dataset) {
         const changed = await this.withLiveHost((host) => datasetUndoRulesChanged(host, runs), true);
-        if (changed === null) throw new Error("The workspace's dataset host is not open.");
+        if (changed === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
         if (changed) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
       }
       // Saved before anything is reversed, so no run resumes over what this
@@ -1554,7 +1554,7 @@ export class CollectionAutomations {
           withRecordWrites: this.options.withRecordWrites,
           trash,
         }, pending, this.runAbort.signal);
-      if (undone === null) throw new Error("The workspace's dataset host is not open.");
+      if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
       for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
       return { status: "undone", ...undone };
     } finally {
