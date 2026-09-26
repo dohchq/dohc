@@ -96,6 +96,10 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
         <span data-testid="schedule-host-note" className="text-[12px] text-muted">
           {state.kind === "this-computer" ? "This computer" : state.message}
         </span>
+        {/* A note can pass, as when the connection comes back. */}
+        {state.kind === "note" ? (
+          <SecondaryButton size="compact" disabled={busy} onClick={() => void read()}>Check again</SecondaryButton>
+        ) : null}
       </SettingRow>
     );
   }

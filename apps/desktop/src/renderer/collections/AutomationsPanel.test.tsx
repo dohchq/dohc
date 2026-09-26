@@ -2,12 +2,13 @@
 
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
+  ScheduleHostResult,
   UndoCollectionAutomationRunResult,
   WriteCollectionAutomationsPayload,
   WriteCollectionAutomationsResult,
@@ -49,7 +50,6 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
     cannotRun: null,
     reach: { kind: "checked", steps: automation.do.map(() => ({ verdict: "allowed" as const })) },
     lastRun: null,
-    nextRunMs: null,
     ...overrides,
   };
 }
@@ -68,6 +68,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
   const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
+  const hostListeners = new Set<(workspaceId: string) => void>();
   const written: WriteCollectionAutomationsPayload[] = [];
   const writeResults: WriteCollectionAutomationsResult[] = [];
   const bridge = {
@@ -124,6 +125,12 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return () => undefined;
     }),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    readScheduleHost: vi.fn(async (_payload: { workspaceId: string }): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
+    onScheduleHostChanged: vi.fn((listener: (workspaceId: string) => void) => {
+      hostListeners.add(listener);
+      return () => hostListeners.delete(listener);
+    }),
+    onCloudSessionChanged: vi.fn(() => () => undefined),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   // Another writer changes the file; the panel reads it again, as it does
@@ -132,7 +139,11 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     current = next;
     for (const listener of failureListeners) listener({ workspaceId: "ws-1" });
   };
-  return { bridge, written, writeResults, replaceFile };
+  // Main says which computer runs schedules changed, as after a handover.
+  const hostChanged = (workspaceId: string) => {
+    for (const listener of hostListeners) listener(workspaceId);
+  };
+  return { bridge, written, writeResults, replaceFile, hostChanged };
 }
 
 function Panel(props: {
@@ -142,6 +153,7 @@ function Panel(props: {
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
+  onOpenScheduleSettings?: () => void;
   closeAsk?: number;
   onClose?: () => void;
 }) {
@@ -158,6 +170,7 @@ function Panel(props: {
       closeAsk={props.closeAsk ?? 0}
       onClose={props.onClose ?? (() => undefined)}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
+      onOpenScheduleSettings={props.onOpenScheduleSettings ?? (() => undefined)}
       onError={onError}
       onNotice={props.onNotice ?? (() => undefined)}
     />
@@ -346,6 +359,192 @@ describe("the ⚡ panel", () => {
     expect(bridge.confirmCollectionAutomationStep).toHaveBeenCalledWith({
       workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7,
     });
+  });
+});
+
+describe("a schedule's next run", () => {
+  const NOW = Date.UTC(2026, 8, 25, 10);
+  const daily: Automation = {
+    ...stamp,
+    id: "report",
+    name: "Morning report",
+    when: { kind: "schedule", every: "day", at: "09:00", timezone: "UTC" },
+    do: [{ kind: "add-record", values: [], collection: null, as: null, operation: null }],
+  };
+  const localTime = (ms: number) => new Intl.DateTimeFormat(undefined, {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  }).format(ms);
+  const tomorrow = `Next run ${localTime(Date.UTC(2026, 8, 26, 9))}`;
+  const computers = [
+    { installId: "me", label: "DESKTOP-1", lastSeenMs: NOW, thisComputer: true },
+    { installId: "laptop", label: "Ice's laptop", lastSeenMs: NOW - 86_400_000, thisComputer: false },
+  ];
+  const relay = (hostInstallId: string | null, handoverFrom: string | null = null): ScheduleHostResult =>
+    ({ kind: "relay", generation: 3, hostInstallId, handoverFrom, computers });
+
+  // Only Date is fake: the panel's timer and the test's waits run on real time.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows when a switched-on schedule runs next, in local time, and nothing for others", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge } = makeBridge(read([
+      summary(daily),
+      summary({ ...daily, id: "off", name: "Off", enabled: false }),
+      summary({ ...daily, id: "stuck", name: "Stuck" }, { cannotRun: "Turn on sync to run this workspace's schedules." }),
+      summary(stamp),
+    ]));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-report");
+    await waitFor(() => expect(bridge.readScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    expect(within(row).getByText(tomorrow)).toBeTruthy();
+    for (const id of ["off", "stuck", "stamp"]) {
+      expect(screen.getByTestId(`automation-${id}`).textContent).not.toContain("Next run");
+    }
+  });
+
+  it("does not ask which computer runs schedules when nothing here is scheduled", async () => {
+    const { bridge } = makeBridge(read([summary(stamp), summary({ ...daily, enabled: false })]));
+    render(<Panel />);
+    await screen.findByTestId("automation-report");
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    expect(bridge.onScheduleHostChanged).not.toHaveBeenCalled();
+  });
+
+  it("moves on to the following run once the shown one comes due, and when the schedule changes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 8, 26, 9) - 20 });
+    const { replaceFile } = makeBridge(read([summary(daily)]));
+    render(<Panel />);
+    expect(await screen.findByText(tomorrow)).toBeTruthy();
+    vi.setSystemTime(Date.UTC(2026, 8, 26, 9));
+    expect(await screen.findByText(`Next run ${localTime(Date.UTC(2026, 8, 27, 9))}`)).toBeTruthy();
+
+    replaceFile(read([summary({ ...daily, when: { kind: "schedule", every: "day", at: "18:30", timezone: "UTC" } })]));
+    expect(await screen.findByText(`Next run ${localTime(Date.UTC(2026, 8, 26, 18, 30))}`)).toBeTruthy();
+    replaceFile(read([summary({ ...daily, enabled: false })]));
+    await waitFor(() => expect(screen.getByTestId("automation-report").textContent).not.toContain("Next run"));
+  });
+
+  it("names the computer that runs schedules when it is not this one, and follows a handover", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge, hostChanged } = makeBridge(read([summary(daily)]));
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("laptop"));
+    const onOpenScheduleSettings = vi.fn();
+    render(<Panel onOpenScheduleSettings={onOpenScheduleSettings} />);
+    expect(await screen.findByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
+
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("me", "laptop"));
+    act(() => hostChanged("ws-2"));
+    act(() => hostChanged("ws-1"));
+    const handover = await screen.findByTestId("schedule-host-handover");
+    expect(within(handover).getByText("Schedules wait for Ice's laptop to hand over.")).toBeTruthy();
+    expect(screen.getByText(tomorrow)).toBeTruthy();
+    expect(bridge.readScheduleHost).toHaveBeenCalledTimes(2);
+    // Settings can take over from a computer that stays away.
+    await userEvent.click(within(handover).getByRole("button", { name: "Choose a computer" }));
+    expect(onOpenScheduleSettings).toHaveBeenCalledTimes(1);
+
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("me"));
+    act(() => hostChanged("ws-1"));
+    await waitFor(() => expect(screen.queryByTestId("schedule-host-handover")).toBeNull());
+    expect(screen.getByText(tomorrow)).toBeTruthy();
+  });
+
+  it("says plainly when no computer runs schedules, and opens the setting that chooses one", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge, hostChanged } = makeBridge(read([summary(daily), summary({ ...daily, id: "second", name: "Second" })]));
+    bridge.readScheduleHost.mockResolvedValueOnce(relay(null));
+    const onOpenScheduleSettings = vi.fn();
+    render(<Panel onOpenScheduleSettings={onOpenScheduleSettings} />);
+    const note = await screen.findByTestId("schedule-host-missing");
+    expect(screen.getAllByText("No computer runs this workspace's schedules.")).toHaveLength(1);
+    expect(screen.queryByText(/Next run/)).toBeNull();
+    await userEvent.click(within(note).getByRole("button", { name: "Choose a computer" }));
+    expect(onOpenScheduleSettings).toHaveBeenCalledTimes(1);
+
+    // The owner chose this computer in settings.
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("me"));
+    act(() => hostChanged("ws-1"));
+    await waitFor(() => expect(screen.getAllByText(tomorrow)).toHaveLength(2));
+    expect(screen.queryByTestId("schedule-host-missing")).toBeNull();
+  });
+
+  it("says offline that dohc could not check, keeps the computer it last named, and checks again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const offline: ScheduleHostResult = { kind: "note", message: "dohc could not reach your server to check which computer runs schedules." };
+    const { bridge, hostChanged } = makeBridge(read([summary(daily)]));
+    const onError = vi.fn();
+    bridge.readScheduleHost.mockResolvedValueOnce(offline);
+    const { unmount } = render(<Panel onError={onError} />);
+    const note = await screen.findByTestId("schedule-host-unchecked");
+    expect(note.textContent).toContain(offline.message);
+    expect(screen.getByText(tomorrow)).toBeTruthy();
+
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("laptop"));
+    await userEvent.click(within(note).getByRole("button", { name: "Check again" }));
+    expect(await screen.findByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
+    expect(screen.queryByTestId("schedule-host-unchecked")).toBeNull();
+
+    // The connection drops: the laptop stays named, with the note beside it.
+    bridge.readScheduleHost.mockResolvedValueOnce(offline);
+    act(() => hostChanged("ws-1"));
+    expect(await screen.findByTestId("schedule-host-unchecked")).toBeTruthy();
+    expect(screen.getByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("shows next runs in the time zone the computer is in now", async () => {
+    // A formatter made without a zone takes the computer's zone when it is
+    // made, as in Electron. Stubbing that keeps the process's own zone intact.
+    let zone = "UTC";
+    const RealDateTimeFormat = Intl.DateTimeFormat;
+    // A function, not an arrow: the panel calls it with new.
+    const spy = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
+      function (locales?: Intl.LocalesArgument, options?: Intl.DateTimeFormatOptions) {
+        return new RealDateTimeFormat(locales, { timeZone: zone, ...options });
+      },
+    );
+    onTestFinished(() => spy.mockRestore());
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    makeBridge(read([summary(daily)]));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-report");
+    await waitFor(() => expect(row.textContent).toMatch(/9:00/));
+    // The person flies to India, and the window gets focus there.
+    zone = "Asia/Kolkata";
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(row.textContent).toMatch(/2:30/));
+  });
+
+  it("reports a failed read with Try again, and drops an answer for a workspace it left", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge } = makeBridge(read([summary(daily)]));
+    const onError = vi.fn();
+    bridge.readScheduleHost.mockRejectedValueOnce(new Error("dohc could not reach the relay."));
+    const { rerender } = render(<Panel onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not read which computer runs schedules.", expect.any(Error), expect.any(Function),
+    ));
+    expect(screen.getByText(tomorrow)).toBeTruthy();
+    const tryAgain = onError.mock.calls[0]?.[2] as () => void;
+    bridge.readScheduleHost.mockResolvedValueOnce(relay("laptop"));
+    act(() => tryAgain());
+    expect(await screen.findByText(`${tomorrow} on Ice's laptop`)).toBeTruthy();
+
+    // ws-1's answer comes after the panel moved to ws-2: it never shows there.
+    let answer: (result: ScheduleHostResult) => void = () => undefined;
+    bridge.readScheduleHost.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    act(() => tryAgain());
+    rerender(<Panel workspaceId="ws-2" onError={onError} />);
+    await waitFor(() => expect(bridge.readScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws-2" }));
+    await act(async () => answer(relay(null)));
+    expect(await screen.findByText(tomorrow)).toBeTruthy();
+    expect(screen.queryByText("No computer runs this workspace's schedules.")).toBeNull();
+    expect(screen.queryByText(/on Ice's laptop/)).toBeNull();
   });
 });
 

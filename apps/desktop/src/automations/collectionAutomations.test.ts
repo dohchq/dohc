@@ -598,32 +598,6 @@ describe("Collection automations", () => {
       .toHaveLength(1);
   });
 
-  it("says when each switched-on schedule runs next", async () => {
-    const w = await world({ automations: { Tasks: [
-      "  - id: sweep",
-      "    name: Sweep",
-      "    when: {schedule: day, at: '09:00', timezone: UTC}",
-      "    do: [{add-record: {Title: Swept}}]",
-      "  - id: off",
-      "    name: Off",
-      "    enabled: false",
-      "    when: {schedule: day, at: '09:00', timezone: UTC}",
-      "    do: [{add-record: {Title: Never}}]",
-      "  - id: stamp",
-      "    name: Stamp",
-      "    when: record-added",
-      "    do: [{set: {Status: New}}]",
-    ].join("\n") } });
-    const executor = w.makeExecutor({ nowMs: () => Date.UTC(2026, 8, 25, 10) });
-    await executor.open();
-    const listed = await executor.automationsIn("Tasks");
-    const next = listed.status === "read"
-      ? listed.automations.map((entry) => (entry.valid ? entry.nextRunMs : "invalid"))
-      : [];
-    expect(next).toEqual([Date.UTC(2026, 8, 26, 9), null, null]);
-    await executor.dispose();
-  });
-
   it("closes after a background run and opens again", async () => {
     const w = await world({ automations: { Tasks: [
       "  - id: sweep",

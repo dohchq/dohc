@@ -5663,6 +5663,7 @@ export function DesktopWorkspaceShell(props: {
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
                     onOpenFile={(path) => openFile(path)}
+                    onOpenScheduleSettings={() => openSettings("advanced")}
                     onError={collectionReports.onError}
                     onNotice={collectionReports.onNotice}
                     automationFocus={

@@ -227,6 +227,7 @@ function makeBridge(
 // The props a page gets from the shell besides its collection and view.
 const SHELL_PROPS = {
   onOpenFile: () => undefined,
+  onOpenScheduleSettings: () => undefined,
   onError: () => undefined,
   onNotice: () => undefined,
   automationFocus: null,
