@@ -6,9 +6,10 @@
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, Placement,
-    ReplaceBackoff, StdReplacer, backoff_delay, materialize_secret_one, recover_displacements,
-    recover_path_displacements, run_pending_jobs, workspace_lacks_atomic_placement,
+    AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, MaterializeOptions,
+    NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay, materialize_secret_one,
+    recover_displacements, recover_path_displacements, run_pending_jobs,
+    workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -2509,4 +2510,40 @@ fn a_write_leaves_files_and_symlinks_at_old_probe_names_untouched() {
         std::fs::read(&outside_file).expect("outside file"),
         b"outside the workspace"
     );
+}
+
+/// A network filesystem can do a rename and then report it failed. A
+/// check-then-rename that errors after taking effect still records the limit.
+struct FallbackRenameFailsAfterMoving;
+
+impl AtomicReplacer for FallbackRenameFailsAfterMoving {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+        StdReplacer.place(incoming, target)?;
+        Err(CheckThenRenameFailed::wrap(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )))
+    }
+}
+
+#[test]
+fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit() {
+    let sc = Scratch::new("fallback-fails-after-moving");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let job = spec("j1", "a.md", &hex_sha256(OURS), Preimage::Absent, 1, 10);
+    stage_job(&mut store, OURS, &job);
+
+    let result = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &FallbackRenameFailsAfterMoving,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
+    );
+    assert!(result.is_err(), "the rename reported failure");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS), "it took effect");
+    assert!(workspace_lacks_atomic_placement(sc.workspace()));
 }

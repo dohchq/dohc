@@ -169,6 +169,37 @@ pub trait AtomicReplacer: Send + Sync {
     }
 }
 
+/// The error of a check-then-rename's rename, which may have taken effect
+/// before it failed (a network filesystem can report a rename it did as
+/// failed). It carries the fallback on the error, so the placement still
+/// records the limit. The wrapping `io::Error` keeps the original kind.
+#[derive(Debug)]
+pub struct CheckThenRenameFailed(pub std::io::Error);
+
+impl CheckThenRenameFailed {
+    /// Wrap a fallback rename's error, keeping its kind.
+    pub fn wrap(err: std::io::Error) -> std::io::Error {
+        std::io::Error::new(err.kind(), CheckThenRenameFailed(err))
+    }
+
+    fn is(err: &std::io::Error) -> bool {
+        err.get_ref()
+            .is_some_and(|inner| inner.is::<CheckThenRenameFailed>())
+    }
+}
+
+impl std::fmt::Display for CheckThenRenameFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "check-then-rename failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for CheckThenRenameFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// Which rename placed a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -217,7 +248,7 @@ fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placemen
             match std::fs::symlink_metadata(target) {
                 Ok(_) => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
                 Err(err) if err.kind() == ErrorKind::NotFound => {
-                    std::fs::rename(incoming, target)?;
+                    std::fs::rename(incoming, target).map_err(CheckThenRenameFailed::wrap)?;
                     Ok(Placement::CheckThenRename)
                 }
                 Err(err) => Err(err),
@@ -1681,24 +1712,27 @@ fn place_after_displace(
 }
 
 /// One try of a no-replace placement. Every placement, by a write, a delete's
-/// return, or recovery after a restart, comes through here. A placement the
-/// rename reports as a check-then-rename records its directory, so the
-/// workspace reports the limit.
+/// return, or recovery after a restart, comes through here. A placement that
+/// chose the check-then-rename records its directory, so the workspace
+/// reports the limit, whether that rename succeeded or failed.
 fn place_attempt(
     replacer: &dyn AtomicReplacer,
     incoming: &Path,
     target: &Path,
 ) -> Result<Attempt<bool>, MaterializeError> {
-    match replacer.place(incoming, target) {
-        Ok(Placement::Atomic) => Ok(Attempt::Done(true)),
-        Ok(Placement::CheckThenRename) => {
-            if let Some(dir) = target.parent()
-                && let Ok(mut dirs) = dirs_without_atomic_placement().lock()
-            {
-                dirs.insert(dir.to_path_buf());
-            }
-            Ok(Attempt::Done(true))
-        }
+    let placed = replacer.place(incoming, target);
+    let fell_back = match &placed {
+        Ok(placement) => *placement == Placement::CheckThenRename,
+        Err(err) => CheckThenRenameFailed::is(err),
+    };
+    if fell_back
+        && let Some(dir) = target.parent()
+        && let Ok(mut dirs) = dirs_without_atomic_placement().lock()
+    {
+        dirs.insert(dir.to_path_buf());
+    }
+    match placed {
+        Ok(_) => Ok(Attempt::Done(true)),
         Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(Attempt::Done(false)),
         Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
         Err(err) => Err(MaterializeError::io(target, &err)),
