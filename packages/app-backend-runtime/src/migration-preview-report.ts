@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync, unlinkSync, writeSync } from "node:fs";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
-import { reject } from "./persistent-protocol.js";
+import { HEARTBEAT_ROWS, reject } from "./persistent-protocol.js";
 
 export type MigrationPreviewValue = null | string | number | {type:"integer";value:string} | {type:"blob";base64:string};
 export interface MigrationPreviewChange {
@@ -67,10 +67,11 @@ function values(row:Row,names:string[]):Record<string,MigrationPreviewValue> {
 }
 
 /** The caller holds exclusive ownership of both immutable snapshots and supplies the dataset's report allowance. */
-export function createMigrationPreviewReport(input:{before:DatabaseSync;after:DatabaseSync;beforeTables:string[];afterTables:string[];path:string;maxBytes:number}):{tables:MigrationPreviewTableSummary[];bytes:number} {
+export function createMigrationPreviewReport(input:{before:DatabaseSync;after:DatabaseSync;beforeTables:string[];afterTables:string[];path:string;maxBytes:number;heartbeat?:()=>void}):{tables:MigrationPreviewTableSummary[];bytes:number} {
   if(!Number.isSafeInteger(input.maxBytes)||input.maxBytes<1||input.maxBytes>reportBytes)reject("invalid_input","Invalid migration preview byte allowance.");
   const descriptor=openSync(input.path,"wx",0o600);
-  let bytes=0,complete=false;
+  let bytes=0,complete=false,rows=0;
+  const counted=()=>{if(++rows%HEARTBEAT_ROWS===0) input.heartbeat?.();};
   const tables:MigrationPreviewTableSummary[]=[];
   try {
     for(const table of new Set([...input.beforeTables,...input.afterTables])) {
@@ -92,13 +93,13 @@ export function createMigrationPreviewReport(input:{before:DatabaseSync;after:Da
         bytes+=encoded.length;summary.changedRows++;
       };
       if(before)for(const row of statement(input.before,select(table,before)).iterate()) {
-        summary.beforeRows++;
+        summary.beforeRows++;counted();
         const match=getAfter?find(getAfter,after!,row):undefined;
         if(!match)append("delete",row,undefined);
         else if(before.columns.length!==after!.columns.length||before.columns.some(name=>!after!.columns.includes(name)||!equalValue(row[name],match[name])))append("update",row,match);
       }
       if(after)for(const row of statement(input.after,select(table,after)).iterate()) {
-        summary.afterRows++;
+        summary.afterRows++;counted();
         if(!getBefore||!find(getBefore,before!,row))append("insert",undefined,row);
       }
       tables.push(summary);
