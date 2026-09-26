@@ -176,6 +176,8 @@ Finish implementation, self-simplification, and focused checks before requesting
 
 The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
+The plan narrows JavaScript packages and integration proofs through workspace dependencies and external test inputs.
+Shared configuration and unknown code inputs retain full verification.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
 - Before merging, require passing local evidence that covers the PR's changes.
@@ -183,8 +185,8 @@ Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
 - Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
-- When impact is unclear, run both jobs with explicit `--job js` and `--job rust` invocations.
-- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
+- When impact is unclear, use `pnpm verify:pr --base <target-ref> --full` to run both complete jobs.
+- Record the tested commit, target ref, selected gates and JavaScript scope, result, and evidence location. Explain any reuse across commits.
 - If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 

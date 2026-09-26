@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
+import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const initial={revision:0,digest:hash("initial")};
@@ -50,6 +52,12 @@ function scriptLauncher(script:string,ended:(signal:NodeJS.Signals|null)=>void=(
 }
 
 describe("persistent dataset worker",()=>{
+  it("keeps an over-budget step armed when it finishes before the watch polls",()=>{
+    const state=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8));
+    const section=armBudget(state,1n,10_000n,1_000n);
+    expect(disarmBudget(state,section,12_000n)).toBe(false);
+    expect(Atomics.load(state,0)).toBe(section);
+  });
   it("fails the open when the worker exits before it is ready",async()=>{
     await fixture(async({open})=>{
       await expect(open({},scriptLauncher("process.exit(1)"))).rejects.toMatchObject({code:"worker_stopped"});
@@ -448,12 +456,12 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("kills a migration that exceeds its native SQL deadline without changing the live database",async()=>{
+  it("ends a migration whose native SQL exceeds its CPU budget without changing the live database",async()=>{
     await fixture(async({root,open})=>{
-      const worker=await open({limits:{deadlineMs:1000}});
+      const worker=await open({limits:{cpuBudgetMs:1000}});
       await expect(worker.migrateCheckpoint({path:join(root,"timeout.sqlite"),schemaSql,tables:["items"],
         migrationSql:"INSERT INTO items VALUES(1,'copy only'); WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count;"}))
-        .rejects.toMatchObject({code:"worker_deadline"});
+        .rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const live=new DatabaseSync(join(root,"1","app.sqlite"));
       try {
@@ -464,12 +472,13 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("kills native SQL at its deadline and requires journal recovery instead of silently restarting",async()=>{
+  it("ends native SQL at its CPU budget and requires journal recovery instead of silently restarting",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000,evaluationMs:100}});
+      const worker=await open({limits:{cpuBudgetMs:1000,evaluationMs:100}});
       const expensive={...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`};
-      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_deadline"});
-      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_deadline"});
+      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 s of CPU time while running the app operation. Try again."});
+      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const recovered=await open();
       expect((await recovered.prepare({...operation(),readOnly:true})).result).toEqual([]);
@@ -478,16 +487,137 @@ describe("persistent dataset worker",()=>{
 
   it("bounds queued work and expires queued operations without consuming their execution budget",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000},queueDeadlineMs:40});
+      const worker=await open({limits:{cpuBudgetMs:1000},queueDeadlineMs:40});
       for(let index=0;index<70;index++) await expect(worker.prepare(operation(initial,{value:"x".repeat(70_000)}))).rejects.toThrow();
       const active=worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`}).catch(error=>error);
       const queued=Array.from({length:64},()=>worker.prepare({...operation(),readOnly:true}).catch(error=>error));
       const results=await Promise.all(queued);
       expect(results.filter(result=>result.code==="queue_full")).toHaveLength(1);
       expect(results.filter(result=>result.code==="queue_deadline")).toHaveLength(63);
-      expect(await active).toMatchObject({code:"worker_deadline"});
+      expect(await active).toMatchObject({code:"worker_budget"});
     });
   });
+
+  // Short SQLite work can register zero CPU ticks on a loaded Windows host.
+  // Compute a costly index per row so replay and integrity checks exceed that granularity.
+  const cpuBudgetSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.200000c',value)));";
+
+  it("charges a journal replay's app work to the CPU budget",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open({schemaSql:cpuBudgetSchema});
+      const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
+      const committed=event(prepared);
+      await expect((await open({schemaSql:cpuBudgetSchema,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Try again."});
+      await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
+    });
+  },60_000);
+
+  // Each row costs this index about 10 µs of CPU to compute.
+  const heavySchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.20000c',value)));";
+  const insertRows=(from:number,to:number)=>`globalThis.operations={run(ctx){
+    ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(${from}) UNION ALL SELECT x+1 FROM n WHERE x<${to}) SELECT x FROM n)");return 1}}`;
+
+  it("ends a dataset check at its own CPU budget and names it",async()=>{
+    await fixture(async({root,open})=>{
+      const writer=await open({schemaSql:cpuBudgetSchema});
+      const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,20_000)})));
+      const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
+      // The integrity check at open computes the index for every row.
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
+        message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Try again\.$/)});
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor})).resolves.toBeDefined();
+    });
+  },60_000);
+
+  it("gives each replayed event of a batch the whole CPU budget",async()=>{
+    await fixture(async({open})=>{
+      // An event costs about a tenth of the budget below, and the batch's
+      // sixteen events together exceed it.
+      const writer=await open({schemaSql:heavySchema});
+      const events=[];let cursor=initial;
+      for(let index=0;index<16;index++) {
+        const committed=event(await writer.prepare({...operation(cursor),source:insertRows(index*10_000+1,(index+1)*10_000)}),cursor);cursor=await writer.finalize(committed);events.push(committed);
+      }
+      await expect((await open({schemaSql:heavySchema,limits:{cpuBudgetMs:1000}})).applyBatch(events)).resolves.toMatchObject({revision:16});
+    });
+  },60_000);
+
+  it("keeps a dataset check's quiet window through its row reports",async()=>{
+    await fixture(async({root,open})=>{
+      const uniqueSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);";
+      const writer=await open({schemaSql:uniqueSchema});
+      const filled=await writer.finalize(event(await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("INSERT INTO items SELECT x, 'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n)");return 1}}`})));
+      const checkpointPath=join(root,"filled.sqlite");await writer.snapshot(checkpointPath);
+      // Swapping two unique values replays through the shadow copy, which rebuilds every row.
+      const swap=event(await writer.prepare({...operation(filled),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("UPDATE items SET value='temp' WHERE id=1");ctx.db.execute("UPDATE items SET value='v1' WHERE id=2");ctx.db.execute("UPDATE items SET value='v2' WHERE id=1");return 1}}`}),filled);
+      await writer.finalize(swap);
+      const reports:{progress:string;cpuBudgetMs?:number}[]=[];
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",message=>{
+          const report=message as {progress?:unknown;cpuBudgetMs?:number};
+          if(typeof report.progress==="string") reports.push({progress:report.progress,cpuBudgetMs:report.cpuBudgetMs});
+          options.onMessage(message);
+        });
+        child.on("error",options.onError);child.on("close",options.onExit);
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      await (await open({schemaSql:uniqueSchema,checkpointPath,cursor:filled},launch)).apply(swap);
+      const rebuilding=reports.filter(report=>report.progress==="rebuilding the dataset from the replay copy");
+      // The step starts, its check starts, rows 1,000 and 2,000 report, and the check ends.
+      expect(rebuilding.map(report=>report.cpuBudgetMs===undefined)).toEqual([true,false,false,false,true]);
+    });
+  },60_000);
+
+  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
+    // Windows has no stop signal. PowerShell compiles its calls before the
+    // operation starts, so each later request lands in milliseconds.
+    const suspender=process.platform==="win32" ? spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",
+      `Add-Type -Namespace W -Name P -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);';
+      [Console]::Out.WriteLine('ready'); while(($line=[Console]::In.ReadLine()) -ne $null){ $verb,$id=$line.Split(' '); $handle=(Get-Process -Id $id).Handle;
+      if($verb -eq 'Suspend'){[void][W.P]::NtSuspendProcess($handle)}else{[void][W.P]::NtResumeProcess($handle)}; [Console]::Out.WriteLine('done') }`],
+    {windowsHide:true,stdio:["pipe","pipe","ignore"]}) : undefined;
+    const lines=suspender ? createInterface({input:suspender.stdout!})[Symbol.asyncIterator]() : undefined;
+    const answer=async(expected:string)=>{const line=await lines!.next();if(line.value!==expected) throw new Error(`The suspender said ${String(line.value)}.`);};
+    try {
+      if(suspender) await answer("ready");
+      await fixture(async({open})=>{
+        let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
+        const signal=async(verb:"Suspend"|"Resume")=>{
+          if(!suspender){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
+          suspender.stdin!.write(`${verb} ${pid}\n`);await answer("done");
+        };
+        const launch:AppRuntimeLauncher=options=>{
+          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+          pid=child.pid!;
+          child.on("message",message=>{
+            const reply=message as {progress?:string;ok?:boolean};
+            // The app code section starts right after this report: stop the worker inside it.
+            if(reply.progress==="running the app operation" && !stall) stall=(async()=>{
+              await signal("Suspend");suspendedAt=performance.now();
+              await new Promise(resolve=>setTimeout(resolve,6_000));
+              resumedAt=performance.now();await signal("Resume");
+            })();
+            if(typeof reply.ok==="boolean") repliedAt=performance.now();
+            options.onMessage(message);
+          });
+          child.on("error",options.onError);child.on("close",options.onExit);
+          return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+        };
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch);
+        // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
+        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
+        await stall;
+        expect(prepared.result).toEqual([{total:50000005000000}]);
+        // Stopped for 6 s inside a 5 s budget, and not charged for it.
+        expect(suspendedAt).toBeGreaterThan(0);
+        expect(repliedAt).toBeGreaterThan(resumedAt);
+      });
+    } finally {suspender?.stdin!.end();}
+  },60_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{

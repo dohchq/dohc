@@ -134,7 +134,7 @@ export async function removeTestScratch(path: string): Promise<void> {
   unresolvedScratch.delete(path);
 }
 
-async function sweepOldTestScratch(): Promise<void> {
+export async function sweepOldTestScratch(): Promise<void> {
   const currentRun = testScratchRunRoot();
   await sweepScratchParent(join(nativeTmpdir(), SCRATCH_PARENT), currentRun, Date.now());
 }
@@ -253,18 +253,18 @@ function safePrefix(prefix: string): string {
   return safe.length > 0 && !isDirection ? safe : "scratch-";
 }
 
-export async function prepareTestScratch(): Promise<void> {
+export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
   startup ??= (async () => {
-    await sweepOldTestScratch();
+    if (sweep) await sweepOldTestScratch();
     await mkdir(testScratchRunRoot(), { recursive: true });
   })();
   await startup;
 }
 
 // Only the run root, never a sweep. `testSetup.ts` awaits `prepareTestScratch`
-// at module scope, and vitest evaluates a setup file before the test module
-// that needs this — so by the time any synchronous creator runs, the sweep has
-// already happened. Playwright never reaches here: its helpers are async.
+// at module scope, after the global setup has swept once for this invocation.
+// Vitest evaluates setup before the test module needs a synchronous creator.
+// Playwright never reaches here: its helpers are async.
 function ensureScratchRunSync(): void {
   mkdirSync(testScratchRunRoot(), { recursive: true });
 }

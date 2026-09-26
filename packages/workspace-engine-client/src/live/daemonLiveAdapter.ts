@@ -158,6 +158,18 @@ export function isYdocUnsettledCloseRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-unsettled-close";
 }
 
+// The write reused an idempotency key that already recorded other content.
+// The engine recorded nothing of it, and resending under that key cannot land.
+export function isIdempotencyKeyReuseRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "idempotency-key-reuse-mismatch";
+}
+
+// A reopen named the object it expected at a path, and the path now holds
+// another object (`ydoc-object-changed`, dohc-workspace-engine rpc/ydoc.rs).
+export function isYdocObjectChangedRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-object-changed";
+}
+
 // A live session already holds this document's lease, so the daemon refuses to
 // bind a second one (`ydoc-session-busy`, dohc-workspace-engine/src/lib.rs).
 //

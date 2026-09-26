@@ -156,7 +156,7 @@ jobs:
       # The runner owns Postgres, native preparation, and every mandatory proof,
       # including accounts and self-host onboarding. Dispatch always runs this job.
       - name: Canonical JavaScript gate
-        run: xvfb-run -a pnpm verify:pr --base HEAD --job js
+        run: xvfb-run -a pnpm verify:pr --base HEAD --job js --full
 
   rust:
     name: engine gate
@@ -198,4 +198,4 @@ jobs:
 
       # Linux also exercises cfg(unix) code absent from Windows verification.
       - name: Canonical engine gate
-        run: pnpm verify:pr --base HEAD --job rust
+        run: pnpm verify:pr --base HEAD --job rust --full

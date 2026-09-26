@@ -351,8 +351,7 @@ fn local_append_request_replay_distinguishes_all_lineage_guards() {
                 |_, _, _| panic!("a changed guard must not reach post-append"),
             )
             .expect_err("request replay binds the original lineage guard");
-            assert!(matches!(error, CollabError::Corrupt { reason }
-                if reason == "idempotency key reused with different content"));
+            assert!(matches!(error, CollabError::IdempotencyKeyReused));
         }
         let error = record_local_update(
             &mut ts.store,
@@ -370,8 +369,7 @@ fn local_append_request_replay_distinguishes_all_lineage_guards() {
             |_, _, _| panic!("a changed request must not reach post-append"),
         )
         .expect_err("request mismatch precedes byte validation");
-        assert!(matches!(error, CollabError::Corrupt { reason }
-            if reason == "idempotency key reused with different content"));
+        assert!(matches!(error, CollabError::IdempotencyKeyReused));
         assert_eq!(
             record_update_transaction_fingerprint(&ts.store, &key),
             before
@@ -464,11 +462,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
         |_tx, _outcome, _update_sha| Ok(()),
     )
     .expect_err("a request id cannot be reused for another path");
-    assert!(matches!(
-        error,
-        CollabError::Corrupt { reason }
-            if reason == "idempotency key reused with different content"
-    ));
+    assert!(matches!(error, CollabError::IdempotencyKeyReused));
     assert_eq!(
         record_update_transaction_fingerprint(&ts.store, &key),
         committed_state,

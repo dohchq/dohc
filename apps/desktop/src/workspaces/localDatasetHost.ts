@@ -163,7 +163,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerStat = await lstat(workerDirectory);
     if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
     let resources:Resources|undefined;
-    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers,
+    // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
+    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
     resources = options.resources?.({ db, transaction });

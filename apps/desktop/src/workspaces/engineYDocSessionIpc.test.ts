@@ -225,6 +225,28 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
+  // An editor sat idle while sync turned on. The engine claimed its history
+  // and told the session to resync, which is how the provider learns the
+  // claim. Owner registration then matches the published binding.
+  it("registers an idle editor as owner once it learns the claim sync made", async () => {
+    const nativeOwner = {onDurableLocalChange: () => () => {},
+      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined)};
+    let providerClaim: string | null = null;
+    const provider = providerSession({nativeOwner, objectId: "object", versionId: "main"});
+    Object.defineProperty(provider, "lineageClaimId", {get: () => providerClaim});
+    const h = harness(provider);
+    await h.ipc.open(new FakeSender(7), openPayload);
+    const binding = {workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1};
+    expect(() => h.ipc.existingOwner(binding)).toThrow("Existing owner changed.");
+
+    providerClaim = "a".repeat(64);
+
+    const owner = h.ipc.existingOwner(binding);
+    expect(owner.nativeSessionId).toBe("native-existing");
+    expect(() => owner.assertCurrent()).not.toThrow();
+  });
+
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
     const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
@@ -891,6 +913,28 @@ describe("engine Y.Doc IPC adapter", () => {
         seq: 6,
       }),
     ).toEqual({ accepted: false, reason: "deleted" });
+    expect(h.session.applyLocalUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses every later update once another object takes the path", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+
+    h.capturedOpen()?.onObjectChanged?.();
+    expect(sender.sent.at(-1)?.payload).toEqual({
+      sessionId: openPayload.sessionId,
+      state: "object-changed",
+      seq: 0,
+    });
+    expect(
+      h.ipc.applyUpdate(sender, {
+        sessionId: openPayload.sessionId,
+        update: new Uint8Array([2]),
+        lineageGeneration: 1,
+        seq: 6,
+      }),
+    ).toEqual({ accepted: false, reason: "object-changed" });
     expect(h.session.applyLocalUpdate).not.toHaveBeenCalled();
   });
 

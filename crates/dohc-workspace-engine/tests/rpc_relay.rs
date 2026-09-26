@@ -624,8 +624,12 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
     );
 }
 
+// The document stays open and idle when sync turns on. Its last record came
+// before enrollment, so no record claimed it. The push that makes enrollment
+// ready claims it through its session and sends it, and the session's next
+// write then succeeds under that claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
+async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -659,7 +663,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     )
     .await;
     seed_sync_identity(&transport, &handle, &mut id).await;
-    call(
+    let first = call(
         &transport,
         &handle,
         &mut id,
@@ -667,6 +671,41 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
         json!({ "workspaceId": workspace_id }),
     )
     .await;
+    assert!(
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .pushed_workspace_ops
+            .iter()
+            .any(|op| op["opKind"] == "ydoc.update"),
+        "the first push must send the open document without another edit: {first}"
+    );
+
+    // The open session writes and saves again, with nothing refused as stale.
+    let next =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(24, " and after"));
+    let recorded = call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": next }),
+    )
+    .await;
+    assert!(recorded["lineageClaimId"].is_string());
+    let settled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(
+        settled["content"],
+        json!("edited before enrollment and after")
+    );
 
     let (origin_id, pushed) = {
         let state = relay.state.lock().expect("relay state");
@@ -729,7 +768,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     assert_eq!(
         peer_text.as_deref(),
         Some("edited before enrollment"),
-        "the first enrollment must replicate a live lineage before its first settle"
+        "the first push must replicate a live lineage before its first settle"
     );
 }
 
@@ -1035,6 +1074,99 @@ async fn push_unrelated_change(
         json!({ "workspaceId": workspace_id }),
     )
     .await;
+}
+
+// The push that claims an idle open document can be dropped at any point:
+// the supervisor drops a request on cancellation or deadline. Wherever the
+// drop lands, the claim and its handover to the session happen together or
+// not at all, so the session's next write and settle still succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_working() {
+    let relay = FakeRelay::start(RelayState::default());
+    let drop_points: Vec<(u32, u64)> = [0, 1, 2, 4, 8, 16, 32, 64, 128]
+        .into_iter()
+        .map(|yields| (yields, 0))
+        .chain([1, 2, 5, 10, 20].into_iter().map(|ms| (0, ms)))
+        .collect();
+    for (round, (yields, sleep_ms)) in drop_points.into_iter().enumerate() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        let workspace_id = format!("rpc-relay-dropped-live-claim-{round}");
+        let handle = open_workspace(&transport, &scratch, &relay, 1, &workspace_id).await;
+        let mut id = 1;
+        seed_main(&transport, &handle, &mut id, &workspace_id).await;
+        let opened = call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "notes/idle.md",
+                "contentKind": "plaintext",
+            }),
+        )
+        .await;
+        let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+        let doc = Ydoc::wire();
+        let first_edit =
+            base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "idle"));
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.recordUpdate",
+            json!({ "sessionId": session_id, "updateBase64": first_edit }),
+        )
+        .await;
+        seed_sync_identity(&transport, &handle, &mut id).await;
+
+        id += 1;
+        let pushing = Arc::clone(&transport);
+        let push_request = request(
+            id,
+            "sync.push",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id }),
+        );
+        let push = tokio::spawn(async move {
+            pushing
+                .call(RequestContext::unbounded(), push_request)
+                .await
+        });
+        for _ in 0..yields {
+            tokio::task::yield_now().await;
+        }
+        if sleep_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        }
+        push.abort();
+        let _ = push.await;
+
+        let next_edit =
+            base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(4, " then"));
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.recordUpdate",
+            json!({ "sessionId": session_id, "updateBase64": next_edit }),
+        )
+        .await;
+        let settled = call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.settle",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+        assert_eq!(
+            settled["content"],
+            json!("idle then"),
+            "drop point {round}: yields {yields}, sleep {sleep_ms} ms"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
