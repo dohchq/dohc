@@ -2116,10 +2116,12 @@ fn an_agents_moment_author_carries_its_runs_depth() {
 }
 
 /// One of the owner's computers in a handover test, and every claim it took.
+/// The store is declared before its directory, so it closes first and the
+/// directory can go.
 struct Computer {
-    _scratch: ScratchDir,
     store: EngineStore,
     claimed: Vec<(String, String)>,
+    _scratch: ScratchDir,
 }
 
 impl Computer {
