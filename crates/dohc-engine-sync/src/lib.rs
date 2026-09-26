@@ -53,7 +53,7 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
-pub use enrolment::originate_closing_ydoc_base_in_tx;
+pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{

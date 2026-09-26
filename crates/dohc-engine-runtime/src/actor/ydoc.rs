@@ -830,6 +830,48 @@ impl ActorHandle {
         .await
     }
 
+    /// Originate the unclaimed lineage a live session holds, when the
+    /// workspace's relay enrollment is ready. Returns the lineage's claim
+    /// afterwards, which the caller hands to the session, and a decline when
+    /// the base is too large to share.
+    pub async fn ydoc_originate_live_lineage(
+        &self,
+        key: DocKey,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<(Option<String>, Option<SharingDeclined>), RuntimeError> {
+        self.run(move |store, doc_cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let Some(marker) = dohc_engine_collab::read_marker(store, &key)? else {
+                return Ok((None, None));
+            };
+            if marker.lineage_claim_status.has_claimed_base()
+                || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
+                || !store.read_with(|conn| {
+                    dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
+                })?
+            {
+                return Ok((marker.lineage_claim_id, None));
+            }
+            let declined = match store.write_with(&NoFaults, |tx| {
+                dohc_engine_sync::originate_live_ydoc_base_in_tx(tx, &key, now_ms)
+            })? {
+                TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
+                    Some(declined)
+                }
+                TxnOutcome::Committed(_) => None,
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            };
+            doc_cache.remove(&key);
+            let claim = dohc_engine_collab::read_marker(store, &key)?
+                .and_then(|marker| marker.lineage_claim_id);
+            Ok((claim, declined))
+        })
+        .await
+    }
+
     pub async fn ydoc_close_session(
         &self,
         key: DocKey,

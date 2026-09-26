@@ -624,11 +624,12 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
     );
 }
 
-// Enrolment leaves a lineage alone while a session holds it: claiming under
-// the session would turn its next record into a stale write. A close that
-// settles the lineage then claims it for the relay.
+// The document stays open and idle when sync turns on. Its last record came
+// before enrollment, so no record claimed it. The push that makes enrollment
+// ready claims it through its session and sends it, and the session's next
+// write then succeeds under that claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes() {
+async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -662,7 +663,7 @@ async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes(
     )
     .await;
     seed_sync_identity(&transport, &handle, &mut id).await;
-    call(
+    let first = call(
         &transport,
         &handle,
         &mut id,
@@ -677,25 +678,34 @@ async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes(
             .expect("relay state")
             .pushed_workspace_ops
             .iter()
-            .all(|op| op["opKind"] != "ydoc.update"),
-        "enrolment must not claim a lineage an open session holds"
+            .any(|op| op["opKind"] == "ydoc.update"),
+        "the first push must send the open document without another edit: {first}"
     );
-    call(
+
+    // The open session writes and saves again, with nothing refused as stale.
+    let next =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(24, " and after"));
+    let recorded = call(
         &transport,
         &handle,
         &mut id,
-        "ydoc.close",
-        json!({ "sessionId": session_id, "settle": true }),
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": next }),
     )
     .await;
-    call(
+    assert!(recorded["lineageClaimId"].is_string());
+    let settled = call(
         &transport,
         &handle,
         &mut id,
-        "sync.push",
-        json!({ "workspaceId": workspace_id }),
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
     )
     .await;
+    assert_eq!(
+        settled["content"],
+        json!("edited before enrollment and after")
+    );
 
     let (origin_id, pushed) = {
         let state = relay.state.lock().expect("relay state");
@@ -758,7 +768,7 @@ async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes(
     assert_eq!(
         peer_text.as_deref(),
         Some("edited before enrollment"),
-        "closing the session must replicate a lineage that never settled"
+        "the first push must replicate a live lineage before its first settle"
     );
 }
 

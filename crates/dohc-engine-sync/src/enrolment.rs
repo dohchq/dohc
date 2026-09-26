@@ -121,6 +121,39 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     Ok(sharing_declined)
 }
 
+/// Originate the lineage a live session holds, once enrollment is ready. The
+/// sweep leaves such a lineage alone because the session's next write would
+/// expect the old claim. The daemon calls this for each live session instead,
+/// serialized with that session's writes, and hands the session the claim.
+/// Reads the path the way the sweep does.
+pub fn originate_live_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    if crate::live_audit::enrollment::pending_in_tx(tx, &key.workspace_id)? {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE(s.path,d.path) \
+             FROM ydoc_docs d LEFT JOIN snapshots s \
+               ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+              AND s.object_id=d.object_id \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+               AND d.lineage_claim_status = 'unclaimed'",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    match path {
+        Some(path) => originate_ydoc_base_in_tx(tx, key, &path, None, None, now_ms),
+        None => Ok(BaseOrigination::NothingToDo),
+    }
+}
+
 /// Originate the lineage a closing session held, when the sweep left it for
 /// that session. A local-only close prunes the lineage, so this is the last
 /// point its history can reach the relay. The file's current path comes
