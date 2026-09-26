@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { RelayUnauthorizedError, RelayWorkspaceUnavailableError } from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
 import { registerCloudIpcHandlers } from "./cloudIpc";
 import { type SyncStatusResult } from "./bridgeContract";
@@ -279,6 +279,17 @@ describe("registered cloud handlers", () => {
     }));
     expect(h.enroll).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }));
     expect(h.steps).toEqual(["claim", "enroll", "remote", "enable"]);
+  });
+
+  it.each([
+    new RelayWorkspaceUnavailableError(),
+    new RelayClaimRefusedError("Another account already claimed this workspace."),
+  ])("preserves the enrollment claim failure: %s", async (error) => {
+    const h = await harness();
+    h.claim.mockRejectedValueOnce(error);
+    await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toBe(error);
+    expect(h.enroll).not.toHaveBeenCalled();
+    expect(h.enable).not.toHaveBeenCalled();
   });
 
   it("rejects received views and an existing remote owned by another account before claiming", async () => {

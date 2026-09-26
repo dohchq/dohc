@@ -67,6 +67,20 @@ export class RelayUnauthorizedError extends Error {
   }
 }
 
+export class RelayIdentityMissingError extends Error {
+  constructor() {
+    super("This workspace has no sync identity.");
+    this.name = "RelayIdentityMissingError";
+  }
+}
+
+export class RelayClaimRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RelayClaimRefusedError";
+  }
+}
+
 export class RelayWorkspaceUnavailableError extends Error {
   constructor(message = "Relay workspace is unavailable.") {
     super(message);

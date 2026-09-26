@@ -7,6 +7,8 @@ import {
   RelayUnauthorizedError,
   RelayUnreachableError,
   RelayWorkspaceUnavailableError,
+  RelayIdentityMissingError,
+  RelayClaimRefusedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
@@ -481,6 +483,23 @@ const SYNC_PASS_METHODS: ReadonlySet<string> = new Set([
 
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
+  const savedClaimRefusal = method === "sync.push" && error.message === "relay-claim-refused";
+  if (method === "sync.push" && error.wireCode === "IDENTITY_REQUIRED" && !savedClaimRefusal) {
+    throw new RelayIdentityMissingError();
+  }
+  if (method === "sync.claim" || savedClaimRefusal) {
+    const refusals: Readonly<Record<string, string>> = {
+      EPOCH_SUPERSEDED: "This workspace uses an older sync identity than the server.",
+      IDENTITY_NOT_RECOGNIZED: "The server does not recognize this workspace's sync identity.",
+      STREAM_IDENTITY_MISMATCH: "This workspace's sync identity does not match the server.",
+      IDENTITY_REQUIRED: "The server requires a sync identity for this workspace.",
+    };
+    const refusal = refusals[error.wireCode];
+    if (refusal) throw new RelayClaimRefusedError(refusal);
+    if (error.wireCode === "WORKSPACE_UNAVAILABLE" && (error.message === "relay-workspace-unavailable" || savedClaimRefusal)) {
+      throw new RelayClaimRefusedError("Another account already claimed this workspace.");
+    }
+  }
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
   if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
     if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
@@ -495,9 +514,8 @@ function translateRelayError(method: string, error: unknown): never {
   }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
-    // Only the sync pass names this cause today; the enable and join flows
-    // keep their own reading of an unavailable workspace.
-    if (SYNC_PASS_METHODS.has(method) && error.message === "relay-unreachable") {
+    // Claim setup must distinguish a network outage from a refused claim.
+    if ((SYNC_PASS_METHODS.has(method) || method === "sync.claim") && error.message === "relay-unreachable") {
       throw new RelayUnreachableError();
     }
     throw new RelayWorkspaceUnavailableError();

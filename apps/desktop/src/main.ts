@@ -1779,6 +1779,7 @@ function engineForWorkspace(
     rootDir: workspace.rootPath,
     relay,
     operations: {
+      claim: () => daemonRelay.claim(),
       push: () => daemonRelay.push(),
       // Each page's files, once written, go to the Collection automation
       // executor: a pull need not leave a watcher batch.

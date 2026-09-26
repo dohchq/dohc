@@ -229,16 +229,7 @@ export function registerCloudIpcHandlers<
           attachmentId: workspace.attachmentId,
           relay,
         });
-        try {
-          await daemonRelay.claim();
-        } catch (error) {
-          if (error instanceof RelayWorkspaceUnavailableError) {
-            throw new Error(
-              "This workspace id is already claimed by another account",
-            );
-          }
-          throw error;
-        }
+        await daemonRelay.claim();
         operation.assertCurrent();
         const sessions = currentEngineSessions();
         if (!sessions) {

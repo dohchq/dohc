@@ -327,6 +327,7 @@ describe("workspaceActivity cloud sync nudge", () => {
   // clear; an automatic pass does not hide the failure.
   it("shows a failed sync as syncing only while a retry someone asked for runs", async () => {
     let retrying = false;
+    let claimingIdentity = false;
     const engine = {
       start: async () => {},
       queueSync: () => {},
@@ -335,6 +336,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       snapshot: () => ({
         syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
         retrying,
+        claimingIdentity,
         syncing: true,
         lastSyncedAtMs: null,
         pendingChangeCount: 1,
@@ -351,6 +353,8 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.open(workspace());
     expect(activity.getStatus("activity-test").state).toBe("sync-failed");
     retrying = true;
+    claimingIdentity = true;
+    expect(activity.getStatus("activity-test").claimingIdentity).toBe(true);
     expect(activity.getStatus("activity-test").state).toBe("syncing");
     expect(activity.getStatus("activity-test").syncFailure?.attempts).toBe(2);
     await activity.stopAll();

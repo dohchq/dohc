@@ -1509,11 +1509,15 @@ fn run_relay_operation(
                         .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?
                 }
             };
-            client.claim_workspace(ClaimRequest {
-                workspace_id,
-                replication_epoch: identity.replication_epoch,
-                stream_identity: identity.stream_identity,
-            })?;
+            client.claim_workspace(
+                store,
+                ClaimRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                },
+                &NoFaults,
+            )?;
             Ok(RelayOperationOutcome::Claimed)
         }
         RelayOperation::AdoptJoinIdentity {

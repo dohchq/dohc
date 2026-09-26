@@ -4,6 +4,8 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayUnreachableError,
+  RelayIdentityMissingError,
+  RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
   type MaterializeRelayPullPage,
   type PushWorkspaceToRelayResult,
@@ -15,6 +17,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 export interface RelaySyncOperations {
+  claim(): Promise<void>;
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(
     materializePage: MaterializeRelayPullPage,
@@ -81,18 +84,19 @@ export interface CloudSyncEngineOptions {
 }
 
 // Why the last pass failed, as far as dohc knows. "server-unreachable" means
-// no connection reached the server; every other failure is "unknown", and its
-// detail is the only account of it. One failure runs from the first failed
+// no connection reached the server; "claim-refused" names a refused setup.
+// Other failures are "unknown"; their detail is the only account of them. One failure runs from the first failed
 // pass (`sinceMs`) until a pass succeeds, and `attempts` counts its failed
 // passes, so a surface can tell a blip from an outage.
 export interface CloudSyncFailure {
-  cause: "server-unreachable" | "unknown";
+  cause: "server-unreachable" | "claim-refused" | "unknown";
   detail: string;
   sinceMs: number;
   attempts: number;
 }
 
 export interface CloudSyncSnapshot {
+  claimingIdentity?: boolean;
   syncing: boolean;
   lastSyncedAtMs: number | null;
   pendingChangeCount: number;
@@ -130,6 +134,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   const nowMs = options.nowMs ?? (() => Date.now());
 
   let syncing = false;
+  let identityState: "unchecked" | "needed" | "claimed" = "unchecked";
+  let claimingIdentity = false;
+  let claimRefusal: RelayClaimRefusedError | null = null;
   let lastSyncedAtMs: number | null = null;
   let pendingChangeCount = 0;
   let conflictCount = 0;
@@ -299,7 +306,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // failure the backoff owns the retry.
   function scheduleIdlePull(): void {
     const delay = options.idlePullMs;
-    if (delay === undefined || stopped || authExpired) return;
+    if (delay === undefined || stopped || authExpired || claimRefusal) return;
     if (passesPending > 0 || backoffTimer !== undefined || idlePullTimer !== undefined) return;
     idlePullTimer = setTimeout(() => {
       idlePullTimer = undefined;
@@ -349,15 +356,22 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       emitChange();
       return;
     }
+    const claimRefused = error instanceof RelayClaimRefusedError;
+    if (claimRefused) {
+      identityState = "needed";
+      claimRefusal = error;
+    }
     setSyncFailure({
-      cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
-      detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      cause: claimRefused ? "claim-refused" : error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
+      detail: claimRefused ? error.message
+        : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       sinceMs: syncFailure?.sinceMs ?? nowMs(),
       attempts: syncFailure
         ? syncFailure.attempts + (countsAsAttempt ? 1 : 0)
         : 1,
     });
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
+    if (claimRefused) return;
     scheduleBackoff(
       displacedDueAtMs === undefined
         ? undefined
@@ -375,8 +389,31 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const servedChange = changeReported;
     changeReported = undefined;
     let passOwnerPending = ownerAdmissionPending;
+    const claim = async () => {
+      claimingIdentity = true;
+      emitChange();
+      try {
+        // The daemon reuses its durable identity if a previous claim lost its response.
+        await operations.claim();
+        identityState = "claimed";
+      } catch (error) {
+        if (error instanceof RelayClaimRefusedError) claimRefusal = error;
+        throw error;
+      } finally {
+        claimingIdentity = false;
+        emitChange();
+      }
+    };
     const push = async () => {
-      const result = await operations.push();
+      // A failed claim may already have written the local identity. Finish
+      // that claim before pushing, even if the next push would find the row.
+      if (identityState === "needed") await claim();
+      const result = await operations.push().catch(async (error: unknown) => {
+        if (!(error instanceof RelayIdentityMissingError) || identityState !== "unchecked") throw error;
+        identityState = "needed";
+        await claim();
+        return operations.push();
+      });
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
     };
@@ -501,7 +538,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
     const result = chain.then(async () => {
       try {
-        if (stopped) return;
+        if (stopped || (claimRefusal && !retry?.countsAsAttempt)) return;
+        if (retry?.countsAsAttempt) claimRefusal = null;
         // A retry someone asked for keeps the automatic pass it displaces, in
         // case it fails. `undefined` marks an automatic pass.
         const displacedDueAtMs = retry
@@ -577,6 +615,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     snapshot() {
       return {
         syncing,
+        claimingIdentity,
         lastSyncedAtMs,
         pendingChangeCount,
         conflictCount,

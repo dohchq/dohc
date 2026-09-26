@@ -294,6 +294,7 @@ describe("registered direct message boundaries", () => {
       } as unknown as WorkspaceEngineCapture,
       onChange: () => undefined,
       operations: {
+        claim: async () => undefined,
         push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
         pull: workspacePull,
         recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },

@@ -13,6 +13,8 @@ import {
   RelayOriginDivergedError,
   RelayUnreachableError,
   RelayWorkspaceUnavailableError,
+  RelayIdentityMissingError,
+  RelayClaimRefusedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
@@ -2110,10 +2112,8 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // The engine answers an unreachable relay and a relay without the workspace
-  // with one code. The sync pass names the first; the enable flow keeps its
-  // own reading of both.
-  it("names an unreachable relay for the sync pass only", async () => {
+  // An unreachable server is retryable even while claiming the workspace.
+  it("names an unreachable relay for sync and claim", async () => {
     const daemon = new MockDaemon((request) => {
       if (request.method === "sync.push" || request.method === "sync.claim") {
         throw new DaemonRefusalError(
@@ -2134,7 +2134,107 @@ describe("EngineRelayClient", () => {
     await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
       RelayWorkspaceUnavailableError,
     );
-    await expect(client.claim()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+    await expect(client.claim()).rejects.toBeInstanceOf(RelayUnreachableError);
+    await sessions.closeAll();
+  });
+
+  it.each(["workspace operation failed", "relay-workspace-unavailable"])(
+    "preserves not-found classification for wire message %s", async (message) => {
+      const daemon = new MockDaemon((request) => {
+        if (request.method.startsWith("sync.") || request.method.startsWith("share.")) {
+          throw new DaemonRefusalError(
+            { code: "WORKSPACE_UNAVAILABLE", message, retry: "afterReconnect" }, new Error("refused"),
+          );
+        }
+        return undefined;
+      });
+      const { client, sessions } = await harness(daemon);
+      await expect(client.push()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.commitCursor({})).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.recoverOrigin()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.probe()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.pullSharedChannel({ shareId: "share", channelWireId: "channel" })).rejects.toBeInstanceOf(ShareUnavailableError);
+      await sessions.closeAll();
+    },
+  );
+
+  it.each(["workspace operation failed", "workspace handle is unavailable", "workspace-owned"])(
+    "does not report local claim failure %s as another account", async (message) => {
+      const daemon = new MockDaemon((request) => {
+        if (request.method === "sync.claim") throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message, retry: "afterReconnect" }, new Error("refused"),
+        );
+        return undefined;
+      });
+      const { client, sessions } = await harness(daemon);
+      await expect(client.claim()).rejects.not.toBeInstanceOf(RelayClaimRefusedError);
+      await sessions.closeAll();
+    },
+  );
+
+  it.each([
+    ["EPOCH_SUPERSEDED", "This workspace uses an older sync identity than the server."],
+    ["IDENTITY_NOT_RECOGNIZED", "The server does not recognize this workspace's sync identity."],
+    ["STREAM_IDENTITY_MISMATCH", "This workspace's sync identity does not match the server."],
+    ["IDENTITY_REQUIRED", "The server requires a sync identity for this workspace."],
+  ] as const)("names claim refusal %s", async (code, message) => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.claim") throw new DaemonRefusalError(
+        { code, message: "workspace operation failed", retry: "no" }, new Error("refused"),
+      );
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.claim()).rejects.toThrow(message);
+    await sessions.closeAll();
+  });
+
+  it("names a push's missing identity", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push") throw new DaemonRefusalError(
+        { code: "IDENTITY_REQUIRED", message: "workspace operation failed", retry: "no" }, new Error("refused"),
+      );
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
+    await sessions.closeAll();
+  });
+
+  it("names a refused claim without replacing push failures", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.claim" || request.method === "sync.push") {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.claim()).rejects.toThrow("Another account already claimed this workspace.");
+    await expect(client.push()).rejects.toThrow("Relay workspace is unavailable.");
+    await sessions.closeAll();
+  });
+
+  it.each([
+    ["WORKSPACE_UNAVAILABLE", "Another account already claimed this workspace."],
+    ["EPOCH_SUPERSEDED", "This workspace uses an older sync identity than the server."],
+    ["IDENTITY_NOT_RECOGNIZED", "The server does not recognize this workspace's sync identity."],
+    ["STREAM_IDENTITY_MISMATCH", "This workspace's sync identity does not match the server."],
+    ["IDENTITY_REQUIRED", "The server requires a sync identity for this workspace."],
+  ] as const)("restores saved claim refusal %s from push", async (code, message) => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push") throw new DaemonRefusalError(
+        { code, message: "relay-claim-refused", retry: "no" }, new Error("refused"),
+      );
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
+    await expect(client.push()).rejects.toThrow(message);
+    expect(daemon.requests.filter(request => request.method === "sync.push")).toHaveLength(2);
     await sessions.closeAll();
   });
 
