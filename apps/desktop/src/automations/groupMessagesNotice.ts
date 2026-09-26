@@ -37,7 +37,7 @@ export function groupMessagesNotice(input: {
     title: "Group messages started no automations",
     body: reason === "ahead"
       ? "Some Group messages are dated more than an hour later than this computer's clock. Check that this computer's date and time are right."
-      : "Some Group messages reached this computer too late to start automations. To run an automation for one, post the message again.",
+      : "Some Group messages reached this computer too late to start automations here. Their automations may have already run on another of your computers. Check before you post one again.",
     target: {},
   };
 }

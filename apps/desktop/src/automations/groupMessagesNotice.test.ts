@@ -22,7 +22,7 @@ describe("groupMessagesNotice", () => {
     const late = groupMessagesNotice({ workspaceId: "ws-trip", reason: "late", atMs: at });
     expect(late.noticeId).toBe("group-messages-skipped:ws-trip:late:2026-09-26");
     expect(late.body).toBe(
-      "Some Group messages reached this computer too late to start automations. To run an automation for one, post the message again.",
+      "Some Group messages reached this computer too late to start automations here. Their automations may have already run on another of your computers. Check before you post one again.",
     );
   });
 
