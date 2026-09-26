@@ -58,12 +58,16 @@ export interface EngineWorkspaceBinding {
 
 export interface EngineDaemonClientSource {
   currentClient(): EngineDaemonClient;
+  /** Fires when the current client is retired or a replacement is published. */
+  onClientChanged?(handler: () => void): () => void;
 }
 
 const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
 // Matches the daemon's EARLY_IMPORT_APPLY_DEADLINE. Initial capture is
 // separate from the much shorter budget for recovering a failed transport.
 const INITIAL_CAPTURE_WAIT_MS = 120_000;
+
+class InitialCaptureBindingChangedError extends Error {}
 
 function isInitialCaptureSettledEvent(
   event: Event,
@@ -427,7 +431,8 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    const entry = await this.acquire(workspace);
+    let entry = await this.acquire(workspace);
+    let acquired = true;
     try {
       const maxAttempts = options.retryTransportErrors
         ? this.transportRebindAttempts
@@ -445,8 +450,9 @@ export class EngineWorkspaceSessions {
         // The second door: the operation is daemon work this class does not
         // issue itself, and the rebind above can take the whole window with it.
         this.assertRegionLive(workspace.workspaceId);
-        let initialCaptureWake: Promise<void> | undefined;
+        let initialCaptureWake: Promise<void | "rebind"> | undefined;
         let unsubscribeInitialCapture: (() => void) | undefined;
+        let unsubscribeClientChanged: (() => void) | undefined;
         if (
           options.retryInitialCapture === true &&
           this.activeBudget() !== undefined &&
@@ -454,7 +460,8 @@ export class EngineWorkspaceSessions {
         ) {
           // Subscribe before the operation: settlement can occur while the
           // daemon's refusal is travelling back to this client.
-          initialCaptureWake = new Promise<void>((resolve) => {
+          initialCaptureWake = new Promise<void | "rebind">((resolve) => {
+            unsubscribeClientChanged = this.source.onClientChanged?.(() => resolve("rebind"));
             unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
               if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
               let current = false;
@@ -510,13 +517,27 @@ export class EngineWorkspaceSessions {
             isWorkspaceUpdatingRefusal(error);
           if (retryAfterInitialCapture) {
             initialCaptureDeadline ??= this.now() + INITIAL_CAPTURE_WAIT_MS;
-            const deadlineReached = await this.waitForInitialCapture(
-              entry,
-              initialCaptureWake,
-              initialCaptureDeadline,
-              error,
-            );
-            if (deadlineReached) initialCaptureDeadline = -Infinity;
+            try {
+              const deadlineReached = await this.waitForInitialCapture(
+                entry,
+                binding,
+                initialCaptureWake,
+                initialCaptureDeadline,
+                error,
+              );
+              if (deadlineReached) initialCaptureDeadline = -Infinity;
+            } catch (captureError) {
+              if (!(captureError instanceof InitialCaptureBindingChangedError)) throw captureError;
+              unsubscribeInitialCapture?.();
+              unsubscribeInitialCapture = undefined;
+              unsubscribeClientChanged?.();
+              unsubscribeClientChanged = undefined;
+              // Closing must drain this run before it can free the binding.
+              this.release(entry);
+              acquired = false;
+              entry = await this.acquire(workspace);
+              acquired = true;
+            }
             continue;
           }
           this.noteBudgetAttempt(error);
@@ -538,17 +559,19 @@ export class EngineWorkspaceSessions {
           attempt += 1;
         } finally {
           unsubscribeInitialCapture?.();
+          unsubscribeClientChanged?.();
         }
       }
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
     } finally {
-      this.release(entry);
+      if (acquired) this.release(entry);
     }
   }
 
   private async waitForInitialCapture(
     entry: SessionEntry,
-    wake: Promise<void> | undefined,
+    binding: EngineWorkspaceBinding,
+    wake: Promise<void | "rebind"> | undefined,
     deadline: number,
     refusal: unknown,
   ): Promise<boolean> {
@@ -557,16 +580,28 @@ export class EngineWorkspaceSessions {
     const budget = this.activeBudget();
     const signal = budget?.signal;
     if (signal?.aborted) throw refusal;
+    const checkBinding = () => {
+      let current = false;
+      try {
+        current = entry.binding === binding && this.source.currentClient() === binding.client;
+      } catch {
+        // Client retirement can precede publication of its replacement.
+      }
+      if (entry.closing || !current) throw new InitialCaptureBindingChangedError();
+    };
+    checkBinding();
     let cancel!: () => void;
+    let rebind!: () => void;
     let timer!: ReturnType<typeof setTimeout>;
     const stopped = new Promise<"deadline">((resolve, reject) => {
       cancel = () => reject(refusal);
+      rebind = () => reject(entry.retiring ? refusal : new InitialCaptureBindingChangedError());
       // Settlement notifications are advisory. At the bound, allow one
       // final fenced read; another capture refusal cannot start a new wait.
       timer = setTimeout(() => resolve("deadline"), deadline - started);
     });
     this.sleepCancels.add(cancel);
-    entry.captureWaitCancels.add(cancel);
+    entry.captureWaitCancels.add(rebind);
     signal?.addEventListener("abort", cancel, { once: true });
     try {
       const outcome = await Promise.race([wake, stopped]);
@@ -574,11 +609,13 @@ export class EngineWorkspaceSessions {
           (outcome !== "deadline" && this.now() >= deadline)) {
         throw refusal;
       }
+      if (outcome === "rebind") throw new InitialCaptureBindingChangedError();
+      checkBinding();
       return outcome === "deadline";
     } finally {
       clearTimeout(timer);
       this.sleepCancels.delete(cancel);
-      entry.captureWaitCancels.delete(cancel);
+      entry.captureWaitCancels.delete(rebind);
       signal?.removeEventListener("abort", cancel);
       // Capture is healthy work, not transport recovery. Preserve any
       // recovery time already spent without charging this wait to it.
@@ -998,9 +1035,7 @@ export class EngineWorkspaceSessions {
   }
 
   private async closeEntry(entry: SessionEntry): Promise<void> {
-    if (entry.retiring) {
-      for (const cancel of entry.captureWaitCancels) cancel();
-    }
+    for (const cancel of entry.captureWaitCancels) cancel();
     await this.waitForIdle(entry);
     let binding = entry.binding;
     if (!binding && entry.opening) {

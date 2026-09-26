@@ -108,6 +108,84 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it.each([
+    ["binding close", "deadline"],
+    ["client replacement", "deadline"],
+    ["binding close", "event"],
+    ["client replacement", "event"],
+  ] as const)(
+    "rebinds during initial capture after %s and finishes on the original %s",
+    async (change, finish) => {
+      const workspace = await tempWorkspace();
+      const first = new MockClient("first"), replacement = new MockClient("replacement");
+      let current = first;
+      const changed = new Set<() => void>();
+      const source = {
+        currentClient: () => current,
+        onClientChanged: (handler: () => void) => {
+          changed.add(handler);
+          return () => { changed.delete(handler); };
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(source);
+      await sessions.run(workspace, async () => undefined);
+      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+      const bindings: EngineDaemonClient[] = [];
+      let settled = false;
+      vi.useFakeTimers();
+      const started = performance.now();
+      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async (binding) => {
+        bindings.push(binding.client);
+        if (settled) return "ready";
+        throw refusal;
+      }, { retryInitialCapture: true }));
+      const finished = finish === "deadline"
+        ? expect(run).rejects.toBe(refusal)
+        : expect(run).resolves.toBe("ready");
+      let closing: Promise<void> | undefined;
+      try {
+        await vi.advanceTimersByTimeAsync(40_000);
+        if (change === "binding close") {
+          closing = sessions.closeWorkspaceBinding(workspace);
+        } else {
+          current = replacement;
+          for (const handler of changed) handler();
+        }
+        // Real directory preparation can finish while the capture clock stays still.
+        await vi.waitFor(() => expect(bindings).toHaveLength(2));
+        await closing;
+        expect(bindings[1]).toBe(current);
+        expect(current.eventSubscriberCount).toBe(1);
+        if (change === "client replacement") expect(first.eventSubscriberCount).toBe(0);
+        if (change === "binding close") {
+          expect(first.requests.map(request => request.method)).toEqual([
+            "workspace.open", "workspace.close", "workspace.open",
+          ]);
+        }
+        if (finish === "deadline") {
+          // A new wait gets only what remains of the first wait's 120 seconds.
+          await vi.advanceTimersByTimeAsync(started + 119_999 - performance.now());
+          expect(bindings).toHaveLength(2);
+          await vi.advanceTimersByTimeAsync(1);
+        } else {
+          settled = true;
+          current.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+        }
+        await finished;
+        expect(bindings).toHaveLength(3);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(current.eventSubscriberCount).toBe(0);
+        expect(changed.size).toBe(0);
+      } finally {
+        sessions.beginShutdown();
+        await finished.catch(() => undefined);
+        await closing;
+        vi.useRealTimers();
+        await sessions.closeAll();
+      }
+    },
+  );
+
   it("waits beyond transport recovery for initial capture without polling", async () => {
     const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
@@ -155,6 +233,8 @@ describe("EngineWorkspaceSessions", () => {
       }, { retryInitialCapture: true }));
       try {
         await entered.promise;
+        // Let the refusal arm its wait before changing the event's authority.
+        await new Promise<void>((resolve) => setImmediate(resolve));
         if (scenario === "retired client") current = replacement;
         if (scenario === "unavailable client") unavailable = true;
         if (scenario === "retired binding") {

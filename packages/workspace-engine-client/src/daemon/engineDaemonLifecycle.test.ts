@@ -261,6 +261,42 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
+  it("notifies client changes on publication, retirement and stop, until unsubscribed", async () => {
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const client = new FakeClient();
+        clients.push(client);
+        return client;
+      },
+    });
+    const seen: (EngineDaemonClient | null)[] = [];
+    const unsubscribe = lifecycle.onClientChanged(() => {
+      try { seen.push(lifecycle.currentClient()); } catch { seen.push(null); }
+    });
+    const removed = vi.fn();
+    lifecycle.onClientChanged(removed)();
+    try {
+      await lifecycle.start();
+      expect(seen).toEqual([clients[0]]);
+      exits[0]?.(1, null);
+      expect(seen).toEqual([clients[0], null]);
+      await vi.waitFor(() => expect(seen).toHaveLength(3), WAIT);
+      expect(seen[2]).toBe(clients[1]);
+      await lifecycle.stop();
+      expect(seen).toEqual([clients[0], null, clients[1], null]);
+      expect(removed).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+      await lifecycle.stop();
+    }
+  });
+
   it("fires onLaunch for the first launch and again after a restart", async () => {
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     let launches = 0;
