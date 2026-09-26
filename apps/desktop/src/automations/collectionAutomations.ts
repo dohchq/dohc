@@ -1471,20 +1471,24 @@ export class CollectionAutomations {
   }
 
   /**
-   * What each Button field shows in a dataset Collection, in order. `table`
-   * is null for a dataset with one table. `description` is the dataset as
-   * its host describes it to the person asking, so the access is theirs.
+   * What each Button field shows in a dataset Collection, in order, by its
+   * table's name. `description` is the dataset as its host describes it to
+   * the person asking, so the access is theirs.
    */
   async datasetButtons(
-    collectionPath: string,
-    buttons: ReadonlyArray<{ field: string; table: string | null }>,
+    datasetId: string,
+    buttons: ReadonlyArray<{ field: string; table: string }>,
     description: DatasetDescription,
   ): Promise<AutomationButtonState[]> {
     await this.ready();
-    await this.openDataset(collectionPath);
+    const collectionPath = await this.datasetFolder(datasetId);
     const roster = await this.options.cachedRoster();
     const states: AutomationButtonState[] = [];
-    for (const button of buttons) states.push((await this.datasetButton(collectionPath, button, description, roster)).state);
+    for (const button of buttons) {
+      states.push(collectionPath === null
+        ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
+        : (await this.datasetButton(collectionPath, button, description, roster)).state);
+    }
     return states;
   }
 
@@ -1498,17 +1502,17 @@ export class CollectionAutomations {
    * since, a renamed button included; only a new press is checked.
    */
   async pressDataset(
-    input: { collectionPath: string; table: string | null; field: string; recordId: string; pressId: string; pressedBy: string },
+    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string },
     description: DatasetDescription,
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
-    await this.openDataset(input.collectionPath);
-    if (!this.datasets.has(input.collectionPath)) throw new Error(DATASET_NOT_APPROVED);
+    const collectionPath = await this.datasetFolder(input.datasetId);
+    if (collectionPath === null) throw new Error(DATASET_NOT_APPROVED);
     const recordId = datasetRecordIdOf(input.recordId);
-    if (recordId === null) throw new Error(`This record is not in ${collectionNamed(input.collectionPath).name}.`);
+    if (recordId === null) throw new Error(`This record is not in ${input.table}.`);
     const request = createHash("sha256")
-      .update(JSON.stringify(["dohc-dataset-press-v1", input.collectionPath, input.table, input.field, recordId, input.pressedBy])).digest("hex");
+      .update(JSON.stringify(["dohc-dataset-press-v1", input.datasetId, input.table, input.field, recordId, input.pressedBy])).digest("hex");
     const known = await this.withLiveHost((ledger) => ({ press: ledger.pressed(input.pressId) }), true);
     if (known === null) throw new Error("The workspace's dataset host is not open.");
     if (known.press !== null) {
@@ -1516,15 +1520,13 @@ export class CollectionAutomations {
       if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy) throw new Error("This press id already names another press.");
       return await this.answerPress(claim, watch);
     }
-    const button = await this.datasetButton(input.collectionPath, input, description, await this.options.cachedRoster());
+    const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster());
     if (!("checked" in button)) throw new Error(button.state.reason);
     const { datasetId, tableId, fieldId, automation } = button.checked;
     const pressed = await this.withLiveHost(async (ledger) => {
       // A dataset that moved to a server says so before anything reads it.
       ledger.assertPressable(datasetId, { tableId, fieldId });
-      if (!(await datasetRecordExists(ledger, datasetId, automation, recordId))) {
-        throw new Error(`This record is no longer in ${collectionNamed(input.collectionPath).name}.`);
-      }
+      if (!(await datasetRecordExists(ledger, datasetId, automation, recordId))) throw new Error(`This record is no longer in ${input.table}.`);
       return ledger.press(datasetId, {
         pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
         tableId, fieldId, recordId, pressedBy: input.pressedBy,
@@ -1562,6 +1564,16 @@ export class CollectionAutomations {
     }
     const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
     if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
+    // A dataset that moved to a server lists its buttons with the reason a press would get.
+    const unpressable = await this.withLiveHost((host) => {
+      try {
+        host.assertPressable(definition.datasetId, { tableId: table.tableId, fieldId: field.fieldId });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    if (unpressable) return disabled(unpressable);
     const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, button.field,
       (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
     if (resolved.kind === "state") return { state: resolved.state };
@@ -1571,6 +1583,17 @@ export class CollectionAutomations {
     return state.kind === "ready"
       ? { state, checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId } }
       : { state };
+  }
+
+  /**
+   * The folder of the dataset Collection with this id, or null when no
+   * approved dataset has it. A person is asking about it, so a dataset the
+   * index lacks opens its host to be indexed.
+   */
+  private async datasetFolder(datasetId: string): Promise<string | null> {
+    const find = () => [...this.datasets].find(([, dataset]) => dataset.definition.datasetId === datasetId)?.[0] ?? null;
+    if (find() === null) await this.enqueue(() => this.indexDatasets(true));
+    return find();
   }
 
   /** A dataset Collection the index lacks, whose host may not be open yet: a person is asking about it, so open it. */
