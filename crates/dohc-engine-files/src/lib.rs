@@ -59,7 +59,8 @@ pub use materialize::{
     ProjectionTargetState, ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay,
     finish_prepared_displacements, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, prepare_displacements, probe_projection_target, recover_displacements,
-    recover_path_displacements, run_pending_jobs, workspace_lacks_atomic_placement,
+    recover_path_displacements, remove_empty_directory_target, run_pending_jobs,
+    workspace_lacks_atomic_placement,
 };
 pub use policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,

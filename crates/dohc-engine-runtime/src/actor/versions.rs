@@ -12,7 +12,10 @@ use dohc_engine_domain::{
     SecretMomentRecord, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
     VersionedTextStore, list_secret_files_keyless, list_secret_moments_in_time_window_keyless,
 };
-use dohc_engine_files::{ProjectionTargetKind, ProjectionTargetState, probe_projection_target};
+use dohc_engine_files::{
+    ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    remove_empty_directory_target,
+};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
@@ -349,6 +352,72 @@ pub(super) fn switch_projection_job_id(
         "version-switch-mat_"
     };
     format!("{prefix}{}", hex_sha256(identity.as_bytes()))
+}
+
+/// Whether `path` lies strictly inside the directory `ancestor`.
+fn is_inside(path: &str, ancestor: &str) -> bool {
+    path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
+}
+
+/// Enqueue one batch of a sync page in one transaction and materialize it in
+/// one replay. Clears `projections` and adds the batch's deletes to
+/// `deleted`.
+fn run_relay_batch(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    projections: &mut Vec<SwitchProjection>,
+    deleted: &mut Vec<String>,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    if projections.is_empty() {
+        return Ok(());
+    }
+    let batch = std::mem::take(projections);
+    let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        for projection in &batch {
+            if let Some(bytes) = projection.inline_content.as_deref()
+                && put_binary_blob(tx, bytes)? != projection.spec.content_sha256
+            {
+                return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
+            }
+            upsert_projection_job(tx, &projection.spec, projection.operation)?;
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    for projection in &batch {
+        if projection.operation == MaterializationOperation::Delete {
+            deleted.push(projection.spec.target_path.clone());
+        }
+    }
+    let selected: HashSet<String> = batch
+        .into_iter()
+        .map(|projection| projection.spec.job_id)
+        .collect();
+    let replay = replay_pending_materializations(
+        store,
+        root_dir,
+        MaterializationReplayScope {
+            workspace_id,
+            self_writes: Some(self_writes),
+            progress: None,
+        },
+        now_ms,
+        &dohc_engine_storage::NoFaults,
+        Some(&selected),
+        false,
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs > 0 {
+        return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+    Ok(())
 }
 
 #[allow(
@@ -872,12 +941,39 @@ impl ActorHandle {
                 return Err(DomainError::StateCorrupt { reason: "ordinary materialization policy unavailable" }.into());
             }
             let mut secret_key = None;
-            // The page's paths are distinct. Plan every change first, enqueue
-            // them in one transaction, then materialize them in one replay, so
-            // the page shares one synced displacement commit.
-            let mut projections = Vec::new();
-            for change in changes {
+            // A change can depend on another in the same page: a file becomes a
+            // directory (delete `notes`, write `notes/work.md`) or the reverse
+            // (delete `d/a.md`, write `d`). Deletes under another changed path
+            // run first, and the page runs in batches that each hold no two
+            // paths where one is inside the other, so every probe sees the
+            // effects of the batches before it. Each batch shares one synced
+            // displacement commit.
+            let mut changes = changes;
+            let inside_another = |path: &str, all: &[dohc_engine_sync::MomentMaterializationChange]| {
+                all.iter().any(|other| is_inside(path, &other.path))
+            };
+            let first: Vec<bool> = changes
+                .iter()
+                .map(|change| change.operation == "delete" && inside_another(&change.path, &changes))
+                .collect();
+            let mut keyed: Vec<(bool, dohc_engine_sync::MomentMaterializationChange)> =
+                first.into_iter().zip(changes.drain(..)).collect();
+            keyed.sort_by_key(|(first, _)| !*first);
+            let mut projections: Vec<SwitchProjection> = Vec::new();
+            let mut deleted: Vec<String> = Vec::new();
+            for (_, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                if projections.iter().any(|planned| {
+                    is_inside(&planned.spec.target_path, &change.path)
+                        || is_inside(&change.path, &planned.spec.target_path)
+                }) {
+                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
+                }
+                // A file replacing a directory whose tracked files this page
+                // deleted: the empty directory gives way.
+                if deleted.iter().any(|path| is_inside(path, &change.path)) {
+                    remove_empty_directory_target(&root_dir, &change.path)?;
+                }
                 // A retry from a former active version cannot repaint the current version.
                 if change.version_id != active { continue; }
                 let secret = change.content_kind == "secret";
@@ -917,27 +1013,8 @@ impl ActorHandle {
                 projections.push(planned_projection(&workspace_id, &active, change.path, operation, sha,
                     preimage, now_ms, now_ms, secret, inline));
             }
-            if projections.is_empty() { return Ok(()); }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-            let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-                for projection in &projections {
-                    if let Some(bytes) = projection.inline_content.as_deref() {
-                        if put_binary_blob(tx, bytes)? != projection.spec.content_sha256 {
-                            return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
-                        }
-                    }
-                    upsert_projection_job(tx, &projection.spec, projection.operation)?;
-                }
-                Ok::<_, StorageError>(())
-            })?;
-            if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
-            let selected: HashSet<String> =
-                projections.into_iter().map(|projection| projection.spec.job_id).collect();
-            let replay = replay_pending_materializations(store, &root_dir,
-                MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None},
-                now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
-            let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
-            if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }
+            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await

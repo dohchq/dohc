@@ -128,3 +128,128 @@ async fn earlier_page_delete_materializes_the_current_write_instead_of_erasing_i
         "new head"
     );
 }
+
+fn write_at(path: &str, object: &str, text: &str, moment: &str, now_ms: i64) -> WriteText {
+    WriteText {
+        path: path.into(),
+        object_id: object.into(),
+        ..write(text, moment, now_ms)
+    }
+}
+
+fn delete_at(path: &str, moment: &str, now_ms: i64) -> DeleteTextFile {
+    DeleteTextFile {
+        workspace_id: "workspace".into(),
+        version_id: "main".into(),
+        path: path.into(),
+        moment_id: moment.into(),
+        request_id: None,
+        metadata_origin: "sync".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+    }
+}
+
+fn change(path: &str, operation: &'static str) -> MomentMaterializationChange {
+    MomentMaterializationChange {
+        version_id: "main".into(),
+        path: path.into(),
+        operation,
+        content_kind: "text",
+    }
+}
+
+/// Apply `moments` to a fresh store, lay `disk` out, and materialize `page`.
+async fn materialize_page(
+    moments: impl FnOnce(&mut VersionedTextStore<'_>),
+    disk: impl FnOnce(&std::path::Path),
+    page: Vec<MomentMaterializationChange>,
+) -> ScratchDir {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        moments(&mut domain);
+        domain
+            .set_active_version("workspace", "main", &NoFaults)
+            .unwrap();
+    }
+    disk(scratch.path());
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 10).unwrap().actor;
+    actor
+        .materialize_relay_page(
+            "workspace".into(),
+            scratch.path().to_path_buf(),
+            page,
+            Arc::new(()),
+            11,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the page materializes");
+    scratch
+}
+
+/// One page turns the file `notes` into a directory holding `work.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_page_turns_a_file_into_a_directory() {
+    let scratch = materialize_page(
+        |domain| {
+            domain
+                .write_text(&write_at("notes", "o-notes", "old", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .delete_text_file(&delete_at("notes", "m2", 2), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(
+                    &write_at("notes/work.md", "o-work", "work", "m3", 3),
+                    &NoFaults,
+                )
+                .unwrap();
+        },
+        |root| std::fs::write(root.join("notes"), "old").unwrap(),
+        vec![change("notes", "delete"), change("notes/work.md", "write")],
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes").join("work.md")).unwrap(),
+        "work"
+    );
+}
+
+/// One page turns the directory `d` into a file, after deleting its only
+/// tracked file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_page_turns_a_directory_into_a_file() {
+    let scratch = materialize_page(
+        |domain| {
+            domain
+                .write_text(&write_at("d/a.md", "o-a", "a", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .delete_text_file(&delete_at("d/a.md", "m2", 2), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d", "o-d", "file d", "m3", 3), &NoFaults)
+                .unwrap();
+        },
+        |root| {
+            std::fs::create_dir(root.join("d")).unwrap();
+            std::fs::write(root.join("d").join("a.md"), "a").unwrap();
+        },
+        vec![change("d", "write"), change("d/a.md", "delete")],
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("d")).unwrap(),
+        "file d"
+    );
+}

@@ -2274,16 +2274,53 @@ pub fn finish_prepared_displacements(
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let mut unused = Vec::new();
     for row in prepared {
-        let unmoved = match resolve_target(&canonical_root, &row.target_path) {
-            Ok(target) => !entry_exists(&sibling_with_name(&target, &row.displaced_name))?,
-            Err(_) => true,
-        };
-        if unmoved {
+        if proven_unmoved(&canonical_root, &row) {
             unused.push(row.displacement_id);
         }
     }
     store.discard_displacements(&unused)?;
     Ok(())
+}
+
+/// Whether a prepared row's file is provably not at its displaced name. The
+/// path is checked the way recovery checks it: a name recovery would refuse,
+/// or an ancestor that is now a link, proves nothing, and the row stays.
+fn proven_unmoved(root: &Path, row: &Displacement) -> bool {
+    if !is_displaced_name(&row.displaced_name) {
+        return false;
+    }
+    let Ok(target) = resolve_target(root, &row.target_path) else {
+        return false;
+    };
+    if ensure_target_symlink_free(root, &target).is_err() {
+        return false;
+    }
+    matches!(
+        std::fs::symlink_metadata(sibling_with_name(&target, &row.displaced_name)),
+        Err(err) if err.kind() == ErrorKind::NotFound
+    )
+}
+
+/// Remove the directory at `rel` when it is empty, so a file can take its
+/// name. Used when a sync page deletes the last tracked files under a path
+/// and then writes a file there. Only a real, empty directory below the
+/// workspace root is removed; `false` when nothing was removed.
+pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, MaterializeError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, rel)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    let Ok(metadata) = std::fs::symlink_metadata(&target) else {
+        return Ok(false);
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+    {
+        return Ok(false);
+    }
+    // `remove_dir` refuses a directory that is not empty.
+    Ok(std::fs::remove_dir(&target).is_ok())
 }
 
 /// Resolve every displacement a crash left unresolved under `root`,

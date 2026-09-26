@@ -7,9 +7,9 @@
 
 use dohc_engine_files::{
     AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, MaterializeOptions,
-    NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay, materialize_secret_one,
-    recover_displacements, recover_path_displacements, run_pending_jobs,
-    workspace_lacks_atomic_placement,
+    NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay,
+    finish_prepared_displacements, materialize_secret_one, recover_displacements,
+    recover_path_displacements, run_pending_jobs, workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -2659,4 +2659,49 @@ fn a_crash_mid_batch_recovers_every_job() {
         );
     }
     assert_nothing_displaced(&sc, &store);
+}
+
+/// While dohc is stopped, another program swaps the directory holding a
+/// displaced file for a link to an empty directory. Cleanup cannot prove the
+/// file is gone through the link, so the row stays, and the file is found
+/// again once the directory is back.
+#[test]
+fn cleanup_keeps_a_prepared_row_behind_a_substituted_linked_ancestor() {
+    let sc = Scratch::new("prepared-linked-ancestor");
+    let elsewhere = Scratch::new("prepared-linked-elsewhere");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::create_dir(sc.target("dir")).expect("dir");
+    std::fs::write(sc.target("dir/.dohc-write-j1.displaced"), PREIMAGE).expect("moved file");
+    store
+        .prepare_displacements(&[dohc_engine_storage::DisplacementSpec {
+            job_id: "j1".to_owned(),
+            workspace_id: "ws".to_owned(),
+            target_path: "dir/a.md".to_owned(),
+            displaced_name: ".dohc-write-j1.displaced".to_owned(),
+            expected_sha256: hex_sha256(PREIMAGE),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 1,
+        }])
+        .expect("prepare");
+    std::fs::rename(sc.target("dir"), sc.target("dir-real")).expect("move dir away");
+    if !try_make_dir_alias(elsewhere.workspace(), &sc.target("dir")).expect("alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
+    assert_eq!(
+        store.list_prepared_displacements().expect("prepared").len(),
+        1,
+        "the row stays while the ancestor is a link"
+    );
+
+    remove_dir_alias(&sc.target("dir"));
+    std::fs::rename(sc.target("dir-real"), sc.target("dir")).expect("dir back");
+    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
+    assert_eq!(
+        store.list_prepared_displacements().expect("prepared").len(),
+        1,
+        "the moved file is there, so the row is not unused"
+    );
 }
