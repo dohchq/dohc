@@ -749,7 +749,7 @@ it("refuses cache installation after authority transfers during the snapshot",as
   const result=await f.invoke({id:"one",value:"saved"});expect(result.revision).toBe(1);
   await vi.waitFor(()=>expect(release).toBeTypeOf("function"),workerWait);
   f.journal.fence({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
-  const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("moved to another host");
+  const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("stopped accepting changes to this Collection");
   release!();await check;
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
   await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0),workerWait);

@@ -104,7 +104,7 @@ it("rejects deletion at a fenced former authority", async () => {
   const preview = f.host.deletePreview("owner",scope);
   f.journal.fence({expected:preview.cursor,authorize(){}});
   expect(() => f.host.deletePreview("owner",scope)).toThrow("current host");
-  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("moved to another host");
+  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("stopped accepting changes to this Collection");
 });
 
 it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
@@ -171,7 +171,7 @@ it("archives and restores the same records without releasing storage or reactiva
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "retained" }]);
   f.host.archiveDataset("owner", scope);
   f.journal.fence({ expected: f.host.approvedArtifacts("owner", scope).cursor, authorize() {} });
-  expect(() => f.host.restoreDataset("owner", scope)).toThrow("moved to another host");
+  expect(() => f.host.restoreDataset("owner", scope)).toThrow("stopped accepting changes to this Collection");
 });
 
 it("invalidates a pending operation even if the dataset is archived and restored before commit", async () => {
@@ -273,7 +273,7 @@ it("intersects admin app operations with the explicit data grant and refuses sta
   await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
   await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(() => f.host.describe("helper", scope)).toThrow("You do not have access to this Collection.");
-  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("Approve this access again.");
+  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("Its owner must approve this access again.");
 });
 
 it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
@@ -337,9 +337,9 @@ it("migrates records atomically and retains stale grants for explicit reapproval
   expect(f.host.permissions("owner", scope).permissions.map(permission => permission.current)).toEqual([false, false]);
   expect(() => f.host.permissions("helper", scope)).toThrow("You do not have access to this Collection.");
   expect(f.host.list("helper", { workspaceId: "workspace" }).datasets).toEqual([]);
-  await expect(f.invoke("helper", id(7))).rejects.toThrow("Approve this access again.");
+  await expect(f.invoke("helper", id(7))).rejects.toThrow("Its owner must approve this access again.");
   await expect(f.invoke("friend", id(6), { value: "another" }, "form")).rejects.toThrow();
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } })).toThrow("Approve this access again.");
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } })).toThrow("Choose it again.");
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 2, revisionSha256: revision.revisionSha256, operationIds: [id(7)], discover: true } });
   const result = await f.host.invoke("helper", { ...scope, revision: 2, revisionSha256: revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-new" });
   expect(result.result).toMatchObject([{ value: "saved" }]);
@@ -591,7 +591,7 @@ it("keeps original app and helper grants working through display renames, includ
   expect(f.db.prepare("SELECT * FROM dohc_dataset_bindings").all()).toEqual(bindings);
   expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
   await expect(f.invoke("friend",id(9),{},"form")).rejects.toThrow("You do not have access to this Collection.");
-  await expect(f.host.invoke("friend",{...scope,revision:1,revisionSha256:"0".repeat(64),operationId:id(6),input:{value:"forged"},idempotencyKey:"forged",access:{kind:"app",appId:"form"}})).rejects.toThrow("Approve this access again.");
+  await expect(f.host.invoke("friend",{...scope,revision:1,revisionSha256:"0".repeat(64),operationId:id(6),input:{value:"forged"},idempotencyKey:"forged",access:{kind:"app",appId:"form"}})).rejects.toThrow("Its owner must approve this access again.");
   f.host.setBinding("owner",{...scope,appId:"form",binding:null});
   await expect(f.invoke("friend",id(6),{value:"saved"},"form")).rejects.toThrow("You do not have access to this Collection.");
 });
@@ -629,10 +629,10 @@ it.each(["fields","access","constraint","source"])("requires reapproval after a 
   const source = change === "source" ? operationSource+"\n// edited rule" : operationSource;
   const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource:source});
   await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:source,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Approve this access again.");
+  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
   const restored = describeDatasetRevision({definition,revision:3,schemaSql,operationSource});
   await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision:restored,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"still refused"},"form")).rejects.toThrow("Approve this access again.");
+  await expect(f.invoke("friend",id(6),{value:"still refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
 });
 
 it("refuses display continuity when identical source compiles to different executable bytes", async () => {
@@ -642,7 +642,7 @@ it("refuses display continuity when identical source compiles to different execu
   compiler = 2;
   const revision = describeDatasetRevision({definition:{...definition,name:"Renamed"},revision:2,schemaSql,operationSource});
   await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Approve this access again.");
+  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
 });
 
 it("connects schema history to immutable source and reverses rules forward without losing newer records or restoring grants", async () => {

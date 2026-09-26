@@ -99,7 +99,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       if (!row || (row.phase !== "installed" && row.phase !== "claimed") || row.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(row.source_json)), input.sourceCursor)) throw new Error("Recovery transfer is not installed with this identity.");
       if (row.phase === "claimed") return receipt(row);
       const head = JSON.parse(String(row.head_json)) as ValidatedDatasetRecovery["headCheckpoint"] & { stage: CheckpointStage; sourceState: string };
-      if (head.sourceState !== "fenced" && !(options.allowOwnerRecoveryClaim && input.oldHostStopped === true)) throw new Error("Stop the old host before moving this Collection.");
+      if (head.sourceState !== "fenced" && !(options.allowOwnerRecoveryClaim && input.oldHostStopped === true)) throw new Error("This recovery file was saved while the Collection still accepted changes, so it cannot move the Collection. Publish the Collection's app to your sharing server to move it.");
       journal.claimInactiveCheckpoint({ expected: input.sourceCursor, hostEpoch: randomUUID(), approvedRevisionHash: input.sourceCursor.approvedRevisionHash,
         source: head.source, schemaSql: head.schemaSql, definitionJson: head.definitionJson, capacityBytes: head.capacityBytes, checkpoint: head.stage, authorize: input.authorize,
         account(allocation) {

@@ -252,8 +252,8 @@ it("isolates matching dataset and retry names across workspaces",()=>{
 it("fences the old host durably without deleting recovery data",()=>{
   const f=fixture();const result=f.journal.commitOperation(f.prepare());if(result.kind!=="committed")throw Error();
   f.journal.fence({expected:result.event.cursor,authorize:f.authorize});f.reopen();expect(f.journal.head(f.scope,f.authorize).active).toBe(false);
-  expect(()=>f.journal.commitOperation(f.prepare())).toThrow("moved to another host");expect(()=>f.journal.receipt({...f.prepare(),scope:f.scope})).toThrow("moved to another host");
-  expect(()=>f.journal.initialize(f.initialization)).toThrow("moved to another host");expect(f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize}).events).toHaveLength(1);
+  expect(()=>f.journal.commitOperation(f.prepare())).toThrow("stopped accepting changes to this Collection");expect(()=>f.journal.receipt({...f.prepare(),scope:f.scope})).toThrow("stopped accepting changes to this Collection");
+  expect(()=>f.journal.initialize(f.initialization)).toThrow("stopped accepting changes to this Collection");expect(f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize}).events).toHaveLength(1);
 });
 it("rejects stale transfer fences",()=>{
   const f=fixture();f.journal.commitOperation(f.prepare());expect(()=>f.journal.fence({expected:f.initial,authorize:f.authorize})).toThrow("The Collection changed. Try again.");expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
@@ -306,7 +306,7 @@ it("rejects stale deletion and refuses deleting a transferred authority",()=>{
   expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup})).toThrow("The Collection changed. Try again.");
   const expected=f.journal.head(f.scope,f.authorize).cursor;
   f.journal.fence({expected,authorize:f.authorize});
-  expect(()=>f.journal.destroy({expected,authorize:f.authorize,cleanup})).toThrow("moved to another host");
+  expect(()=>f.journal.destroy({expected,authorize:f.authorize,cleanup})).toThrow("stopped accepting changes to this Collection");
   expect(cleanup).not.toHaveBeenCalled();expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_deletions").get()!.n).toBe(0);
   expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(expected);
 });

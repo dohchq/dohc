@@ -118,7 +118,7 @@ describe("error words", () => {
   it("shows a plain Collection reply as written, names and instructions included", () => {
     for (const message of [
       "The Collection changed after this preview. Preview the change again.",
-      "The Collection's rules changed. Reload the Collection, then try again.",
+      "The Collection's rules changed. Reload the Collection. Then try again.",
       "Journal.md changed on disk. Open it again.",
       "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
       ...["Materialization", "Checkpoint", "Materialization is truncated.: Status", "Dataset operation"].map((field) =>

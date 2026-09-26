@@ -42,7 +42,7 @@ export async function compileDatasetOperations(source: string, path: string, opt
   try {
     const run = (args: string[], input?: string) => new Promise<string>((resolve, reject) => {
       const child = execFile(executablePath, args, { timeout: 10_000, maxBuffer: SOURCE_BYTES, windowsHide: true, encoding: "utf8", signal: options.signal }, (error, stdout) => {
-        if (error) reject(new DatasetCompilerError("invalid", "dohc could not build these Collection actions within this host's limits. Check the source, then approve again.", { cause: error }));
+        if (error) reject(new DatasetCompilerError("invalid", "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.", { cause: error }));
         else resolve(stdout);
       });
       child.stdin!.on("error", () => {}); child.stdin!.end(input);
