@@ -2344,6 +2344,33 @@ pub fn target_has_requested_name(root: &Path, target: &Path) -> bool {
     .is_ok()
 }
 
+/// Compare directory entries independently of ancestor spelling and hard links.
+pub fn same_existing_entry(source: &Path, target: &Path) -> bool {
+    same_existing_file(source, target)
+        && source
+            .parent()
+            .zip(target.parent())
+            .is_some_and(|(a, b)| same_existing_file(a, b))
+        && matches!((actual_component_path(source), actual_component_path(target)),
+            (Ok(a), Ok(b)) if a.file_name() == b.file_name())
+}
+
+/// Unknown identities cannot prove that two paths address the same file.
+pub fn same_existing_file(source: &Path, target: &Path) -> bool {
+    match (file_id::get_file_id(source), file_id::get_file_id(target)) {
+        (Ok(source), Ok(target)) => known_file_id(source) && source == target,
+        _ => false,
+    }
+}
+
+fn known_file_id(identity: file_id::FileId) -> bool {
+    match identity {
+        file_id::FileId::Inode { inode_number, .. } => inode_number != 0,
+        file_id::FileId::LowRes { file_index, .. } => file_index != 0,
+        file_id::FileId::HighRes { file_id, .. } => file_id != 0,
+    }
+}
+
 #[cfg(windows)]
 fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
     let actual = std::fs::canonicalize(path).map_err(|err| MaterializeError::io(path, &err))?;
@@ -2355,6 +2382,21 @@ fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
 
 #[cfg(not(windows))]
 fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(path.to_path_buf());
+    };
+    let mut alias = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_uppercase() {
+            alias.extend(ch.to_lowercase());
+        } else {
+            alias.extend(ch.to_uppercase());
+        }
+    }
+    // Case-sensitive filesystems need no directory enumeration on the common path.
+    if alias == name || !same_existing_file(path, &path.with_file_name(&alias)) {
+        return Ok(path.to_path_buf());
+    }
     let parent = path.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
     let entries = std::fs::read_dir(parent).map_err(|err| MaterializeError::io(parent, &err))?;
     let mut candidates = Vec::new();
@@ -2374,17 +2416,33 @@ fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
     // Identity, not folded spelling, proves an alias on this filesystem.
     candidates
         .into_iter()
-        .find(|candidate| same_file::is_same_file(path, candidate).unwrap_or(false))
+        .find(|candidate| same_existing_file(path, candidate))
         .ok_or(MaterializeError::UnsafeTargetPath)
 }
 
 /// Restore directory spelling for a relay case replacement, preserving its contents.
-pub fn restore_parent_spelling(root: &Path, rel: &str) -> Result<(), MaterializeError> {
+pub fn restore_parent_spelling(
+    root: &Path,
+    source: &str,
+    rel: &str,
+) -> Result<(), MaterializeError> {
     let root = std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&root, rel)?;
+    let source = resolve_target(&root, source)?;
     ensure_target_symlink_free(&root, &target)?;
     let parent = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    let mut recorded = source
+        .strip_prefix(&root)
+        .map_err(|_| MaterializeError::UnsafeTargetPath)?
+        .components();
     walk_target_components(&root, parent, |requested| {
+        let recorded = recorded.next().ok_or(MaterializeError::UnsafeTargetPath)?;
+        let parent_path = requested
+            .parent()
+            .ok_or(MaterializeError::UnsafeTargetPath)?;
+        let Some(guard) = SecretParentGuard::open_existing(&root, requested, parent_path)? else {
+            return Ok(());
+        };
         reject_link_or_reparse(requested)?;
         if !requested.exists() {
             return Ok(());
@@ -2399,9 +2457,23 @@ pub fn restore_parent_spelling(root: &Path, rel: &str) -> Result<(), Materialize
             {
                 return Err(MaterializeError::UnsafeTargetPath);
             }
-            std::fs::rename(&actual, requested)
+            // A local case-only rename since the recorded source must survive.
+            if actual.file_name() != Some(recorded.as_os_str()) {
+                return Ok(());
+            }
+            guard
+                .rename(
+                    actual
+                        .file_name()
+                        .ok_or(MaterializeError::UnsafeTargetPath)?,
+                    requested
+                        .file_name()
+                        .ok_or(MaterializeError::UnsafeTargetPath)?,
+                    &actual,
+                    requested,
+                )
                 .map_err(|err| MaterializeError::io(requested, &err))?;
-            sync_parent_dir(requested.parent(), DurabilityPolicy::per_os())?;
+            guard.sync(DurabilityPolicy::per_os())?;
         }
         Ok(())
     })
@@ -3817,6 +3889,109 @@ fn replace_secret_with_bounded_retry(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn zero_file_ids_are_unknown() {
+        for identity in [
+            file_id::FileId::new_inode(1, 0),
+            file_id::FileId::new_low_res(1, 0),
+            file_id::FileId::new_high_res(1, 0),
+        ] {
+            assert!(!super::known_file_id(identity));
+        }
+        for identity in [
+            file_id::FileId::new_inode(0, 1),
+            file_id::FileId::new_low_res(0, 1),
+            file_id::FileId::new_high_res(0, 1),
+        ] {
+            assert!(super::known_file_id(identity));
+        }
+    }
+
+    #[test]
+    fn parent_spelling_preserves_an_unrecorded_local_rename() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("local-directory-spelling").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("PARENT/Sub")).unwrap();
+        std::fs::write(root.join("PARENT/Sub/a.md"), "local").unwrap();
+        super::restore_parent_spelling(root, "Parent/Sub/a.md", "parent/sub/a.md").unwrap();
+        assert!(
+            std::fs::read_dir(root)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "PARENT")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("PARENT/Sub/a.md")).unwrap(),
+            "local"
+        );
+    }
+
+    #[test]
+    fn leaf_spelling_ignores_ancestor_spelling() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("leaf-spelling").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir(root.join("Dir")).unwrap();
+        std::fs::write(root.join("Dir/ss.md"), "old").unwrap();
+        std::fs::hard_link(root.join("Dir/ss.md"), root.join("Dir/\u{1e9e}.md")).unwrap();
+        if super::same_existing_file(&root.join("Dir"), &root.join("dir")) {
+            assert!(super::same_existing_entry(
+                &root.join("Dir/ss.md"),
+                &root.join("dir/ss.md")
+            ));
+            assert!(!super::same_existing_entry(
+                &root.join("Dir/ss.md"),
+                &root.join("dir/\u{1e9e}.md")
+            ));
+        }
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::fs::hard_link(root.join("Dir/ss.md"), root.join("other/ss.md")).unwrap();
+        assert!(!super::same_existing_entry(
+            &root.join("Dir/ss.md"),
+            &root.join("other/ss.md")
+        ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn directory_rename_uses_the_pinned_parent() {
+        let scratch =
+            dohc_test_scratch::ScratchDir::new_named("pinned-directory-spelling").unwrap();
+        let root = std::fs::canonicalize(scratch.path()).unwrap();
+        std::fs::create_dir_all(root.join("Parent/Sub")).unwrap();
+        std::fs::create_dir_all(root.join("outside/Sub")).unwrap();
+        let target = root.join("Parent/sub");
+        let guard = super::SecretParentGuard::open_existing(&root, &target, &root.join("Parent"))
+            .unwrap()
+            .unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::rename(root.join("Parent"), root.join("moved")).unwrap();
+            std::os::unix::fs::symlink(root.join("outside"), root.join("Parent")).unwrap();
+        }
+        #[cfg(windows)]
+        assert!(std::fs::rename(root.join("Parent"), root.join("moved")).is_err());
+        guard
+            .rename(
+                std::ffi::OsStr::new("Sub"),
+                std::ffi::OsStr::new("sub"),
+                &root.join("Parent/Sub"),
+                &target,
+            )
+            .unwrap();
+        assert!(
+            std::fs::read_dir(root.join("outside"))
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "Sub")
+        );
+        #[cfg(unix)]
+        assert!(root.join("moved/sub").is_dir());
+        #[cfg(windows)]
+        assert!(
+            std::fs::read_dir(root.join("Parent"))
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "sub")
+        );
+    }
+
+    #[test]
     fn parent_spelling_never_renames_reserved_directories() {
         let scratch =
             dohc_test_scratch::ScratchDir::new_named("reserved-directory-spelling").unwrap();
@@ -3824,7 +3999,7 @@ mod tests {
         std::fs::create_dir(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/keep"), "keep").unwrap();
         if same_file::is_same_file(root.join(".git"), root.join(".GIT")).unwrap_or(false) {
-            assert!(super::restore_parent_spelling(root, ".GIT/new.md").is_err());
+            assert!(super::restore_parent_spelling(root, ".git/new.md", ".GIT/new.md").is_err());
         }
         assert_eq!(
             std::fs::read_to_string(root.join(".git/keep")).unwrap(),

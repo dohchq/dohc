@@ -383,10 +383,7 @@ fn is_inside(root: &std::path::Path, path: &str, ancestor: &str) -> bool {
 }
 
 fn same_projection_file(root: &std::path::Path, source: &str, target: &str) -> bool {
-    matches!(
-        (file_id::get_file_id(root.join(source)), file_id::get_file_id(root.join(target))),
-        (Ok(source), Ok(target)) if source == target
-    )
+    dohc_engine_files::materialize::same_existing_file(&root.join(source), &root.join(target))
 }
 
 fn relay_case_replacement_paths(
@@ -1045,8 +1042,8 @@ impl ActorHandle {
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
                     return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
                 }
-                if case_replacements.values().any(|destination| destination == &change.path) {
-                    dohc_engine_files::materialize::restore_parent_spelling(&root_dir, &change.path)?;
+                if let Some((source, _)) = case_replacements.iter().find(|(_, destination)| *destination == &change.path) {
+                    dohc_engine_files::materialize::restore_parent_spelling(&root_dir, source, &change.path)?;
                 }
                 let state = probe_projection_target(&root_dir, &change.path,
                     if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext });
@@ -1080,9 +1077,7 @@ impl ActorHandle {
                     }
                     ("delete", None) if case_replacements.get(&change.path).is_some_and(|destination| {
                         // Collision keys can also group distinct files.
-                        same_projection_file(&root_dir, &change.path, destination)
-                            && !(target_has_requested_name(&root_dir, &root_dir.join(&change.path))
-                                && target_has_requested_name(&root_dir, &root_dir.join(destination)))
+                        dohc_engine_files::materialize::same_existing_entry(&root_dir.join(&change.path), &root_dir.join(destination))
                     }) => continue,
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),

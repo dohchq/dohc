@@ -379,6 +379,7 @@ async fn collision_key_match_does_not_skip_deleting_a_distinct_windows_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collision_key_hard_links_still_delete_the_old_name() {
     check_case_replacement("\u{1e9e}.md", "ss.md", true).await;
+    check_case_replacement("Dir/ss.md", "dir/\u{1e9e}.md", true).await;
 }
 
 async fn check_case_replacement(old_path: &str, new_path: &str, hard_link: bool) {
@@ -401,6 +402,8 @@ async fn check_case_replacement(old_path: &str, new_path: &str, hard_link: bool)
                         .unwrap();
                 },
                 |root| {
+                    std::fs::create_dir_all(root.join(old_path).parent().unwrap()).unwrap();
+                    std::fs::create_dir_all(root.join(new_path).parent().unwrap()).unwrap();
                     std::fs::write(root.join(old_path), "old").unwrap();
                     if hard_link {
                         std::fs::hard_link(root.join(old_path), root.join(new_path)).unwrap();
@@ -413,12 +416,25 @@ async fn check_case_replacement(old_path: &str, new_path: &str, hard_link: bool)
                 std::fs::read_to_string(scratch.path().join(new_path)).unwrap(),
                 new_text
             );
-            let names: Vec<_> = std::fs::read_dir(scratch.path())
+            let names: Vec<_> = std::fs::read_dir(scratch.path().join(new_path).parent().unwrap())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
                 .collect();
-            assert!(names.iter().any(|name| name == new_path));
-            assert!(!names.iter().any(|name| name == old_path));
+            assert!(
+                names.iter().any(
+                    |name| Some(name.as_os_str()) == std::path::Path::new(new_path).file_name()
+                )
+            );
+            let old_names: Vec<_> =
+                std::fs::read_dir(scratch.path().join(old_path).parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+            assert!(
+                !old_names.iter().any(
+                    |name| Some(name.as_os_str()) == std::path::Path::new(old_path).file_name()
+                )
+            );
         }
     }
 }
