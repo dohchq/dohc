@@ -64,12 +64,21 @@ try {
           recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
             source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
         } finally {await recovered.close();}
+        // The CPU budget watch runs on a worker thread and ends the utility process from there.
+        const budgetDirectory=join(app.getPath('userData'),'budget');mkdirSync(budgetDirectory);
+        const budgeted=await openPersistentAppBackend({...config,directory:budgetDirectory,limits:{cpuBudgetMs:1000}},options);
+        let budgetResult;
+        try {
+          budgetResult=await budgeted.prepare({expected:cursor,caller:{kind:'owner'},operation:'spin',readOnly:true,input:{},requestId:'budget',nowMs:3,
+            source:"globalThis.operations={spin(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n');}}"})
+            .then(()=>'finished',error=>error.code);
+        } finally {await budgeted.close();}
         // The automation evaluator's worker thread, started from Electron main as the desktop starts it.
         const evaluator=createAutomationEvaluator({entryPath:join(process.resourcesPath,'app-backend-runtime','automation-worker.mjs')});
         let formulaResult;
         try {formulaResult=await evaluator.evaluate({trigger:{kind:'record-added'},person:null,now:'2026-09-25T09:30:00.000+08:00'},[{kind:'expression',source:'dateAdd(today(), 3, "days")'}]);}
         finally {await evaluator.close();}
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,formulaResult,electron:process.versions.electron}));
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,budgetResult,formulaResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -98,6 +107,7 @@ try {
   assert.ok(result.changesetBytes > 0);
   assert.deepEqual(result.persistentResult, [{ id: 'persistent-fuse-proof', value: 43 }]);
   assert.deepEqual(result.recoveredResult, result.persistentResult);
+  assert.equal(result.budgetResult, 'worker_budget');
   assert.deepEqual(result.formulaResult, [{ ok: true, value: '2026-09-28' }]);
-  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored, automation formulas evaluated.`);
+  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored, over-budget worker ended, automation formulas evaluated.`);
 } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }

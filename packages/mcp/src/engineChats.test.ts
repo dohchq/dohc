@@ -28,7 +28,6 @@ const moment = {
   operation: "write" as const,
   path: "notes/agenda.md",
   versionId: "main",
-  summary: "Update agenda",
   fileCount: 1 as const,
 };
 

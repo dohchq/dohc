@@ -18,6 +18,7 @@ import {
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
 import {
+  createDocument,
   createRecord,
   dataset,
   createWorkspaceDirectory,
@@ -29,9 +30,10 @@ import {
   readChat,
   replyToChat,
   startGroupChat,
-  createSite,
+  startFileChat,
+  createApp,
   deleteWorkspacePath,
-  detectSites,
+  detectApps,
   editDocument,
   importData,
   listWorkspaceFiles,
@@ -43,7 +45,7 @@ import {
   readDocument,
   readWorkspaceFile,
   searchWorkspaceFiles,
-  testSite,
+  testApp,
   writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
@@ -90,7 +92,7 @@ function text(structuredContent: Record<string, unknown>) {
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: "dohc", version: "0.2.0" });
+  const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
   // A share view's write surface is its access level. The write tools
   // come in two tiers, and a tier the level does not grant is never registered
@@ -104,10 +106,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // that exist — `dohc_start_group_chat` and `dohc_reply_to_chat` — are
   // GROUP tools, and a shared view refuses every group write before the
   // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
-  // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
-  // a tool its own workspace always refuses is a promise the surface cannot
-  // keep, so the level is carried here for the tiers PR3 adds and grants
-  // nothing today.
+  // grants per-FILE chat, and `dohc_start_file_chat` writes it, but a shared
+  // view refuses every chat write in the desktop's chat write module. Offering
+  // an agent a tool its own workspace always refuses is a promise the surface
+  // cannot keep, so the level is carried here for the tiers PR3 adds and
+  // grants nothing today.
   const register = server.registerTool.bind(server);
   const skip = (() => undefined) as unknown as McpServer["registerTool"];
   // Every write tool, document and chat alike.
@@ -139,11 +142,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_changes",
     {
       description:
-        "List workspace history: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId.",
+        "List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the workspace root, to list only that file's changes across its renames.",
       inputSchema: {
         sinceMs: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().max(500).optional(),
         includeFiles: z.boolean().optional(),
+        path: z.string().min(1).max(4096).optional(),
       },
     },
     async (args) => text(await listChanges(ctx, args)),
@@ -240,10 +244,23 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   registerWrite(
+    "dohc_create_document",
+    {
+      description:
+        "Create a Markdown document at a path that does not exist yet. `markdown` is its body text, without frontmatter. dohc writes it the way a person types into a new file, so later changes go through dohc_edit_document.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        markdown: documentEditTextSchema.optional(),
+      },
+    },
+    async (args) => text(await createDocument(ctx, args, agentName())),
+  );
+
+  registerWrite(
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
+        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -297,42 +314,42 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_detect_sites",
+    "dohc_detect_apps",
     {
       description:
-        "Detect normal browser-viewable website folders in the workspace using index.html, package.json, dohc.json, and common web configs.",
+        "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       inputSchema: {
         path: z.string().max(4096).optional(),
         maxDepth: z.number().int().nonnegative().max(12).optional(),
       },
     },
-    async (args) => text(await detectSites(ctx, args)),
+    async (args) => text(await detectApps(ctx, args)),
   );
 
   registerWrite(
-    "dohc_create_site",
+    "dohc_create_app",
     {
       description:
-        "Scaffold a normal website folder with index.html, package.json, pinned serve devDependency, and optional dohc.json. Records history; does not create hidden app folders.",
+        "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Records history; does not create hidden app folders.",
       inputSchema: {
-        path: z.string().min(1).max(4096),
+        appRoot: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),
         withDohcJson: z.boolean().optional(),
       },
     },
-    async (args) => text(await createSite(ctx, args)),
+    async (args) => text(await createApp(ctx, args)),
   );
 
   server.registerTool(
-    "dohc_test_site",
+    "dohc_test_app",
     {
       description:
-        "Run bounded static validation for a normal website folder: detector diagnostics and entry presence.",
+        "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
       inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
+        appRoot: z.string().min(1).max(4096),
       },
     },
-    async (args) => text(await testSite(ctx, args)),
+    async (args) => text(await testApp(ctx, args)),
   );
 
   registerWrite(
@@ -414,6 +431,22 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await startGroupChat(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_start_file_chat",
+    {
+      description:
+        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        title: z.string().min(1).max(200),
+        body: chatWriteInput.body,
+        requestId: requestIdSchema.optional(),
+        runId: chatWriteInput.runId,
+      },
+    },
+    async (args) => text(await startFileChat(ctx, args, agentName())),
   );
 
   registerWrite(

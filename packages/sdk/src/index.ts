@@ -547,7 +547,7 @@ export function createPostMessageTransport(
         return Promise.reject(
           new DohcSdkError(
             DohcSdkErrorCodes.hostMissingOrigin,
-            "No dohc host origin is available for this site.",
+            "No dohc host origin is available for this panel.",
           ),
         );
       }
@@ -562,7 +562,7 @@ export function createPostMessageTransport(
         return Promise.reject(
           new DohcSdkError(
             DohcSdkErrorCodes.hostUnavailable,
-            "No dohc host window is available for this site.",
+            "No dohc host window is available for this panel.",
           ),
         );
       }
@@ -761,8 +761,8 @@ export function createPostMessageTransport(
           ? DohcSdkErrorCodes.hostUnavailable
           : DohcSdkErrorCodes.hostMissingOrigin,
         targetOrigin
-          ? "No dohc host window is available for this site."
-          : "No dohc host origin is available for this site.",
+          ? "No dohc host window is available for this panel."
+          : "No dohc host origin is available for this panel.",
       );
     }
 
@@ -1475,7 +1475,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       },
       /**
        * Opens one instance of this plugin's own per-instance web app in its
-       * own tab. `instanceKey` names the thing the tab shows — a site root,
+       * own tab. `instanceKey` names the thing the tab shows — an app folder,
        * a record id, whatever the plugin serves — and comes back to the
        * plugin's `startWebApp`, which returns the origin for that instance.
        *

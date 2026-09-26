@@ -270,6 +270,24 @@ describe("document request schemas", () => {
     })).success).toBe(false);
   });
 
+  it("parses a document create and a comment on a file", () => {
+    expect(cliRequestSchema.safeParse(request("documentCreate", {
+      agent: "claude-code", path: "notes/new.md", markdown: "# New",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("fileChatStart", {
+      path: "notes/new.md", title: "Budget", body: "Is 400 enough?", runId: "run-1",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("fileChatStart", {
+      path: "notes/new.md", title: "", body: "x",
+    })).success).toBe(false);
+    expect(parseCliResult("fileChatStart", {
+      ok: true, path: "notes/new.md", threadId: "thread-1", messageId: "message-1",
+    })).toMatchObject({ ok: true, threadId: "thread-1" });
+    expect(() => parseCliResult("fileChatStart", {
+      ok: true, path: "notes/new.md", threadId: "th_1", messageId: "message-1",
+    })).toThrow();
+  });
+
   it("bounds each side of an edit by its UTF-8 bytes, not its characters", () => {
     // Three bytes per character: 80,000 fit 256 KiB and 90,000 do not.
     const edit = (replacement: string) =>

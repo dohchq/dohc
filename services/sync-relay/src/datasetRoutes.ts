@@ -2,6 +2,7 @@ import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
@@ -44,6 +45,8 @@ async function response(run: () => unknown): Promise<Response> {
   try { return Response.json(await run(), {headers}); }
   catch (error) {
     if (isAppBackendRuntimeError(error)) return Response.json({code: error.refusal.code, message: error.refusal.message}, {status: 409, headers});
+    if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error)) return Response.json({code: error.code, message: error.message},
+      {status: 503, headers: {...headers, ...(error.retryAfterMs ? {"retry-after": String(Math.ceil(error.retryAfterMs / 1000))} : {})}});
     if (error instanceof JournalError) throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
     if (error instanceof DatasetHostError) throw relayError(error.code === "not_authorized" ? "not_found" : error.code === "invalid" ? "bad_request" : "conflict");
     throw error;

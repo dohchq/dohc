@@ -17,6 +17,7 @@ const configFiles = {
     ".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs",
     // electron-vite builds all three targets in production mode from the desktop package.
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `apps/desktop/${name}`),
+    ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `services/share-web/viewer/${name}`),
   ],
 };
 const inputPaths = {
@@ -110,7 +111,7 @@ export function directoryFingerprint(path) {
 function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist", "services/share-web/viewer/dist",
     ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
@@ -130,11 +131,12 @@ export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   }
 }
 
-export function assertPrepared() {
+export function assertPrepared({ engineOnly = false } = {}) {
   const receipt = readJson(receiptPath);
-  if (!preparedStatus("engine", receipt) || !preparedStatus("desktop", receipt)) {
+  if (!preparedStatus("engine", receipt) || !engineOnly && !preparedStatus("desktop", receipt)) {
     throw new Error("The desktop or engine does not match this checkout. Run pnpm qa:prepare before driving it.");
   }
+  if (engineOnly) return { version: receipt.version, engine: receipt.engine };
   const staged = join(repoRoot, "apps/desktop/target/debug", enginePath.split(/[\\/]/).at(-1));
   if (!engineArtifactMatches(staged, receipt.engine.artifact)) {
     throw new Error("The staged engine differs from the prepared engine. Run pnpm qa:prepare.");
@@ -199,6 +201,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
       repairOwnedEngineExecutable(enginePath);
     } else {
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
+      await run(...pnpm(["--filter", "@dohc/share-web", "build"]), { log: join(output, "share-web-build.log") });
     }
     if (sourceFingerprint(kind) !== source) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
     receipt[kind] = { source, artifact: artifactFingerprint(kind), commit: git(["rev-parse", "HEAD"]), builtAt: new Date().toISOString() };

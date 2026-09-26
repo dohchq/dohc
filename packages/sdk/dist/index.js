@@ -214,7 +214,7 @@ export function createPostMessageTransport(options = {}) {
             const windowRef = currentWindow;
             const targetOrigin = options.targetOrigin ?? targetOriginFromLocation(windowRef);
             if (!targetOrigin) {
-                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this site."));
+                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this panel."));
             }
             const resolvedTargetOrigin = targetOrigin;
             const targetWindow = options.targetWindow ??
@@ -222,7 +222,7 @@ export function createPostMessageTransport(options = {}) {
                     ? windowRef.parent
                     : undefined);
             if (!targetWindow) {
-                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "No dohc host window is available for this site."));
+                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "No dohc host window is available for this panel."));
             }
             const id = createRequestId();
             const message = {
@@ -375,8 +375,8 @@ export function createPostMessageTransport(options = {}) {
             throw new DohcSdkError(targetOrigin
                 ? DohcSdkErrorCodes.hostUnavailable
                 : DohcSdkErrorCodes.hostMissingOrigin, targetOrigin
-                ? "No dohc host window is available for this site."
-                : "No dohc host origin is available for this site.");
+                ? "No dohc host window is available for this panel."
+                : "No dohc host origin is available for this panel.");
         }
         const finishPendingSubscribe = retainPendingSubscribe();
         const releaseSubscriptionMessageListener = retainSubscriptionMessageListener(currentWindow, targetWindow, targetOrigin);
@@ -853,7 +853,7 @@ export function createDohcClient(options = {}) {
             },
             /**
              * Opens one instance of this plugin's own per-instance web app in its
-             * own tab. `instanceKey` names the thing the tab shows — a site root,
+             * own tab. `instanceKey` names the thing the tab shows — an app folder,
              * a record id, whatever the plugin serves — and comes back to the
              * plugin's `startWebApp`, which returns the origin for that instance.
              *

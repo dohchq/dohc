@@ -101,6 +101,7 @@ const momentsArgsSchema = z
     sinceMs: z.number().int().nonnegative().optional(),
     limit: z.number().int().positive().max(500).optional(),
     includeFiles: z.boolean().optional(),
+    path: z.string().min(1).max(4096).optional(),
   })
   .strict();
 const momentArgsSchema = z
@@ -148,6 +149,26 @@ const documentEditArgsSchema = z
     path: documentPathArg,
     find: documentEditTextSchema.min(1).optional(),
     replacement: documentEditTextSchema,
+  })
+  .strict();
+const documentCreateArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    path: documentPathArg,
+    markdown: documentEditTextSchema,
+  })
+  .strict();
+// A comment on a file: a chat linked to it, started with its first message.
+const fileChatStartArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema.optional(),
+    runId: z.string().min(1).optional(),
+    path: documentPathArg,
+    title: z.string().min(1).max(200),
+    body: z.string().min(1),
   })
   .strict();
 
@@ -319,6 +340,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -530,7 +553,6 @@ const rawMomentSummarySchema = z
     operation: rawMomentOperationSchema,
     path: z.string().min(1),
     versionId: z.string().min(1),
-    summary: z.string().optional(),
     author: rawMomentAuthorSchema.optional(),
     fileCount: z.literal(1),
     files: z.array(rawMomentFileSchema).optional(),
@@ -778,8 +800,24 @@ const documentEditResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
   rawFailureSchema,
 ]);
+const documentCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+const fileChatStartResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      threadId: rawThreadIdSchema,
+      messageId: rawMessageIdSchema,
+      warning: z.string().min(1).optional(),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
 
-const cliResultSchemas = {
+export const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
@@ -803,6 +841,8 @@ const cliResultSchemas = {
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
   documentEdit: documentEditResultSchema,
+  documentCreate: documentCreateResultSchema,
+  fileChatStart: fileChatStartResultSchema,
 } as const;
 
 export type CliResultByVerb = {
