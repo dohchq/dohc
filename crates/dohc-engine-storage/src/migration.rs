@@ -2679,7 +2679,6 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-    Migration {
         ordinal: 18,
         id: "v2-materialization-displacements",
         sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
