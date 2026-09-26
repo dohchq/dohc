@@ -41,7 +41,7 @@ export function registerCloudIpcHandlers<
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   loadAndCacheCurrentCredentials(): Promise<CloudCredentials | null>;
-  closeAllRelayTransportWorkspaces(): Promise<void>;
+  closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void>;
   activity: {
     stopEngines(): Promise<void>;
     enableCloud(workspace: RegistryEntry, options?: { joinBootstrap?: boolean }): Promise<unknown>;
@@ -123,7 +123,7 @@ export function registerCloudIpcHandlers<
         clearCachedCredentials: () => clearCachedCredentials(),
         stopEngines: async () => await activity.stopEngines(),
         closeRelayTransportWorkspaces: async () =>
-          await closeAllRelayTransportWorkspaces(),
+          await closeAllRelayTransportWorkspaces({ accountChanged: true }),
         refreshCredentialCache: async () => await refreshCredentialCache(),
         // Attach engines to already-open cloud-enabled workspaces that were
         // opened local-only because no session existed yet.
@@ -182,7 +182,7 @@ export function registerCloudIpcHandlers<
       clearCachedCredentials: () => clearCachedCredentials(),
       logout: () => cloudLogin().logout(),
       stopEngines: () => activity.stopEngines(),
-      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
       // Scope-free: logout changes every workspace's sync state at once.
       notifyWorkspaceActivity: () => notifyRenderer(),
       // Logout is a one-event transition to a known state: signed out. The

@@ -134,7 +134,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   const nowMs = options.nowMs ?? (() => Date.now());
 
   let syncing = false;
-  let identityState: "unchecked" | "needed" | "claimed" = "unchecked";
   let claimingIdentity = false;
   let claimRefusal: RelayClaimRefusedError | null = null;
   let lastSyncedAtMs: number | null = null;
@@ -358,7 +357,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
     const claimRefused = error instanceof RelayClaimRefusedError;
     if (claimRefused) {
-      identityState = "needed";
       claimRefusal = error;
     }
     setSyncFailure({
@@ -382,7 +380,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // Resolves true when the workspace pull or the shared-channel pass applied
   // ops. The shared-channel pass tells the renderer itself, and the renderer
   // then reads `syncing`, so a quiet pass must announce that it ended.
-  async function doPass(): Promise<boolean> {
+  async function doPass(retryClaim: boolean): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
     // This pass pulls whatever change the relay reported before it started.
@@ -395,7 +393,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       try {
         // The daemon reuses its durable identity if a previous claim lost its response.
         await operations.claim();
-        identityState = "claimed";
       } catch (error) {
         if (error instanceof RelayClaimRefusedError) claimRefusal = error;
         throw error;
@@ -405,12 +402,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }
     };
     const push = async () => {
-      // A failed claim may already have written the local identity. Finish
-      // that claim before pushing, even if the next push would find the row.
-      if (identityState === "needed") await claim();
+      if (retryClaim) {
+        retryClaim = false;
+        await claim();
+      }
       const result = await operations.push().catch(async (error: unknown) => {
-        if (!(error instanceof RelayIdentityMissingError) || identityState !== "unchecked") throw error;
-        identityState = "needed";
+        if (!(error instanceof RelayIdentityMissingError)) throw error;
         await claim();
         return operations.push();
       });
@@ -539,6 +536,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const result = chain.then(async () => {
       try {
         if (stopped || (claimRefusal && !retry?.countsAsAttempt)) return;
+        const retryClaim = claimRefusal !== null && retry?.countsAsAttempt === true;
         if (retry?.countsAsAttempt) claimRefusal = null;
         // A retry someone asked for keeps the automatic pass it displaces, in
         // case it fails. `undefined` marks an automatic pass.
@@ -560,7 +558,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
-          applied = await doPass();
+          applied = await doPass(retryClaim);
         } catch (error) {
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;

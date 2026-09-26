@@ -489,15 +489,15 @@ function translateRelayError(method: string, error: unknown): never {
   }
   if (method === "sync.claim" || savedClaimRefusal) {
     const refusals: Readonly<Record<string, string>> = {
-      EPOCH_SUPERSEDED: "This workspace uses an older sync identity than the server.",
-      IDENTITY_NOT_RECOGNIZED: "The server does not recognize this workspace's sync identity.",
-      STREAM_IDENTITY_MISMATCH: "This workspace's sync identity does not match the server.",
-      IDENTITY_REQUIRED: "The server requires a sync identity for this workspace.",
+      EPOCH_SUPERSEDED: "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue.",
+      IDENTITY_NOT_RECOGNIZED: "Sync stopped. The server does not recognize this workspace. Check your account and try again.",
+      STREAM_IDENTITY_MISMATCH: "Sync stopped. This workspace does not match the server's copy. Join that copy to continue.",
+      IDENTITY_REQUIRED: "Sync is not set up for this workspace. Try again.",
     };
     const refusal = refusals[error.wireCode];
     if (refusal) throw new RelayClaimRefusedError(refusal);
     if (error.wireCode === "WORKSPACE_UNAVAILABLE" && (error.message === "relay-workspace-unavailable" || savedClaimRefusal)) {
-      throw new RelayClaimRefusedError("Another account already claimed this workspace.");
+      throw new RelayClaimRefusedError("Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.");
     }
   }
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
@@ -1289,10 +1289,23 @@ export class EngineRelayClient {
     });
   }
 
-  async closeAll(): Promise<void> {
+  async closeAll(options?: { accountChanged?: boolean }): Promise<void> {
     const results = await Promise.allSettled(
       [...this.boundWorkspaces.values()].map(async (workspace) => {
-        await this.closeWorkspace(workspace);
+        try {
+          if (options?.accountChanged) {
+            await runInKeyedLane(this.lanes, this.workspaceKey(workspace), async () => {
+              await this.sessions.run(workspace, async ({ client, workspace: handle }) => {
+                await new WorkspaceDaemonRequester(client).request(
+                  "sync.resetClaimRefusal", { workspaceId: workspace.workspaceId },
+                  { workspace: handle, deadlineMs: this.requestDeadlineMs },
+                );
+              });
+            });
+          }
+        } finally {
+          await this.closeWorkspace(workspace);
+        }
       }),
     );
     const failures = results.filter(

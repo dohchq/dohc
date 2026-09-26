@@ -325,10 +325,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     });
   }
 
-  async function closeAllRelayTransportWorkspaces(): Promise<void> {
+  async function closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void> {
     await withOwnerHostPaused(true, async () => {
       if (rustEngineRelayClient) {
-        await rustEngineRelayClient.closeAll();
+        await rustEngineRelayClient.closeAll(options);
         return;
       }
       await rustEngineWorkspaceSessions?.closeAll();

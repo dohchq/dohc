@@ -190,6 +190,7 @@ describe("registered cloud handlers", () => {
     await expect(result).resolves.toEqual({ status: "complete", email: incoming.email });
     expect(h.cache.snapshot().credentials).toBe(incoming);
     expect(h.steps).toEqual(["clear", "stop", "close-relay", "refresh", "reconcile"]);
+    expect(h.closeRelay).toHaveBeenCalledWith({ accountChanged: true });
     expect(h.ready).toHaveBeenCalledWith("ready");
   });
 
@@ -205,6 +206,7 @@ describe("registered cloud handlers", () => {
     held.reject(new Error("store failed"));
     await expect(result).rejects.toThrow("store failed");
     expect(h.steps).toEqual(["clear", "stop", "close-relay", "notify"]);
+    expect(h.closeRelay).toHaveBeenCalledWith({ accountChanged: true });
   });
 
   it("waits for daemon startup and rejects a secret-status result from a retired physical workspace", async () => {

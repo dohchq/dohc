@@ -133,6 +133,18 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("passes account changes to relay-session cleanup", async () => {
+    const f = fixture();
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const close = vi.spyOn(f.engine.relayClient!, "closeAll").mockResolvedValue(undefined);
+      await f.engine.closeAllRelayTransportWorkspaces({ accountChanged: true });
+      expect(close).toHaveBeenCalledWith({ accountChanged: true });
+    } finally {
+      await f.close();
+    }
+  });
+
   it("discovers remaining configured owners after another workspace closes", async () => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

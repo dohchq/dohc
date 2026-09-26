@@ -1032,6 +1032,25 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
+    pub(super) async fn sync_reset_claim_refusal(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "sync.resetClaimRefusal",
+            open.actor.reset_claim_refusal(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({ "reset": true }))
+    }
+
     pub(super) async fn sync_adopt_join_identity(
         &self,
         ctx: &RequestContext,

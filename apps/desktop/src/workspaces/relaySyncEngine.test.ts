@@ -150,6 +150,21 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("claims again when an established engine reports a pending identity", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncFailure).toBeNull();
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+
   it("claims before the first push and shares it across concurrent passes and push retries", async () => {
     pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
     const claimed = Promise.withResolvers<void>();
@@ -175,7 +190,7 @@ describe("relaySyncEngine", () => {
   });
 
   it("retries a network failure during claim before allowing a push", async () => {
-    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
     claimMock.mockRejectedValueOnce(new RelayUnreachableError());
     const sync = engine({ capture: capture() });
     await expect(sync.start()).rejects.toThrow("could not reach");
@@ -183,20 +198,32 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().syncFailure?.cause).toBe("server-unreachable");
     await vi.advanceTimersByTimeAsync(500);
     expect(claimMock).toHaveBeenCalledTimes(2);
-    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).toHaveBeenCalledTimes(3);
     expect(sync.snapshot().syncFailure).toBeNull();
     await sync.stop();
   });
 
   it("retries a local claim failure without calling it an account refusal", async () => {
-    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
     claimMock.mockRejectedValueOnce(new RelayWorkspaceUnavailableError());
     const sync = engine({ capture: capture() });
     await expect(sync.start()).rejects.toThrow("unavailable");
     expect(sync.snapshot().syncFailure?.cause).toBe("unknown");
     await vi.advanceTimersByTimeAsync(500);
     expect(claimMock).toHaveBeenCalledTimes(2);
-    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+  it("automatically retries a generic failure from a bare claim 404", async () => {
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new Error("workspace operation failed"));
+    const sync = engine({ capture: capture() });
+    await expect(sync.start()).rejects.toThrow("workspace operation failed");
+    expect(sync.snapshot().syncFailure?.cause).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(claimMock).toHaveBeenCalledTimes(2);
     expect(sync.snapshot().syncFailure).toBeNull();
     await sync.stop();
   });

@@ -859,6 +859,10 @@ impl RelayTransport for PagedShareRelay {
 }
 
 fn seed_identity(engine: &mut EngineStore) {
+    adopt_join_identity(
+        engine, "ws", "local", "epoch-1", "stream-1", 1_000, &NoFaults,
+    )
+    .expect("server-issued identity");
     let outcome = journal_local_replication_op(
         engine,
         "ws",

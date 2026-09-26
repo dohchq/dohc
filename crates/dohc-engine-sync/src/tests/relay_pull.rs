@@ -202,6 +202,45 @@ fn push_without_identity_requests_enrollment() {
     );
 }
 
+#[test]
+fn locally_journaled_identity_requires_claim_before_push() {
+    let (_scratch, path, mut store) = open_store();
+    journal_local_replication_op(
+        &mut store,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "probe.local",
+        &json!({}),
+        1_000,
+        &NoFaults,
+    )
+    .unwrap();
+    drop(store);
+    let mut store = EngineStore::open(&path, 2_000).unwrap();
+    let client = RelaySyncClient::new(ClaimRelay::default());
+    assert_eq!(
+        client.push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
+        Err(RelayError::IdentityRequired)
+    );
+    client
+        .claim_workspace(
+            &mut store,
+            ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch-1".to_owned(),
+                stream_identity: "stream-1".to_owned(),
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 2_002, 0)
+        .unwrap();
+    assert_eq!(client.transport().claims.lock().unwrap().len(), 1);
+}
+
 struct FirstLeaseCheckLive(AtomicUsize);
 
 impl LeaseProbe for FirstLeaseCheckLive {
