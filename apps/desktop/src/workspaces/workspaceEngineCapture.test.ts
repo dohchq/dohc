@@ -1,3 +1,4 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import type { MomentAuthor } from "@dohc/workspace-contracts";
 import type {
   MaterializeRelayPullPage,
@@ -31,7 +32,6 @@ import {
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
-  type EngineDiskWriter,
   type WorkspaceEngineCapture,
   type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
@@ -95,7 +95,6 @@ interface CaptureOptions {
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   rustEngineSessions?: EngineWorkspaceSessions;
-  diskWriter?: EngineDiskWriter;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
   ) => Promise<EngineYdocProviderSession>;
@@ -173,7 +172,21 @@ function liveCapture(
 ): WorkspaceEngineCapture {
   const { requests, ...rest } = options;
   return capture(root, {
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockLiveSessions(loopback, requests, undefined, async (request) => {
+      const params = request.params as { createOnly?: boolean; path: string; text: string };
+      if (request.method !== VERSIONED_METHOD.textWrite || params.createOnly !== true) return;
+      const target = join(root, params.path);
+      await mkdir(dirname(target), { recursive: true });
+      try {
+        await writeFile(target, params.text, { flag: "wx" });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          requests?.push(request);
+          throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
+        }
+        throw error;
+      }
+    }),
     ...rest,
   });
 }
@@ -2625,34 +2638,51 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
-    expect(String(attempts.find((attempt) => attempt.status === "rejected")?.reason)).toContain(
-      "File already exists: exclusive.txt",
-    );
+    const collision = attempts.find((attempt) => attempt.status === "rejected")?.reason;
+    expect(collision).toBeInstanceOf(VersionedTextStoreError);
+    expect(collision).toMatchObject({ code: "target-path-exists", message: "File already exists: exclusive.txt" });
     await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
     await engine.stop();
   });
 
-  it("keeps the text of a writer that creates the file during a create-only write, and records no head", async () => {
+  it("refuses an authored create when an ordinary file wins after the existence check", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
-    const disk = createDefaultDiskWriter(root);
-    const target = join(root, "raced.md");
-    const engine = liveCapture(root, new VersionedLoopbackEngine(), {
-      diskWriter: {
-        ...disk,
-        async createTextFile(absolutePath, text) {
-          // Another writer creates the file just before the create lands.
-          await writeFile(absolutePath, "Written elsewhere.\n");
-          await disk.createTextFile(absolutePath, text);
-        },
+    const targetPath = join(root, "record.md");
+    const competingText = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nKeep this record.\n";
+    const realLoopback = new VersionedLoopbackEngine();
+    let injected = false;
+    const requests: Request[] = [];
+    const loopback = new Proxy(realLoopback, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") return Reflect.get(target, property, receiver);
+        return async (request: Request) => {
+          if (!injected && request.method === VERSIONED_METHOD.versionsActive) {
+            injected = true;
+            await writeFile(targetPath, competingText, { flag: "wx" });
+          }
+          return target.sendRequest(request);
+        };
       },
     });
-
-    await expect(
-      engine.writeAuthoredTextFile(target, "", null, { createOnly: true }),
-    ).rejects.toMatchObject({ code: "EEXIST", message: "File already exists: raced.md" });
-    await expect(readFile(target, "utf8")).resolves.toBe("Written elsewhere.\n");
-    expect(await liveMoments(engine)).toEqual([]);
-    await engine.stop();
+    const engine = liveCapture(root, loopback, { requests });
+    try {
+      const outcome = await engine.writeAuthoredTextFile(
+        targetPath,
+        "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
+        { kind: "agent", agentId: "plugin:records", onBehalfOf: "local", agentRunId: "create" },
+        { createOnly: true },
+      ).then(() => "created", (error: unknown) => ({ refused: String(error) }));
+      expect(injected).toBe(true);
+      expect.soft(outcome).not.toBe("created");
+      expect.soft(outcome).toEqual({ refused: expect.stringMatching(/exist/i) });
+      expect.soft(await readFile(targetPath, "utf8")).toBe(competingText);
+      expect.soft(requests.filter(request => request.method === VERSIONED_METHOD.textWrite)).toEqual([
+        expect.objectContaining({ params: expect.objectContaining({ createOnly: true }) }),
+      ]);
+      expect(await liveMoments(engine)).toEqual([]);
+    } finally {
+      await engine.stop();
+    }
   });
 
   it("rechecks panel cancellation after an authored write reaches the capture queue", async () => {

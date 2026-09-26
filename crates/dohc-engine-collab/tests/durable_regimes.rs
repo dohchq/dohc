@@ -1,7 +1,7 @@
 //! The durable-layer invariants: two regimes (local-only prune vs replicated
 //! never-prune), base-once, replication idempotency + echo suppression, leases,
 //! and the yjs-non-atomic boundary (never journal invalid bytes). Crash-recovery
-//! / exactly-once tests live behind the `fault-injection` feature.
+//! / exactly-once tests use the storage fault seam enabled by testkit.
 
 mod common;
 
@@ -1816,9 +1816,9 @@ fn field_history(store: &EngineStore, key: &DocKey, field: &str) -> Vec<(String,
 
 fn collection_base() -> Vec<u8> {
     let doc = Ydoc::wire();
-    doc.frontmatter_set("id", INDEX_RECORD_ID);
-    doc.frontmatter_set("title", "Original");
-    doc.frontmatter_set("status", "open");
+    doc.frontmatter_set("id", INDEX_RECORD_ID).unwrap();
+    doc.frontmatter_set("title", "Original").unwrap();
+    doc.frontmatter_set("status", "open").unwrap();
     doc.encode_full_state()
 }
 
@@ -1848,8 +1848,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     peer_a.apply(&base).expect("peer A base");
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
-    let alice = peer_a.frontmatter_set("title", "Alice title");
-    let bob = peer_b.frontmatter_set("status", "done");
+    let alice = peer_a.frontmatter_set("title", "Alice title").unwrap();
+    let bob = peer_b.frontmatter_set("status", "done").unwrap();
 
     committed(
         record_local_update(
@@ -1950,8 +1950,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     peer_a.apply(&base).expect("peer A base");
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
-    let alice = peer_a.frontmatter_set("title", "Alice title");
-    let bob = peer_b.frontmatter_set("title", "Bob title");
+    let alice = peer_a.frontmatter_set("title", "Alice title").unwrap();
+    let bob = peer_b.frontmatter_set("title", "Bob title").unwrap();
 
     committed(
         record_local_update(
@@ -2061,7 +2061,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
         two_collection_stores("collection-index-later-a", "collection-index-later-b");
     let peer_a = Ydoc::wire();
     peer_a.apply(&base).expect("peer A base");
-    let alice = peer_a.frontmatter_set("title", "Alice title");
+    let alice = peer_a.frontmatter_set("title", "Alice title").unwrap();
 
     committed(
         record_local_update(
@@ -2101,7 +2101,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
     peer_b.apply(&alice).expect("peer B receives Alice edit");
-    let bob = peer_b.frontmatter_set("title", "Bob title");
+    let bob = peer_b.frontmatter_set("title", "Bob title").unwrap();
     committed(
         record_local_update(
             &mut b.store,
@@ -3687,7 +3687,6 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
 
 // ---- crash recovery / exactly-once (needs the shared storage fault seam) -----
 
-#[cfg(feature = "fault-injection")]
 mod crash {
     use super::*;
     use dohc_engine_storage::FaultPoint;
@@ -3876,7 +3875,7 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
 
     // First indexed apply on a never-indexed binding: the record reads as
     // created, and the fact mirrors the history row it inserted.
-    let first = peer.frontmatter_set("title", "Renamed");
+    let first = peer.frontmatter_set("title", "Renamed").unwrap();
     let outcome = committed(
         record_local_update(
             &mut a.store,
@@ -3915,7 +3914,7 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
 
     // Second apply: the binding is indexed now, so the record reads as
     // changed, and the new fact's history id advances past the first.
-    let second = peer.frontmatter_set("status", "done");
+    let second = peer.frontmatter_set("status", "done").unwrap();
     let outcome = committed(
         record_local_update(
             &mut a.store,
@@ -3968,7 +3967,7 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
         two_collection_stores("collection-facts-remote-a", "collection-facts-remote-b");
     let peer = Ydoc::wire();
     peer.apply(&base).expect("peer base");
-    let delta = peer.frontmatter_set("status", "done");
+    let delta = peer.frontmatter_set("status", "done").unwrap();
     let remote = RemoteUpdate {
         origin_id: "peer-A".to_owned(),
         origin_seq: 1,
@@ -4052,8 +4051,8 @@ fn a_second_synced_update_records_only_its_real_change_and_no_phantom_removal() 
     );
     let peer = Ydoc::wire();
     peer.apply(&base).expect("peer base");
-    let first = peer.frontmatter_set("title", "Renamed");
-    let second = peer.frontmatter_set("status", "done");
+    let first = peer.frontmatter_set("title", "Renamed").unwrap();
+    let second = peer.frontmatter_set("status", "done").unwrap();
 
     let mut apply = |origin_seq: i64, bytes: &[u8], now_ms: i64| {
         committed(
@@ -4164,7 +4163,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     // Local apply: the attribution rides the returned facts (record and field
     // level) and lands on the history row. This lineage journals nothing, so
     // the facts carry no replication coordinate.
-    let edit = peer.frontmatter_set("title", "Renamed");
+    let edit = peer.frontmatter_set("title", "Renamed").unwrap();
     let outcome = committed(
         record_local_update(
             &mut a.store,
@@ -4233,7 +4232,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
 
     // An unattributed write stays NULL on every column: absent means absent.
-    let plain = peer.frontmatter_set("status", "done");
+    let plain = peer.frontmatter_set("status", "done").unwrap();
     let outcome = committed(
         record_local_update(
             &mut a.store,
@@ -4267,7 +4266,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         &mut a.store,
         &mut a.cache,
         &key,
-        &peer.frontmatter_set("title", "Again"),
+        &peer.frontmatter_set("title", "Again").unwrap(),
         LocalAppend {
             attribution: Some(&bad),
             ..Default::default()

@@ -175,18 +175,21 @@ it("refuses shared buffers and checks initial authority before invalid budgets",
   expect(() => compareLiveRestoreContent(input, policy, {...budget, maxBytes: 0})).toThrow("retired first");
 });
 
-it("refuses stale tagged metadata even while it has no effect on current Markdown", () => {
+it("refuses frontmatter text the selected point never had", () => {
   const input = fixture(), doc = new Y.Doc({gc: false});
   try {
     Y.applyUpdate(doc, input.frozenState);
     const before = Y.encodeStateVector(doc);
     Y.applyUpdate(doc, input.candidate);
     doc.clientID = input.replacementRanges[0]!.clientId;
-    doc.getMap("meta").set("dohcTaggedFrontmatterPrefix", "---\na: !custom value\n---\n\n");
-    doc.getMap("meta").set("dohcTaggedFrontmatterBaseline", "a: value\n");
-    expect(hash(yDocToMarkdown(doc))).toBe(input.pointProjectionDigest);
+    doc.getMap("meta").set("dohcFrontmatterSource", "---\n# not selected\n---\n\n");
+    expect(hash(yDocToMarkdown(doc))).not.toBe(input.pointProjectionDigest);
     input.candidate = Y.encodeStateAsUpdate(doc, before);
-    expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("invalid-schema");
+    const restored = createLiveMarkdownJournalValidator(policy)({document, currentPath: input.currentPath,
+      checkpoint: input.frozenState, suffix: [], candidate: input.candidate});
+    if (restored.kind !== "accepted") throw Error(JSON.stringify(restored));
+    input.replacementRanges = [...restored.evidence.candidate.ranges];
+    expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("restored artifact differs");
   } finally {doc.destroy();}
 });
 

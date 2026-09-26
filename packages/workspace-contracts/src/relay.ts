@@ -74,6 +74,16 @@ export class RelayWorkspaceUnavailableError extends Error {
   }
 }
 
+// The engine could not reach the relay at all: no connection, a timeout, or a
+// dropped transfer. Distinct from RelayWorkspaceUnavailableError, which the
+// relay itself answered.
+export class RelayUnreachableError extends Error {
+  constructor(message = "dohc could not reach the server.") {
+    super(message);
+    this.name = "RelayUnreachableError";
+  }
+}
+
 export class RelayConflictError extends Error {
   constructor(message = "Relay rejected the operation batch.") {
     super(message);

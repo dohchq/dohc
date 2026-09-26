@@ -1194,9 +1194,7 @@ mod tests {
     use dohc_engine_storage::put_binary_blob_with_sha;
     use dohc_test_scratch::ScratchDir;
 
-    #[cfg(feature = "fault-injection")]
     struct Crash(dohc_engine_storage::FaultPoint);
-    #[cfg(feature = "fault-injection")]
     impl FaultInjector for Crash {
         fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
             if point == self.0 {
@@ -2076,6 +2074,15 @@ mod tests {
 
     #[test]
     fn missing_insert_and_delete_roll_back_fresh_and_parked_deduped_attempts() {
+        assert_missing_dependencies_recover(false);
+    }
+
+    #[test]
+    fn missing_insert_and_delete_recover_after_commit_before_ack() {
+        assert_missing_dependencies_recover(true);
+    }
+
+    fn assert_missing_dependencies_recover(crash_after_commit: bool) {
         for delete in [false, true] {
             for parked in [false, true] {
                 let (dir, mut store, mut cache, _owner, handle) = fixture();
@@ -2141,8 +2148,7 @@ mod tests {
                     &handle,
                     event("predecessor", 1, predecessor),
                 ));
-                #[cfg(feature = "fault-injection")]
-                {
+                if crash_after_commit {
                     warm_cache(&mut store, &mut cache);
                     producer
                         .apply(&document(&store).encode_full_state())
@@ -2176,9 +2182,7 @@ mod tests {
                     let result = ack(apply(&mut store, &mut cache, &handle, update.clone()));
                     assert!(result.application_replayed);
                     assert_eq!(result.local_ydoc_sequence, persisted_sequence);
-                }
-                #[cfg(not(feature = "fault-injection"))]
-                {
+                } else {
                     let result = ack(apply(&mut store, &mut cache, &handle, update.clone()));
                     assert!(!result.application_replayed);
                 }
@@ -2604,7 +2608,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "fault-injection")]
     #[test]
     fn crash_before_commit_and_after_commit_before_ack_recover_distinctly() {
         use dohc_engine_storage::FaultPoint;
@@ -2792,7 +2795,11 @@ mod tests {
         };
 
         let source = Ydoc::wire();
-        let owner_edit = event("owner-edit", 1, source.frontmatter_set("status", "done"));
+        let owner_edit = event(
+            "owner-edit",
+            1,
+            source.frontmatter_set("status", "done").unwrap(),
+        );
         let ApplicationResult::Applied(_, returned) =
             apply(&mut store, &mut cache, &handle, owner_edit.clone())
         else {
@@ -2817,7 +2824,11 @@ mod tests {
         assert!(returned.is_empty());
         assert_eq!(claims(&store).len(), 1, "a replayed frame claims nothing");
 
-        let mut guest_edit = event("guest-edit", 2, source.frontmatter_set("status", "late"));
+        let mut guest_edit = event(
+            "guest-edit",
+            2,
+            source.frontmatter_set("status", "late").unwrap(),
+        );
         guest_edit.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
             principal_id: "guest-1".into(),
             grant_id: "grant-1".into(),
@@ -2897,7 +2908,7 @@ mod tests {
                 })
                 .unwrap()
         };
-        let stamped = source.frontmatter_set("status", "stamped");
+        let stamped = source.frontmatter_set("status", "stamped").unwrap();
         let delivery = own_draft(&mut store, "own-stamp", &stamped);
         let mut accepted = event(&delivery, 4, stamped);
         accepted.metadata.accepted.received_at_ms = 30;
@@ -2908,7 +2919,7 @@ mod tests {
             "the host's own draft keeps its automation author and depth"
         );
         // The same bytes under another delivery are not that draft.
-        let restamped = source.frontmatter_set("status", "restamped");
+        let restamped = source.frontmatter_set("status", "restamped").unwrap();
         own_draft(&mut store, "own-restamp", &restamped);
         let mut elsewhere = event("elsewhere", 5, restamped);
         elsewhere.metadata.accepted.received_at_ms = 40;

@@ -49,11 +49,15 @@ const MAX_INT64 = (1n << 63n) - 1n
 const SHARED_BIGINT_KEY = '$dohcBigInt'
 const PUBLIC_ROOTS = new Set(['body', 'frontmatter', 'meta'])
 const META_KEYS = new Set([
-  'schemaVersion', 'dohcMarkdownCrlf',
-  'dohcTaggedFrontmatterPrefix', 'dohcTaggedFrontmatterBaseline',
+  'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource',
   'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
 const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
+// Exact text the projection keeps only while it reads as the current state.
+// A frontmatter edit leaves it behind, so it need not match a reimport.
+const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource'] as const
+// The item each frontmatter key held when its text was kept, one entry per key.
+const FRONTMATTER_SOURCE_ITEM_META_PREFIX = 'dohcFrontmatterSourceItem:'
 const ByteArray = Uint8Array
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!
@@ -199,7 +203,7 @@ function validateRegistrationInput(
   if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
   const { cut, topology } = result
   let checkpointCopy: Uint8Array | undefined
-  const projected = projectAndFinalize(cut, topology, () => {
+  const projected = projectAndFinalize(cut, topology, 'drop', () => {
     if (!includeEvidence) return
     checkpointCopy = copyBytes(checkpoint)
     if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
@@ -299,7 +303,7 @@ export function createLiveMarkdownJournalValidator(
     if (result.kind === 'refused') failure = result
     else {
       const { cut, topology } = result
-      const projected = projectAndFinalize(cut, topology)
+      const projected = projectAndFinalize(cut, topology, 'refuse')
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
         if (!includeEvidence) return { kind: 'accepted' }
@@ -373,9 +377,16 @@ type ProjectedCut =
   | { readonly kind: 'accepted'; readonly projectedMarkdown: string; readonly finalized: Extract<OrderedLiveUpdateCutFinalizeResult, { kind: 'accepted' }> }
   | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
 
+// What to do with a current source witness that does not import as the
+// document. A baseline drops it, as the engine does. A journal candidate is
+// refused: the engine's own check reads some sources differently from the
+// importer, so a forged witness must not reach it through an update.
+type UnverifiedSource = 'drop' | 'refuse'
+
 function projectAndFinalize(
   cut: ValidatedLiveUpdateCut,
   topology: ProjectionTopology,
+  unverifiedSource: UnverifiedSource,
   beforeProjection?: () => void,
 ): ProjectedCut {
   let pending: LiveMarkdownValidationRefusal | undefined
@@ -384,7 +395,7 @@ function projectAndFinalize(
   try {
     beforeProjection?.()
     if (topology.kind !== 'compatible') refuse('invalid-schema')
-    projectedMarkdown = validatePublicState(cut.document, topology)
+    projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource)
   } catch (error) { pending = error instanceof Refusal ? error.reason : 'invalid-schema' }
   finally {
     try { finalized = cut.finishAfterProjection() }
@@ -661,7 +672,7 @@ function semanticEqual(left: unknown, right: unknown): boolean {
 function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record<string, unknown> {
   const snapshot: Record<string, unknown> = Object.create(null)
   for (const [key, value] of meta.entries()) {
-    if (!META_KEYS.has(key)) refuse('invalid-schema')
+    if (!META_KEYS.has(key) && !key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) refuse('invalid-schema')
     snapshot[key] = value
   }
   if (Object.hasOwn(snapshot, 'schemaVersion')) {
@@ -670,12 +681,19 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
   if (Object.hasOwn(snapshot, 'dohcMarkdownCrlf') && snapshot.dohcMarkdownCrlf !== true) {
     refuse('invalid-schema')
   }
-  const hasPrefix = Object.hasOwn(snapshot, 'dohcTaggedFrontmatterPrefix')
-  const hasBaseline = Object.hasOwn(snapshot, 'dohcTaggedFrontmatterBaseline')
-  if (hasPrefix !== hasBaseline || (hasPrefix && (
-    typeof snapshot.dohcTaggedFrontmatterPrefix !== 'string'
-    || typeof snapshot.dohcTaggedFrontmatterBaseline !== 'string'
-  ))) refuse('invalid-schema')
+  // Frontmatter text is never longer than the document it leads.
+  if (Object.hasOwn(snapshot, 'dohcFrontmatterSource') && (
+    typeof snapshot.dohcFrontmatterSource !== 'string'
+    || exceedsLiveMarkdownLimit(snapshot.dohcFrontmatterSource)
+  )) refuse('invalid-schema')
+  // The item records name each frontmatter key once, as `client:clock`.
+  let itemBytes = 0
+  for (const [key, item] of Object.entries(snapshot)) {
+    if (!key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) continue
+    if (typeof item !== 'string') refuse('invalid-schema')
+    itemBytes += utf8.encode(key).length + utf8.encode(item).length
+    if (itemBytes > 2 * 1024 * 1024) refuse('invalid-schema')
+  }
   const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
   if (sourceFields !== 0) {
     if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
@@ -691,6 +709,7 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
 function validatePublicState(
   scratch: Y.Doc,
   topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
+  unverifiedSource: UnverifiedSource,
 ): string {
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
@@ -741,8 +760,8 @@ function validatePublicState(
     if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
     const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
     try {
-      if (yDocToMarkdown(source) !== projectedMarkdown) refuse('invalid-schema')
-      preservedSource = metadata.dohcMarkdownSource as string
+      if (yDocToMarkdown(source) === projectedMarkdown) preservedSource = metadata.dohcMarkdownSource as string
+      else if (unverifiedSource === 'refuse') refuse('invalid-schema')
     }
     finally { source.destroy() }
   }
@@ -750,12 +769,13 @@ function validatePublicState(
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
-      let projectedMetadata = metadata
-      if (Object.hasOwn(metadata, 'dohcMarkdownSource')) {
-        projectedMetadata = { ...metadata }
-        for (const key of SOURCE_META_KEYS) delete projectedMetadata[key]
+      const withoutSources = (values: Record<string, unknown>) => {
+        const kept = { ...values }
+        for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key]
+        for (const key of Object.keys(kept)) if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key]
+        return kept
       }
-      if (!semanticEqual(projectedMetadata, Object.fromEntries(reimported.getMap('meta').entries()))) refuse('invalid-schema')
+      if (!semanticEqual(withoutSources(metadata), withoutSources(Object.fromEntries(reimported.getMap('meta').entries())))) refuse('invalid-schema')
     } finally { reimported.destroy() }
   }
   return preservedSource ?? projectedMarkdown

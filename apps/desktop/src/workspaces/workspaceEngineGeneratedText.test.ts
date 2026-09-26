@@ -518,7 +518,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
       diskWriter: {
         writeTextFile: disk.writeTextFile,
-        createTextFile: disk.createTextFile,
         writeBinaryFile: disk.writeBinaryFile,
         async deletePath(path) {
           if (failDelete) {
@@ -573,7 +572,6 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
         rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
         diskWriter: {
           writeTextFile: disk.writeTextFile,
-          createTextFile: disk.createTextFile,
           writeBinaryFile: disk.writeBinaryFile,
           async deletePath(path) {
             if (failDelete) {

@@ -5,16 +5,18 @@
 //!
 //! 1. Reject a non-empty file too small to hold a SQLite header, before the
 //!    connection is opened at all ([`reject_undersized_database`]).
-//! 2. Open the connection.
+//! 2. Open the connection with checkpoint-on-close off, so closing it on a
+//!    refused store never folds a WAL that another build left into the file.
 //! 3. Apply *session-scoped* pragmas only (`busy_timeout`, `foreign_keys`) —
 //!    these live on the connection, not the file.
 //! 4. Classify the fingerprint from read-only queries (`user_version`, table
-//!    presence). A v1/foreign store is rejected here, before any byte of the
-//!    file is touched.
-//! 5. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
-//!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the migration
-//!    ledger (`migration.rs`), then validate the required tables and
-//!    `quick_check`.
+//!    presence, the migration ledger). A v1/foreign store, or one whose ledger
+//!    holds a migration a newer build ran, is rejected here, before any byte
+//!    of the file is touched.
+//! 5. Only for an accepted (fresh or v2) store: turn checkpoint-on-close back
+//!    on, apply the *persistent* pragmas (`journal_mode = WAL`,
+//!    `synchronous = NORMAL`), then run the migration ledger
+//!    (`migration.rs`), then validate the required tables and `quick_check`.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
@@ -22,8 +24,10 @@ use crate::limits::{
     ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, SQLITE_DATABASE_HEADER_BYTES,
 };
 use crate::migration::{
-    BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome, run_migrations,
+    BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome,
+    newer_build_refusal, run_migrations,
 };
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Arc;
@@ -239,6 +243,11 @@ pub(crate) fn open_engine_db_with_root_token(
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
+    // The last connection to close a WAL database checkpoints it. A build
+    // that crashed can leave its commits in the WAL, and refusing its store
+    // must not fold them into engine.db.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .map_err(StorageError::corrupt)?;
     count_open_work(&conn, work)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
@@ -248,7 +257,10 @@ pub(crate) fn open_engine_db_with_root_token(
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
 
-    // Step 4: the store is ours — the file-mutating pragmas are now safe.
+    // Step 4: the store is ours — closing may checkpoint again, and the
+    // file-mutating pragmas are now safe.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
+        .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
@@ -368,6 +380,20 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StorageError::corrupt)?;
+
+    // A store a newer build migrated needs that build, whatever `user_version`
+    // it stamped. This build cannot know what the newer migration changed, so
+    // it must not run here, and a rebuild would move the store aside. A file
+    // with no ledger, such as a fresh one, answers `None`.
+    match newer_build_refusal(conn, BASELINE_MIGRATIONS) {
+        Ok(Some(refused)) => return Err(refused),
+        Ok(None) => {}
+        // Our own store must have a readable ledger.
+        Err(err) if version == ENGINE_SCHEMA_VERSION => return Err(StorageError::corrupt(err)),
+        // Any other fingerprint is judged below; an unreadable ledger proves
+        // nothing about it.
+        Err(_) => {}
+    }
 
     match version {
         ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
