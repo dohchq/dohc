@@ -2657,7 +2657,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 19,
         id: "v2-sync-identity-claim-state",
-        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT DEFAULT 'pending' CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch'));",
+        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch'));",
         sets_user_version: None,
     },
 ];
@@ -2991,7 +2991,7 @@ mod tests {
             ),
             (
                 "v2-sync-identity-claim-state",
-                "e0c87162be58eb874130bf53c23a10e3122c76989422ca525a204fc49a439b44",
+                "06698ed6c3ca2c0cf698540d7eeb872cd4962b22203b865196df8c8e4e493f60",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3048,7 +3048,7 @@ mod tests {
                 "origin".to_owned(),
                 "epoch".to_owned(),
                 "stream".to_owned(),
-                Some("pending".to_owned())
+                None
             )
         );
         assert!(
