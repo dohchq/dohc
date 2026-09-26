@@ -3,6 +3,7 @@ import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
+import { ipcErrorMessage } from "./ipcError";
 
 // The tab surface for a wrapper plugin's embedded web app. The app itself
 // renders in a main-process WebContentsView layered over this page, so this
@@ -87,9 +88,7 @@ export function PluginWebAppPage(props: {
         setLoad({
           status: "error",
           message:
-            error instanceof Error
-              ? error.message
-              : "The plugin app could not start.",
+            ipcErrorMessage(error, "The plugin app could not start."),
         });
       });
 

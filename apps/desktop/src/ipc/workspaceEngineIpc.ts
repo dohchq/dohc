@@ -4,7 +4,7 @@ import {
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
-  RestoreEngineMomentFileResult, WorkspaceIdPayload, SyncStatusResult,
+  RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
@@ -48,6 +48,7 @@ export function createWorkspaceEngineIpc<
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
+  retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -219,6 +220,35 @@ export function createWorkspaceEngineIpc<
         assertWritableWorkspace(operation.workspace);
         dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
       });
+    });
+    // Answers with the status after the pass, so the notice that offered
+    // Try again can say whether it worked. Only the renderer's own workspace
+    // is admitted. The pass starts inside the operation and is awaited
+    // outside it, so a pass waiting on an unreachable server does not hold
+    // the workspace open.
+    registerHandler(CHANNELS.retryCloudSync, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = RetryCloudSyncPayload.parse(payload);
+      const started = await withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "This workspace is no longer active.",
+        async (operation) => {
+          assertWritableWorkspace(operation.workspace);
+          const workspace = operation.workspace;
+          return {
+            workspace,
+            pass: dependencies.retryCloudSync(workspace.workspaceId, input.reason),
+          };
+        },
+      );
+      await started.pass;
+      return SyncStatusResult.parse(
+        await syncStatusWithOwnedProjection(
+          started.workspace,
+          activity.getStatus(started.workspace.workspaceId),
+        ),
+      );
     });
 
     registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {

@@ -34,11 +34,13 @@ const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "asset
 
 async function harness() {
   const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: "C:/alias", kind: "personal", mode: "local-first" };
+  // Open and writable, but not the workspace this renderer shows.
+  const other: RegistryEntry = { workspaceId: "other", rootPath: "C:/other", kind: "personal", mode: "local-first" };
   const sender = new Sender(7);
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
-    findWorkspace: (id) => id === workspace.workspaceId ? workspace : null,
-    canonicalizeRoot: () => "C:/canonical",
+    findWorkspace: (id) => id === workspace.workspaceId ? workspace : id === other.workspaceId ? other : null,
+    canonicalizeRoot: (root) => root === other.rootPath ? "C:/other-canonical" : "C:/canonical",
     createState: (): State => ({ operationLanes: new Map(), lastEngineStoreRebuildResult: null }),
   });
   const canonicalWorkspaceFor = vi.fn((lease: WorkspaceAuthorityLease<RegistryEntry, State>) => {
@@ -124,6 +126,7 @@ async function harness() {
   const notify = vi.fn((_target: { workspaceId: string }) => { events.push("notify"); });
   const writable = vi.fn((_workspace: RegistryEntry) => undefined);
   const requireWorkspace = vi.fn((id: string) => {
+    if (id === other.workspaceId) return other;
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
@@ -134,6 +137,7 @@ async function harness() {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
+  const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const registrations = createWorkspaceEngineIpc({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
@@ -145,7 +149,7 @@ async function harness() {
     requireEngineCapture, localAgentDisplayName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     notifyRenderer: notify,
-    retryOwnerLiveDelivery,
+    retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -165,14 +169,15 @@ async function harness() {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, setMissingAdapter: () => { missingAdapter = true; },
   };
 }
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords,
   CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, CHANNELS.retryOwnerLiveDelivery, CHANNELS.rebuildEngineStore,
+  CHANNELS.getSyncStatus, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
   CHANNELS.engineYDocPrepareOwnerHandoff,
@@ -188,6 +193,28 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => {throw new Error("readonly");});
     await expect(h.invoke(CHANNELS.retryOwnerLiveDelivery)).rejects.toThrow("readonly");
     expect(h.retryOwnerLiveDelivery).toHaveBeenCalledTimes(1);
+  });
+  it("runs a sync pass for a writable workspace and answers with the status after it", async () => {
+    const h = await harness();
+    const order: string[] = [];
+    h.retryCloudSync.mockImplementation(async () => { order.push("pass"); });
+    h.getStatus.mockImplementation(() => { order.push("status"); return healthy; });
+    const asked = { workspaceId: "workspace", reason: "person" };
+    await expect(h.invoke(CHANNELS.retryCloudSync, asked)).resolves.toMatchObject({ state: "synced" });
+    expect(h.retryCloudSync).toHaveBeenCalledWith("workspace", "person");
+    await expect(h.invoke(CHANNELS.retryCloudSync)).rejects.toThrow();
+    expect(order).toEqual(["pass", "status"]);
+    h.writable.mockImplementation(() => {throw new Error("readonly");});
+    await expect(h.invoke(CHANNELS.retryCloudSync, asked)).rejects.toThrow("readonly");
+    expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
+  });
+  // Codex on #1233: a renderer showing one workspace could start another
+  // open workspace's push and pull.
+  it("refuses a sync retry for an open workspace this renderer does not show", async () => {
+    const h = await harness();
+    const foreign = { workspaceId: "other", reason: "person" };
+    await expect(h.invoke(CHANNELS.retryCloudSync, foreign)).rejects.toThrow("This workspace is no longer active.");
+    expect(h.retryCloudSync).not.toHaveBeenCalled();
   });
   it("registers the four groups in order and rejects untrusted callers before parsing", async () => {
     const h = await harness();

@@ -12,6 +12,8 @@ export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string }
+// How long a command waits for the worker by default. A loaded machine can take seconds to start a worker process.
+const WORKER_WAIT_MS=30_000;
 // SQLite's ceiling on columns in a table (SQLITE_MAX_COLUMN).
 const MAX_TABLE_COLUMNS=32_767;
 // A plain object naming every approved table's columns, and nothing else.
@@ -44,12 +46,13 @@ const nodeLauncher:AppRuntimeLauncher=options=>{
 export async function openPersistentAppBackend(input:PersistentOpenInput, options:PersistentRuntimeOptions={}) {
   const config=openRequest(input);
   const entryPath=trustedPath(options.entryPath ?? fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/persistent-child")));
-  const queueDeadlineMs=input.queueDeadlineMs ?? 30_000;
+  const queueDeadlineMs=input.queueDeadlineMs ?? WORKER_WAIT_MS;
   if (!Number.isSafeInteger(queueDeadlineMs) || queueDeadlineMs<1 || queueDeadlineMs>60_000) reject("invalid_input","Invalid worker queue deadline.");
+  input.signal?.throwIfAborted();
   type Entry={id:number;bytes:number;command:PersistentCommand;resolve:(result:PersistentResult)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
   const queue:Entry[]=[];
   let active:Entry | undefined, child:AppRuntimeChild | undefined, stopped:Error | undefined, closing=false, sequence=0;
-  let exited=false, retainedBytes=0;
+  let exited=false, ready=false, retainedBytes=0;
   let resolveExit:()=>void;
   const exitPromise=new Promise<void>(resolve=>{resolveExit=resolve;});
   function fail(error:Error):void {
@@ -58,8 +61,9 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     for(const entry of queue.splice(0)){clearTimeout(entry.timer);retainedBytes-=entry.bytes;entry.reject(stopped);}
     child?.kill();
   }
+  // A command's deadline starts when the worker takes it, so a slow process start does not count against the open.
   function pump():void {
-    if(active || stopped || !child) return;
+    if(active || stopped || !child || !ready) return;
     const entry=queue.shift();
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
@@ -76,18 +80,23 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(command.kind==="apply") command={...command,input:{...command.input,changeset:Uint8Array.from(command.input.changeset)}};
     if(command.kind==="applyBatch") command={...command,input:command.input.map(event=>({...event,changeset:Uint8Array.from(event.changeset)}))};
     retainedBytes+=bytes;
+    // The open is always first, so its wait is the worker's start.
+    const waitMs=command.kind==="open" ? WORKER_WAIT_MS : queueDeadlineMs;
     return new Promise((resolve,rejectEntry)=>{
       const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,timer:setTimeout(()=>{
         const index=queue.indexOf(entry);
         if(index>=0){queue.splice(index,1);retainedBytes-=entry.bytes;rejectEntry(new PersistentRuntimeError("queue_deadline","The operation expired while waiting for the dataset worker."));}
-      },queueDeadlineMs)};
+      },waitMs)};
       queue.push(entry);pump();
     });
   }
+  const cancel=()=>{const reason:unknown=input.signal?.reason;fail(reason instanceof Error ? reason : new PersistentRuntimeError("worker_aborted","The dataset worker was cancelled."));};
+  input.signal?.addEventListener("abort",cancel,{once:true});
   try {
     // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
     child=(options.launch ?? nodeLauncher)({entryPath,cwd:dirname(entryPath),env:{},
       onMessage(message){
+        if(!ready && (message as {ready?:unknown} | null)?.ready===true) {ready=true;pump();return;}
         const reply=message as PersistentReply;
         if(!active || !reply || reply.id!==active.id || typeof reply.ok!=="boolean") {fail(new PersistentRuntimeError("worker_protocol","Invalid dataset worker response."));return;}
         const entry=active;active=undefined;clearTimeout(entry.timer);retainedBytes-=entry.bytes;
@@ -105,6 +114,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     fail(error instanceof Error ? error : new Error(String(error)));
     if(child && !exited) await exitPromise;
     throw error;
+  } finally {
+    input.signal?.removeEventListener("abort",cancel);
   }
 
   return {
