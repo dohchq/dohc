@@ -582,6 +582,17 @@ export interface RelayNoticePage {
 // again, or a row the relay no longer holds, changes nothing.
 export type NoticeMark = "read" | "dismissed";
 
+// The answer to POST /sync/notices/marks. `dismissed` lists the notices this
+// request dismissed first, so of all the computers that dismiss one notice,
+// exactly one hears that it did, as Run now on a skipped schedule needs. A
+// request may carry `installId`: the first dismissal names that computer,
+// and a later request from it hears "first" again, after a lost answer or a
+// crash.
+export interface NoticeMarksResponse {
+  ok: true;
+  dismissed: string[];
+}
+
 // The computer that runs a workspace's schedules and Group-message
 // automations (ADR 0012). Request bodies are at most
 // AUTOMATION_HOST_MAX_BODY_BYTES, and each owner's changes are rate limited. The relay records one host per workspace. Only the
