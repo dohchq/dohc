@@ -1165,7 +1165,6 @@ fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
     );
 }
 
-#[cfg(feature = "fault-injection")]
 #[test]
 fn a_pre_persist_crash_keeps_the_entry_valid() {
     // (b) StorageBeforePersist rolls back: durable state is unchanged, so
@@ -1231,7 +1230,6 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
     assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 }
 
-#[cfg(feature = "fault-injection")]
 #[test]
 fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head() {
     // (c) StorageAfterCommitBeforeAck: durable-but-unacked. The entry is

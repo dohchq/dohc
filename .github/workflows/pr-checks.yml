@@ -45,6 +45,7 @@ jobs:
               - 'crates/**'
               - 'vendor/**'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -62,8 +63,6 @@ jobs:
               # Native paired-backup proof invokes the production relay fixture.
               - 'services/sync-relay/**'
               - 'packages/app-backend-runtime/**'
-              - 'examples/fundraiser/**'
-              - 'examples/stock-orders/**'
               - 'packages/live-session-contract/**'
               - '**/package.json'
               - '**/tsconfig*.json'
@@ -121,42 +120,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 30
-    # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
-    # applies the actual 0001_better_auth.sql migration and drives session and
-    # authorization behaviour through it. Its suite self-skips when no database
-    # is reachable, which is right for local dev and WRONG for CI -- a Postgres
-    # that failed to start would silently skip the collab surface's
-    # authorization tests and report green. So CI provides the database, and
-    # DOHC_REQUIRE_POSTGRES makes an unreachable one a FAILURE rather than a skip.
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: dohc
-          POSTGRES_PASSWORD: dohc
-          POSTGRES_DB: dohc
-        ports:
-          - 54329:5432
-        options: >-
-          --health-cmd "pg_isready -U dohc -d dohc"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      DOHC_REQUIRE_POSTGRES: "1"
-      # Every daemon suite resolves the binary through
-      # apps/desktop/src/testing/engineBinary, which finds the repo-root
-      # target/debug build the step below produces. No per-suite binary
-      # variable is needed; DOHC_REQUIRE_ENGINE_E2E turns a failed resolution
-      # into a failure rather than a silent skip. Override with
-      # DOHC_TEST_ENGINE_BINARY only to point at a binary somewhere else.
-      DOHC_REQUIRE_ENGINE_E2E: "1"
-      # The plugin install proofs run the real pinned pnpm against the real
-      # registry. They are the only measured evidence behind the install
-      # pins, so a checkout that cannot stage pnpm must fail here rather than
-      # report those proofs green without running them.
-      DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1"
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -166,15 +130,8 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # package.json engines: >=24.14.0; "24" resolves to the latest 24.x
           node-version: "24"
           cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Build app backend runtime
-        run: pnpm --filter @dohc/app-backend-runtime build
 
       - name: Rust toolchain
         run: |
@@ -182,55 +139,22 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
-      # Registry + ./target cache for the daemon debug build below. Keyed
-      # separately from the engine gate's cache: the two jobs build different
-      # subsets and would thrash a shared target cache.
+      - name: Prepare the checkout
+        run: pnpm setup:worktree
+
+      # The jobs build different subsets, so keep their target caches separate.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
 
-      - name: Fetch crate dependencies
-        run: |
-          set -euo pipefail
-          cargo fetch --locked
-
-      # The desktop capture e2e drives a REAL daemon over stdio; without this
-      # binary it self-skips. It skipped on every platform since the day it was
-      # written -- CI never built a debug daemon, and its path was hardcoded to
-      # `.exe`, which Linux cannot match -- so the only end-to-end coverage of
-      # the TypeScript desktop capture path never ran. When first forced to run
-      # it failed, on a real defect (see #298). DOHC_REQUIRE_ENGINE_E2E turns a
-      # missing binary here into a failure rather than a silent skip.
-      - name: Build the engine daemon for the desktop e2e
-        run: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
-
-      # Runs every package, not just the one a PR touched. apps/site was broken
-      # on main for weeks precisely because a red typecheck there read as noise
-      # from whichever PR happened to be running.
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Test
-        run: pnpm run test
-
-      - name: Self-host native editing
-        env:
-          POSTGRES_URL: postgres://dohc:dohc@127.0.0.1:54329/dohc
-          DOHC_SERVICE_HOST_PROOF_BINARY: ${{ github.workspace }}/target/debug/dohc-workspace-engine
-          DOHC_SERVICE_HOST_PROOF_OUTPUT: ${{ github.workspace }}/.agent-artifacts/self-host-native-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          DOHC_SERVICE_HOST_PROOF_SHA256="$(sha256sum "$DOHC_SERVICE_HOST_PROOF_BINARY" | cut -d ' ' -f 1)"
-          export DOHC_SERVICE_HOST_PROOF_SHA256
-          mkdir -p "$DOHC_SERVICE_HOST_PROOF_OUTPUT"
-          pnpm --filter @dohc/share-web exec vitest run --config vitest.self-host-native.config.ts --reporter=default --reporter=json --outputFile.json="$DOHC_SERVICE_HOST_PROOF_OUTPUT/vitest.json"
-          node --input-type=module -e "import {readSelfHostNativeProof} from './scripts/verification/verify.mjs'; readSelfHostNativeProof(process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT, process.env.DOHC_SERVICE_HOST_PROOF_BINARY, process.env.DOHC_SERVICE_HOST_PROOF_SHA256);"
-
+      # Install Xvfb before the runner starts the desktop proof's display.
       - name: Desktop system dependencies
         run: pnpm exec playwright install-deps chromium
 
-      - name: Desktop boot and persistence
-        run: xvfb-run -a pnpm qa:smoke
+      # The runner owns Postgres, native preparation, and every mandatory proof,
+      # including accounts and self-host onboarding. Dispatch always runs this job.
+      - name: Canonical JavaScript gate
+        run: xvfb-run -a pnpm verify:pr --base HEAD --job js
 
   rust:
     name: engine gate
@@ -245,18 +169,11 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
-      # The gate's fixture-drift step regenerates the richdoc parity fixtures
-      # through the LIVE TypeScript oracle, so it needs the JS workspace
-      # installed. Without it that step reports SKIP rather than PASS -- which
-      # is honest, but it would mean the drift check never actually runs in CI,
-      # and drift going unnoticed is exactly what it exists to prevent.
+      # Rust fixture drift uses the live TypeScript oracle and pinned dependencies.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
 
       - name: Rust toolchain
         run: |
@@ -265,60 +182,18 @@ jobs:
           rustc -vV
           cargo --version
 
+      - name: Prepare the checkout
+        run: pnpm setup:worktree
+
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: engine-gate
 
-      # Prebuilt binaries, pinned so "cargo-deny=PASS" means the same thing
-      # on every run.
-      # The previous incarnation ran `cargo install` for both -- compiling the
-      # two tools from source cost more minutes than the rest of the gate
-      # combined. The verification steps below are what make the pin a checked
-      # fact rather than an intention.
+      # The canonical runner checks each installed version against the pins above.
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
 
-      - name: Verify pinned cargo-deny
-        run: |
-          set -euo pipefail
-          RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
-          if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
-            echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
-            exit 1
-          fi
-
-      - name: Verify pinned cargo-nextest
-        run: |
-          set -euo pipefail
-          RESOLVED_CARGO_NEXTEST_VERSION="$(cargo nextest --version | head -n 1 | awk '{print $2}')"
-          if [ "$RESOLVED_CARGO_NEXTEST_VERSION" != "$CARGO_NEXTEST_VERSION" ]; then
-            echo "::error::expected cargo-nextest $CARGO_NEXTEST_VERSION, got $RESOLVED_CARGO_NEXTEST_VERSION"
-            exit 1
-          fi
-
-      # run-rust-checks PROBES for cargo-audit and degrades to SKIP when it is
-      # absent -- honest, but it meant every PR reported "cargo-audit=SKIP"
-      # beside a row of PASSes and no advisory scan ever ran in CI. That is
-      # not hypothetical: the first run after this tool was actually installed
-      # flagged a real DoS advisory that had been sitting on main.
-      - name: Verify pinned cargo-audit
-        run: |
-          set -euo pipefail
-          # `cargo audit --version` prints "cargo-audit-audit <version>" --
-          # the cargo subcommand prefix is doubled -- so the version field is
-          # compared rather than the whole line.
-          RESOLVED_CARGO_AUDIT_VERSION="$(cargo audit --version | awk '{print $NF}')"
-          if [ "$RESOLVED_CARGO_AUDIT_VERSION" != "$CARGO_AUDIT_VERSION" ]; then
-            echo "::error::expected cargo-audit $CARGO_AUDIT_VERSION, got $RESOLVED_CARGO_AUDIT_VERSION"
-            exit 1
-          fi
-
-      # The same script the program runs locally, so a green CI run and a green
-      # local gate mean the same thing. Linux also compiles and runs the
-      # cfg(unix) code the canonical Windows gate cannot see at all.
+      # Linux also exercises cfg(unix) code absent from Windows verification.
       - name: Canonical engine gate
-        run: |
-          set -euo pipefail
-          node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log
-          node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log
+        run: pnpm verify:pr --base HEAD --job rust

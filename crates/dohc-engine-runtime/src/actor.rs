@@ -24,6 +24,7 @@
 //! task outlives the actor). Cancellation ([`CancellationToken`](tokio_util::sync::CancellationToken)) is checked
 //! between bounded units, never inside a transaction.
 
+mod authored_create;
 mod automations;
 mod capture;
 mod chats;
@@ -116,15 +117,23 @@ pub enum LifecycleState {
     Draining,
     /// The worker has exited and the connection has been released.
     Closed,
+    /// An unfinished authored create must recover before another command runs.
+    RecoveryRequired,
 }
 
 impl LifecycleState {
+    /// Reopening must replace an actor that cannot accept more workspace work.
+    pub const fn needs_reopen(self) -> bool {
+        matches!(self, Self::Closed | Self::RecoveryRequired)
+    }
+
     const fn as_u8(self) -> u8 {
         match self {
             LifecycleState::Opening => 0,
             LifecycleState::Ready => 1,
             LifecycleState::Draining => 2,
             LifecycleState::Closed => 3,
+            LifecycleState::RecoveryRequired => 4,
         }
     }
 
@@ -133,6 +142,7 @@ impl LifecycleState {
             0 => LifecycleState::Opening,
             1 => LifecycleState::Ready,
             2 => LifecycleState::Draining,
+            4 => LifecycleState::RecoveryRequired,
             _ => LifecycleState::Closed,
         }
     }
@@ -566,6 +576,9 @@ fn worker_main(
                 state.store(LifecycleState::Draining.as_u8(), Ordering::Release);
                 break;
             }
+        }
+        if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
+            break;
         }
     }
 

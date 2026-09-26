@@ -2447,21 +2447,21 @@ pub fn moment_author_json(
 ) -> Option<String> {
     let actor = actor_origin_id?;
     let attribution = attribution?;
-    let on_behalf_of = attribution.on_behalf_of.as_deref()?;
-    let author = match attribution.actor_kind {
+    let mut author = match attribution.actor_kind {
         ChangeActorKind::Agent => serde_json::json!({
             "kind": "agent",
             "agentId": actor,
-            "onBehalfOf": on_behalf_of,
         }),
         ChangeActorKind::Automation => serde_json::json!({
             "kind": "automation",
             "automationId": actor,
-            "onBehalfOf": on_behalf_of,
             "depth": attribution.depth,
         }),
         ChangeActorKind::Human => return None,
     };
+    if let Some(on_behalf_of) = &attribution.on_behalf_of {
+        author["onBehalfOf"] = serde_json::json!(on_behalf_of);
+    }
     Some(author.to_string())
 }
 
