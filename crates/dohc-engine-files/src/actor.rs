@@ -81,6 +81,9 @@ pub struct FilesStats {
     /// not recovered, so a health consumer must not read converged-with-
     /// quarantine as clean.
     pub quarantined: usize,
+    /// Paths the last run deferred to a live document session. They are not
+    /// failures; the driver asks for a rescan once a session releases.
+    pub deferred: usize,
 }
 
 enum Command {
@@ -333,6 +336,12 @@ impl FilesHandle {
         self.pending_overflow.store(true, Ordering::Release);
     }
 
+    /// Ask for a full rescan on the next command, through the same sticky
+    /// flag an overflow sets. Infallible and non-blocking.
+    pub fn request_rescan(&self) {
+        self.pending_overflow.store(true, Ordering::Release);
+    }
+
     /// Snapshot reconcile + pool state.
     pub async fn stats(&self) -> Result<FilesStats, FilesError> {
         let (reply, reply_rx) = oneshot::channel();
@@ -477,6 +486,7 @@ fn worker_main(
                 let gauge = scanner.pool().gauge();
                 let _ = reply.send(FilesStats {
                     quarantined: controller.quarantined_paths().len(),
+                    deferred: controller.deferred_paths().len(),
                     generation: controller.generation(),
                     dirty: controller.is_dirty(),
                     tracked: controller.tracked_len(),
@@ -529,6 +539,7 @@ mod saturation_tests {
                     captured: Vec::new(),
                     not_owned_paths: Vec::new(),
                     failed_applies: Vec::new(),
+                    deferred_paths: Vec::new(),
                     crashed_after_durable_boundary: None,
                     degraded: false,
                 },

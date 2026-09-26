@@ -16,9 +16,12 @@ import {
 // actor, and its messages carry origin "cli" so no device dispatches an agent
 // on them. Identity is never the caller's: it comes from the registry and the
 // signed-in session.
+// `agentName` is the name an agent gave for itself, such as an MCP client's
+// handshake name. It is provenance, like a document edit's author; without
+// it the message carries the agent name from the person's settings.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent" };
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string };
 
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
@@ -165,7 +168,7 @@ export function createChatWrites(dependencies: {
   async function actorFor(writer: ChatWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: await agentDisplayName() },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName() },
           authorOwnerDisplayName: localUserDisplayName(),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };

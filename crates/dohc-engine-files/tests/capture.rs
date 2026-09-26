@@ -16,6 +16,7 @@ struct IdempotentSink {
     calls: Vec<String>,
     fail: BTreeSet<String>,
     not_owned: BTreeSet<String>,
+    deferred: BTreeSet<String>,
     /// Report this sha for a path instead of the plan's (models a re-reading
     /// sink that captured newer bytes than the scan hashed).
     reread_sha: BTreeMap<String, String>,
@@ -37,6 +38,9 @@ impl CaptureSink for IdempotentSink {
         if self.not_owned.contains(path) {
             self.content.remove(path);
             return Ok(IngestOutcome::NotOwned);
+        }
+        if self.deferred.contains(path) {
+            return Ok(IngestOutcome::Deferred);
         }
         let actual = self
             .reread_sha
@@ -176,6 +180,50 @@ fn failed_apply_keeps_prior_manifest_entry_and_continues_the_batch() {
             .expect("retry prepare"),
     );
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md"));
+}
+
+#[test]
+fn deferred_ingest_stays_unrecorded_without_degrading_and_returns_on_a_rescan() {
+    let ws = Scratch::new();
+    ws.write("open.md", b"");
+    ws.write("b.md", b"b");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let mut sink = IdempotentSink {
+        deferred: BTreeSet::from(["open.md".to_owned()]),
+        ..IdempotentSink::default()
+    };
+    let result = apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+
+    assert_eq!(result.deferred_paths, ["open.md"]);
+    assert!(result.failed_applies.is_empty());
+    assert!(!result.degraded, "a live session's path is not a failure");
+    assert_eq!(controller.tracked_len(), 1, "only b.md was recorded");
+    assert_eq!(controller.deferred_paths(), ["open.md"]);
+    assert!(controller.quarantined_paths().is_empty());
+    assert!(
+        !controller.is_dirty(),
+        "a deferred path must not keep the layer rescanning while the session lasts"
+    );
+
+    // A requested rescan offers the path again, and once the session lets go
+    // it is captured and no longer deferred.
+    controller.mark_dirty();
+    sink.deferred.clear();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "open.md"));
+    apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("ack retry");
+    assert_eq!(controller.tracked_len(), 2);
+    assert!(controller.deferred_paths().is_empty());
 }
 
 #[test]

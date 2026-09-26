@@ -608,6 +608,12 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@dohc/app-browser':
+        specifier: workspace:*
+        version: link:../app-browser
+      '@dohc/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3

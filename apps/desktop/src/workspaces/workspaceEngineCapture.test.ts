@@ -31,6 +31,7 @@ import {
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
+  type EngineDiskWriter,
   type WorkspaceEngineCapture,
   type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
@@ -94,6 +95,7 @@ interface CaptureOptions {
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   rustEngineSessions?: EngineWorkspaceSessions;
+  diskWriter?: EngineDiskWriter;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
   ) => Promise<EngineYdocProviderSession>;
@@ -2627,6 +2629,29 @@ describe("workspaceEngineCapture agent attribution", () => {
       "File already exists: exclusive.txt",
     );
     await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
+    await engine.stop();
+  });
+
+  it("keeps the text of a writer that creates the file during a create-only write, and records no head", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const disk = createDefaultDiskWriter(root);
+    const target = join(root, "raced.md");
+    const engine = liveCapture(root, new VersionedLoopbackEngine(), {
+      diskWriter: {
+        ...disk,
+        async createTextFile(absolutePath, text) {
+          // Another writer creates the file just before the create lands.
+          await writeFile(absolutePath, "Written elsewhere.\n");
+          await disk.createTextFile(absolutePath, text);
+        },
+      },
+    });
+
+    await expect(
+      engine.writeAuthoredTextFile(target, "", null, { createOnly: true }),
+    ).rejects.toMatchObject({ code: "EEXIST", message: "File already exists: raced.md" });
+    await expect(readFile(target, "utf8")).resolves.toBe("Written elsewhere.\n");
+    expect(await liveMoments(engine)).toEqual([]);
     await engine.stop();
   });
 

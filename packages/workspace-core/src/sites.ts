@@ -401,7 +401,7 @@ function parsePreview(
         path,
         "warning",
         "unsupported-preview-command-mode",
-        "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+        "Configured preview commands run only in dev mode. Static and build previews use the app's entry file or build output.",
       ),
     );
   }
