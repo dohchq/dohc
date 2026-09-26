@@ -4165,7 +4165,7 @@ export function DesktopWorkspaceShell(props: {
         status?.engineStoreRefused != null &&
         engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
       ) {
-        return;
+        return false;
       }
       reportShellError("Couldn't refresh the shared view.", error);
       return false;
