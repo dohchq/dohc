@@ -9,7 +9,7 @@ Status: agreed with Ice on September 24, 2026, through a grilling session, and i
 The session started from Ice's question: how easily can a person change dohc, and what happens to their change when dohc updates? It settled these:
 
 - **Agent chat is gone.** PR #1231 removed the one built-in plugin. dohc does not provide or supervise people's agents (AGENTS.md commitment 5).
-- **The plugin system goes.** Nobody outside dohc writes plugins, and the plugin an agent wrote in the tailor journey never installed. Apps are how people and agents extend their work. Plugins leave once automations have a new home, because plugins are the only place an automation can be declared today (`apps/desktop/src/plugins/pluginManifestSchema.ts:220-267`).
+- **The plugin system is gone (item 4, done).** Nobody outside dohc wrote plugins, and the plugin an agent wrote in the tailor journey never installed. Apps are how people and agents extend their work. History: the removal waited until automations moved onto Collections, because plugins were then the only place to declare an automation (`apps/desktop/src/plugins/pluginManifestSchema.ts:220-267` at 68cb8b315).
 - **People change dohc's own parts in two ways:** a plain settings file, and apps pinned to the sidebar. Nobody rewrites a built-in part. Updates replace dohc's own parts and never touch a person's settings or apps, as Omarchy separates its defaults from `~/.config`.
 - **Automations move onto Collections.** They should be as easy to set up as Notion's and as flexible as Supabase's.
 - **dohc gets one place for notifications,** its existing Notices, which also holds things sent to a person.
@@ -132,7 +132,9 @@ dohc has Notices, a list of problems and finished tasks on one computer. It beco
 
 ## Part 4: Remove plugins
 
-After items 1 to 3 below land, remove the plugin host, the SDK's Node entry, the Plugins view and details page, plugin panels, plugin web apps, plugin automations, agent drivers with `AgentSessionManager`, and their docs and tests. Rewrite AGENTS.md commitment 8 and the "Tailor the workspace" example to describe apps, with no mention of plugins.
+Done in item 4. The plugin host, the SDK, the Plugins view and details page, plugin panels, plugin web apps, plugin automations, and agent drivers with `AgentSessionManager` are gone, with their docs and tests. The engine accepts only `collection:` automation ids. AGENTS.md commitment 8 and the "Tailor the workspace" example describe apps and automations.
+
+History: this part waited for items 1 to 3, so that automations had a home before plugins left.
 
 ## Order of work
 
@@ -141,7 +143,7 @@ Each item is one or more pull requests with one concern. Each gets a review from
 1. The file contract: `automations.yaml` with a version field, its parser, and validation.
 2. The engine: subscription filters, change facts on claims, claims for new and removed records, and draining per executor. Rust gate.
 3. The executor in main, with field, record, and branch steps, formulas, and the reach check, for document Collections. The ⚡ panel, run history, Try again, and Undo.
-4. Remove plugins (Part 4).
+4. Remove plugins (Part 4). Done.
 5. Notices that sync to a person (Part 2).
 6. Chat: the `automation` author kind, posting, the notify step, waking your agent, and the Group message trigger.
 7. Dataset Collections: claims from dataset commits, and steps through approved operations.
