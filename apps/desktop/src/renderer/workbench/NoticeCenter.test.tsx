@@ -271,6 +271,18 @@ describe("automation failure notices", () => {
     expect(onDismissAutomationStops).toHaveBeenLastCalledWith(stops);
   });
 
+  it("names the Group whose messages a held automation would start from", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
+      step: "0", seq: 7, collection: "Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test",
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#task-0");
+    expect(notice.textContent).toContain(
+      "A step in Trip can now start from messages in Planning. It stopped before because bob@dohc.test could not. Allow it to run?",
+    );
+  });
+
   it("names the Group a held post would post in", async () => {
     renderNotices({ automationHolds: [{
       automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",

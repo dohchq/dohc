@@ -177,8 +177,8 @@ export function newAutomation(fields: readonly FieldDefinition[]): Automation {
  * automation's verdicts, in the order the executor walks the steps: a
  * step, then the steps an If runs, then its otherwise steps.
  */
-export function reachPlaces(steps: readonly AutomationStep[]): number[][] {
-  let next = 0;
+export function reachPlaces(steps: readonly AutomationStep[], first = 0): number[][] {
+  let next = first;
   const walk = (list: readonly AutomationStep[], into: number[]) => {
     for (const step of list) {
       if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent") into.push(next++);

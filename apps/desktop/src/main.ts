@@ -3458,6 +3458,11 @@ function createCollectionAutomationsFor(
       }),
     },
     postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
+    // Until dohc lets the owner choose a main computer, a workspace that does
+    // not sync is the only one that can be: its one computer claims each message.
+    runsGroupTriggers: () => findWorkspace(workspaceId)?.remote === undefined,
+    readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
+      (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {

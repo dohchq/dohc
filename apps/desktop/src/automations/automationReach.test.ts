@@ -171,6 +171,14 @@ describe("reach check", () => {
     expect(check(unnamed, change(budget))).toEqual(stopped("Someone you shared with cannot edit Budget."));
   });
 
+  it("lets a Group's messages start an automation only when every editor can read the Group", () => {
+    const readGroup: ReachStep = { kind: "read-group", group: { channelWireId: "wire-trip", name: "Trip chat" } };
+    expect(check(owner(grant(ana, { paths: ["Trip"], access: "edit" })), readGroup)).toEqual(stopped("ana@dohc.test cannot read Trip chat."));
+    // Reading is enough; a read-only Group grant counts.
+    expect(check(owner(grant(ana, { paths: ["Trip"], access: "edit" }, { wireId: "wire-trip", canPost: false })), readGroup)).toEqual(allowed);
+    expect(check({ kind: "shared-view" }, readGroup).allowed).toBe(false);
+  });
+
   it("ignores a grant to the owner's own account", () => {
     expect(check(owner(grant({ userId: OWNER }, { paths: ["Trip"], access: "edit" })), personal(OWNER))).toEqual(allowed);
   });

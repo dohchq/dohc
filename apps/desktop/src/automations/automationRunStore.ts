@@ -271,12 +271,19 @@ export interface StoredRun {
 
 const SubscriptionsSchema = z.object({
   version: z.literal(1),
-  subscriptions: z.array(z.object({
-    automationId: z.string().min(1),
-    path: z.string().min(1),
-    kinds: z.array(z.enum(["added", "changed", "removed"])),
-    fields: z.array(z.string()).optional(),
-  })),
+  subscriptions: z.array(z.union([
+    z.object({
+      automationId: z.string().min(1),
+      path: z.string().min(1),
+      kinds: z.array(z.enum(["added", "changed", "removed"])),
+      fields: z.array(z.string()).optional(),
+    }),
+    z.object({
+      automationId: z.string().min(1),
+      groupId: z.string().min(1),
+      startsWith: z.string().optional(),
+    }),
+  ])),
 });
 
 const ReachVerdictsSchema = z.object({
@@ -298,11 +305,21 @@ const TimeoutsSchema = z.object({
   timeouts: z.array(z.object({ automationId: z.string().min(1), count: z.number().int().nonnegative() })),
 });
 
-export interface StoredSubscription {
-  automationId: string;
-  path: string;
-  kinds: AutomationChangeKind[];
-  fields?: string[];
+/** An engine subscription this computer holds: records under a path, or one Group's messages. */
+export type StoredSubscription =
+  | { automationId: string; path: string; kinds: AutomationChangeKind[]; fields?: string[] }
+  | { automationId: string; groupId: string; startsWith?: string };
+
+/** What removes a subscription from the engine. */
+export function unsubscribeParams(subscription: StoredSubscription): { automationId: string; path: string } | { automationId: string; groupId: string } {
+  return "groupId" in subscription
+    ? { automationId: subscription.automationId, groupId: subscription.groupId }
+    : { automationId: subscription.automationId, path: subscription.path };
+}
+
+/** Whether two subscriptions name the same engine pair, so one replaces the other in place. */
+export function sameSubscriptionTarget(left: StoredSubscription, right: StoredSubscription): boolean {
+  return "groupId" in left ? "groupId" in right && left.groupId === right.groupId : "path" in right && left.path === right.path;
 }
 
 const HEADER_SUFFIX = ".json";

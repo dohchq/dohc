@@ -620,6 +620,24 @@ describe("automations wire schemas", () => {
     ).toEqual(claim);
   });
 
+  it("decodes a Group message claim, whose message has no record and may carry its body truncated", () => {
+    const message = {
+      ...claim,
+      trigger: { key: "message:m1" },
+      recordId: null,
+      change: {
+        ...claim.change,
+        kind: "message",
+        fields: [],
+        message: {
+          id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
+          authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: { truncated: true, bytes: 70_000 },
+        },
+      },
+    };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, message)).toEqual(message);
+  });
+
   it("decodes null from a drained claimNext", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, null),

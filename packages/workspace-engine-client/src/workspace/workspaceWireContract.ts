@@ -161,8 +161,20 @@ export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
-/** Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine. */
-export type AutomationSubscribeParams = WorkspaceJsonObject & {
+/**
+ * Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine: the
+ * records under a path, or the messages in one Group.
+ */
+export type AutomationSubscribeParams = AutomationRecordsSubscribeParams | AutomationGroupSubscribeParams;
+
+/** A Collection automation's interest in one Group's messages, optionally only those that start with some text. */
+type AutomationGroupSubscribeParams = WorkspaceJsonObject & {
+  automationId: string;
+  groupId: string;
+  startsWith?: string;
+};
+
+type AutomationRecordsSubscribeParams = WorkspaceJsonObject & {
   automationId: string;
   /** Collection path prefix; "." covers the whole workspace. */
   path: string;
@@ -177,10 +189,9 @@ export type AutomationSubscribeParams = WorkspaceJsonObject & {
 };
 
 /** Mirrors AutomationUnsubscribeParams in crates/dohc-workspace-engine. */
-export type AutomationUnsubscribeParams = WorkspaceJsonObject & {
-  automationId: string;
-  path: string;
-};
+export type AutomationUnsubscribeParams =
+  | (WorkspaceJsonObject & { automationId: string; path: string })
+  | (WorkspaceJsonObject & { automationId: string; groupId: string });
 
 export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
@@ -977,6 +988,8 @@ const AutomationClaimMessageSchema = mutableStruct({
   authorOwnerDisplayName: Schema.optionalKey(Schema.String),
   authorUserId: Schema.optionalKey(Schema.NonEmptyString),
 });
+
+export type AutomationClaimMessage = typeof AutomationClaimMessageSchema.Type;
 
 const AutomationClaimSchema = mutableStruct({
   ...automationClaimFields,
