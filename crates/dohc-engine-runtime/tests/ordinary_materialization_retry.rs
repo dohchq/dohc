@@ -243,6 +243,36 @@ async fn one_page_turns_a_file_into_a_directory() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_only_page_removes_file_before_probing_descendant() {
+    for reverse in [false, true] {
+        let mut page = vec![change("notes", "delete"), change("notes/a.md", "delete")];
+        if reverse {
+            page.reverse();
+        }
+        let scratch = materialize_pages(
+            |domain| {
+                domain
+                    .write_text(&write_at("notes", "o-notes", "old", "m1", 1), &NoFaults)
+                    .unwrap();
+                domain
+                    .delete_text_file(&delete_at("notes", "m2", 2), &NoFaults)
+                    .unwrap();
+                domain
+                    .write_text(&write_at("notes/a.md", "o-a", "a", "m3", 3), &NoFaults)
+                    .unwrap();
+                domain
+                    .delete_text_file(&delete_at("notes/a.md", "m4", 4), &NoFaults)
+                    .unwrap();
+            },
+            |root| std::fs::write(root.join("notes"), "old").unwrap(),
+            vec![page.clone(), page],
+        )
+        .await;
+        assert!(!scratch.path().join("notes").exists());
+    }
+}
+
 /// One page turns the directory `d` into a file, after deleting its only
 /// tracked file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

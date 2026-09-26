@@ -361,6 +361,16 @@ fn is_inside(path: &str, ancestor: &str) -> bool {
         && path.as_bytes()[ancestor.len()] == b'/'
 }
 
+fn relay_delete_precedes_write(
+    change: &dohc_engine_sync::MomentMaterializationChange,
+    changes: &[dohc_engine_sync::MomentMaterializationChange],
+) -> bool {
+    change.operation == "delete"
+        && changes
+            .iter()
+            .any(|other| other.operation == "write" && is_inside(&change.path, &other.path))
+}
+
 /// Enqueue one batch of a sync page in one transaction and materialize it in
 /// one replay. Clears `projections` and adds the batch's deletes to
 /// `deleted`.
@@ -943,19 +953,16 @@ impl ActorHandle {
             let mut secret_key = None;
             // A change can depend on another in the same page: a file becomes a
             // directory (delete `notes`, write `notes/work.md`) or the reverse
-            // (delete `d/a.md`, write `d`). Deletes under another changed path
+            // (delete `d/a.md`, write `d`). Deletes under a path being written
             // run first, and the page runs in batches that each hold no two
             // paths that alias or where one is inside the other. Aliases keep
             // their page order, matching sequential replay. Every probe sees
             // earlier batches; each batch shares one displacement commit.
             let mut changes = changes;
             changes.retain(|change| change.version_id == active);
-            let inside_another = |path: &str, all: &[dohc_engine_sync::MomentMaterializationChange]| {
-                all.iter().any(|other| is_inside(path, &other.path))
-            };
             let first: Vec<bool> = changes
                 .iter()
-                .map(|change| change.operation == "delete" && inside_another(&change.path, &changes))
+                .map(|change| relay_delete_precedes_write(change, &changes))
                 .collect();
             let mut alias_order = HashMap::new();
             let mut keyed: Vec<_> = first.into_iter().zip(changes).map(|(first, change)| {
@@ -1050,7 +1057,37 @@ impl ActorHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::is_inside;
+    use super::{is_inside, relay_delete_precedes_write};
+    use dohc_engine_sync::MomentMaterializationChange;
+
+    #[test]
+    fn descendant_delete_precedes_only_ancestor_writes() {
+        for operation in ["delete", "write"] {
+            let mut changes = vec![
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "notes".into(),
+                    operation,
+                    content_kind: "text",
+                },
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "notes/a.md".into(),
+                    operation: "delete",
+                    content_kind: "text",
+                },
+            ];
+            for _ in 0..2 {
+                for change in &changes {
+                    assert_eq!(
+                        relay_delete_precedes_write(change, &changes),
+                        operation == "write" && change.path == "notes/a.md",
+                    );
+                }
+                changes.reverse();
+            }
+        }
+    }
 
     #[test]
     fn containment_respects_component_boundaries() {
