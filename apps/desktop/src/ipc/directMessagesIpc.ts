@@ -20,7 +20,7 @@ import {
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
+import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -28,7 +28,7 @@ import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChanne
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 
-// Peek a received chat-channel grant's kind without mutating the local store.
+// Peek a received chat grant's kind without mutating the local store.
 // The share-log GET paginates raw rows before the
 // share filter, so the peek must PAGE through nextCursor until the first
 // served op (the channel.create bootstrap) appears — reading only the first
@@ -41,7 +41,7 @@ export function peekReceivedGrantKindForShare(
   const base = relay.baseUrl.replace(/\/+$/u, "");
   return peekReceivedGrantKind({
     fetchPage: async (since) => {
-      const response = await (relay.fetch ?? fetch)(
+      const response = await (relay.fetch ?? relayApiFetch())(
         `${base}/sync/shares/${encodeURIComponent(shareId)}/log?since=${since}&limit=200`,
         { headers: { authorization: `Bearer ${relay.token}` } },
       );
@@ -114,7 +114,7 @@ export function registerDirectMessagesIpcHandlers<
   const { resolveChatFileReferences } = dependencies.chatScope;
 
   // --- Direct messages (WS-MU-C3) ------------------------------------------
-  // A DM is a `kind:"dm"` channel plus one MU-C4 chat-channel grant per
+  // A DM is a `kind:"dm"` channel plus one MU-C4 chat grant per
   // participant, riding the shared-channel lane. The whole surface is gated on
   // collaboration: signed out / no relay ⇒ available:false and the renderer
   // shows nothing. Authorization lives at the relay. This layer lists
@@ -523,7 +523,7 @@ export function registerDirectMessagesIpcHandlers<
         );
         const store = linkedChatStoreFor(workspace);
         // A DM's identity is its live grant recipient set, not its display
-        // name. Enumerate live chat-channel grants once for deduplication and
+        // name. Enumerate live chat grants once for deduplication and
         // for deciding which recipients still need a grant.
         const shares = await awaitCurrentDmSession(() =>
           relayShareJsonWithCredentials<{
@@ -538,7 +538,7 @@ export function registerDirectMessagesIpcHandlers<
         for (const row of shares.granted ?? []) {
           if (
             (row.revokedAtMs ?? null) !== null ||
-            row.selector?.kind !== "chat-channel" ||
+            row.selector?.kind !== "chat" ||
             typeof row.selector.channelWireId !== "string" ||
             typeof row.recipientEmail !== "string"
           ) {

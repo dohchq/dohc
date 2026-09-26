@@ -3,7 +3,60 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SourceCodeEditor } from "./SourceCodeEditor";
+import { CODE_HIGHLIGHT_STYLE, SourceCodeEditor } from "./SourceCodeEditor";
+
+describe("code highlighting", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  // Each theme sets these variables, so one style reads in light and dark.
+  // A literal color here is what painted #00f on the dark page.
+  it("colors tokens only with theme variables", () => {
+    const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
+    const colors = [...rules.matchAll(/color:\s*([^;}]+)/g)].map((match) => match[1]?.trim());
+    expect(colors.length).toBeGreaterThan(0);
+    for (const color of colors) expect(color).toMatch(/^var\(--dohc-[a-z-]+\)$/);
+  });
+
+  // Mounted, so the test fails if the editor stops using this style.
+  it("colors keywords, strings, comments, numbers, and types in the editor", async () => {
+    stubCodeMirrorLayout();
+    const code = [
+      'import { x } from "react";',
+      "// note",
+      "export function useRows(rows: Array<number>) { return rows[0] ?? 1; }",
+    ].join("\n");
+    render(
+      <SourceCodeEditor
+        testId="code-editor"
+        value={code}
+        valueRevision={0}
+        language="typescript"
+        path="src/rows.ts"
+        onChange={() => undefined}
+        onSave={() => undefined}
+      />,
+    );
+    const content = (await screen.findByTestId("code-editor")).querySelector(".cm-content") as HTMLElement;
+    const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
+    const colorOf = (token: string): string | null => {
+      const span = [...content.querySelectorAll("span")].find((element) => element.textContent === token);
+      const rule = span
+        ? rules.split("\n").find((line) => span.classList.contains(line.slice(1, line.indexOf(" "))))
+        : undefined;
+      return rule?.match(/color:\s*([^;}]+)/)?.[1]?.trim() ?? null;
+    };
+
+    await waitFor(() => expect(colorOf("import")).toBe("var(--dohc-ink)"));
+    expect(colorOf('"react"')).toBe("var(--dohc-success)");
+    expect(colorOf("// note")).toBe("var(--dohc-muted)");
+    expect(colorOf("1")).toBe("var(--dohc-warning)");
+    expect(colorOf("useRows")).toBe("var(--dohc-agent)");
+    expect(colorOf("number")).toBe("var(--dohc-agent)");
+  });
+});
 
 function stubCodeMirrorLayout() {
   vi.stubGlobal(

@@ -54,41 +54,8 @@ export const WORKBENCH_MENU_COMMANDS = [
   "install-update",
   "settings",
   "toggle-theme",
+  "unpin-app",
 ] as const;
-
-export const PLUGIN_PIPELINE_STATUSES = [
-  "discovered",
-  "queued",
-  "snapshotting",
-  "installing",
-  "scanning",
-  "building",
-  "starting",
-  "ready",
-  "failed",
-  "crashed",
-  "disabled",
-  "disabled-pending-approval",
-  "disabled-pending-repair",
-  "invalid",
-  "uninstalling",
-] as const;
-
-export const PLUGIN_PIPELINE_ERROR_STAGES = [
-  "discovery",
-  "snapshot",
-  "install",
-  "scan",
-  "build",
-  "state",
-  "runtime",
-  "uninstall",
-] as const;
-
-// How many unrecoverable paths the uninstall preflight sends to the renderer.
-// The dialog lists this sample and says how many more there are; a plugin
-// tree can hold thousands, and the whole inventory stays in main.
-export const PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT = 20;
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
@@ -137,6 +104,8 @@ export const ENGINE_YDOC_SAVE_STATES = [
   "read-only",
   "changed-on-disk",
   "deleted",
+  // A reopen found another object at this document's path.
+  "object-changed",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 
@@ -189,30 +158,7 @@ export const CHANNELS = {
   startSitePreview: "desktop:start-site-preview",
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
-  openPluginPanel: "desktop:open-plugin-panel",
-  startPluginPanel: "desktop:start-plugin-panel",
-  invokePluginCommand: "desktop:invoke-plugin-command",
-  stopPluginPanel: "desktop:stop-plugin-panel",
-  pluginPanelInvalidated: "desktop:plugin-panel-invalidated",
-  invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
-  openPluginWebApp: "desktop:open-plugin-web-app",
-  startPluginWebApp: "desktop:start-plugin-web-app",
-  setPluginWebAppBounds: "desktop:set-plugin-web-app-bounds",
-  stopPluginWebApp: "desktop:stop-plugin-web-app",
-  pluginWebAppFailed: "desktop:plugin-web-app-failed",
-  listPlugins: "desktop:list-plugins",
-  installPlugin: "desktop:install-plugin",
-  disablePlugin: "desktop:disable-plugin",
-  enablePlugin: "desktop:enable-plugin",
-  approvePlugin: "desktop:approve-plugin",
-  rebuildPlugin: "desktop:rebuild-plugin",
-  pluginUninstallPreflight: "desktop:plugin-uninstall-preflight",
-  pluginSizes: "desktop:plugin-sizes",
-  uninstallPlugin: "desktop:uninstall-plugin",
-  getPluginSettings: "desktop:get-plugin-settings",
-  setPluginSettings: "desktop:set-plugin-settings",
-  pluginStatusChanged: "desktop:plugin-status-changed",
-  pluginPanelSdkEvent: "desktop:plugin-panel-sdk-event",
+  sitePreviewReplaced: "desktop:site-preview-replaced",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",
@@ -274,7 +220,37 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  // The crash report changed; the renderer reads it again.
+  crashReportChanged: "desktop:crash-report-changed",
   noticesChanged: "desktop:notices-changed",
+  // Which of the owner's computers runs a workspace's schedules changed.
+  scheduleHostChanged: "desktop:schedule-host-changed",
+  // Collection automations: main parses and writes automations.yaml.
+  listCollectionAutomations: "desktop:list-collection-automations",
+  listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  retryCollectionAutomation: "desktop:retry-collection-automation",
+  undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
+  listAutomationTargets: "desktop:list-automation-targets",
+  checkCollectionAutomation: "desktop:check-collection-automation",
+  stopAndRestorePerson: "desktop:stop-and-restore-person",
+  undoStopAndRestore: "desktop:undo-stop-and-restore",
+  confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
+  writeCollectionAutomations: "desktop:write-collection-automations",
+  listAutomationHolds: "desktop:list-automation-holds",
+  resetAutomationHolds: "desktop:reset-automation-holds",
+  revealAutomationHolds: "desktop:reveal-automation-holds",
+  dismissAutomationStops: "desktop:dismiss-automation-stops",
+  automationShareImpact: "desktop:automation-share-impact",
+  automationHoldsChanged: "desktop:automation-holds-changed",
+  listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  collectionAutomationsChanged: "desktop:collection-automations-changed",
+  // Button fields: main decides who may press and what runs, and tells the
+  // pressing window how its run went.
+  listAutomationButtons: "desktop:list-automation-buttons",
+  listRecordButtons: "desktop:list-record-buttons",
+  pressAutomationButton: "desktop:press-automation-button",
+  automationRunSettled: "desktop:automation-run-settled",
+  automationRunWaiting: "desktop:automation-run-waiting",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
@@ -282,6 +258,8 @@ export const CHANNELS = {
   readShareProposalFileContent: "desktop:read-share-proposal-file-content",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
+  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   listMyShareChanges: "desktop:list-my-share-changes",
   withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",
@@ -325,14 +303,12 @@ export const CHANNELS = {
   presenceCancel: "desktop:presence-cancel",
   getSyncStatus: "desktop:get-sync-status",
   retryOwnerLiveDelivery: "desktop:retry-owner-live-delivery",
+  retryCloudSync: "desktop:retry-cloud-sync",
   rebuildEngineStore: "desktop:rebuild-engine-store",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",
   getAgentRunStatus: "desktop:get-agent-run-status",
   getMcpConfig: "desktop:get-mcp-config",
-  probeAgentDrivers: "desktop:probe-agent-drivers",
-  getAgentSessionState: "desktop:get-agent-session-state",
-  answerAgentPermission: "desktop:answer-agent-permission",
   stopAgentRun: "desktop:stop-chat-agent-run",
   resumeThreadDispatch: "desktop:resume-thread-dispatch",
   chatDispatchStateForThread: "desktop:chat-dispatch-state-for-thread",
@@ -342,6 +318,7 @@ export const CHANNELS = {
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
   reloadUserSettings: "desktop:reload-user-settings",
+  setAppPinned: "desktop:set-app-pinned",
   getUserSettingsFilePath: "desktop:get-user-settings-file-path",
   openUserSettingsFile: "desktop:open-user-settings-file",
   openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",

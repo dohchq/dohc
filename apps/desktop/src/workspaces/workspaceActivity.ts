@@ -163,11 +163,14 @@ export function createWorkspaceActivity(
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: conflictCount > 0,
+      // A retry someone asked for shows as syncing until it ends.
+      syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and
-      // prompts re-login, instead of spinning on a dead token.
-      cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
+      // prompts re-login, instead of spinning on a dead token. An engine
+      // stopped on the relay API version reads the same way.
+      cloudConnected: cloud.connected && !(snap?.authExpired ?? false) && !snap?.updateRequired,
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -178,11 +181,12 @@ export function createWorkspaceActivity(
     const baseStatus = {
       ...status,
       conflictCount,
+      ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
-      syncFailing: snap?.syncFailing ?? false,
+      ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
       liveSessionsGeneration,
     };
     if (historyCaptureFailure) {
@@ -197,6 +201,40 @@ export function createWorkspaceActivity(
       };
     }
     return baseStatus;
+  }
+
+  // Transition-only: the first failure raises the notice, the first success
+  // after a failure clears it, and repeated failures (a persistently broken
+  // store retries every batch) never re-notify. The refusal classification
+  // transitions the same way: a persistently refused store re-reports the
+  // same code on every pass.
+  function recordCaptureOutcome(
+    entry: WatchedWorkspace,
+    failure: "other" | EngineStoreRefusal | null,
+    detail: string | null,
+  ): void {
+    if (
+      entry.historyCaptureFailure === failure &&
+      entry.historyCaptureDetail === detail
+    ) {
+      return;
+    }
+    entry.historyCaptureFailure = failure;
+    entry.historyCaptureDetail = detail;
+    notify({ workspaceId: entry.workspace.workspaceId });
+  }
+
+  // A shared view has no recorder, so its refresh is what reaches the store.
+  // It reports the store's refusal here, or null once the store answered, so
+  // the same status stops the workspace.
+  function recordShareViewStoreRefusal(
+    state: WorkspaceActivityState,
+    refusal: EngineStoreRefusal | null,
+    detail: string | null,
+  ): void {
+    const entry = state.entry;
+    if (!entry?.historyShareView) return;
+    recordCaptureOutcome(entry, refusal, refusal === null ? null : detail);
   }
 
   async function open(
@@ -232,23 +270,8 @@ export function createWorkspaceActivity(
         try {
           const decision =
             await options.captureFor(workspace, {
-              onCaptureOutcome: (failure, detail = null) => {
-                // Transition-only: the first failure raises the notice, the
-                // first success after a failure clears it, and repeated
-                // failures (a persistently broken store retries every batch)
-                // never re-notify. The refusal classification transitions the
-                // same way: a persistently refused store re-reports
-                // the same code on every pass.
-                if (
-                  entry.historyCaptureFailure === failure &&
-                  entry.historyCaptureDetail === detail
-                ) {
-                  return;
-                }
-                entry.historyCaptureFailure = failure;
-                entry.historyCaptureDetail = detail;
-                notify({ workspaceId: workspace.workspaceId });
-              },
+              onCaptureOutcome: (failure, detail = null) =>
+                recordCaptureOutcome(entry, failure, detail),
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
@@ -451,6 +474,19 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queueSync();
   }
 
+  // The person asked to sync now, from a sync failure's Try again. Runs a
+  // pass without waiting out the backoff and settles when it ends; the
+  // outcome is in the status. No-op when the workspace has no engine.
+  function retryCloudSync(
+    state: WorkspaceActivityState,
+    reason: "person" | "reconnect",
+  ): Promise<void> {
+    return (
+      state.entry?.engine?.retryNow({ countsAsAttempt: reason === "person" }) ??
+      Promise.resolve()
+    );
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -531,6 +567,13 @@ export function createWorkspaceActivity(
     );
   }
 
+  // The chain depth an agent's writes declare while a run holds the slot:
+  // the run's depth, or 0 with no run. An agent writing through the CLI or
+  // MCP during the run writes at the run's depth, whichever agent it is.
+  function agentRunDepth(state: WorkspaceActivityState): number {
+    return state.entry?.agentRun?.depth ?? 0;
+  }
+
   // Registers engine-originated disk writes (restore flows, future engine
   // API/MCP writes) so the watcher's engine capture does not re-record them.
   // Returns null when the workspace has no active engine capture — callers
@@ -591,13 +634,16 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngine,
     getStatus,
+    recordShareViewStoreRefusal,
     isOpen,
     queueCloudSync,
+    retryCloudSync,
     queueCloudPull,
     setAgentRun,
     claimAgentRun,
     clearAgentRun,
     hasAgentRun,
+    agentRunDepth,
     engineCaptureFor,
     workspaceRootPath,
     registerExpectedEngineEvents,

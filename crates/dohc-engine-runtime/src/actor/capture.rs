@@ -24,7 +24,7 @@ use dohc_engine_domain::{
     ensure_main_version_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -443,14 +443,18 @@ fn capture_ingest_in_tx(
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
+    // A captured agent run declares itself as an agent at its run's depth.
+    let attribution = actor_origin_id.as_ref().and_then(|_| {
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref()).1
+    });
     let mut admitted = false;
-    let result = match batch.as_deref_mut() {
+    let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
             input,
             &mut batch.capture,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -459,7 +463,7 @@ fn capture_ingest_in_tx(
             tx,
             input,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -481,7 +485,7 @@ fn capture_ingest_in_tx(
             },
             None => true,
         };
-        if has_ydoc_state {
+        let changed = if has_ydoc_state {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
@@ -492,6 +496,31 @@ fn capture_ingest_in_tx(
                     text: &result.snapshot.text,
                 },
                 actor_origin_id.as_deref(),
+                attribution.as_ref(),
+                input.now_ms,
+            )?
+        } else {
+            // No Y.Doc lineage exists in this version, so the file alone
+            // carries the write.
+            dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+                actor_origin_id.as_deref(),
+                attribution.as_ref(),
+                input.now_ms,
+            )?
+        };
+        // A disk edit captured here is a change on this computer: claim the
+        // automations it triggers in the capture's own transaction.
+        if let Some(facts) = changed {
+            result.automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                tx,
+                &input.workspace_id,
+                &facts,
                 input.now_ms,
             )?;
         }
@@ -819,10 +848,8 @@ mod capture_batch_fast_path_tests {
         assert!(matches!(
             &results[1],
             Err(RuntimeError::Sync(
-                dohc_engine_sync::SyncError::RetryableState {
-                    reason: "ydoc-session-live"
-                }
-            ))
+                dohc_engine_sync::SyncError::RetryableState { reason }
+            )) if *reason == CAPTURE_NEW_FILE_LIVE
         ));
         assert!(results[2].is_ok(), "the final sibling must commit");
         let first_order = results[0]
@@ -922,7 +949,7 @@ fn capture_ingest_binary_on_store(
             tx,
             input,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -934,6 +961,7 @@ fn capture_ingest_binary_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 None,
                 input.now_ms,
             )?;
@@ -958,21 +986,34 @@ fn capture_ingest_binary_on_store(
 }
 
 fn ensure_capture_target_not_leased(
+    conn: &Connection,
     leases: &LeaseRegistry,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
 ) -> Result<(), RuntimeError> {
     let key = DocKey::new(workspace_id, version_id, object_id)?;
-    if leases.is_held(&key) {
-        return Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "ydoc-session-live",
-            },
-        ));
+    if !leases.is_held(&key) {
+        return Ok(());
     }
-    Ok(())
+    // A live session on a file the store has no head for yet: its settle
+    // creates the head, so capture can wait for it. A recorded head the
+    // session holds is refused as before.
+    let recorded = dohc_engine_domain::object_has_live_alias(conn, workspace_id, object_id)?;
+    Err(RuntimeError::Sync(
+        dohc_engine_sync::SyncError::RetryableState {
+            reason: if recorded {
+                "ydoc-session-live"
+            } else {
+                CAPTURE_NEW_FILE_LIVE
+            },
+        },
+    ))
 }
+
+/// The capture refusal for a new file whose live session holds it before the
+/// store has a head for it.
+pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
 
 fn capture_secret_on_store(
     store: &mut EngineStore,

@@ -143,12 +143,31 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   );
 }
 
+// The engine refused a request's input as its domain states it. The daemon
+// keeps the domain's reason to itself and sends only this discriminator, so
+// a caller reads it for a request whose only such refusal it knows.
+export function isInvalidInputRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "invalid-input";
+}
+
 export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }
 
 export function isYdocUnsettledCloseRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-unsettled-close";
+}
+
+// The write reused an idempotency key that already recorded other content.
+// The engine recorded nothing of it, and resending under that key cannot land.
+export function isIdempotencyKeyReuseRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "idempotency-key-reuse-mismatch";
+}
+
+// A reopen named the object it expected at a path, and the path now holds
+// another object (`ydoc-object-changed`, dohc-workspace-engine rpc/ydoc.rs).
+export function isYdocObjectChangedRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-object-changed";
 }
 
 // A live session already holds this document's lease, so the daemon refuses to
@@ -206,12 +225,13 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
-// The store refusals the desktop recovers from by moving the store aside.
-// Each is the storage crate's `code()` for the variant.
+// The store refusals the desktop names and recovers from. Each is the
+// storage crate's `code()` for the variant.
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
+  "migrated-by-newer-build",
 ] as const;
 export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 
@@ -320,7 +340,8 @@ export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
   );
 }
 
-const ERROR_CODES: readonly DaemonErrorCode[] = [
+// Every code the engine answers with. A crash report keeps only these.
+export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "AUTH_FAILED",
   "PROTOCOL_VERSION_UNSUPPORTED",
   "MALFORMED_FRAME",
@@ -376,7 +397,7 @@ function wireErrorFrom(error: unknown): DaemonWireError | null {
   const candidate = error.wireError;
   if (
     typeof candidate.code !== "string" ||
-    !ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
+    !DAEMON_ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
     typeof candidate.message !== "string" ||
     typeof candidate.retry !== "string" ||
     !RETRYABILITIES.includes(candidate.retry as Retryability)

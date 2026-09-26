@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
-import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
+import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PersistentRuntimeOptions, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
+import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const initial={revision:0,digest:hash("initial")};
@@ -25,13 +27,13 @@ function operation(expected=initial,input:PersistentPrepareInput["input"]={}):Pe
 function event(prepared:PreparedOperation, previous=initial) {
   return {proposalId:prepared.proposalId,previousDigest:previous.digest,revision:previous.revision+1,digest:hash(previous.digest+prepared.changesetSha256),changesetSha256:prepared.changesetSha256,changeset:prepared.changeset};
 }
-async function fixture(run:(context:{root:string;open:(input?:Partial<PersistentOpenInput>,launch?:AppRuntimeLauncher)=>Promise<PersistentAppBackend>})=>Promise<void>):Promise<void> {
+async function fixture(run:(context:{root:string;open:(input?:Partial<PersistentOpenInput>,launch?:AppRuntimeLauncher,runtime?:Omit<PersistentRuntimeOptions,"launch">)=>Promise<PersistentAppBackend>})=>Promise<void>):Promise<void> {
   const root=await mkdtemp(join(tmpdir(),"dohc-persistent-test-"));
   const workers:PersistentAppBackend[]=[];let sequence=0;
   try {
-    await run({root,async open(input={},launch){
+    await run({root,async open(input={},launch,runtime={}){
       const directory=join(root,String(++sequence));await mkdir(directory);
-      const worker=await openPersistentAppBackend({directory,schemaSql,tables:["items"],scope,cursor:initial,...input},{launch});
+      const worker=await openPersistentAppBackend({directory,schemaSql,tables:["items"],scope,cursor:initial,...input},{...runtime,launch});
       workers.push(worker);return worker;
     }});
   } finally {
@@ -39,8 +41,40 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
     await rm(root,{recursive:true,force:true,maxRetries:8,retryDelay:25});
   }
 }
+// Runs a stand-in script instead of the worker and reports the signal that ended it.
+function scriptLauncher(script:string,ended:(signal:NodeJS.Signals|null)=>void=()=>{}):AppRuntimeLauncher {
+  return options=>{
+    const child=spawn(process.execPath,["-e",script],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],windowsHide:true});
+    child.on("message",options.onMessage);child.on("error",options.onError);
+    child.on("close",(code,signal)=>{ended(signal);options.onExit(code);});
+    return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+  };
+}
 
 describe("persistent dataset worker",()=>{
+  it("keeps an over-budget step armed when it finishes before the watch polls",()=>{
+    const state=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8));
+    const section=armBudget(state,1n,10_000n,1_000n);
+    expect(disarmBudget(state,section,12_000n)).toBe(false);
+    expect(Atomics.load(state,0)).toBe(section);
+  });
+  it("fails the open when the worker exits before it is ready",async()=>{
+    await fixture(async({open})=>{
+      await expect(open({},scriptLauncher("process.exit(1)"))).rejects.toMatchObject({code:"worker_stopped"});
+    });
+  });
+  it("kills a worker that is still starting when opening is cancelled",async()=>{
+    await fixture(async({open})=>{
+      const controller=new AbortController();
+      let ended!:(signal:NodeJS.Signals|null)=>void;
+      const exit=new Promise<NodeJS.Signals|null>(resolve=>{ended=resolve;});
+      const launch=scriptLauncher("setInterval(()=>{},60_000)",ended);
+      // The stand-in never sends ready, so only the cancellation can end this open before the 30 s startup limit.
+      const opening=open({signal:controller.signal},options=>{const child=launch(options);setImmediate(()=>controller.abort(new Error("Opening was cancelled.")));return child;});
+      await expect(opening).rejects.toThrow("Opening was cancelled.");
+      expect(await exit).toBe("SIGKILL");
+    });
+  });
   it("releases its private directory before the closed worker process exits",async()=>{
     await fixture(async({root,open})=>{
       const directory=join(root,"removable");await mkdir(directory);
@@ -77,11 +111,11 @@ describe("persistent dataset worker",()=>{
       try {
         const directory=await owner.createDirectory();
         const worker=await open({directory,ownership:{root:owner.root,session:owner.session}});
-        await expect(owner.removeDirectory(directory)).rejects.toThrow("ownership is busy");
+        await expect(owner.removeDirectory(directory)).rejects.toThrow("Another copy of dohc is using this Collection folder");
         await worker.close();
         await owner.removeDirectory(directory);
         const next=await owner.createDirectory();
-        await expect(open({directory:next,ownership:{root:owner.root,session:"00000000-0000-0000-0000-000000000000"}})).rejects.toThrow("expired host session");
+        await expect(open({directory:next,ownership:{root:owner.root,session:"00000000-0000-0000-0000-000000000000"}})).rejects.toThrow("earlier dohc session");
         await owner.removeDirectory(next);
       }finally{owner.close();}
     });
@@ -155,6 +189,15 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("stops an operation at its memory limit and keeps serving the dataset",async()=>{
+    await fixture(async({open})=>{
+      const worker=await open();
+      const hoard="globalThis.operations={run(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}";
+      await expect(worker.prepare({...operation(),source:hoard})).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+      expect((await worker.prepare(operation(initial,{id:1,value:"after"}))).result).toEqual([{id:1,value:"after"}]);
+    });
+  });
+
   it("replays committed changesets without evaluating source and refuses out-of-order events",async()=>{
     await fixture(async({open})=>{
       const writer=await open(),recovered=await open();
@@ -210,6 +253,41 @@ describe("persistent dataset worker",()=>{
         } finally {session.close();}
       } finally {untrusted.close();}
       expect((await worker.prepare({...operation(),readOnly:true})).result).toEqual([]);
+    });
+  });
+
+  it("refuses SQL with no statement, which would crash the worker process",async()=>{
+    await fixture(async({open})=>{
+      // node:sqlite in Node 24.16 crashes the process after it prepares text with no statement between failed prepares.
+      let exited!:(status:[number|null,NodeJS.Signals|null])=>void;
+      const exit=new Promise<[number|null,NodeJS.Signals|null]>(resolve=>{exited=resolve;});
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",options.onMessage);child.on("error",options.onError);
+        child.on("close",(code,signal)=>{exited([code,signal]);options.onExit(code);});
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({},launch);
+      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1",
+        "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"];
+      // Each input's own outcome, so one that reaches SQLite shows. Five rounds of 24 queries stay under the 128-statement limit.
+      const source=`globalThis.operations={run(ctx){
+        const inputs=${JSON.stringify(empty)}, outcomes=inputs.map(()=>[]);
+        for(let round=0;round<5;round++) inputs.forEach((sql,index)=>{
+          try { (round%2 ? ctx.db.execute : ctx.db.query)(sql); outcomes[index].push('prepared'); }
+          catch (error) { outcomes[index].push(error.message); }
+          try { ctx.db.query('SELECT missing FROM items'); } catch {}
+        });
+        return outcomes;
+      }}`;
+      const results=[];
+      for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
+      await worker.close();
+      const [code,signal]=await exit;
+      // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
+      expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
+      const refused=Array.from({length:5},()=>"SQL statement is empty.");
+      expect(results).toEqual(Array.from({length:4},()=>empty.map(()=>refused)));
     });
   });
 
@@ -378,12 +456,12 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("kills a migration that exceeds its native SQL deadline without changing the live database",async()=>{
+  it("ends a migration whose native SQL exceeds its CPU budget without changing the live database",async()=>{
     await fixture(async({root,open})=>{
-      const worker=await open({limits:{deadlineMs:1000}});
+      const worker=await open({limits:{cpuBudgetMs:1000}});
       await expect(worker.migrateCheckpoint({path:join(root,"timeout.sqlite"),schemaSql,tables:["items"],
         migrationSql:"INSERT INTO items VALUES(1,'copy only'); WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count;"}))
-        .rejects.toMatchObject({code:"worker_deadline"});
+        .rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const live=new DatabaseSync(join(root,"1","app.sqlite"));
       try {
@@ -394,12 +472,13 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("kills native SQL at its deadline and requires journal recovery instead of silently restarting",async()=>{
+  it("ends native SQL at its CPU budget and requires journal recovery instead of silently restarting",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000,evaluationMs:100}});
+      const worker=await open({limits:{cpuBudgetMs:1000,evaluationMs:100}});
       const expensive={...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`};
-      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_deadline"});
-      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_deadline"});
+      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again."});
+      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const recovered=await open();
       expect((await recovered.prepare({...operation(),readOnly:true})).result).toEqual([]);
@@ -408,16 +487,139 @@ describe("persistent dataset worker",()=>{
 
   it("bounds queued work and expires queued operations without consuming their execution budget",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000},queueDeadlineMs:40});
+      const worker=await open({limits:{cpuBudgetMs:1000},queueDeadlineMs:40});
       for(let index=0;index<70;index++) await expect(worker.prepare(operation(initial,{value:"x".repeat(70_000)}))).rejects.toThrow();
       const active=worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`}).catch(error=>error);
       const queued=Array.from({length:64},()=>worker.prepare({...operation(),readOnly:true}).catch(error=>error));
       const results=await Promise.all(queued);
       expect(results.filter(result=>result.code==="queue_full")).toHaveLength(1);
       expect(results.filter(result=>result.code==="queue_deadline")).toHaveLength(63);
-      expect(await active).toMatchObject({code:"worker_deadline"});
+      expect(await active).toMatchObject({code:"worker_budget"});
     });
   });
+
+  // Short SQLite work can register zero CPU ticks on a loaded Windows host.
+  // Compute a costly index per row so replay and integrity checks exceed that granularity.
+  const cpuBudgetSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.200000c',value)));";
+
+  it("charges a journal replay's app work to the CPU budget",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open({schemaSql:cpuBudgetSchema});
+      const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
+      const committed=event(prepared);
+      await expect((await open({schemaSql:cpuBudgetSchema,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 ms of CPU time while reapplying a saved change. Try again."});
+      await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
+    });
+  },60_000);
+
+  // Each row costs this index about 10 µs of CPU to compute.
+  const heavySchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.20000c',value)));";
+  const insertRows=(from:number,to:number)=>`globalThis.operations={run(ctx){
+    ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(${from}) UNION ALL SELECT x+1 FROM n WHERE x<${to}) SELECT x FROM n)");return 1}}`;
+
+  it("ends a dataset check at its own CPU budget and names it",async()=>{
+    await fixture(async({root,open})=>{
+      const writer=await open({schemaSql:cpuBudgetSchema});
+      const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,20_000)})));
+      const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
+      // The integrity check at open computes the index for every row.
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
+        message:expect.stringMatching(/^dohc's checks of this Collection ran too long: they used more than \d+ ms of CPU time while checking the tables\. Try again\.$/)});
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor})).resolves.toBeDefined();
+    });
+  },60_000);
+
+  it("gives each replayed event of a batch the whole CPU budget",async()=>{
+    await fixture(async({open})=>{
+      // An event costs about a tenth of the budget below, and the batch's
+      // sixteen events together exceed it.
+      const writer=await open({schemaSql:heavySchema});
+      const events=[];let cursor=initial;
+      for(let index=0;index<16;index++) {
+        const committed=event(await writer.prepare({...operation(cursor),source:insertRows(index*10_000+1,(index+1)*10_000)}),cursor);cursor=await writer.finalize(committed);events.push(committed);
+      }
+      await expect((await open({schemaSql:heavySchema,limits:{cpuBudgetMs:1000}})).applyBatch(events)).resolves.toMatchObject({revision:16});
+    });
+  },60_000);
+
+  it("keeps a dataset check's quiet window through its row reports",async()=>{
+    await fixture(async({root,open})=>{
+      const uniqueSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);";
+      const writer=await open({schemaSql:uniqueSchema});
+      const filled=await writer.finalize(event(await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("INSERT INTO items SELECT x, 'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n)");return 1}}`})));
+      const checkpointPath=join(root,"filled.sqlite");await writer.snapshot(checkpointPath);
+      // Swapping two unique values replays through the shadow copy, which rebuilds every row.
+      const swap=event(await writer.prepare({...operation(filled),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("UPDATE items SET value='temp' WHERE id=1");ctx.db.execute("UPDATE items SET value='v1' WHERE id=2");ctx.db.execute("UPDATE items SET value='v2' WHERE id=1");return 1}}`}),filled);
+      await writer.finalize(swap);
+      const reports:{progress:string;cpuBudgetMs?:number}[]=[];
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",message=>{
+          const report=message as {progress?:unknown;cpuBudgetMs?:number};
+          if(typeof report.progress==="string") reports.push({progress:report.progress,cpuBudgetMs:report.cpuBudgetMs});
+          options.onMessage(message);
+        });
+        child.on("error",options.onError);child.on("close",options.onExit);
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      await (await open({schemaSql:uniqueSchema,checkpointPath,cursor:filled},launch)).apply(swap);
+      const rebuilding=reports.filter(report=>report.progress==="rebuilding the dataset from the replay copy");
+      // The step starts, its check starts, rows 1,000 and 2,000 report, and the check ends.
+      expect(rebuilding.map(report=>report.cpuBudgetMs===undefined)).toEqual([true,false,false,false,true]);
+    });
+  },60_000);
+
+  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
+    // Windows has no stop signal. PowerShell compiles its calls before the
+    // operation starts, so each later request lands in milliseconds.
+    const suspender=process.platform==="win32" ? spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",
+      `Add-Type -Namespace W -Name P -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);';
+      [Console]::Out.WriteLine('ready'); while(($line=[Console]::In.ReadLine()) -ne $null){ $verb,$id=$line.Split(' '); $handle=(Get-Process -Id $id).Handle;
+      if($verb -eq 'Suspend'){[void][W.P]::NtSuspendProcess($handle)}else{[void][W.P]::NtResumeProcess($handle)}; [Console]::Out.WriteLine('done') }`],
+    {windowsHide:true,stdio:["pipe","pipe","ignore"]}) : undefined;
+    const lines=suspender ? createInterface({input:suspender.stdout!})[Symbol.asyncIterator]() : undefined;
+    const answer=async(expected:string)=>{const line=await lines!.next();if(line.value!==expected) throw new Error(`The suspender said ${String(line.value)}.`);};
+    try {
+      if(suspender) await answer("ready");
+      await fixture(async({open})=>{
+        let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
+        const signal=async(verb:"Suspend"|"Resume")=>{
+          if(!suspender){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
+          suspender.stdin!.write(`${verb} ${pid}\n`);await answer("done");
+        };
+        const launch:AppRuntimeLauncher=options=>{
+          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+          pid=child.pid!;
+          child.on("message",message=>{
+            const reply=message as {progress?:string;ok?:boolean};
+            // The app code section starts right after this report: stop the worker inside it.
+            if(reply.progress==="running the Collection action" && !stall) stall=(async()=>{
+              await signal("Suspend");suspendedAt=performance.now();
+              await new Promise(resolve=>setTimeout(resolve,6_000));
+              resumedAt=performance.now();await signal("Resume");
+            })();
+            if(typeof reply.ok==="boolean") repliedAt=performance.now();
+            options.onMessage(message);
+          });
+          child.on("error",options.onError);child.on("close",options.onExit);
+          return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+        };
+        // This test is about the CPU budget, not the silence watchdog: under a loaded gate the 6 s stop plus the
+        // query can pass 30 s without a progress report. 50 s stays inside the test's 60 s limit, so a real stall still fails.
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:50_000});
+        // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
+        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
+        await stall;
+        expect(prepared.result).toEqual([{total:50000005000000}]);
+        // Stopped for 6 s inside a 5 s budget, and not charged for it.
+        expect(suspendedAt).toBeGreaterThan(0);
+        expect(repliedAt).toBeGreaterThan(resumedAt);
+      });
+    } finally {suspender?.stdin!.end();}
+  },60_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{
@@ -425,7 +627,7 @@ describe("persistent dataset worker",()=>{
       const launch:AppRuntimeLauncher=options=>{
         const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
         child.on("message",message=>{
-          if((message as {id:number}).id===finalizeId) child.kill("SIGKILL");
+          if(finalizeId!==undefined && (message as {id?:number}).id===finalizeId) child.kill("SIGKILL");
           else options.onMessage(message);
         });
         child.on("error",options.onError);child.on("close",options.onExit);

@@ -18,6 +18,7 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostCommitMaterializeOutcome {
@@ -55,6 +56,20 @@ impl ActorHandle {
         workspace_id: String,
         now_ms: i64,
     ) -> Result<usize, RuntimeError> {
+        self.materialize_replay_pending_counting(root_dir, workspace_id, now_ms, None)
+            .await
+    }
+
+    /// [`Self::materialize_replay_pending`], counting into `progress` each job
+    /// the replay takes on. The whole replay is one actor command, so without
+    /// this a long replay moves no counter until it ends.
+    pub async fn materialize_replay_pending_counting(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        now_ms: i64,
+        progress: Option<Arc<AtomicU64>>,
+    ) -> Result<usize, RuntimeError> {
         self.run(move |store, _cache| {
             // Open-time replay runs before the files layer starts. The
             // switch path calls the same tolerant per-job executor with a
@@ -65,6 +80,7 @@ impl ActorHandle {
                 MaterializationReplayScope {
                     workspace_id: &workspace_id,
                     self_writes: None,
+                    progress: progress.as_deref(),
                 },
                 now_ms,
                 &NoFaults,
@@ -94,6 +110,7 @@ impl ActorHandle {
                 MaterializationReplayScope {
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
+                    progress: None,
                 },
                 now_ms,
                 &NoFaults,
@@ -131,6 +148,7 @@ impl ActorHandle {
                 MaterializationReplayScope {
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
+                    progress: None,
                 },
                 now_ms,
                 &NoFaults,
@@ -348,6 +366,9 @@ pub(super) struct MaterializationReplaySummary {
 pub(super) struct MaterializationReplayScope<'a> {
     pub(super) workspace_id: &'a str,
     pub(super) self_writes: Option<&'a dyn SelfWriteRecorder>,
+    /// Counts each job this replay takes on, so a caller waiting on a long
+    /// replay can tell it from a stuck one.
+    pub(super) progress: Option<&'a AtomicU64>,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -516,6 +537,9 @@ pub(super) fn replay_pending_materializations(
             continue;
         }
         summary.selected_seen += usize::from(selected.is_some());
+        if let Some(progress) = scope.progress {
+            progress.fetch_add(1, Ordering::Relaxed);
+        }
         let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
         let ordinary_secret = job.job_id.starts_with("secret-mat_");
         if switch_secret || ordinary_secret {
@@ -743,7 +767,8 @@ pub(super) fn replay_pending_materializations(
                         store.write_with(&NoFaults, |transaction| {
                             transaction
                                 .execute(
-                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4 \
+                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, \
+                                     settled_update_seq = NULL, updated_at_ms = ?4 \
                                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                                     params![workspace_id, version_id, object_id, now_ms],
                                 )

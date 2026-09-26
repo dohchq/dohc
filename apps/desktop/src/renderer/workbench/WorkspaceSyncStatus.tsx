@@ -1,10 +1,12 @@
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
+// A pass in flight is syncing, never saving: the files are already on disk.
 const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   synced: "Local · saved",
-  syncing: "Saving…",
+  syncing: "Syncing…",
   "local-changes": "Local changes",
   conflict: "Conflict",
+  "sync-failed": "Sync failed",
   "cloud-disconnected": "Server disconnected",
 };
 
@@ -13,7 +15,14 @@ const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
   syncing: "bg-warning",
   "local-changes": "bg-warning",
   conflict: "bg-danger",
+  "sync-failed": "bg-danger",
   "cloud-disconnected": "bg-subtle",
+};
+
+// Sync stopped until one side updates, so the title bar names that side.
+export const UPDATE_REQUIRED_LABEL: Record<NonNullable<SyncStatusResult["updateRequired"]>, string> = {
+  app: "Update dohc to sync",
+  server: "Server needs an update",
 };
 
 // Owner live delivery is its own fact, beside the local save state and never
@@ -35,9 +44,20 @@ export function WorkspaceSyncStatus({ syncStatus }: {
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
-  const label = state
-    ? `${SYNC_LABEL[state]}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
+  // A failed sync names the server when the server is what failed.
+  const stateLabel =
+    state === "sync-failed" &&
+    syncStatus?.syncFailure?.cause === "server-unreachable"
+      ? "Server unreachable"
+      : state
+        ? SYNC_LABEL[state]
+        : null;
+  const label = stateLabel
+    ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
+  const shownLabel = syncStatus?.updateRequired
+    ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
+    : label;
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.
   const liveDelivery = syncStatus?.ownerLiveDelivery;
@@ -50,12 +70,12 @@ export function WorkspaceSyncStatus({ syncStatus }: {
         data-testid="sync-status"
         data-state={state ?? "unknown"}
         role="status"
-        aria-label={label}
-        title={label}
+        aria-label={shownLabel}
+        title={shownLabel}
         className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted"
       >
         <span aria-hidden className={`inline-block size-1.5 rounded-full ${state ? SYNC_DOT[state] : "bg-subtle"}`} />
-        <span>{label}</span>
+        <span>{shownLabel}</span>
       </span>
       {liveDelivery && liveLabel ? (
         <span

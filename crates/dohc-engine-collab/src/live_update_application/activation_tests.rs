@@ -134,6 +134,48 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
     assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
+/// An imported document whose file keeps a body the engine's reader holds as
+/// text, such as a nested list, activates: activation compares the version's
+/// file with the projection the store settles, not the strict one.
+#[test]
+fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
+    const NESTED: &str = "# Shared\n\n- parent\n  - nested\n";
+    let mut f = imported_fixture();
+    f.doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, NESTED)
+        .unwrap();
+    let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+    assert_ne!(projection, NESTED);
+    assert_eq!(f.doc.preserved_markdown_source(&projection), None);
+    let update = f.doc.encode_full_state();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            durable::record_update_in_tx(tx, &f.key, &update, None, None, 4)
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "owner.md".into(),
+                text: NESTED.into(),
+                moment_id: "imported-nested".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(captured.source.source_digest, hex_sha256(NESTED.as_bytes()));
+}
+
 #[test]
 fn owner_adoption_publication_failure_rolls_back_and_replay_skips_publication() {
     let mut f = Fixture::new();
@@ -347,7 +389,7 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
         |_, _, _, _| Ok(()),
     )
     .unwrap();
-    assert!(matches!(applied, ApplicationResult::Applied(_)));
+    assert!(matches!(applied, ApplicationResult::Applied(..)));
     owner_outbox::acknowledge(
         &mut f.store,
         "workspace",

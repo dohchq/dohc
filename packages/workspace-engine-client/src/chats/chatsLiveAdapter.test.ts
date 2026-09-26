@@ -1347,3 +1347,67 @@ it("decodes agent owner display metadata without changing its verified author", 
   });
   expect(message).toMatchObject({ author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Ada", authorUserId: "owner-id" });
 });
+
+describe("automation authors", () => {
+  it("posts with the executor's ids, key, and automation, and reads the automation back", async () => {
+    const requests: Request[] = [];
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Trip" });
+    const recording = new ChatsLiveAdapter(
+      { sendRequest: (request) => { requests.push(request); return loopback.sendRequest(request); }, close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "automation" as const, displayName: "Stamp the finish date" };
+    const started = await recording.startChannelThread({
+      workspaceId: "workspace", channelId: "channel", threadId: "thread-auto", messageId: "message-auto-1",
+      idempotencyKey: "claim/step/post", automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 },
+      author, authorOwnerDisplayName: "Ice", body: "Finished Book hotel",
+    });
+    expect(requests.at(-1)).toMatchObject({
+      idempotencyKey: "claim/step/post",
+      params: { threadId: "thread-auto", messageId: "message-auto-1", authorKind: "automation", authorOwnerDisplayName: "Ice",
+        automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 } },
+    });
+    expect(started.message).toMatchObject({ id: "message-auto-1", author, authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" } });
+    const reply = await recording.sendMessage({
+      workspaceId: "workspace", threadId: "thread-auto", messageId: "message-auto-2", idempotencyKey: "claim/step2/post",
+      automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 2 }, author, body: "Again",
+    });
+    expect(requests.at(-1)).toMatchObject({ idempotencyKey: "claim/step2/post", params: { messageId: "message-auto-2" } });
+    expect(reply.automation).toEqual({ automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" });
+    expect((await adapter.listMessages({ workspaceId: "workspace", threadId: "thread-auto" })).map((message) => message.automation?.collectionPath))
+      .toEqual(["Trip/Tasks", "Trip/Tasks"]);
+    // Without ids, the adapter still mints them.
+    const minted = await adapter.sendMessage({ workspaceId: "workspace", threadId: "thread-auto", author: { kind: "human", displayName: "Ice" }, body: "Thanks" });
+    expect(minted.id).toMatch(/^message-/u);
+    expect(minted.automation).toBeUndefined();
+  });
+
+  it("refuses an automation author without its automation, and an automation on anyone else", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Trip" });
+    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+      author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
+    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+      automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 },
+      author: { kind: "human", displayName: "Ice" }, body: "Done" })).rejects.toThrow("invalid-input");
+    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+      automation: { automationId: "other:hello/triage", chainDepth: 1 },
+      author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
+  });
+
+  it("decodes automation message and mention authors, and refuses an automation reaction author", () => {
+    const message = decodeChatsResult(CHATS_METHOD.messageSend, {
+      id: "message", workspaceId: "workspace", threadId: "thread",
+      author: { kind: "automation", displayName: "Stamp the finish date" }, authorOwnerDisplayName: "Ice", authorUserId: "ice",
+      body: "Done", createdAtMs: 1, attachments: [], automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+    });
+    expect(message.author.kind).toBe("automation");
+    expect(() => decodeChatsResult(CHATS_METHOD.reactionSet, {
+      reactionId: "reaction", threadId: "thread", messageId: "message", emoji: "👍",
+      author: { authorId: "ice", kind: "automation", displayName: "Stamp the finish date" }, state: "added", atMs: 1,
+    })).toThrow(ProtocolShapeError);
+  });
+});

@@ -8,9 +8,10 @@ import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
-import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { parseDatasetDefinition, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import type { DatasetAutomationClaim, DatasetAutomationSubscription, DatasetPressed, DatasetPressInput } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { resolveCompatibleDatasetRevision, createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
+import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
@@ -21,10 +22,20 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
+import { hasGeneratedDatasetOperations } from "./datasetGenerator";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
-type LocalContext = OwnerContext | LocalDatasetAppContext;
+/**
+ * One automation run's authority on this computer's datasets: the owner's
+ * operations, attributed to the automation. Only main creates one, through
+ * the host, and the host object never leaves main. `depth` is the chain depth
+ * its writes declare, one more than the claim that started the run.
+ */
+export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
+/** The owner's agent in a run an automation started: the owner's authority, at the run's chain depth. */
+type AgentContext = { readonly agentDepth: number };
+type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
 export interface LocalDatasetHostOptions {
   workspaceId: string;
@@ -41,6 +52,10 @@ export interface LocalDatasetHostOptions {
   capacityBytes?: number;
   /** File associations must use this database and transaction, never a later write. */
   resources?(storage: { db: JournalDb; transaction: <T>(run: () => T) => T }): Resources;
+  /** A commit made automation claims. A hint for the executor, which also drains at open. */
+  onAutomationClaims?(): void;
+  /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
+  onDatasetsChanged?(): void;
 }
 export interface LocalDatasetPreparation {
   preparationId: string;
@@ -55,6 +70,12 @@ export interface LocalDatasetInvocation {
   input: JsonValue;
   idempotencyKey: string;
   signal?: AbortSignal;
+  /**
+   * Set by main for the owner's agent in a run an automation started: the
+   * chain depth the run's writes declare, so the claims its commit makes
+   * carry the chain on.
+   */
+  agentDepth?: number;
 }
 export interface LocalDatasetUpload {
   datasetId: string;
@@ -112,6 +133,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   // Owner retries must retain their identity when a fenced local dataset moves to the relay.
   // The workspace owns this identity, so it does not depend on a device or account session.
   const ownerId = digest(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
+  // Each automation's retries keep their own identity, derived from the workspace like the owner's.
+  const automationKey = (automationId: string) => digest(JSON.stringify(["dohc-dataset-automation-v1", workspaceId, automationId]));
+  const automationContexts = new WeakSet<LocalDatasetAutomationContext>();
+  const agentContexts = new WeakSet<AgentContext>();
+  // The owner, or the owner's agent: both reach every file the owner can.
+  const ownerAuthority = (context: LocalContext) => context === owner || agentContexts.has(context as AgentContext);
   const pending = new Map<string, { preparation: LocalDatasetPreparation; schemaSql: string; operationSource: string; expires: number }>();
   function assertCurrent() {
     if (closed) throw new Error("This Collection session ended. Reopen the workspace.");
@@ -161,9 +188,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerDirectory = join(directory, "workers");
     await mkdir(workerDirectory).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
     const workerStat = await lstat(workerDirectory);
-    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
+    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("dohc cannot use the folder that holds this workspace's Collections. It must be a folder, not a link.");
     let resources:Resources|undefined;
-    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers,
+    // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
+    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
     resources = options.resources?.({ db, transaction });
@@ -180,6 +208,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     let apps: ReturnType<typeof createLocalDatasetApps>;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
+      wakeAutomations: () => { if (!closed) options.onAutomationClaims?.(); },
       recovery: {
         directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
         install: { allowOwnerRecoveryClaim: true, account(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },
@@ -221,9 +250,14 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       resolveAuthority(context, request) {
         assertCurrent();
-        if (context !== owner) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
+        const automation = automationContexts.has(context as LocalDatasetAutomationContext) ? context as LocalDatasetAutomationContext : null;
+        const agent = agentContexts.has(context as AgentContext) ? context as AgentContext : null;
+        if (context !== owner && automation === null && agent === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
-        return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
+        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agentDepth } };
+        if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
+        return { caller: { kind: "owner", userId: ownerId }, principalKey: automationKey(automation.automationId),
+          automation: { automationId: automation.automationId, depth: automation.depth } };
       },
       async compileOperations(source, sourcePath) {
         const compiled = await compile(source, sourcePath, lifetime.signal);
@@ -232,6 +266,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       accountCreation(context, allocation) { charge(allocation.datasetId,allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       accountMetadata(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },
+      accountAutomations(allocation) { charge(allocation.datasetId,allocation.bytes); },
       accountMigration(context, allocation) { charge(allocation.datasetId,allocation.bytes); return resources?.accountMigration?.(context, allocation); },
       accountCheckpointStage(context, allocation) { charge(allocation.scope.datasetId,allocation.bytes); return resources?.accountCheckpointStage?.(context, allocation); },
       deleteResources(_context, key) {
@@ -256,7 +291,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const files: AppBackendFile[] = [];
         for (const fileId of ids) {
           const row = db.prepare("SELECT metadata,key,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)").get(workspaceId, request.datasetId, fileId, Date.now());
-          if (row && (context === owner || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
+          if (row && (ownerAuthority(context) || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
         }
         if (files.length > APP_BACKEND_OPERATION_FILES) throw new Error(`A Collection action can attach at most ${APP_BACKEND_OPERATION_FILES} files.`);
         const capturedFiles = new Set(files.map(file => file.fileId));
@@ -265,7 +300,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           for (const fileId of allocation.attachedFileIds) {
             if (!capturedFiles.has(fileId)) throw new Error("This Collection file is unavailable.");
             const current=db.prepare("SELECT key FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId,request.datasetId,fileId);
-            if (!current || (context !== owner && JSON.parse(String(current.key))[2] !== request.authority.principalKey)) throw new Error("This Collection file is unavailable.");
+            if (!current || (!ownerAuthority(context) && JSON.parse(String(current.key))[2] !== request.authority.principalKey)) throw new Error("This Collection file is unavailable.");
             const changed = db.prepare("UPDATE local_dataset_files SET attached_revision=coalesce(attached_revision,?) WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)")
               .run(allocation.revision, workspaceId, request.datasetId, fileId, Date.now());
             if (changed.changes !== 1) throw new Error("This Collection file expired. Upload it again.");
@@ -333,16 +368,24 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     function invoke(input: LocalDatasetInvocation, readOnly?: boolean): Promise<DatasetInvocationResult> {
       return tracked(async () => {
         checkInvocation(input, readOnly);
-        return host.invoke(owner, {workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256, operationId: input.operationId, input: input.input,
+        const context = input.agentDepth ? agentContext(input.agentDepth) : owner;
+        return host.invoke(context, {workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256, operationId: input.operationId, input: input.input,
           idempotencyKey: input.idempotencyKey, signal: signal(input.signal)});
       });
     }
+    function agentContext(agentDepth: number): AgentContext {
+      const context = Object.freeze({ agentDepth });
+      agentContexts.add(context);
+      return context;
+    }
     const recovery = createLocalDatasetRecovery({workspaceId,directory:exportDirectory,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
       prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
+    // After a change to which rules a dataset runs, or whether it runs.
+    const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
-      approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })); },
+      approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })).then(changed); },
       discardMigration: migrations.discardMigration,
 
       discard(preparationId: string) { assertCurrent(); pending.delete(preparationId); },
@@ -352,18 +395,18 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           if (!captured || captured.expires < Date.now() || captured.preparation.revision.revisionSha256 !== input.revisionSha256) throw new Error("This Collection approval expired or changed. Prepare it again.");
           const approved = await host.activate(owner, {workspaceId, revision: captured.preparation.revision, schemaSql: captured.schemaSql,
             operationSource: captured.operationSource, capacityBytes: options.capacityBytes, signal: signal(input.signal)});
-          pending.delete(input.preparationId); return approved;
+          pending.delete(input.preparationId); return changed(approved);
         });
       },
       list(input: {after?: string; limit?: number; includeArchived?: boolean} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
       describe(datasetId: string, input: { includeArchived?: boolean } = {}) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId, ...input}); },
       lifecycle(input: { datasetId: string; after?: string; limit?: number }) { assertCurrent(); return host.lifecycle(owner, { workspaceId, ...input }); },
-      archive(input: { datasetId: string }) { assertCurrent(); return host.archiveDataset(owner, { workspaceId, datasetId: input.datasetId }); },
-      restore(input: { datasetId: string }) { assertCurrent(); return host.restoreDataset(owner, { workspaceId, datasetId: input.datasetId }); },
+      archive(input: { datasetId: string }) { assertCurrent(); return changed(host.archiveDataset(owner, { workspaceId, datasetId: input.datasetId })); },
+      restore(input: { datasetId: string }) { assertCurrent(); return changed(host.restoreDataset(owner, { workspaceId, datasetId: input.datasetId })); },
       deletePreview(input: { datasetId: string; after?: string; limit?: number }) { assertCurrent(); return host.deletePreview(owner,{workspaceId,...input}); },
       deletionStatus(input: { datasetId: string }) { assertCurrent(); return host.deletionStatus(owner,{workspaceId,...input}); },
       deleteDataset(input: { datasetId: string; expected: import("@dohc/app-backend-runtime/journal").DatasetCursor; reviewToken: string; acknowledge: true }) {
-        return tracked(() => host.deleteDataset(owner,{workspaceId,...input}));
+        return tracked(() => host.deleteDataset(owner,{workspaceId,...input})).then(changed);
       },
       pendingAttempts(input: { datasetId: string; after?: number; limit?: number }) { assertCurrent(); return host.pendingAttempts(owner, { workspaceId, ...input }); },
       reconcileAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.reconcileAttempt(owner, { workspaceId, ...input }); },
@@ -372,10 +415,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
-      claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)); },
+      claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)).then(changed); },
       discardRecovery(transferId: string) { return tracked(() => recovery.discard(transferId)); },
       prepareMigrationCandidate(input: Parameters<typeof host.prepareMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.prepareMigration(owner, { ...input, signal: signal(input.signal) })); },
-      approveMigrationCandidate(input: Parameters<typeof host.approveMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.approveMigration(owner, { ...input, signal: signal(input.signal) })); },
+      approveMigrationCandidate(input: Parameters<typeof host.approveMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.approveMigration(owner, { ...input, signal: signal(input.signal) })).then(changed); },
       migrationPreviewPage(input: Parameters<typeof host.migrationPreviewPage>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(async () => host.migrationPreviewPage(owner, { ...input, signal: signal(input.signal) })); },
       discardMigrationCandidate(input: Parameters<typeof host.discardMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(async () => host.discardMigration(owner, { ...input, signal: signal(input.signal) })); },
       prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {
@@ -386,7 +429,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }));
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
@@ -431,6 +474,94 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       invoke: (input: LocalDatasetInvocation) => invoke(input),
       query: (input: LocalDatasetInvocation) => invoke(input, true),
       action: (input: LocalDatasetInvocation) => invoke(input, false),
+      /** For main's automation executor only. Claims are this workspace's, from the host's ledger. */
+      automations: {
+        context(input: { automationId: string; claimId: string; depth: number }): LocalDatasetAutomationContext {
+          assertCurrent();
+          const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth });
+          automationContexts.add(context);
+          return context;
+        },
+        invoke(context: LocalDatasetAutomationContext, input: LocalDatasetInvocation): Promise<DatasetInvocationResult> {
+          return tracked(async () => {
+            checkInvocation(input);
+            return host.invoke(context, { workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256,
+              operationId: input.operationId, input: input.input, idempotencyKey: input.idempotencyKey, signal: signal(input.signal) });
+          });
+        },
+        /** Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read. */
+        datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> } {
+          assertCurrent();
+          const definitions: DatasetDefinition[] = [], failures: Array<{ datasetId: string; error: unknown }> = [];
+          // Each dataset's rules are read on their own, so one that cannot be read hides no other.
+          for (const datasetId of host.datasetIds(owner, { workspaceId })) {
+            try { definitions.push(host.approvedRevision(owner, { workspaceId, datasetId }).definition); }
+            catch (error) { failures.push({ datasetId, error }); }
+          }
+          return { definitions, failures };
+        },
+        /** Invokes an operation as the owner, the person on this computer, as an Undo does. */
+        invokeAsOwner: (input: LocalDatasetInvocation) => invoke(input),
+        /** The dataset's current data grants: each principal and the operations it may use. */
+        dataGrants(datasetId: string): { workspaceId: string; grants: Array<{ principalKey: string; operationIds: string[] }> } {
+          assertCurrent();
+          const grants: Array<{ principalKey: string; operationIds: string[] }> = [];
+          for (let after: string | undefined; ;) {
+            const page = host.permissions(owner, { workspaceId, datasetId, after, limit: 100 });
+            for (const permission of page.permissions) {
+              const operationIds = (permission.metadata as { operationIds?: unknown }).operationIds;
+              if (permission.kind !== "data" || !permission.current || !Array.isArray(operationIds)) continue;
+              grants.push({ principalKey: permission.principal, operationIds: operationIds.filter((value): value is string => typeof value === "string") });
+            }
+            if (page.nextCursor === null) return { workspaceId, grants };
+            after = page.nextCursor;
+          }
+        },
+        /** A dataset's approved revision now. */
+        revision(datasetId: string): DatasetRevision { assertCurrent(); return host.approvedRevision(owner, { workspaceId, datasetId }); },
+        /** Whether dohc generated the dataset's operations, the only ones automations can use at launch. */
+        generated(datasetId: string): boolean {
+          assertCurrent();
+          const approved = host.approvedArtifacts(owner, { workspaceId, datasetId });
+          return hasGeneratedDatasetOperations(approved.operationSource, approved.revision.definition);
+        },
+        /** Whether an invocation under a saved revision would still run under the rules approved now. */
+        resolves(reference: { datasetId: string; revision: number; revisionSha256: string }): boolean {
+          assertCurrent();
+          try { resolveCompatibleDatasetRevision(db, { workspaceId, datasetId: reference.datasetId }, reference); return true; }
+          catch (error) { if (error instanceof DatasetHostError) return false; throw error; }
+        },
+        subscribe(datasetId: string, subscription: DatasetAutomationSubscription) { assertCurrent(); host.automationClaims.subscribe({ workspaceId, datasetId }, subscription); },
+        unsubscribe(datasetId: string, automationId: string) { assertCurrent(); host.automationClaims.unsubscribe({ workspaceId, datasetId }, automationId); },
+        subscriptions() { assertCurrent(); return host.automationClaims.subscriptions(workspaceId); },
+        next() { assertCurrent(); return host.automationClaims.next(workspaceId); },
+        settle(started: Pick<DatasetAutomationClaim, "claimId" | "attempts">, outcome: Parameters<typeof host.automationClaims.settle>[1]) {
+          assertCurrent(); return host.automationClaims.settle({ workspaceId, claimId: started.claimId, attempts: started.attempts }, outcome);
+        },
+        release(started: Pick<DatasetAutomationClaim, "claimId" | "attempts">) {
+          assertCurrent(); host.automationClaims.release({ workspaceId, claimId: started.claimId, attempts: started.attempts });
+        },
+        retry(claimId: string) { assertCurrent(); return host.automationClaims.retry({ workspaceId, claimId }); },
+        claims(automationId: string) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId); },
+        claim(automationId: string, claimId: string) { assertCurrent(); return host.automationClaims.claim(workspaceId, automationId, claimId); },
+        failures() { assertCurrent(); return host.automationClaims.failures(workspaceId); },
+        /**
+         * Claims a press by `pressedBy`, the account main pressed for. Every
+         * person on this computer is the owner of its datasets, so the run
+         * acts with the owner's authority, which is theirs.
+         */
+        press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed {
+          assertCurrent();
+          const { pressedBy, ...press } = input;
+          return host.automationClaims.press({ workspaceId, datasetId, ...press, presser: { kind: "owner", userId: pressedBy } });
+        },
+        /** Throws why this host cannot take a press of this button, as `press` would. */
+        assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">) {
+          assertCurrent(); host.automationClaims.assertPressable({ workspaceId, datasetId, ...button });
+        },
+        /** A press the ledger remembers, with its claim, or null. */
+        pressed(pressId: string) { assertCurrent(); return host.automationClaims.pressed(workspaceId, pressId); },
+      },
       close(): Promise<void> {
         return closePromise ??= (async () => {
           closed = true; pending.clear(); migrations.clear(); lifetime.abort();

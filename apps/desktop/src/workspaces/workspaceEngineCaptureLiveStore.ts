@@ -6,6 +6,8 @@ import type {
   ActorNeutralWriteMetadata,
   FileObjectRecord,
   MomentAuthor,
+  MomentWriteAuthor,
+  MomentMetadata,
   SecretFileMoment,
   SecretFileStore,
   TextFileSnapshot,
@@ -19,6 +21,7 @@ import {
   DaemonRefusalError,
   VersionedLiveAdapter,
   type AgentAuthor,
+  type WriteAuthor,
   type CollectionPendingAdoptionCursor,
   type CollectionPendingAdoptionsPage,
   type ConflictFileState,
@@ -158,7 +161,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
-  setCaptureAuthor?(author: MomentAuthor | null): Promise<void>;
+  setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
 };
 
 export interface CaptureLiveStores {
@@ -192,6 +195,17 @@ function publicOrigin(origin: string): ActorNeutralWriteMetadata["origin"] {
     default:
       return "unknown";
   }
+}
+
+// A moment keeps the live settle's "ydoc" origin, which History shows as a
+// live edit. Snapshot, conflict, and secret metadata share the write type,
+// so they keep the write origins above.
+function momentMetadataFromOrigin(
+  origin: string,
+  supplied?: ActorNeutralWriteMetadata,
+): MomentMetadata {
+  const metadata = metadataFromOrigin(origin, supplied);
+  return origin === "ydoc" ? { ...metadata, origin } : metadata;
 }
 
 function snapshotFromWire(
@@ -236,13 +250,22 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
   if (author.kind === "named") {
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
   }
+  if (author.kind === "automation") {
+    return {
+      kind: "automation",
+      automationId: author.automationId,
+      ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
+      depth: author.depth,
+    };
+  }
   return {
     kind: "agent",
     agentId: author.agentId,
-    onBehalfOf: author.onBehalfOf,
+    ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
       : {}),
+    ...(author.depth !== undefined ? { depth: author.depth } : {}),
   };
 }
 
@@ -309,7 +332,7 @@ function momentFromWire(
       // reconstructed from the before side.
       after: payloadSnapshot(moment, "after"),
     },
-    metadata: metadataFromOrigin(moment.metadataOrigin, {
+    metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
         ? { summary: moment.metadataSummary }
@@ -341,7 +364,7 @@ function momentSummaryFromWire(
     ...(moment.afterByteLength !== null
       ? { byteLength: moment.afterByteLength }
       : {}),
-    metadata: metadataFromOrigin(moment.metadataOrigin, {
+    metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
         ? { summary: moment.metadataSummary }
@@ -521,8 +544,20 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   };
 }
 
-function adapterAuthor(author: MomentAuthor): AgentAuthor {
-  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public and named authorship can only arrive through relay replication.");
+// A file write's author. A public or named author arrives only through
+// relay replication, never from this computer.
+function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
+  if (author.kind === "automation") {
+    if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
+    return { kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth };
+  }
+  return captureAuthor(author);
+}
+
+// The author capture stamps on this computer's own edits: an agent run only.
+function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Only an agent run can author captured edits.");
+  if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -530,6 +565,7 @@ function adapterAuthor(author: MomentAuthor): AgentAuthor {
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
       : {}),
+    ...(author.depth !== undefined && author.depth > 0 ? { depth: author.depth } : {}),
   };
 }
 
@@ -839,16 +875,19 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       text: string;
+      createOnly?: boolean;
       restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
-      author?: MomentAuthor;
+      author?: MomentWriteAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
+      const requestId = input.createOnly ? randomUUID() : undefined;
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeTextFile({
             ...writeInput,
+            ...(requestId ? { requestId } : {}),
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
@@ -870,7 +909,7 @@ export function createCaptureLiveStores(
       path: string;
       bytes: Uint8Array;
       metadata: ActorNeutralWriteMetadata;
-      author?: MomentAuthor;
+      author?: MomentWriteAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
@@ -922,7 +961,7 @@ export function createCaptureLiveStores(
       expectedObjectId?: string;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;
-      author?: MomentAuthor;
+      author?: MomentWriteAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...deleteInput } = input;
@@ -1323,8 +1362,8 @@ export function createCaptureLiveStores(
       return await runRead(async (adapter) => await adapter.watcherStatus());
     },
 
-    async setCaptureAuthor(author: MomentAuthor | null) {
-      const desired = author === null ? null : adapterAuthor(author);
+    async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
+      const desired = author === null ? null : captureAuthor(author);
       await runMutation(async (adapter) => {
         await adapter.setCaptureAuthor(desired);
       });

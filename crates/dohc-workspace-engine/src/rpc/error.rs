@@ -138,16 +138,18 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Storage(
         refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
         | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }),
+        | dohc_engine_storage::StorageError::MigrationFailed { .. }
+        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
     ) = &error
     {
         eprintln!("engine: store refused: {}", error_chain(refused));
-        // A failed migration names its cause after the code, the way other
+        // A migration refusal names its cause after the code, the way other
         // refusals carry a detail: the desktop matches the code prefix and
         // shows the rest. The cause is the storage crate's constant text
         // plus a migration id, never a path or content.
         let message = match refused {
-            dohc_engine_storage::StorageError::MigrationFailed { .. } => {
+            dohc_engine_storage::StorageError::MigrationFailed { .. }
+            | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. } => {
                 format!("{}: {}", refused.code(), error_chain(refused))
             }
             _ => refused.code().to_string(),
@@ -155,6 +157,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
+        RuntimeError::Collab(refused @ CollabError::FrontmatterEditRefused) => {
+            return WireError::new(ErrorCode::InvalidParams, refused.to_string());
+        }
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. }) => {
             return WireError::new(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
         }
@@ -170,11 +175,32 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
             return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
         }
+        RuntimeError::Collab(CollabError::IdempotencyKeyReused) => {
+            return WireError::new(ErrorCode::InvalidParams, "idempotency-key-reuse-mismatch");
+        }
+        RuntimeError::Relay(RelayError::ApiVersionTooOld) => {
+            return WireError::new(
+                ErrorCode::ProtocolVersionUnsupported,
+                "relay-api-version-too-old",
+            );
+        }
+        RuntimeError::Relay(RelayError::ApiVersionTooNew) => {
+            return WireError::new(
+                ErrorCode::ProtocolVersionUnsupported,
+                "relay-api-version-too-new",
+            );
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
+        }
+        // The same code as a relay that answered "not found", so retries treat
+        // them alike. The message is what lets the desktop tell a person which
+        // one happened: the server could not be reached at all.
+        RuntimeError::Relay(RelayError::Partitioned) => {
+            return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
         }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(
@@ -281,6 +307,9 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::SelfShare => ErrorCode::SelfShare,
         RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
         RelayError::InvalidChannel => ErrorCode::InvalidChannel,
+        RelayError::ApiVersionTooOld | RelayError::ApiVersionTooNew => {
+            ErrorCode::ProtocolVersionUnsupported
+        }
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
         // A served share op the engine cannot replay is the relay's response
         // failing validation, which is the code that already says so. The
@@ -372,6 +401,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         CollabError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
+        | CollabError::FrontmatterEditRefused
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }
@@ -398,6 +428,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::MissingDependencies
         | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
+        | CollabError::IdempotencyKeyReused
         | CollabError::OwnerOutboxFrozen
         | CollabError::RestoreFenced
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
@@ -513,6 +544,12 @@ mod tests {
             )),
             RuntimeError::LiveApplication(ApplicationError::Storage(
                 StorageError::MigrationFailed { source: None },
+            )),
+            RuntimeError::LiveApplication(ApplicationError::Storage(
+                StorageError::MigratedByNewerBuild {
+                    ordinal: 5,
+                    id: "from-a-newer-build".to_owned(),
+                },
             )),
         ] {
             let expected = match &error {
@@ -654,6 +691,10 @@ mod tests {
             reason: "test corrupt lineage".to_owned(),
         }));
         assert_eq!(corrupt.code, ErrorCode::Internal);
+
+        let reused = map_runtime(RuntimeError::Collab(CollabError::IdempotencyKeyReused));
+        assert_eq!(reused.code, ErrorCode::InvalidParams);
+        assert_eq!(reused.message, "idempotency-key-reuse-mismatch");
 
         let storage =
             dohc_engine_storage::StorageError::persist_public(rusqlite::Error::InvalidQuery);
@@ -917,6 +958,14 @@ mod tests {
             map_relay_code(RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
         );
+        // A relay that answered "not found" and one nobody could reach share
+        // the code; only the message tells the desktop which to name.
+        let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
+        assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
+        assert_eq!(unreachable.message, "relay-unreachable");
+        let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
+        assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);
+        assert_ne!(missing.message, "relay-unreachable");
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,
@@ -924,6 +973,18 @@ mod tests {
             let wire = map_runtime(RuntimeError::Relay(relay));
             assert_eq!(wire.code, ErrorCode::Overloaded);
             assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
+        }
+        for (relay, message) in [
+            (RelayError::ApiVersionTooOld, "relay-api-version-too-old"),
+            (RelayError::ApiVersionTooNew, "relay-api-version-too-new"),
+        ] {
+            let wire = map_runtime(RuntimeError::Relay(relay));
+            assert_eq!(wire.code, ErrorCode::ProtocolVersionUnsupported);
+            assert_eq!(
+                wire.message, message,
+                "the desktop reads which side must update"
+            );
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
         }
         let permanent_limit = map_runtime(RuntimeError::Relay(RelayError::QuotaExceeded));
         assert_eq!(permanent_limit.code, ErrorCode::QuotaExceeded);

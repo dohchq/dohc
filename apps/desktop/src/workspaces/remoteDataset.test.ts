@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createRemoteDatasetData, createDatasetAuthorityRouter, resolveRemoteDatasetRevision } from "./remoteDataset";
 import type { OwnerDatasetData } from "./remoteDataset";
 
@@ -14,7 +14,7 @@ const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "
 const approved = { revision, schemaSql: "SQL", operationSource: "RULES", active: true,
   cursor: { workspaceId: "workspace", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
 const description = { datasetId: id(1), name: "Responses", revision: 1, revisionSha256: revision.revisionSha256,
-  tables: definition.tables.map(table => ({ tableId: table.tableId, name: table.name, fields: table.fields.map(({ sqlColumn: _, ...field }) => field) })), operations: definition.operations };
+  tables: definition.tables.map(table => ({ tableId: table.tableId, name: table.name, fields: datasetColumnFields(table).map(({ sqlColumn: _, ...field }) => field) })), operations: definition.operations };
 const invocation = { datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationId: id(4), input: {}, idempotencyKey: "retry" };
 function fixture() {
   const credentials = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" };

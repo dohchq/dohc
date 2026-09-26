@@ -7,6 +7,7 @@ import { TableCell, TableHeader } from '@tiptap/extension-table'
 import { getExtensionField } from '@tiptap/core'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
+import { setFrontmatterValue } from './frontmatter.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
@@ -406,16 +407,23 @@ describe('public Markdown schema', () => {
     })
     refused(checkpoint, 'capacity-refused')
   }, 60_000)
-  it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcTaggedFrontmatterBaseline', '']])('rejects strict metadata %s = %s', (key, value) => {
+  it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcFrontmatterSource', 1]])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
   })
-  it('rejects absent version, stale tagged baseline and unobservable CRLF flags', () => {
+  it('rejects absent version and unobservable CRLF flags', () => {
     refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
-    refused(encode('Text', doc => {
-      doc.getMap('meta').set('dohcTaggedFrontmatterPrefix', '---\nx: 1\n---\n\n')
-      doc.getMap('meta').set('dohcTaggedFrontmatterBaseline', 'stale')
-    }))
     refused(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
+  })
+  it('refuses frontmatter text longer than a live document', () => {
+    refused(encode('---\ntitle: A\n---\n\nText', doc => {
+      doc.getMap('meta').set('dohcFrontmatterSource', `---\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`)
+    }))
+  })
+  it('accepts frontmatter text that a later frontmatter edit left behind', () => {
+    const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
+      setFrontmatterValue(doc, 'title', 'B')
+    }))
+    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText')
   })
   it.each([undefined, new Uint8Array([1]), new Y.Text('discarded'), new Y.Doc()])('rejects nonpublic frontmatter values %#', value => {
     refused(encode('Text', doc => doc.getMap('frontmatter').set('value', value)))
@@ -603,6 +611,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     '.': './src/index.ts',
     './body-fragment': './src/body-fragment.ts',
     './browser-editor': './src/browser-editor.ts',
+    './frontmatter': './src/frontmatter.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
     './restore-proof': './src/liveRestoreProof.ts',
@@ -963,4 +972,43 @@ it('journal refuses keyed body topology that the generic cut accepts', () => {
   expect(generic.kind).toBe('accepted')
   if (generic.kind === 'accepted') { expect(generic.cut.finishAfterProjection().kind).toBe('accepted'); generic.cut.document.destroy() }
   expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
+})
+
+it('refuses an update that binds a source the document does not import as, and drops one in a baseline', () => {
+  const digest = (text: string) => hash(new TextEncoder().encode(text))
+  const forge = (doc: Y.Doc) => {
+    const meta = doc.getMap('meta')
+    meta.set('dohcMarkdownSource', '- # Title\n')
+    meta.set('dohcMarkdownSourceSha256', digest('- # Title\n'))
+    meta.set('dohcMarkdownSourceProjectionSha256', digest(projection.yDocToMarkdown(doc)))
+  }
+  expect(journal(journalFixture([forge]))).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
+  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text')
+})
+
+it('never projects a preserved source that holds text the document lacks', () => {
+  const table = '| a | b |\n|---|---|\n| c | d |\n'
+  const codeTable = '| `a|b` | c |\n|---|---|---|\n| x | `y|z` |\n'
+  const digest = (text: string) => hash(new TextEncoder().encode(text))
+  for (const [document, source] of [
+    [table, '| a | b |\n|---|---|\n| c | d | hidden |\n'],
+    [table, 'a | b\n--- | ---\nc | d | hidden\n'],
+    // A header with a pipe inside a code span makes the importer read the
+    // table from the raw text, where the row's code span splits too.
+    [codeTable, '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n'],
+    // An unused link reference definition.
+    ['Hello\n', 'Hello\n\n[x]: https://h.example "hidden"\n'],
+    // A link with no text.
+    ['Hello\n', 'Hello[](https://h.example "hidden")\n'],
+    // A second definition of the same label.
+    ['[x]: https://a.example\n', '[x]: https://a.example\n[x]: https://b.example "hidden"\n'],
+  ]) {
+    const canonical = projection.yDocToMarkdown(markdownToYDoc(document))
+    const result = validate(input(encode(document, doc => {
+      doc.getMap('meta').set('dohcMarkdownSource', source)
+      doc.getMap('meta').set('dohcMarkdownSourceSha256', digest(source))
+      doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', digest(canonical))
+    })))
+    expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, source).toBe(canonical)
+  }
 })

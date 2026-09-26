@@ -8,16 +8,17 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "cancellation.mjs"]) {
+  for (const file of ["build.mjs", "verify.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
+  put("pnpm-workspace.yaml", "fixture workspace");
+  put("packages/workspace-auth/package.json", '{"name":"@dohc/workspace-auth","scripts":{"test":"vitest run"}}');
   put(".github/workflows/pr-checks.yml", "fixture workflow");
-  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
   put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
-  put("apps/desktop/scripts/stage-plugin-tools.mjs", "export const stagedEsbuildExecutable=()=>true;");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   if (kind === "verify") put("scripts/verification/build.mjs", `

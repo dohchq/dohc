@@ -14,6 +14,7 @@
     "./dataset-host": { "types": "./src/dataset-host.ts", "default": "./dist/dataset-host.mjs" },
     "./dataset-compiler": { "types": "./src/dataset-compiler.ts", "default": "./dist/dataset-compiler.mjs" },
     "./dataset-attempts": { "types": "./src/dataset-attempts.ts", "default": "./dist/dataset-attempts.mjs" },
+    "./dataset-automation-claims": { "types": "./src/dataset-automation-claims.ts", "default": "./dist/dataset-automation-claims.mjs" },
     "./recovery": { "types": "./src/recovery.ts", "default": "./dist/recovery.mjs" },
     "./recovery-export": { "types": "./src/recovery-export.ts", "default": "./dist/recovery-export.mjs" },
     "./recovery-import": { "types": "./src/recovery-import.ts", "default": "./dist/recovery-import.mjs" },
@@ -22,7 +23,7 @@
     "./replica": { "types": "./src/replica.ts", "default": "./dist/replica.mjs" }
   },
   "files": ["dist", "src", "README.md"],
-  "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },
+  "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && pnpm test:prepared", "test:prepared": "vitest run", "typecheck": "tsc --noEmit" },
   "dependencies": { "@dohc/security-contract": "workspace:*", "acorn": "^8.18.0", "esbuild": "0.28.1", "quickjs-emscripten": "0.32.0", "zod": "^4.4.3" },
   "devDependencies": { "@types/node": "^24.13.3", "typescript": "^7.0.2", "vitest": "^4.1.11" }
 }

@@ -2,6 +2,7 @@ import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextp
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import type { createLinkLiveClient } from "./linkLiveClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -27,6 +28,41 @@ const fileInventorySchema = z.object({
   files: z.array(z.object({blobSha256: z.string(), contentKind: z.enum(["text", "binary"])})),
 });
 
+const logSha = z.string().regex(/^[0-9a-f]{64}$/u);
+const logPath = z.string().min(1);
+const linkLogSchema = z.object({
+  ok: z.literal(true),
+  ops: z.array(z.discriminatedUnion("opKind", [
+    z.object({opKind: z.literal("workspace.init")}),
+    z.object({opKind: z.literal("moment.append"), recordedAtMs: z.number(), payload: z.object({
+      operation: z.enum(["write", "rename", "delete"]), payloadBeforePath: logPath.optional(),
+      payloadAfterPath: logPath.optional(), payloadBeforeBlobSha256: logSha.nullable().optional(),
+      payloadAfterBlobSha256: logSha.optional(), payloadAfterContentKind: z.literal("binary").optional(),
+    })}),
+    z.object({opKind: z.literal("version.create"), recordedAtMs: z.number(), payload: z.object({
+      versionId: z.string(), forkSnapshots: z.array(z.object({path: logPath, blobSha256: logSha.optional(), contentKind: z.literal("binary").optional()})),
+    })}),
+  ])),
+  nextCursor: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  epochLogFloor: z.number().int().nonnegative(),
+});
+type LinkLogOp = z.infer<typeof linkLogSchema>["ops"][number];
+
+// One change per logged moment, named like the engine's history: beforeBlobSha256 and afterBlobSha256.
+// A link reads an afterBlobSha256 only while its file is still in the share (docs/adr/0014).
+function linkChange(op: LinkLogOp): Record<string, unknown> | null {
+  if (op.opKind === "workspace.init") return null;
+  if (op.opKind === "version.create") return {recordedAtMs: op.recordedAtMs, operation: "version", versionId: op.payload.versionId,
+    files: op.payload.forkSnapshots.map(file => ({path: file.path, ...(file.blobSha256 ? {blobSha256: file.blobSha256} : {}), contentKind: file.contentKind ?? "text"}))};
+  const {operation, payloadBeforePath: beforePath, payloadAfterPath: afterPath, payloadBeforeBlobSha256: beforeBlobSha256, payloadAfterBlobSha256: afterBlobSha256} = op.payload;
+  const path = operation === "delete" ? beforePath : afterPath;
+  if (!path) return null;
+  return {recordedAtMs: op.recordedAtMs, operation, path, ...(operation === "rename" && beforePath ? {beforePath} : {}),
+    ...(operation !== "delete" && afterBlobSha256 ? {afterBlobSha256, contentKind: op.payload.payloadAfterContentKind ?? "text"} : {}),
+    ...(beforeBlobSha256 ? {beforeBlobSha256} : {})};
+}
+
 const text = (value: unknown): CallToolResult => {
   const encoded = JSON.stringify(value);
   if (Buffer.byteLength(encoded) > 1024 * 1024) return error("The result exceeds the 1 MiB response limit.");
@@ -34,7 +70,14 @@ const text = (value: unknown): CallToolResult => {
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
-  if (!response.ok) {await response.body?.cancel(); throw new Error(`Share link request failed (${response.status}).`);}
+  if (!response.ok) {
+    const refusal = response.status === RELAY_VERSION_REFUSAL_STATUS
+      ? relayVersionRefusal(await readBoundedJson(response, 4096, signal).catch(() => null))
+      : null;
+    await response.body?.cancel().catch(() => undefined);
+    if (refusal) throw new RelayVersionRefusalError(refusal);
+    throw new Error(`Share link request failed (${response.status}).`);
+  }
   return readBoundedJson(response, 1024 * 1024, signal);
 };
 
@@ -52,15 +95,24 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
       return text(await jsonResponse(await options.request("/api/view/current")));
     } catch (e) { return error(String(e)); }
   });
+  server.registerTool("dohc_list_changes", {
+    description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads an afterBlobSha256 while its file is still in the share.",
+    inputSchema: z.object({since: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(500).optional()}),
+  }, async ({since, limit}) => {
+    try {
+      const page = linkLogSchema.parse(await jsonResponse(await options.request(`/api/view/log?${new URLSearchParams({since: String(since ?? 0), limit: String(limit ?? 100)})}`)));
+      return text({ok: true, changes: page.ops.flatMap(op => linkChange(op) ?? []), nextCursor: page.nextCursor, hasMore: page.hasMore, epochLogFloor: page.epochLogFloor});
+    } catch (e) { return error(String(e)); }
+  });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded.",
+    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded. An earlier revision has no contentKind here, so it is returned as UTF-8 when its bytes decode and as base64 otherwise; use the contentKind from dohc_list_changes.",
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {
       const inventory = fileInventorySchema.parse(await jsonResponse(await options.request("/api/view/current")));
       const files = inventory.files.filter(file => file.blobSha256 === blobSha256);
-      if (files.length === 0) return error("The file is no longer in the shared inventory. List files again.");
       const response = await options.request(`/api/view/blob/${blobSha256}`);
+      if (response.status === 404) {await response.body?.cancel(); return error("No file in the share has this content now or in its history. Deleting a file or moving it out of the share withdraws its history, so list files or changes again.");}
       if (!response.ok) {await response.body?.cancel(); return error(`Share link request failed (${response.status}).`);}
       const bytes = await boundedBytes(response, 256 * 1024, options.signal);
       if (files.some(file => file.contentKind === "binary")) return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});

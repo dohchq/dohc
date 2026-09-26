@@ -17,6 +17,13 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import {
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
+  frontmatterEditsRefused,
+  markdownFrontmatterEditsRefused,
+  loadMarkdownFrontmatter,
+  setFrontmatterValue,
+} from './frontmatter.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -234,56 +241,38 @@ describe('Y.Doc markdown import/export', () => {
     },
   )
 
-  it('keeps malformed and over-parser-limit frontmatter visible as body text', () => {
-    const overLimit = `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.\n`
-    const cases: { markdown: string; heading: JSONContent[] }[] = [
-      {
-        markdown: overLimit,
-        heading: [
-          { type: 'text', text: 'value: ' },
-          {
-            type: 'wikilink',
-            attrs: { target: `${'['.repeat(128)}"depth-limit-leaf"`, label: null },
-          },
-          { type: 'text', text: ']'.repeat(128) },
-        ],
-      },
-      {
-        markdown: '---\nvalue: [unterminated\n---\nBody remains.\n',
-        heading: [{ type: 'text', text: 'value: [unterminated' }],
-      },
-    ]
-    for (const { markdown, heading } of cases) {
-      const expectedBody: JSONContent = {
-        type: 'doc',
-        content: [
-          { type: 'horizontalRule' },
-          { type: 'heading', attrs: { level: 2 }, content: heading },
-          { type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] },
-        ],
-      }
+  it('keeps malformed and over-parser-limit frontmatter as written, out of the body', () => {
+    for (const markdown of [
+      `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.`,
+      '---\nvalue: [unterminated\n---\nBody remains.',
+      '---\na:\r\r\n---\nBody remains.',
+      '---\n?\r\r\n---\nBody remains.',
+      '---\n\r\r\na: [\n---\nBody remains.',
+    ]) {
       const restored = markdownToYDoc(markdown)
       try {
         expect(getDohcYDocFrontmatter(restored)).toEqual({})
-        expect(yDocBodyJSON(restored)).toEqual(expectedBody)
-        const reimported = markdownToYDoc(yDocToMarkdown(restored))
-        try {
-          expect(getDohcYDocFrontmatter(reimported)).toEqual({})
-          expect(yDocBodyJSON(reimported)).toEqual(expectedBody)
-        } finally {
-          reimported.destroy()
-        }
+        expect(yDocBodyJSON(restored)).toEqual({
+          type: 'doc',
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] }],
+        })
+        expect(yDocToMarkdown(restored)).toBe(markdown)
+        expect(() => setFrontmatterValue(restored, 'title', 'Plan')).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+        expect(yDocToMarkdown(restored)).toBe(markdown)
       } finally {
         restored.destroy()
       }
     }
   })
 
-  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
+  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ name, markdown, expected }) => {
     const doc = markdownToYDoc(markdown)
     expect(getDohcYDocFrontmatter(doc))
       .toEqual(expected === null ? {} : decodeFixtureIntegers(expected))
-    if (expected === null) {
+    // A refused block stays visible as body text. The body writer escapes
+    // `&` and fences indented lines, so only plain duplicate-key lines are
+    // compared verbatim.
+    if (expected === null && name.startsWith('duplicate-')) {
       const output = yDocToMarkdown(doc)
       for (const line of markdown.split('\n').slice(1, -1)) {
         expect(output).toContain(line)
@@ -387,14 +376,184 @@ describe('Y.Doc markdown import/export', () => {
     expect(changed).not.toContain('!custom high')
   })
 
+  it('rewrites only the frontmatter keys that change', () => {
+    const written = [
+      '---', '# Trip', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999',
+      'zero: -0', 'tags:', '- a', '---', '', 'Body',
+    ].join('\n')
+    const doc = markdownToYDoc(written)
+    try {
+      expect(getDohcYDocFrontmatter(doc)).toEqual({
+        id: '99999999999999999999', score: '.nan', tags: ['a'], title: 'Lisbon', zero: 0,
+      })
+      expect(yDocToMarkdown(doc)).toBe(written)
+      const frontmatter = doc.getMap('frontmatter')
+      setFrontmatterValue(doc, 'title', 'Porto')
+      setFrontmatterValue(doc, 'status', 'booked')
+      expect(yDocToMarkdown(doc)).toBe([
+        '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
+        'zero: -0', 'tags:', '- a', 'status: booked', '---', '', 'Body',
+      ].join('\n'))
+      frontmatter.set('rating', 5)
+      frontmatter.delete('zero')
+      frontmatter.delete('tags')
+      expect(yDocToMarkdown(doc)).toBe([
+        '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
+        'rating: 5', 'status: booked', '---', '', 'Body',
+      ].join('\n'))
+    } finally { doc.destroy() }
+    // A writer that sets the key directly gets the entry in place without the
+    // comments above it, because the key no longer holds the item the text was
+    // written for.
+    const raw = markdownToYDoc(written)
+    try {
+      raw.getMap('frontmatter').set('title', 'Porto')
+      expect(yDocToMarkdown(raw)).toBe(written.replace('# Trip\ntitle:   Lisbon', 'title: Porto'))
+    } finally { raw.destroy() }
+  })
+
+  it.each([
+    {
+      name: 'a deleted key whose name comes back',
+      markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody',
+      deleted: 'wifi',
+      added: ['wifi', 'new'] as const,
+      settled: '---\nwifi: new\nbudget: 100\n---\n\nBody',
+    },
+    {
+      name: 'a deleted key whose value comes back',
+      markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody',
+      deleted: 'draft',
+      added: ['featured', true] as const,
+      settled: '---\ntitle: A\nfeatured: true\n---\n\nBody',
+    },
+  ])('never brings back the comments of $name, whoever writes it', ({ markdown, deleted, added, settled }) => {
+    // Plain Y.Map writes in separate updates, in one update, and through the
+    // helper that keeps an edited key's comments.
+    for (const write of ['separate', 'together', 'helper'] as const) {
+      const doc = markdownToYDoc(markdown)
+      try {
+        const frontmatter = doc.getMap('frontmatter')
+        const add = () => write === 'helper'
+          ? setFrontmatterValue(doc, added[0], added[1])
+          : frontmatter.set(added[0], added[1])
+        if (write === 'together') doc.transact(() => { frontmatter.delete(deleted); add() })
+        else { frontmatter.delete(deleted); add() }
+        expect(yDocToMarkdown(doc), write).toBe(settled)
+      } finally { doc.destroy() }
+    }
+  })
+
+  // A collaborator can write any frontmatter source. One too deep, too large,
+  // or too costly to expand refuses projection.
+  it.each([
+    ['deep block', `---\ntitle:\n${'- '.repeat(500_000)}Plan\n---\n\n`],
+    ['deep flow', `---\ntitle: ${'['.repeat(500_000)}Plan${']'.repeat(500_000)}\n---\n\n`],
+    ['alias ladder', `---\n${Array.from({ length: 6 }, (_, level) => `l${level}: &l${level} [${
+      Array(10).fill(level === 0 ? 'x' : `*l${level - 1}`).join(', ')
+    }]`).join('\n')}\ntitle: Plan\n---\n\n`],
+    ['oversized', `---\ntitle: Plan\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`],
+  ])('refuses a hostile frontmatter source: %s', (_name, source) => {
+    const doc = markdownToYDoc('---\ntitle: Plan\n---\n\nBody')
+    try {
+      doc.getMap('meta').set('dohcFrontmatterSource', source)
+      expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+    } finally { doc.destroy() }
+  })
+
+  // A file up to 10 MiB can carry frontmatter that would copy gigabytes if
+  // the loader expanded it. The loader refuses each one within the test's
+  // default timeout.
+  it.each([
+    ['tag directive', `---\n%TAG !e! tag:${'x'.repeat(1 << 20)}\n--- # x\na: [${'!e!x a, '.repeat(140_000)}a]\n---\n`],
+    ['nested anchors', `---\ns: &s "${'x'.repeat(1_900_000)}"\nv: ${'&a ['.repeat(128)}${Array(256).fill('*s').join(', ')}${']'.repeat(128)}\n---\n`],
+    ['aliases of a long string', `---\ns: &s "${'x'.repeat(2_000_000)}"\nv: [${Array(256).fill('*s').join(', ')}]\n---\n`],
+    ['bare carriage return', '---\na: "x\ry"\n---\n'],
+  ])('refuses frontmatter that would expand past its budgets: %s', (_name, markdown) => {
+    expect(loadMarkdownFrontmatter(markdown)).toBeUndefined()
+  })
+
+  // Two devices delete different keys offline, then one adds both back. The
+  // kept text still names both keys and their comments, but neither key holds
+  // the item the text was written for.
+  it('never brings back a comment when a key deleted on another device returns', () => {
+    const base = markdownToYDoc('---\n# x note\nx: 1\n# y note\ny: 2\nz:   3\n---\n\nBody')
+    const [a, b] = [new Y.Doc(), new Y.Doc()]
+    try {
+      for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
+      a.getMap('frontmatter').delete('x')
+      b.getMap('frontmatter').delete('y')
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      expect(a.getMap('meta').get('dohcFrontmatterSource')).toMatch(/# x note[\s\S]*# y note/)
+      for (const key of ['x', 'y']) a.getMap('frontmatter').set(key, 'new')
+      expect(yDocToMarkdown(a)).toBe('---\nx: new\ny: new\nz:   3\n---\n\nBody')
+    } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+
+  it('refuses property edits when the frontmatter is written on one line', () => {
+    const flow = '---\n# Keep\n{a: 1, b: .nan}\n---\n\nBody'
+    expect(markdownFrontmatterEditsRefused(flow)).toBe(true)
+    expect(markdownFrontmatterEditsRefused('---\n  {a: 1}\n---\n')).toBe(true)
+    expect(markdownFrontmatterEditsRefused('---\na: {b: 1}\n---\n')).toBe(false)
+    expect(markdownFrontmatterEditsRefused('---\n? [a, b]\n: 1\n---\n')).toBe(false)
+    const doc = markdownToYDoc(flow)
+    const block = markdownToYDoc('---\na: 1\n---\n\nBody')
+    try {
+      expect(frontmatterEditsRefused(doc)).toBe(true)
+      expect(frontmatterEditsRefused(block)).toBe(false)
+      expect(yDocToMarkdown(doc)).toBe(flow)
+    } finally { doc.destroy(); block.destroy() }
+  })
+
+
+  it.each([
+    '&root {a: 1, b: .nan}',
+    '!!map {a: 1, b: .nan}',
+    '!<tag:yaml.org,2002:map> &root {a: 1, b: .nan}',
+    '&root !custom\n{a: 1, b: .nan}',
+    '{\n a: 1,\n b: .nan\n}',
+    ': note\na: 1\nb: .nan',
+    '&root {}',
+  ])('refuses edits to unsplittable frontmatter: %s', yaml => {
+    const markdown = `---\n${yaml}\n---\n\nBody`
+    const doc = markdownToYDoc(markdown)
+    try {
+      expect(markdownFrontmatterEditsRefused(markdown)).toBe(true)
+      expect(frontmatterEditsRefused(doc)).toBe(true)
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally { doc.destroy() }
+  })
+
+  it.each(['a\r: [', 'a\r\r: ['])('keeps unreadable keys containing carriage returns: %s', yaml => {
+    const markdown = `---\n${yaml}\n---\n\nBody`
+    const doc = markdownToYDoc(markdown)
+    try {
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally { doc.destroy() }
+  })
+
+  it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {
+    const empty = markdownToYDoc('---\n---\n\nBody')
+    const removed = markdownToYDoc('---\nz: 1\ntitle: Plan\n---\n\nBody')
+    try {
+      expect(yDocToMarkdown(empty)).toBe('---\n---\n\nBody')
+      empty.getMap('frontmatter').set('title', 'Plan')
+      expect(yDocToMarkdown(empty)).toBe('---\ntitle: Plan\n---\n\nBody')
+      removed.getMap('frontmatter').delete('z')
+      removed.getMap('frontmatter').delete('title')
+      expect(yDocToMarkdown(removed)).toBe('Body')
+    } finally { empty.destroy(); removed.destroy() }
+  })
+
   it.each([
     '---\npriority: !custom foreign\n---\n\n',
     '---\npriority: !custom high\n---\n\ninjected body\n',
-  ])('refuses forged tagged-frontmatter prefix %s', prefix => {
+  ])('refuses forged frontmatter source %s', prefix => {
     const doc = markdownToYDoc('---\npriority: !custom high\n---\n\nReal body')
-    doc.getMap('meta').set('dohcTaggedFrontmatterPrefix', prefix)
+    doc.getMap('meta').set('dohcFrontmatterSource', prefix)
     try {
-      expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
+      if (prefix.includes('injected body')) expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+      else expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
     } finally { doc.destroy() }
   })
 
@@ -403,18 +562,15 @@ describe('Y.Doc markdown import/export', () => {
       name: 'out-of-safe-range integer',
       source: '9007199254740993',
       value: 9007199254740993n,
-      settledSource: '9007199254740993',
     },
     {
       name: 'out-of-int64 integral float',
       source: '1e20',
       value: 1e20,
-      settledSource: '100000000000000000000.0',
     },
-  ])('seeds and settles $name without changing its numeric kind', ({
+  ])('seeds and settles $name without changing its text or numeric kind', ({
     source,
     value,
-    settledSource,
   }) => {
     const input = ['---', `exact: ${source}`, 'status: open', '---', '', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
@@ -425,7 +581,7 @@ describe('Y.Doc markdown import/export', () => {
     replica.getMap('frontmatter').set('status', 'closed')
     const settled = yDocToMarkdown(replica)
 
-    expect(settled).toContain(`exact: ${settledSource}`)
+    expect(settled).toContain(`exact: ${source}`)
     expect(getDohcYDocFrontmatter(markdownToYDoc(settled)).exact)
       .toBe(value)
   })
@@ -458,12 +614,12 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toBe(input)
   })
 
-  it('keeps comment-only frontmatter empty under the js-yaml 5 parser', () => {
+  it('keeps comment-only frontmatter as an empty map and as the text written', () => {
     const input = ['---', '# metadata', '', '---', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
 
     expect(getDohcYDocFrontmatter(doc)).toEqual({})
-    expect(yDocToMarkdown(doc)).toBe('# Body')
+    expect(yDocToMarkdown(doc)).toBe(input)
   })
 
   it('round-trips hostile frontmatter keys as own data properties', () => {
@@ -1753,6 +1909,66 @@ describe('Y.Doc markdown import/export', () => {
       'bulletList',
     ])
     expect(yDocToMarkdown(doc)).toBe(input)
+  })
+
+  it('ends a table at a row with more cells than its header so no cell text disappears', () => {
+    for (const input of [
+      '| a | b |\n|---|---|\n| c | d | hidden |\n',
+      'a | b\n--- | ---\nc | d\ne | f | hidden\n',
+      '> | a | b |\n> |---|---|\n> | c | d | hidden |\n',
+      '- [ ] task\n  | a | b |\n  |---|---|\n  | c | d | hidden |\n',
+      '| a | b |\n|---|---|\n| `c|x` | d | hidden |\n',
+      // A code-span pipe in the header sends the importer to the raw text,
+      // where the code span in the row splits too.
+      '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n',
+    ]) {
+      expect(yDocToMarkdown(markdownToYDoc(input)), JSON.stringify(input)).toContain('hidden')
+    }
+  })
+
+  it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
+    expect(yDocToMarkdown(markdownToYDoc('Hello\n\n[x]: https://h.example "kept"\n')))
+      .toBe('Hello\n\n\\[x]: https://h.example "kept"')
+    // marked drops a second definition of a label without a token.
+    expect(yDocToMarkdown(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')))
+      .toBe('\\[x]: https://a.example\n\n\\[x]: https://b.example "kept"')
+    // A link with no text keeps its destination and title as text.
+    expect(yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0])
+      .toEqual({ type: 'paragraph', content: [{ type: 'text', text: 'Hello[](https://h.example "kept")' }] })
+    expect(yDocBodyJSON(markdownToYDoc('[docs](https://example.com)\n')).content?.[0]?.content?.[0])
+      .toMatchObject({ text: 'docs', marks: [{ type: 'link' }] })
+  })
+
+  it('keeps repeated definitions of one label in linear work', () => {
+    const repeats = 10_000
+    const hasOwn = vi.spyOn(Object, 'hasOwn')
+    try {
+      const doc = markdownToYDoc('[x]: /a\n'.repeat(repeats))
+      expect(yDocBodyJSON(doc).content?.length).toBe(repeats)
+      // One check for each definition, with room for the rest of the import.
+      expect(hasOwn.mock.calls.length).toBeLessThan(10 * repeats)
+    } finally { hasOwn.mockRestore() }
+    const body = yDocBodyJSON(markdownToYDoc('See [docs][x].\n\n[x]: https://example.com\n'))
+    expect(body.content?.[0]?.content?.[1]).toMatchObject({
+      text: 'docs',
+      marks: [{ type: 'link', attrs: { href: 'https://example.com' } }],
+    })
+    expect(body.content?.[1]).toEqual({
+      type: 'paragraph',
+      content: [{ type: 'text', text: '[x]: https://example.com' }],
+    })
+  })
+
+  it('still reads an empty extra cell and a pipe inside inline code as one table', () => {
+    for (const [input, rows] of [
+      ['| a | b |\n|---|---|\n| c | d |  |\n', [['a', 'b'], ['c', 'd']]],
+      ['| a | b |\n|---|---|\n| `c|x` | d |\n', [['a', 'b'], ['c|x', 'd']]],
+    ] as const) {
+      const table = yDocBodyJSON(markdownToYDoc(input)).content?.[0]
+      expect(table?.type, input).toBe('table')
+      expect(table?.content?.map(row => row.content?.map(cell =>
+        cell.content?.[0]?.content?.[0]?.text ?? ''))).toEqual(rows)
+    }
   })
 
   it('escapes literal table-cell pipes before computing column widths', () => {

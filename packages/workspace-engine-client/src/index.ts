@@ -8,13 +8,17 @@ export {
   engineStoreRefusalDetailOf,
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
+  isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocObjectChangedRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
+  DAEMON_ERROR_CODES,
   type CompletedDaemonBlob,
   type DaemonErrorCode,
   type EngineStoreRefusal,
@@ -49,6 +53,7 @@ export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {
   VERSIONED_METHOD,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretMomentRecord,
   type VersionedComparisonRecord,
@@ -63,7 +68,7 @@ export {
   type KeyEnvelopeUploadResult,
 } from "./relay/keyEnvelopeWireContract";
 
-export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
+export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeAutomationGroupHandover, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimMessage, type AutomationClaimSummary, type AutomationGroupHandover, type AutomationGroupRelayRecord, type AutomationReleaseGroupsResult, type AutomationWatchGroupsParams, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
 
 export {
   OwnerYDocOutbox,

@@ -16,8 +16,11 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  VersionedTextStoreError,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentWriteAuthor,
+  type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
@@ -40,8 +43,10 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
+  isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
@@ -65,6 +70,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -110,10 +116,16 @@ function liveDocumentMutationRefusal(
   if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
     return null;
   }
-  return new Error(
+  return new LiveDocumentMutationError(
     `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
   );
+}
+
+// A move, delete, or restore the engine refuses because the file is a shared
+// live document.
+export class LiveDocumentMutationError extends Error {
+  override name = "LiveDocumentMutationError";
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -241,7 +253,7 @@ export interface WorkspaceEngineMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: "text" | "binary";
   byteLength?: number;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   author?: MomentAuthor;
   momentOrder: number;
   protected: boolean;
@@ -350,6 +362,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   | "head"
   | "lineage"
+  // Read once, here: the open settles an unsettled lineage itself.
+  | "unsettled"
   | "applyLocalUpdate"
   | "close"
   // Deliberately not handed out. An evict takes a daemon session away without
@@ -368,7 +382,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // and a save-state bookkeeper that counts at hand-over instead vouches for
   // edits still sitting in the queue.
   // `options.actorOriginId` is the author the engine records this update
-  // under (an agent's id from the SDK/MCP write seam), and
+  // under (an agent's id from the CLI/MCP write seam), and
   // `options.attribution` is the declared provenance recorded beside it
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
   // call; a dead-generation revive or recovery replay re-journals canonical
@@ -376,7 +390,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
-  // write dedupes engine-side.
+  // write dedupes engine-side. A keyed update's failure goes to the error
+  // hook here; a caller that must hear it uses applyDecidedLocalUpdate.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -386,6 +401,27 @@ export type WorkspaceEngineYDocProviderSession = Omit<
       idempotencyKey?: string;
     },
   ): void;
+  // A local update decided when its turn on this session's chain comes:
+  // `decide` reads the canonical doc as it stands then and returns the
+  // update, or null for none. A check it makes and the write it chooses see
+  // the same state, which a caller comparing against `initialUpdate` cannot
+  // promise. Resolves whether an update was journaled; rejects when the
+  // session closed before its turn or `decide` threw. With
+  // `options.idempotencyKey`, the update must insert content (one that only
+  // deletes is refused before it is sent), and the promise also rejects when
+  // the engine did not record it: with the engine's refusal when the key
+  // already recorded other content, and otherwise with an error that says
+  // whether the update may have been recorded. A rejected update does not
+  // stay in the document unless the engine recorded it.
+  applyDecidedLocalUpdate(
+    decide: (doc: Y.Doc) => Uint8Array | null,
+    onArmed?: () => void,
+    options?: {
+      actorOriginId?: string;
+      attribution?: ChangeAttributionWire;
+      idempotencyKey?: string;
+    },
+  ): Promise<boolean>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
@@ -407,13 +443,14 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
-  // Writes one SDK-originated text file with an explicit per-operation
-  // author. This never reads or changes the workspace's ambient agent slot.
-  // Returns the resolved path where the write landed.
+  // Writes one text file with an explicit per-operation author, or none when
+  // the writer did not name itself. This never reads or changes the
+  // workspace's ambient agent slot. Returns the resolved path where the
+  // write landed.
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentAuthor,
+    author: MomentWriteAuthor | null,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
@@ -470,6 +507,10 @@ export interface WorkspaceEngineCapture {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
+    // A reopen found another object at this path: this document was moved,
+    // or deleted and replaced. The session stops reopening and saves nothing
+    // more, so the caller sets the editor's text aside.
+    onObjectChanged?: () => void;
     contentKind?: YdocContentKind;
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.
@@ -534,19 +575,36 @@ export interface WorkspaceEngineCapture {
   // timeline the UI paints always includes the batch whose onRecorded
   // notification triggered the refresh (read-your-writes; the chain never
   // rejects, so this can only wait, not fail).
+  // With objectId, the page holds only that file's moments in the active
+  // version, across its renames.
   listMoments(input?: {
     limit?: number;
     beforeMomentOrder?: number;
+    objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
+  // The ids of a file's moments in the active version after `momentId`,
+  // newest first, deletes and renames included. Record-only sync rows never
+  // touched the file, so they are passed over.
+  listObjectMomentsAfter(objectId: string, momentId: string): Promise<string[]>;
   // Engine restore (PR 0M-5): returns the file to its state before the given
   // moment. Runs on the capture chain; records a forward "Restored <file>"
   // moment (history is never rewritten) and materializes the result to disk
   // with expected-event registration so the watcher's observation of our own
   // write is not re-captured. Undo = call again with the returned
   // restoredMomentId.
-  restoreFileToBeforeMoment(momentId: string): Promise<WorkspaceEngineRestoreResult>;
-  undoAcceptedAppResponse(input: AppResponseUndoSelection): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
+  // `expectedHeadMomentId` restores only while the file's newest moment,
+  // after its disk state is captured, is still that one; otherwise it throws
+  // RestoreHeadChangedError and changes nothing. `aloneInFolder` removes a
+  // file the moment created only while nothing else is in its folder;
+  // otherwise it throws RestoreFolderInUseError.
+  restoreFileToBeforeMoment(
+    momentId: string,
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
+  ): Promise<WorkspaceEngineRestoreResult>;
+  // `author` names an agent's removal during a run an automation started, so
+  // the removed record's claims carry the run's chain depth.
+  undoAcceptedAppResponse(input: AppResponseUndoSelection, author?: MomentWriteAuthor): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -620,6 +678,11 @@ export interface WorkspaceEngineCaptureOptions {
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
   createId?: () => string;
+  // Test seams, set only by the desktop's DOHC_TEST_* switches. How long an
+  // edit waits before its settle (omitted uses the provider's default), and a
+  // gate the open-time settle of an unsettled document waits on.
+  settleDebounceMs?: number;
+  openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
@@ -708,6 +771,16 @@ function isFileLockedCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+// Whether the update carries any new item, rather than only deletions: some
+// client's struct range in it is not empty.
+function insertsContent(update: Uint8Array): boolean {
+  const { from, to } = Y.parseUpdateMeta(update);
+  for (const [client, end] of to) {
+    if (end > (from.get(client) ?? 0)) return true;
+  }
+  return false;
 }
 
 function isLineageChangedCause(error: unknown): boolean {
@@ -811,6 +884,36 @@ function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
   return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
+// Whether applying `replay` would change `target`: an item it lacks, or a
+// deletion it has not applied. The probe keeps deleted content so a deletion
+// the target already holds compares equal.
+function replacementLacks(target: Y.Doc, replay: Uint8Array): boolean {
+  const probe = new Y.Doc({ gc: false });
+  Y.applyUpdate(probe, Y.encodeStateAsUpdate(target));
+  const before = Y.snapshot(probe);
+  Y.applyUpdate(probe, replay);
+  return (
+    probe.store.pendingStructs !== null ||
+    probe.store.pendingDs !== null ||
+    !Y.equalSnapshots(before, Y.snapshot(probe))
+  );
+}
+
+// Whether a claimed lineage holds every item of the history this session
+// recorded. A re-seeded lineage or another object's history starts from other
+// client ids, so it cannot cover what this session recorded.
+function claimCoversRecordedHistory(
+  claimed: Y.Doc,
+  recorded: Uint8Array | null,
+): boolean {
+  if (recorded === null) return false;
+  const claimedClocks = Y.decodeStateVector(Y.encodeStateVector(claimed));
+  for (const [client, clock] of Y.decodeStateVector(recorded)) {
+    if ((claimedClocks.get(client) ?? 0) < clock) return false;
+  }
+  return true;
+}
+
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -902,6 +1005,23 @@ function pathBasename(path: string): string {
 // diagnostic ("unsupported filename for this platform") instead of a silent
 // console line. The file stays safe in engine state; only this host's disk
 // cannot represent the name.
+// A guarded restore that would remove a file found something else in its
+// folder, so it removed nothing.
+export class RestoreFolderInUseError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} shares its folder with other files.`);
+    this.name = "RestoreFolderInUseError";
+  }
+}
+
+// A guarded restore found the file changed since its caller checked it.
+export class RestoreHeadChangedError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} changed since dohc checked it.`);
+    this.name = "RestoreHeadChangedError";
+  }
+}
+
 export class UnsupportedWorkspacePathError extends Error {
   readonly code = "unsupported-name" as const;
   constructor(readonly workspacePath: string) {
@@ -1766,6 +1886,7 @@ export function createWorkspaceEngineCapture(
     contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
+    onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onSettled: (
@@ -1780,7 +1901,8 @@ export function createWorkspaceEngineCapture(
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
     // The first generation's answers to "does the entered version have a
-    // snapshot for this path" and "did the daemon resume durable CRDT state".
+    // snapshot for this path", "did the daemon resume durable CRDT state", and
+    // "does that state hold updates the file may not".
     // Reported out because the absent-head contract (see
     // `WorkspaceEngineCapture.openYDocSession`) is decided by the caller, not
     // here: later generations reopen an already-admitted document.
@@ -1788,6 +1910,7 @@ export function createWorkspaceEngineCapture(
     session: RestartSafeYDocSession;
     head: "present" | "absent";
     lineage: "existing" | "absent";
+    unsettled: boolean;
   }> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -1800,6 +1923,16 @@ export function createWorkspaceEngineCapture(
     };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
+    // The object this session opened, and the part of its history the engine
+    // has recorded. A claim made while the session's generation was gone must
+    // name this object and cover this history before main keeps the document
+    // under it.
+    let sessionObjectId: string | undefined;
+    let recordedStateVector: Uint8Array | null = null;
+    // Set when a reopen found another object at this path. Terminal: the
+    // session stops reopening, since every reopen would meet the same
+    // refusal.
+    let objectChanged = false;
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1874,12 +2007,26 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
-    // A file-locked settle failure means the engine holds a durably pending
-    // write and the GENERATION's own backoff timer is retrying it. That timer
-    // dies with the generation, so the fact it existed must outlive it:
-    // set on a file-locked refusal, cleared by the next settle that reaches
-    // disk, and read at adoption to re-arm the retry on the replacement.
-    let lockedSettlePending = false;
+    // Whether the file is behind this document. Every update counts when it
+    // enters the document, local or remote, since either arms a settle, and
+    // a settle covers the updates counted when it started. The debt is the
+    // gap. It outlives a generation, whose armed settle and retry ladder die
+    // with it, and adoption reads it to settle the replacement. It is
+    // counted from updates rather than from settle failures: a generation
+    // can drop inside its settle delay and report the failure only after
+    // adoption has already looked.
+    //
+    // A settle refused because the file changed outside dohc, or because a
+    // conflict is open, forgives the debt and stops adoption from settling
+    // at all, owed or replayed, until a settle succeeds: a reopened
+    // generation expects whatever head the engine now holds, so it would
+    // write the document over that change.
+    let updatesCounted = 0;
+    let updatesSettled = 0;
+    let settleForgiven = false;
+    const settleCovers = new Map<string, number>();
+    const settleOwed = (): boolean =>
+      !settleForgiven && updatesSettled < updatesCounted;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1916,6 +2063,13 @@ export function createWorkspaceEngineCapture(
             versionId: input.versionId,
             path: input.path,
             seedAbsentLineage,
+            ...(options.settleDebounceMs !== undefined
+              ? { settleDebounceMs: options.settleDebounceMs }
+              : {}),
+            // A reopen must find the object this session opened. If the path
+            // now names another object, refuse rather than replay this
+            // document into it.
+            ...(sessionObjectId ? { expectedObjectId: sessionObjectId } : {}),
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -1925,6 +2079,7 @@ export function createWorkspaceEngineCapture(
                 return;
               }
               Y.applyUpdate(canonicalDoc, update);
+              updatesCounted += 1;
               input.onRemoteUpdate(update);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
@@ -1943,13 +2098,32 @@ export function createWorkspaceEngineCapture(
             // reconnect error, so it is not an error sink: every settle
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
-            onSettleStart: (token) => input.onSettleStart(token, generation),
+            onSettleStart: (token) => {
+              settleCovers.set(`${generation}:${token}`, updatesCounted);
+              input.onSettleStart(token, generation);
+            },
             onSettleError: (error, token) => {
-              if (isFileLockedRefusal(error)) lockedSettlePending = true;
+              settleCovers.delete(`${generation}:${token}`);
+              // A transient refusal or a lost session leaves the debt for the
+              // retry or the replacement. Any other refusal, such as the file
+              // changing outside dohc, forgives it.
+              if (
+                !isTransientEngineCause(error) &&
+                !hasRefusalInCauseChain(error, isEngineSessionReconnectError)
+              ) {
+                updatesSettled = updatesCounted;
+                settleForgiven = true;
+              }
               input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {
-              lockedSettlePending = false;
+              const key = `${generation}:${token}`;
+              const covered = settleCovers.get(key);
+              settleCovers.delete(key);
+              if (covered !== undefined) {
+                updatesSettled = Math.max(updatesSettled, covered);
+              }
+              settleForgiven = false;
               return input.onSettled(result, token, generation);
             },
           });
@@ -1978,17 +2152,29 @@ export function createWorkspaceEngineCapture(
       // settle the document sits on "Saving…" for good.
       onReplayArmed?: () => void,
     ): Promise<void> => {
+      let replayArmed = false;
       try {
         let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
+        // Enabling sync drops this session's generation, and the sync pass
+        // can claim the lineage before the next edit reopens it. The engine
+        // then reports that it made the claim from this lineage's own
+        // unclaimed history, and the canonical doc extends that history. A
+        // hash of the full state cannot prove it: the doc holds edits the
+        // lost generation never recorded, and it garbage-collects deleted
+        // content the engine keeps.
         const promotedSameLineage =
           canonicalLineageClaimId === null &&
           replacementClaimId !== null &&
-          isExactYDocClaimPromotion(doc, replacementClaimId);
+          (isExactYDocClaimPromotion(doc, replacementClaimId) ||
+            (replacement.lineageOriginatedHere === true &&
+              replacement.objectId === sessionObjectId &&
+              claimCoversRecordedHistory(replacement.doc, recordedStateVector)));
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
+          recordedStateVector = Y.encodeStateVector(replacement.doc);
           current = replacement;
           input.onLineageReplaced?.(
             Y.encodeStateAsUpdate(replacement.doc),
@@ -2013,8 +2199,13 @@ export function createWorkspaceEngineCapture(
           doc,
           Y.encodeStateVector(replacement.doc),
         );
-        if (replay.byteLength > 2) {
-          const journaled = replacement.applyLocalUpdate(replay);
+        // A diff against a state vector still carries the whole delete set,
+        // so its size cannot say whether the replacement lacks anything.
+        if (replacementLacks(replacement.doc, replay)) {
+          replayArmed = !settleForgiven;
+          const journaled = replacement.applyLocalUpdate(replay, {
+            armSettle: replayArmed,
+          });
           onReplayArmed?.();
           await journaled;
           replacementClaimId =
@@ -2036,6 +2227,7 @@ export function createWorkspaceEngineCapture(
           }
         }
         canonicalLineageClaimId = replacementClaimId;
+        recordedStateVector = Y.encodeStateVector(doc);
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
         try {
@@ -2047,17 +2239,16 @@ export function createWorkspaceEngineCapture(
         throw error;
       }
       markAlive();
-      // A pending locked settle survives the rebind: the failed
-      // generation's retry timer died with it, and when the replacement
-      // needed no replay (the daemon's CRDT already holds the edit) nothing
-      // above armed a settle — releasing the lock later would leave the
-      // artifact stale until an unrelated edit. Ask the replacement to
-      // settle: unchanged content routes through the engine's idempotent
-      // branch, which replays the pending write, and a still-held lock
-      // re-enters the provider's own retry ladder. Failures are reported
-      // through the settle channel like any other, so nothing extra to do
-      // with the rejection here.
-      if (lockedSettlePending) {
+      // A settle the failed generation owed survives the rebind: its retry
+      // died with it, and when the replacement needed no replay (the engine
+      // already holds the edit) nothing above armed a settle, which would
+      // leave the artifact stale until an unrelated edit. Ask the
+      // replacement to settle: unchanged content routes through the engine's
+      // idempotent branch, which replays the pending write, and a still-held
+      // lock re-enters the provider's own retry ladder. Failures are
+      // reported through the settle channel like any other, so nothing extra
+      // to do with the rejection here.
+      if (!replayArmed && settleOwed()) {
         void replacement.settleNow().catch(() => undefined);
       }
     };
@@ -2092,6 +2283,7 @@ export function createWorkspaceEngineCapture(
           retryTransportErrors: options?.retryTransportErrors,
         });
       } catch (error) {
+        if (retireForObjectChange(error)) return;
         markDead(failed);
         throw error;
       }
@@ -2121,13 +2313,120 @@ export function createWorkspaceEngineCapture(
       doc: Y.Doc,
       onReplayArmed?: () => void,
     ): Promise<void> => {
-      if (closed || current !== null) return;
-      await adoptGeneration(
-        doc,
-        await openGeneration(false, { retryTransportErrors: false }),
-        onReplayArmed,
-      );
+      if (closed || current !== null || objectChanged) return;
+      let replacement: EngineYdocProviderSession;
+      try {
+        replacement = await openGeneration(false, { retryTransportErrors: false });
+      } catch (error) {
+        if (retireForObjectChange(error)) return;
+        throw error;
+      }
+      await adoptGeneration(doc, replacement, onReplayArmed);
     };
+
+    // A reopen names the object this session opened, and the engine refuses
+    // it when the path now holds another object. That is not a lost
+    // generation to retry: report it once and stay closed to reopening.
+    const retireForObjectChange = (error: unknown): boolean => {
+      if (!hasRefusalInCauseChain(error, isYdocObjectChangedRefusal)) return false;
+      current = null;
+      if (!objectChanged) {
+        objectChanged = true;
+        input.onObjectChanged();
+      }
+      return true;
+    };
+
+    // A recovery replay carries no idempotency key, so it must never carry a
+    // keyed update. A failed send therefore restores the canonical doc to
+    // its state before the update, when the generation shares that doc,
+    // rebuilds the generation, and resends the update under its key. The
+    // key ledger answers that resend: other content is the key's refusal,
+    // and a fresh record is a success. One resend gets no ledger answer:
+    // when the rebuilt generation already holds the update, applying it
+    // changes nothing and the client sends nothing. That is a success too,
+    // because only the engine recording this write can have put its
+    // inserted items there, which is why a keyed update must insert. Once a
+    // send has gone out, a failure nobody answered may have recorded the
+    // update, and the caller hears exactly that.
+    const applyKeyedUpdate = async (
+      update: Uint8Array,
+      applyOptions: Parameters<
+        WorkspaceEngineYDocProviderSession["applyLocalUpdate"]
+      >[2],
+      armed: () => void,
+    ): Promise<void> => {
+      let sent = false;
+      const unanswered = (error: unknown): Error =>
+        sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
+      for (let attempt = 0; ; attempt += 1) {
+        if (canonicalDoc === null || closed) throw unanswered(closedError());
+        const doc = canonicalDoc;
+        try {
+          if (current === null) await reviveDeadSession(doc);
+        } catch (error) {
+          throw unanswered(error);
+        }
+        if (current === null) throw unanswered(closedError());
+        const generation = current;
+        // The first generation's doc is the canonical doc, and it takes the
+        // update before the journal answers. Keep the state to return to.
+        const before =
+          generation.doc === doc ? Y.encodeStateAsUpdate(doc) : null;
+        try {
+          sent = true;
+          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          armed();
+          await journaled;
+          Y.applyUpdate(doc, update);
+          recordedStateVector = Y.encodeStateVector(doc);
+          if (
+            canonicalLineageClaimId === null &&
+            generation.lineageClaimId != null
+          ) {
+            canonicalLineageClaimId = generation.lineageClaimId;
+          }
+          return;
+        } catch (error) {
+          if (before !== null && canonicalDoc === doc) {
+            const restored = new Y.Doc();
+            Y.applyUpdate(restored, before);
+            canonicalDoc = restored;
+          }
+          // The failed generation still holds this doc, and keeps it until
+          // something replaces the generation.
+          if (isLineageChangedCause(error)) throw error;
+          const refused = isIdempotencyKeyReuseRefusal(error);
+          const retired = canonicalDoc === doc ? null : doc;
+          try {
+            await rebind(generation, {
+              releaseBeforeOpen: !isEngineSessionReconnectError(error),
+            });
+          } catch (rebindError) {
+            // The session's own failure, reported as one. The write's result
+            // is still the engine's answer when it gave one.
+            onError(`Y.Doc rebind of ${input.path}`, rebindError);
+            throw refused ? error : keyedWriteUncertain(error);
+          }
+          // Its generation was replaced, so nothing reads this doc now.
+          retired?.destroy();
+          if (refused) throw error;
+          if (attempt > 0) throw keyedWriteUncertain(error);
+        }
+      }
+    };
+
+    const keyedWriteNotRecorded = (cause: unknown): Error =>
+      new Error(
+        `The engine did not record this write to ${input.path}, and nothing of it was kept. Retry it with the same idempotency key.`,
+        { cause },
+      );
+
+    const keyedWriteUncertain = (cause: unknown): Error =>
+      new Error(
+        `The write to ${input.path} may have been recorded. Retry it with the same idempotency key to find out; the key keeps a recorded write from applying twice.`,
+        { cause },
+      );
 
     const closedError = (cause?: unknown): Error =>
       new Error(
@@ -2173,6 +2472,8 @@ export function createWorkspaceEngineCapture(
     current = await openGeneration(true);
     canonicalDoc = current.doc;
     canonicalLineageClaimId = current.lineageClaimId ?? null;
+    sessionObjectId = current.objectId;
+    recordedStateVector = Y.encodeStateVector(canonicalDoc);
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -2192,6 +2493,130 @@ export function createWorkspaceEngineCapture(
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
+    const openedUnsettled = current.unsettled;
+
+    // Journals one local update on this session's chain. `decide` runs when
+    // the update's turn comes and reads the canonical doc as it stands then,
+    // with every remote update this process has received, so a check it
+    // makes and the update it returns cannot be split by one. It returns
+    // null to journal nothing. Resolves whether an update was journaled; a
+    // failure after deciding is this session's to recover, and is reported
+    // here rather than to the caller.
+    const journalLocalUpdate = (
+      decide: (doc: Y.Doc) => Uint8Array | null,
+      onArmed: (() => void) | undefined,
+      applyOptions: Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2],
+    ): Promise<boolean> => {
+      // One announcement per update, at the first provider call that arms a
+      // settle carrying it. Three calls can be that first one — the live
+      // generation's own, a dead session's revive replay, and a failed
+      // generation's recovery replay — and which one gets there depends on
+      // how the generation failed. Handing the same once-guarded function to
+      // all three is what stops that from mattering: the count can neither
+      // lead the armed settle (a "Saved" over content it never carried) nor
+      // lag it (a settle that saves the edit while vouching for a seq below
+      // it, leaving the document on "Saving…" with nothing left to arm
+      // another settle). #514, and its two review rounds.
+      const armed = announceOnce(onArmed);
+      const keyed = applyOptions?.idempotencyKey !== undefined;
+      let decided = false;
+      return append(async () => {
+        if (canonicalDoc === null || closed) throw closedError();
+        const doc = canonicalDoc;
+        const update = decide(doc);
+        decided = true;
+        if (update === null) return false;
+        if (keyed && !insertsContent(update)) {
+          throw new Error(
+            `A write with an idempotency key must insert content; this update to ${input.path} only deletes.`,
+          );
+        }
+        // Counted before any generation arms a settle for it, so a settle
+        // that starts afterwards covers it and one that started before
+        // does not.
+        updatesCounted += 1;
+        if (keyed) {
+          await applyKeyedUpdate(update, applyOptions, armed);
+          return true;
+        }
+        // The renderer has already accepted this update, so the canonical doc
+        // — the renderer's truth — records it before anything else may fail.
+        // A daemon generation is rebuilt around that text, never instead of
+        // it: dropping the update here is exactly how visible typing vanished
+        // once a generation died.
+        if (current === null) {
+          Y.applyUpdate(doc, update);
+          // The revive replays the canonical doc — this update included —
+          // into the new generation. It announces the update when that
+          // replay is ARMED, not when its journal RPC returns.
+          await reviveDeadSession(doc, armed);
+          return true;
+        }
+        const generation = current;
+        try {
+          // The provider journals and arms its settle synchronously inside
+          // this call, so the update is covered from here. Announce it before
+          // awaiting the journal round trip: the settle it just armed may
+          // start before that round trip returns.
+          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          armed();
+          await journaled;
+          Y.applyUpdate(doc, update);
+          recordedStateVector = Y.encodeStateVector(doc);
+          // A successful record can promote a local-only lineage. Retain
+          // the durable claim now; later deltas change the full-state hash.
+          if (
+            canonicalLineageClaimId === null &&
+            generation.lineageClaimId != null
+          ) {
+            canonicalLineageClaimId = generation.lineageClaimId;
+          }
+        } catch (error) {
+          // A live refusal still owns its lease and must close first; a
+          // transport restart opens first because the old daemon is gone.
+          //
+          // A SYNCHRONOUS refusal threw before the line above, so nothing was
+          // armed and nothing announced. The recovery replay below is then
+          // the first and only settle that will carry this edit, and the
+          // once-guard makes announcing there a no-op when the failure was
+          // asynchronous and the count already rose.
+          Y.applyUpdate(doc, update);
+          // This is an invariant breach, not a reconnect. Rebinding would
+          // replace this still-visible editor with the winner and silently
+          // discard the refused keystroke. Keep the old document visible
+          // and report the failure; the server's live-session drain rule
+          // makes this branch unreachable in an ordinary arbitration.
+          if (isLineageChangedCause(error)) throw error;
+          // A transient refusal is not a broken generation, and rebinding
+          // for one is worse than doing nothing. The provider holds what the
+          // engine refused and has already re-armed its own ladder to resend
+          // it; closing that provider cancels the retry, and if the
+          // replacement's replay meets the same busy store the session is
+          // marked dead with no timer behind it — canonical text in memory
+          // only, the.md stale until some unrelated edit.
+          //
+          // Absorbed, therefore, rather than recovered from: the retry
+          // already exists one layer down. Every other class here really
+          // does need a new generation — a dropped transport, a quarantined
+          // session, a session the daemon no longer knows — so this stays
+          // narrow and everything else still rebinds.
+          if (isTransientEngineCause(error)) {
+            armed();
+            return true;
+          }
+          await rebind(generation, {
+            releaseBeforeOpen: !isEngineSessionReconnectError(error),
+            onReplayArmed: armed,
+          });
+        }
+        return true;
+      }).catch((error: unknown) => {
+        // A keyed write's failure belongs to the caller that chose the key.
+        if (!decided || keyed) throw error;
+        onError(`Y.Doc local update of ${input.path}`, error);
+        return true;
+      });
+    };
 
     const restartSafeSession: RestartSafeYDocSession = {
       get nativeOwner() {
@@ -2209,6 +2634,7 @@ export function createWorkspaceEngineCapture(
           },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
+          resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },
         };
       },
       get doc() {
@@ -2219,7 +2645,9 @@ export function createWorkspaceEngineCapture(
       ...(objectId ? { objectId } : {}),
       ...(sessionVersionId ? { versionId: sessionVersionId } : {}),
       get lineageClaimId() {
-        return canonicalLineageClaimId;
+        // The live generation learns a claim from its own record before this
+        // operation's next line records it here.
+        return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
       contentKind,
       get artifactAssets() {
@@ -2234,92 +2662,12 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
-        // One announcement per update, at the first provider call that arms a
-        // settle carrying it. Three calls can be that first one — the live
-        // generation's own, a dead session's revive replay, and a failed
-        // generation's recovery replay — and which one gets there depends on
-        // how the generation failed. Handing the same once-guarded function to
-        // all three is what stops that from mattering: the count can neither
-        // lead the armed settle (a "Saved" over content it never carried) nor
-        // lag it (a settle that saves the edit while vouching for a seq below
-        // it, leaving the document on "Saving…" with nothing left to arm
-        // another settle). #514, and its two review rounds.
-        const armed = announceOnce(onArmed);
-        void append(async () => {
-          if (canonicalDoc === null || closed) throw closedError();
-          const doc = canonicalDoc;
-          // The renderer has already accepted this update, so the canonical doc
-          // — the renderer's truth — records it before anything else may fail.
-          // A daemon generation is rebuilt around that text, never instead of
-          // it: dropping the update here is exactly how visible typing vanished
-          // once a generation died.
-          if (current === null) {
-            Y.applyUpdate(doc, update);
-            // The revive replays the canonical doc — this update included —
-            // into the new generation. It announces the update when that
-            // replay is ARMED, not when its journal RPC returns.
-            await reviveDeadSession(doc, armed);
-            return;
-          }
-          const generation = current;
-          try {
-            // The provider journals and arms its settle synchronously inside
-            // this call, so the update is covered from here. Announce it before
-            // awaiting the journal round trip: the settle it just armed may
-            // start before that round trip returns.
-            const journaled = generation.applyLocalUpdate(update, applyOptions);
-            armed();
-            await journaled;
-            Y.applyUpdate(doc, update);
-            // A successful record can promote a local-only lineage. Retain
-            // the durable claim now; later deltas change the full-state hash.
-            if (
-              canonicalLineageClaimId === null &&
-              generation.lineageClaimId != null
-            ) {
-              canonicalLineageClaimId = generation.lineageClaimId;
-            }
-          } catch (error) {
-            // A live refusal still owns its lease and must close first; a
-            // transport restart opens first because the old daemon is gone.
-            //
-            // A SYNCHRONOUS refusal threw before the line above, so nothing was
-            // armed and nothing announced. The recovery replay below is then
-            // the first and only settle that will carry this edit, and the
-            // once-guard makes announcing there a no-op when the failure was
-            // asynchronous and the count already rose.
-            Y.applyUpdate(doc, update);
-            // This is an invariant breach, not a reconnect. Rebinding would
-            // replace this still-visible editor with the winner and silently
-            // discard the refused keystroke. Keep the old document visible
-            // and report the failure; the server's live-session drain rule
-            // makes this branch unreachable in an ordinary arbitration.
-            if (isLineageChangedCause(error)) throw error;
-            // A transient refusal is not a broken generation, and rebinding
-            // for one is worse than doing nothing. The provider holds what the
-            // engine refused and has already re-armed its own ladder to resend
-            // it; closing that provider cancels the retry, and if the
-            // replacement's replay meets the same busy store the session is
-            // marked dead with no timer behind it — canonical text in memory
-            // only, the.md stale until some unrelated edit.
-            //
-            // Absorbed, therefore, rather than recovered from: the retry
-            // already exists one layer down. Every other class here really
-            // does need a new generation — a dropped transport, a quarantined
-            // session, a session the daemon no longer knows — so this stays
-            // narrow and everything else still rebinds.
-            if (isTransientEngineCause(error)) {
-              armed();
-              return;
-            }
-            await rebind(generation, {
-              releaseBeforeOpen: !isEngineSessionReconnectError(error),
-              onReplayArmed: armed,
-            });
-          }
-        }).catch((error: unknown) => {
+        void journalLocalUpdate(() => update, onArmed, applyOptions).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         });
+      },
+      applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
+        return journalLocalUpdate(decide, onArmed, applyOptions);
       },
       settleNow(settleOptions) {
         return append(async () => {
@@ -2421,6 +2769,7 @@ export function createWorkspaceEngineCapture(
       session: restartSafeSession,
       head: openedHead,
       lineage: openedLineage,
+      unsettled: openedUnsettled,
     };
   }
 
@@ -2588,7 +2937,7 @@ export function createWorkspaceEngineCapture(
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
@@ -2610,7 +2959,7 @@ export function createWorkspaceEngineCapture(
       | { kind: "text"; text: string; sha256: string }
       | { kind: "binary"; bytes: Uint8Array; sha256: string; byteLength: number },
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     // Content equality is the no-op rule: it keeps one engine record per
@@ -2637,7 +2986,14 @@ export function createWorkspaceEngineCapture(
       });
       return true;
     }
-    if (current && current.contentKind !== "binary" && current.text === disk.text) return false;
+    // A binary head of the same bytes, stored before its path was read as
+    // text, is unchanged too: a change of kind alone is not a change.
+    if (
+      current &&
+      (current.contentKind === "binary" ? current.sha256 === disk.sha256 : current.text === disk.text)
+    ) {
+      return false;
+    }
     // The mirror transition: a binary-tracked path whose content is UTF-8
     // text again continues as the same object with an honest moment.
     const becameText = current?.contentKind === "binary";
@@ -3044,6 +3400,7 @@ export function createWorkspaceEngineCapture(
                 agentId: run.agentId,
                 onBehalfOf: run.onBehalfOf,
                 agentRunId: run.agentRunId,
+                ...(run.depth > 0 ? { depth: run.depth } : {}),
               },
         );
       });
@@ -3054,7 +3411,7 @@ export function createWorkspaceEngineCapture(
     writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
       return enqueueResult("write authored text", async () => {
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const observedBytes = Buffer.byteLength(text, "utf8");
         if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
@@ -3079,13 +3436,10 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
         }
-        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
-          throw new Error(`File already exists: ${path}`);
-        }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
@@ -3094,15 +3448,25 @@ export function createWorkspaceEngineCapture(
           summary: `Updated ${pathBasename(path)}`,
           correlationId: `authored-write-${createId()}`,
         };
-        await engine.writeTextFile({
-          workspaceId,
-          versionId,
-          path,
-          text,
-          metadata,
-          author,
-        });
-        await materialize([{ kind: "write", path, text }], policy);
+        try {
+          await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path,
+            text,
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
+            metadata,
+            ...(author ? { author } : {}),
+          });
+        } catch (error) {
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
+          }
+          throw error;
+        }
+        if (!writeOptions.createOnly) {
+          await materialize([{ kind: "write", path, text }], policy);
+        }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },
@@ -3229,6 +3593,9 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
+        // How many settles this session has started, so the open can tell a
+        // refusal before its settle started from that settle's own failure.
+        let settleStarts = 0;
         const settleClaims = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
@@ -3395,6 +3762,7 @@ export function createWorkspaceEngineCapture(
         // session's commands in order, so an update already sent is in the
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number, generation: number) => {
+          settleStarts += 1;
           settleClaims.set(settleId(token, generation), updatesSeen);
           settleStartedAtMs.set(settleId(token, generation), now());
           reportSaveState("settling", token);
@@ -3437,7 +3805,7 @@ export function createWorkspaceEngineCapture(
           reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;
-        const { session, head, lineage } = await openRestartSafeRustYDocSession({
+        const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -3457,6 +3825,13 @@ export function createWorkspaceEngineCapture(
               entry.status === "dead-generation"
             ) {
               entry.status = "live";
+            }
+          },
+          onObjectChanged: () => {
+            try {
+              input.onObjectChanged?.();
+            } catch {
+              // Observer boundary, like the save-state hook.
             }
           },
           onRemoteUpdate: (update) => {
@@ -3494,9 +3869,10 @@ export function createWorkspaceEngineCapture(
         // version fence:
         //
         // - A live entry for the path takes the debt. Opening a document
-        //   settles nothing by itself, so the live session's settle is asked
-        //   for explicitly. An open cannot interleave with a chain task, which
-        //   is what makes the check authoritative.
+        //   settles only a lineage the engine reports unsettled, so the live
+        //   session's settle is asked for explicitly. An open cannot
+        //   interleave with a chain task, which is what makes the check
+        //   authoritative.
         // - A workspace on another version drops it with a trace. Reopening
         //   the captured version here would run outside the fence and could
         //   write the old version's projection over the active one. Nothing
@@ -3810,6 +4186,7 @@ export function createWorkspaceEngineCapture(
                   : {}),
                 onDead: () => undefined,
                 onAlive: () => undefined,
+                onObjectChanged: () => undefined,
                 onRemoteUpdate: () => {
                   // An update the settle did not carry is not covered by
                   // it. The close below cancels this update's debounce and
@@ -4267,8 +4644,10 @@ export function createWorkspaceEngineCapture(
         // settle:false close of that dirty lineage would be refused and strand
         // the lease. Read here, on the capture chain, so no version op can land
         // between the version binding above and this check.
+        let absentHeadDisk: AbsentHeadDiskState | null = null;
         if (head === "absent") {
           const disk = await absentHeadDiskState(rootPath, input.path);
+          absentHeadDisk = disk;
           // Three rules, IN THIS ORDER. They used to be tangled into one
           // condition, and the order is the whole correctness argument:
           //
@@ -4380,9 +4759,30 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
-        // A retained document can reopen over an outside edit. Check the file
-        // without settling: opening a document must not trigger a write retry.
-        if (head === "present" && lineage === "existing") {
+        // The editor's first save state, decided before it can show Saved.
+        //
+        // A document can open over an outside edit: write nothing and report
+        // the error. A lineage the engine calls unsettled holds updates its
+        // file may not (a crash between an edit and its settle, or remote
+        // updates drained at this open): settle it now, and say "settling"
+        // before this open returns, so the editor reads Saving… from its
+        // first frame until the file has the text.
+        const settleOnOpen = (): void => {
+          reportSaveState("settling", 0);
+          const startsBefore = settleStarts;
+          void (async () => {
+            await options.openSettleGate?.();
+            return await session.settleNow();
+          })().catch((error: unknown) => {
+            // A settle that started reports its own outcome. One refused
+            // before it started (a removal under way, a closed session, a
+            // failed revive) reports nothing, so close the "settling" above.
+            if (settleStarts === startsBefore) {
+              reportSaveState(settleFailureSaveState(error), 0);
+            }
+          });
+        };
+        if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
           try {
@@ -4397,10 +4797,24 @@ export function createWorkspaceEngineCapture(
             // A failed read does not prove drift. Keep the existing state and
             // let the next ordinary settle report a retryable read failure.
           }
-          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
-            // The retained Y.Doc text is not a History moment yet, so the
-            // existing error state is the honest recovery surface. It carries
-            // no settle token because this report did not come from a settle.
+          if (drifted) {
+            if (updatesSeen === openingUpdates && lastSettledSha === null) {
+              // The retained Y.Doc text is not a History moment yet, so the
+              // existing error state is the honest recovery surface. It carries
+              // no settle token because this report did not come from a settle.
+              reportSaveState("error", 0);
+            }
+          } else if (unsettled) {
+            settleOnOpen();
+          }
+        } else if (lineage === "existing") {
+          // A crash-kept draft of a file capture never recorded. Its text is
+          // only in the lineage. Over the empty file New File leaves, settling
+          // writes it. A missing file, or content capture cannot reach, is not
+          // this draft's to overwrite, so the draft stays unsaved and says so.
+          if (absentHeadDisk === "empty") {
+            if (unsettled) settleOnOpen();
+          } else {
             reportSaveState("error", 0);
           }
         }
@@ -4449,6 +4863,10 @@ export function createWorkspaceEngineCapture(
           applyLocalUpdate: (update, onArmed, applyOptions) => {
             noteUpdate();
             return session.applyLocalUpdate(update, onArmed, applyOptions);
+          },
+          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => {
+            noteUpdate();
+            return session.applyDecidedLocalUpdate(decide, onArmed, applyOptions);
           },
           settleNow: (opts) => session.settleNow(opts),
           close: closeEntry,
@@ -4984,6 +5402,25 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
+      if (input.objectId !== undefined) {
+        const activeVersionId = await activeVersionIdOf(engine);
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: input.objectId,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.beforeMomentOrder !== undefined
+            ? { beforeMomentOrder: input.beforeMomentOrder }
+            : {}),
+        });
+        return {
+          moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
+          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+          latestMomentOrder: page.latestMomentOrder,
+          activeVersionId,
+          protectedTruncated: false,
+        };
+      }
       const history = await engine.listHistoryPage({
         workspaceId,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
@@ -5050,7 +5487,31 @@ export function createWorkspaceEngineCapture(
       return null;
     },
 
-    restoreFileToBeforeMoment(momentId) {
+    async listObjectMomentsAfter(objectId, momentId) {
+      await chain;
+      const engine = await engineStore();
+      await engine.flushCapture?.();
+      const versionId = await activeVersionIdOf(engine);
+      const after: string[] = [];
+      let beforeMomentOrder: number | undefined;
+      for (;;) {
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId,
+          objectId,
+          limit: 100,
+          ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+        });
+        for (const moment of page.moments) {
+          if (moment.id === momentId) return after;
+          if (!moment.syncRecordOnly) after.push(moment.id);
+        }
+        if (page.nextBeforeMomentOrder === null) return after;
+        beforeMomentOrder = page.nextBeforeMomentOrder;
+      }
+    },
+
+    restoreFileToBeforeMoment(momentId, options = {}) {
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
@@ -5066,6 +5527,7 @@ export function createWorkspaceEngineCapture(
           if (!secretMoment) {
             throw new Error("This history moment is no longer available.");
           }
+          if (options.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
           if (secretMoment.versionId !== activeVersionId) {
             throw new Error(
               "This moment belongs to a different version. Switch to that version to restore it.",
@@ -5197,12 +5659,19 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
           });
+          if (
+            options.expectedHeadMomentId !== undefined &&
+            (current?.objectId !== moment.objectId || current.latestMomentId !== options.expectedHeadMomentId)
+          ) {
+            throw new RestoreHeadChangedError(path);
+          }
           if (target) {
+            // Equal bytes are the pre-moment state, whatever their kinds.
             if (
               current &&
-              (target.contentKind === "binary"
-                ? current.contentKind === "binary" && current.sha256 === target.sha256
-                : current.contentKind !== "binary" && current.text === target.text)
+              (target.contentKind === "binary" || current.contentKind === "binary"
+                ? current.sha256 !== undefined && current.sha256 === target.sha256
+                : current.text === target.text)
             ) {
               // Already in the pre-moment state. Returning the same moment id
               // keeps undo a no-op (undoing an idempotent restore restores the
@@ -5246,6 +5715,12 @@ export function createWorkspaceEngineCapture(
           if (!current) {
             return { restored: "deleted" as const, restoredMomentId: momentId, path };
           }
+          if (options.aloneInFolder) {
+            // Checked here, in the queue, so nothing queued before it can add
+            // a file between the check and the delete.
+            const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
+            if (siblings.some((name) => name !== basename(path))) throw new RestoreFolderInUseError(path);
+          }
           const result = await engine.deleteTextFile({
             workspaceId,
             versionId: activeVersionId,
@@ -5264,7 +5739,7 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    undoAcceptedAppResponse(input) {
+    undoAcceptedAppResponse(input, author) {
       return enqueueResult("remove app response", async () => {
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
@@ -5309,7 +5784,7 @@ export function createWorkspaceEngineCapture(
         if(!snapshot || snapshot.objectId!==input.objectId || snapshot.text!==disk.text)return {status:"conflict" as const};
         try {
           const result=await engine.deleteTextFile({workspaceId,versionId,path,expectedObjectId:input.objectId,requestId:input.requestId,
-            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId}});
+            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId},...(author?{author}:{})});
           await materialize([{kind:"delete",path}],policy);
           return {status:"deleted" as const,momentId:result.moment.id};
         } catch(error) {

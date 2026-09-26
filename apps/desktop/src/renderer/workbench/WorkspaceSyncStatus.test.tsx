@@ -28,7 +28,51 @@ function liveDeliveryStatus(
   };
 }
 
+function syncState(
+  state: SyncStatusResult["state"],
+  syncFailure?: SyncStatusResult["syncFailure"],
+): SyncStatusResult {
+  return {
+    state,
+    pendingChangeCount: 1,
+    lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+    ...(syncFailure ? { syncFailure } : {}),
+  };
+}
+
 describe("sync status surface", () => {
+  // edges-05: a pass in flight read "Saving…" beside a document that said
+  // Saved. The files are on disk; only the sync is under way.
+  it("calls a pass in flight syncing, never saving", () => {
+    renderStatus({ syncStatus: syncState("syncing") });
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Syncing…");
+    expect(status.textContent).not.toContain("Sav");
+  });
+
+  it("names the server when the server is what failed", () => {
+    const { rerender } = renderStatus({
+      syncStatus: syncState("sync-failed", {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: dohc could not reach the server.",
+        sinceMs: 1,
+        attempts: 1,
+      }),
+    });
+    const status = screen.getByTestId("sync-status");
+    expect(status.getAttribute("data-state")).toBe("sync-failed");
+    expect(status.textContent).toBe("Server unreachable");
+    rerender(
+      <WorkspaceSyncStatus
+        syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused", sinceMs: 1, attempts: 1 })}
+      />,
+    );
+    expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
+  });
+
   it("keeps the pinned testid/data-state and shows no count when clean", () => {
     renderStatus({
       syncStatus: {
@@ -119,5 +163,26 @@ describe("sync status surface", () => {
       },
     });
     expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
+  });
+
+  it.each([
+    ["app", "Update dohc to sync"],
+    ["server", "Server needs an update"],
+  ] as const)("names the side to update when sync stopped on the relay API version (%s)", (updateRequired, label) => {
+    renderStatus({
+      syncStatus: {
+        state: "cloud-disconnected",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        updateRequired,
+      },
+    });
+    const status = screen.getByTestId("sync-status");
+    expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
+    expect(status.getAttribute("aria-label")).toBe(label);
+    expect(status.textContent).toBe(label);
   });
 });

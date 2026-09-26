@@ -50,20 +50,15 @@ import {
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
-  isPluginDetailsTabPath,
-  isPluginPanelTabPath,
-  isPluginWebAppTabPath,
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseCollectionTabPath,
   parseTransactionalCollectionTabPath,
-  parsePluginDetailsTabPath,
-  parsePluginPanelTabPath,
-  parsePluginWebAppTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+import { ipcErrorMessage } from "../ipcError";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -105,6 +100,10 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
+  // A path to select and focus once its row renders ("Show in Explorer").
+  // The shell expands its folders first; onRevealed clears the request.
+  revealPath?: string | null;
+  onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   onActivateTab: (groupId: string, path: string) => void;
   onCloseTab: (groupId: string, path: string) => void;
@@ -149,7 +148,7 @@ export interface ExplorerProps {
   onShare: (path: string) => void;
   onRefresh: () => void;
   // Failed tree operations go to the shell's error toast and Notices row.
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -236,15 +235,6 @@ export function editorTitle(path: string, label?: string): string {
   if (isHistoryTabPath(path)) return "History";
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
-  }
-  if (isPluginPanelTabPath(path)) {
-    return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
-  }
-  if (isPluginWebAppTabPath(path)) {
-    return `Plugin: ${parsePluginWebAppTabPath(path)?.webAppId ?? "app"}`;
-  }
-  if (isPluginDetailsTabPath(path)) {
-    return `Plugin: ${parsePluginDetailsTabPath(path)?.pluginId ?? "details"}`;
   }
   if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";
@@ -466,6 +456,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onOpenFile,
     onOpenCollection,
     onTogglePin,
+    revealPath,
+    onRevealed,
   } = props;
   const activeTab =
     props.editorGroups.find((group) => group.id === props.activeEditorGroup)?.activeTab ??
@@ -848,7 +840,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
-        onError(cause instanceof Error ? cause.message : String(cause));
+        onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
         return;
       }
       try {
@@ -860,7 +852,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             succeeded.push(change);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            onError(cause instanceof Error ? cause.message : String(cause));
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -873,7 +865,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         } catch (cause) {
           // The disk change already completed. Surface the settlement error,
           // then project the successful paths so the shell matches storage.
-          onError(cause instanceof Error ? cause.message : String(cause));
+          onError(ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."), cause);
         }
         if (succeeded.length > 0) onPathsChanged(succeeded);
         onRefresh();
@@ -992,7 +984,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       void bridge()
         .exportWorkspaceZip({ workspaceId, relativePath })
         .catch((cause) =>
-          onError(cause instanceof Error ? cause.message : String(cause)),
+          onError(ipcErrorMessage(cause, "Could not export this workspace."), cause),
         );
     },
     [onError, workspaceId],
@@ -1006,6 +998,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setAnchorPath(path);
     setFocusedPath(path);
   }, []);
+
+  useEffect(() => {
+    if (!revealPath) return;
+    // A path the tree does not list never gets a row; drop the request so it
+    // cannot take focus later when that path appears.
+    if (!fileByPath.has(revealPath) && !isFolderPath(revealPath)) {
+      onRevealed?.();
+      return;
+    }
+    if (!renderIndexByPath.has(revealPath)) return;
+    setFilesExpanded(true);
+    setSelection(new Set([revealPath]));
+    setAnchorPath(revealPath);
+    focusRow(revealPath);
+    onRevealed?.();
+  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPath]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
@@ -1957,7 +1965,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   performDeletes(confirmDelete);
                   setConfirmDelete(null);
                 }}
-                className="rounded bg-danger px-3 py-1 text-xs text-white"
+                className="rounded bg-danger px-3 py-1 text-xs text-bg"
               >
                 Delete
               </button>

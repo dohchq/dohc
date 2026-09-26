@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import type { ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
 import {
   goneMountProjections,
@@ -14,8 +15,13 @@ export function useShareMounts(
   refreshWorkspaceRegistry: () => Promise<WorkspaceSummary[]>,
   onExplorerPathsChanged: (changes: PendingTreeChange[]) => void,
   refreshFiles: () => Promise<unknown>,
-  reportShellError: (fallback: string, error: unknown) => void,
-  showShellNotice: (message: string) => void,
+  reportShellError: (
+    fallback: string,
+    error: unknown,
+    retry?: (() => void) | null,
+    kind?: ShellErrorKind,
+  ) => void,
+  showSuccessNotice: (message: string, undo?: () => void, kind?: ShellErrorKind) => void,
 ) {
   // Share mounts: the registry is loaded once at boot, so the shell owns a
   // live copy of this workspace's mounts — reloaded after every mount /
@@ -69,8 +75,13 @@ export function useShareMounts(
   // Share mounts: pull every mount's share once (quietly — offline or
   // signed-out refreshes are no-ops main-side). `announce` adds the visible
   // summary for the explicit "Refresh Share(s)" menu action.
+  // Announced refreshes share one Notices row, so only the newest may write
+  // it: an older one that finishes late must not replace a newer failure.
+  const announcedRefreshToken = useRef(0);
   const refreshShareMounts = useCallback(
     async (announce = false) => {
+      const token = announce ? ++announcedRefreshToken.current : null;
+      const newest = () => token !== null && token === announcedRefreshToken.current;
       let results: Array<{
         label: string;
         status: "updated" | "unchanged" | "ended" | "damaged";
@@ -79,7 +90,7 @@ export function useShareMounts(
       try {
         results = (await bridge().refreshShareMounts({ workspaceId })).results;
       } catch (error) {
-        if (announce) reportShellError("Couldn't refresh shares.", error);
+        if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
       }
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
@@ -88,9 +99,18 @@ export function useShareMounts(
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (announce) showShellNotice(shareRefreshSummary(results));
+      if (!newest()) return;
+      // A share dohc cannot read is a failure the person has to act on. Each
+      // refresh's summary replaces the last one's row, so a clean refresh
+      // clears an earlier failure.
+      const summary = shareRefreshSummary(results);
+      if (results.some((row) => row.status === "damaged")) {
+        reportShellError(summary, null, null, "share-refresh");
+      } else {
+        showSuccessNotice(summary, undefined, "share-refresh");
+      }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
+    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts],
   );
 
   // DesktopRoot owns the live registry snapshot above this keyed shell. A
@@ -137,7 +157,7 @@ export function useShareMounts(
       // The record went but its folder stayed, because its label is not one
       // this app would ever address a folder through. The files are still on
       // disk, so say where they are and leave the choice to the user.
-      showShellNotice(
+      showSuccessNotice(
         folderLeft
           ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
           : `Removed ${label} from this workspace.`,
@@ -149,7 +169,7 @@ export function useShareMounts(
       onExplorerPathsChanged,
       refreshFiles,
       reportShellError,
-      showShellNotice,
+      showSuccessNotice,
       reloadShareMounts,
     ],
   );

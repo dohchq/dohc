@@ -1,11 +1,11 @@
 import { posix } from "node:path";
-import { parseDatasetDefinition, type DatasetDefinition, type DatasetField } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
 
 const quote = (name: string) => `"${name}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const versionColumn = "_record_version";
 
-function sqlDefault(field: DatasetField): string {
+function sqlDefault(field: DatasetColumnField): string {
   if (field.default === null) return "NULL";
   if (typeof field.default === "boolean") return field.default ? "1" : "0";
   if (typeof field.default === "number") return String(field.default);
@@ -15,10 +15,10 @@ function sqlDefault(field: DatasetField): string {
 export function generateDatasetSchema(definition: DatasetDefinition): string {
   const statements: string[] = [];
   for (const table of definition.tables) {
-    const columns = table.fields.map(field => {
+    const columns = datasetColumnFields(table).map(field => {
       const column = quote(field.sqlColumn);
       const target = field.relation && definition.tables.find(candidate => candidate.tableId === field.relation!.tableId)!;
-      const targetField = target && target.fields.find(candidate => candidate.fieldId === field.relation!.fieldId)!;
+      const targetField = target && datasetColumnFields(target).find(candidate => candidate.fieldId === field.relation!.fieldId)!;
       const numeric = field.type === "number" || targetField && !field.relation!.many && targetField.type === "number";
       const type = field.type === "checkbox" ? "INTEGER" : numeric ? "REAL" : "TEXT";
       let sql = `${column} ${type}${field.required ? " NOT NULL" : ""}${field.sqlColumn === table.primaryKey ? " PRIMARY KEY" : field.unique ? " UNIQUE" : ""}`;
@@ -32,14 +32,14 @@ export function generateDatasetSchema(definition: DatasetDefinition): string {
     });
     columns.push(`${quote(versionColumn)} INTEGER NOT NULL DEFAULT 1 CHECK (${quote(versionColumn)} > 0)`);
     statements.push(`CREATE TABLE ${quote(table.sqlName)} (\n  ${columns.join(",\n  ")}\n) STRICT;`);
-    for (const field of table.fields.filter(field => field.sqlColumn !== table.primaryKey && !field.unique && !field.relation?.many && !["attachment", "multi-select"].includes(field.type))) {
+    for (const field of datasetColumnFields(table).filter(field => field.sqlColumn !== table.primaryKey && !field.unique && !field.relation?.many && !["attachment", "multi-select"].includes(field.type))) {
       statements.push(`CREATE INDEX ${quote(`idx_${field.fieldId.replaceAll("-", "")}`)} ON ${quote(table.sqlName)} (${quote(field.sqlColumn)},${quote(table.primaryKey)});`);
     }
   }
   // JSON relations retain the declared tables while SQL triggers protect authored operations too.
-  for (const table of definition.tables) for (const field of table.fields.filter(field => field.relation?.many)) {
+  for (const table of definition.tables) for (const field of datasetColumnFields(table).filter(field => field.relation?.many)) {
     const target = definition.tables.find(candidate => candidate.tableId === field.relation!.tableId)!;
-    const targetField = target.fields.find(candidate => candidate.fieldId === field.relation!.fieldId)!;
+    const targetField = datasetColumnFields(target).find(candidate => candidate.fieldId === field.relation!.fieldId)!;
     const suffix = field.fieldId.replaceAll("-", "");
     // json_each is a virtual table outside the approved table capability. Use scalar JSON functions instead.
     const indices = (column: string) => `WITH RECURSIVE positions(n) AS (SELECT 0 WHERE json_array_length(${column}) > 0 UNION ALL SELECT n+1 FROM positions WHERE n+1 < json_array_length(${column}))`;
@@ -60,11 +60,11 @@ export function generateDatasetSchema(definition: DatasetDefinition): string {
 export function generateDatasetSources(value: DatasetDefinition): { definition: DatasetDefinition; files: Record<string, string> } {
   const definition = parseDatasetDefinition(value);
   for (const operation of definition.operations) if (operation.kind === "edit") operation.reversible = true;
-  if (definition.operations.some(operation => operation.kind === "action")) throw new Error("Custom actions need authored operation source. Create that source before approving this dataset.");
-  if (definition.tables.some(table => table.fields.some(field => field.sqlColumn.toLowerCase() === versionColumn))) throw new Error("The field column _record_version is reserved. Choose another column name.");
+  if (definition.operations.some(operation => operation.kind === "action")) throw new Error("Custom actions need authored operation source. Create that source before approving this Collection.");
+  if (definition.tables.some(table => datasetColumnFields(table).some(field => field.sqlColumn.toLowerCase() === versionColumn))) throw new Error("The field column _record_version is reserved. Choose another column name.");
   for (const operation of definition.operations.filter(operation => operation.kind === "create")) {
     const table = definition.tables.find(table => table.tableId === operation.tableId)!;
-    for (const field of table.fields) {
+    for (const field of datasetColumnFields(table)) {
       if (field.required && !Object.hasOwn(field, "default") && !operation.fieldIds.includes(field.fieldId) && !(field.sqlColumn === table.primaryKey && field.type === "text")) {
         throw new Error("A create operation cannot fill a required field. Expose the field or define a default.");
       }
@@ -74,8 +74,14 @@ export function generateDatasetSources(value: DatasetDefinition): { definition: 
   return { definition, files: {
     [descriptor]: JSON.stringify(definition, null, 2) + "\n",
     [definition.schemaPath]: generateDatasetSchema(definition),
-    [definition.operationsPath]: `const definition = ${JSON.stringify(definition)};\n${operationsSource}`,
+    [definition.operationsPath]: `const definition = ${JSON.stringify(withoutButtons(definition))};\n${operationsSource}`,
   } };
+}
+
+// Operations read and write columns only, so their embedded definition leaves
+// buttons out, and adding a button leaves the operations as they are.
+function withoutButtons(definition: DatasetDefinition): DatasetDefinition {
+  return { ...definition, tables: definition.tables.map(table => ({ ...table, fields: datasetColumnFields(table) })) };
 }
 
 /** Labels and captured source paths may change without changing executable rules. */
@@ -85,7 +91,7 @@ export function hasGeneratedDatasetOperations(source: string, definition: Datase
   try {
     const embedded = parseDatasetDefinition(JSON.parse(source.slice("const definition = ".length, end)));
     const normalize = (value: DatasetDefinition) => {
-      const copy = structuredClone(value); copy.name = ""; copy.schemaPath = ""; copy.operationsPath = "";
+      const copy = structuredClone(withoutButtons(value)); copy.name = ""; copy.schemaPath = ""; copy.operationsPath = "";
       for (const table of copy.tables) { table.name = ""; for (const field of table.fields) field.name = ""; }
       return JSON.stringify(copy);
     };

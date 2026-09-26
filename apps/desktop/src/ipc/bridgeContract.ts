@@ -12,6 +12,21 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
+import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type {
+  CollectionAutomationHolds,
+  CollectionAutomationButton,
+  CollectionAutomationRetry,
+  CollectionAutomationRun,
+  CollectionAutomationShareStop,
+  CollectionAutomationsFile,
+  CollectionAutomationStop,
+  CollectionFieldMark,
+  CollectionAutomationTarget,
+  CollectionAutomationUndo,
+  PressSettled,
+  PressWaitReason,
+} from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
   NOTICE_BODY_MAX_CHARS,
@@ -20,7 +35,6 @@ import {
   NOTICE_TARGET_FIELD_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
 } from "@dohc/workspace-contracts/relay";
-import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
@@ -48,7 +62,6 @@ export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
   isChatsTabPath,
   canonicalSingletonEditorTabPath,
-  isPluginPanelTabPath,
   isSiteTabPath,
   isSingletonEditorTabPath,
   MAX_COLLECTION_VIEWS,
@@ -64,8 +77,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  parsePluginViewId,
-  PLUGIN_VIEW_ID_PREFIX,
+  APP_VIEW_ID_PREFIX,
+  parseAppViewId,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -77,34 +90,11 @@ import {
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
-  PLUGIN_PIPELINE_ERROR_STAGES,
-  PLUGIN_PIPELINE_STATUSES,
-  PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { OperationBridge, OperationTable } from "./operationTable";
-// The manifest schema is plain zod, which the sandboxed preload already
-// bundles, so the contract shares the settings declaration rather than keeping
-// a second copy of it. A copy that drifts would fail the whole plugin list's
-// parse over a value the manifest itself allows.
-import {
-  isHttpsUrl,
-  MAX_PLUGIN_DESCRIPTION_CHARS,
-  MAX_PLUGIN_DRIVER_NAME_CHARS,
-  MAX_PLUGIN_LICENSE_CHARS,
-  MAX_PLUGIN_PUBLISHER_CHARS,
-  MAX_PLUGIN_URL_CHARS,
-  MAX_PLUGIN_VERSION_CHARS,
-  MAX_PLUGIN_SETTINGS,
-  PluginSettingDeclarationSchema,
-  PluginSettingValueSchema,
-} from "../plugins/pluginManifestSchema";
-import {
-  MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
-  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
-} from "../plugins/pluginWebAppInstances";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -235,7 +225,7 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 // The level a recipient holds on a path/version share, from the same
 // one place the relay and the engine read it. All three levels read the same
 // files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
-// The chat-channel grant's own binary access is a different field.
+// The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
 
@@ -370,6 +360,13 @@ export const WorkspaceIdPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
+
+// Who asked for a sync pass now. A person's retry counts toward the attempts
+// a failure's notice weighs; a retry on reconnecting or waking does not.
+export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
+  reason: z.enum(["person", "reconnect"]),
+});
+export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
@@ -518,7 +515,7 @@ const COLLECTION_NAME = z.string().min(1).max(200);
 
 const ScalarFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
-  type: z.enum(["text", "number", "checkbox", "date", "person", "url"]),
+  type: z.enum(["text", "number", "checkbox", "date", "person", "url", "button"]),
 });
 const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
@@ -781,7 +778,8 @@ export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
 
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  context: z.enum(["tab", "editor", "status"]),
+  // A pinned app's menu names the app's folder as its path.
+  context: z.enum(["tab", "editor", "status", "pinned-app"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
   canCloseEditorGroup: z.boolean().optional(),
@@ -821,10 +819,23 @@ export const ImportWorkspaceFilesResult = z.object({
   // collision budget exhausted) — surfaced so the import summary can say
   // "2 skipped" instead of the batch silently shrinking.
   skipped: z.number().int().min(0),
-  // Some files landed before the owner lost a trustworthy completion result.
-  // This is not an ordinary skip: the Explorer must refresh before the user
-  // decides what, if anything, to retry.
+  // Some files landed before the import stopped: a copy failed, or the owner
+  // lost a trustworthy completion result. This is not an ordinary skip: the
+  // Explorer must refresh before the user decides what, if anything, to
+  // retry, and importing the same sources again would copy the landed files
+  // a second time.
   interrupted: z.literal(true).optional(),
+  // An ordinary import stopped at a failed copy: the source file's name, and
+  // either the filesystem's error code or a refusal dohc makes itself
+  // (`refusal`), with raw text that only goes into copied details.
+  stop: z
+    .object({
+      file: z.string().min(1).max(4096),
+      code: z.string().min(1).max(64).optional(),
+      detail: z.string().min(1).max(500).optional(),
+      refusal: z.enum(["dangling-link"]).optional(),
+    })
+    .optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
@@ -1196,6 +1207,7 @@ const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
+  "migrated-by-newer-build",
 ] as const satisfies readonly EngineStoreRefusal[];
 type AssertNever<T extends never> = T;
 type _AllEngineStoreRefusalsRepresented = AssertNever<
@@ -1208,6 +1220,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     "syncing",
     "local-changes",
     "conflict",
+    "sync-failed",
     "cloud-disconnected",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
@@ -1216,6 +1229,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
+  // Sync stopped because the server does not serve this dohc's relay API
+  // version: "app" means update dohc, "server" means the server is older.
+  updateRequired: z.enum(["app", "server"]).optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
@@ -1224,9 +1240,17 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
-  // Additive (0P-B relay sync): true after repeated non-auth sync failures.
-  // Local changes remain safe and the engine keeps retrying with backoff.
-  syncFailing: z.boolean().optional(),
+  // Why the last sync pass failed, present until a pass succeeds. Local work
+  // is saved either way, and the engine keeps retrying with backoff.
+  syncFailure: z
+    .object({
+      cause: z.enum(["server-unreachable", "unknown"]),
+      detail: z.string(),
+      // When this failure began, and how many passes have failed since.
+      sinceMs: z.number(),
+      attempts: z.number().int().positive(),
+    })
+    .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
@@ -1308,16 +1332,26 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "dohc cannot read this workspace's data store.";
     case "migration-failed":
       return "dohc could not update this workspace's data store to this version.";
+    case "migrated-by-newer-build":
+      return "A newer version of dohc updated this workspace's data store.";
   }
 }
 
 // What the refusal needs. A store from another format, or a file that is not
 // a dohc database, is rebuilt from the workspace files. A store this build
-// could not migrate is intact and waits for a build that can open it.
+// could not migrate, or one a newer build migrated, is intact and waits for a
+// build that can open it.
 export function engineStoreRefusalRecovery(
   cause: EngineStoreRefusal,
 ): "rebuild" | "update" {
-  return cause === "migration-failed" ? "update" : "rebuild";
+  switch (cause) {
+    case "unsupported-fingerprint":
+    case "foreign-database":
+      return "rebuild";
+    case "migration-failed":
+    case "migrated-by-newer-build":
+      return "update";
+  }
 }
 
 export const ENGINE_STORE_UPDATE_NEXT_STEP =
@@ -1361,6 +1395,16 @@ export const EngineMomentRecord = z.object({
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
+  // Present when a Collection automation authored the moment: its name as
+  // this computer's automations.yaml has it, and the Collection it belongs to.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
+  // Present when a person the owner shared with wrote the moment directly
+  // (ADR 0013): main names them from the owner's share roster. The user id
+  // picks them for Stop and restore.
+  namedAuthor: z.object({
+    userId: z.string().min(1).max(256),
+    label: z.string().min(1).max(400),
+  }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -1517,10 +1561,19 @@ export const ChatFileReferenceInput = z.object({
 });
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
+// Messages and their authors as the renderer shows them. Only the automation
+// executor in main writes an automation's message; the renderer never sends one.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// Which automation wrote a message, when it ran on this computer.
+const CHAT_MESSAGE_AUTOMATION = z.object({
+  automationId: z.string().min(1).max(1024),
+  collectionPath: SAFE_RELATIVE_PATH,
+});
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
-  authorKind: z.enum(["human", "agent"]),
+  authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
@@ -1528,6 +1581,7 @@ export const ChatMessageRecord = z.object({
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
   createdAtMs: z.number(),
+  automation: CHAT_MESSAGE_AUTOMATION.optional(),
   // Optional on the wire so pre-phase-4 fixture objects and stored messages
   // remain compatible. Main includes the engine's authoritative array.
   attachments: z.array(ChatAttachmentRecord).optional(),
@@ -1887,12 +1941,13 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
-      authorKind: z.enum(["human", "agent"]),
+      authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
+      automation: CHAT_MESSAGE_AUTOMATION.optional(),
       reactions: z.array(ChatReactionRecord),
     })
     .nullable()
@@ -2112,7 +2167,7 @@ export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 const EMAIL_STRING = z.email().max(320);
 
 // Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
-// chat-channel grant per participant, riding the shared-channel lane. The
+// chat grant per participant, riding the shared-channel lane. The
 // whole surface is gated on collaboration (signed in + relay): a solo user
 // sees none of it. Identity is always main-derived — the renderer never
 // supplies who is sending or who a grant belongs to.
@@ -2125,7 +2180,7 @@ export const DmRecord = z.object({
   // is the owner's recipient list — often the participant's own address).
   peerLabel: z.string().min(1).max(320),
   role: z.enum(["owner", "participant"]),
-  // The chat-channel grant a PARTICIPANT joined this DM through — the presence
+  // The chat grant a PARTICIPANT joined this DM through — the presence
   // SHARE scope both sides converge on (the relay maps it to the granter's
   // workspace, where the owner publishes). Null for the OWNER (who publishes
   // into their own workspace scope) and until a participant's grant registers.
@@ -2584,18 +2639,6 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 // the workspace's engine capture like every version operation.
 const TRY_IN_VERSION_TASK_MAX = 2000;
 
-// How a driver is named wherever a payload or a result carries one. Every
-// surface on the path — the manifest, the probe list, the workspace's own
-// `agents.defaultDriverId`, and the task a driver is handed — reads these two,
-// so a driver dohc lists is always one dohc can be asked to run.
-//
-// A driver id is bounded by what workspace settings can store, because
-// `agents.defaultDriverId` has to be able to name any driver the list shows —
-// dohc's own and a plugin's alike. A display name takes the bound a plugin
-// manifest gives it, shared with it rather than matched by eye.
-const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
-const AgentDriverNameSchema = z.string().min(1).max(MAX_PLUGIN_DRIVER_NAME_CHARS);
-
 export const TryInWorkspaceVersionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   task: z
@@ -2605,12 +2648,6 @@ export const TryInWorkspaceVersionPayload = z.object({
     .refine((value) => value.trim().length > 0, {
       message: "task must not be blank",
     }),
-  // When present, main hands the task to this installed agent driver (a
-  // dohc-managed driver session); absent = a bare dohc-tracked run the
-  // user's own agent tool works inside. The id comes from the agent panel's
-  // own driver list, so it takes that list's bound: a tighter one here would
-  // refuse a driver dohc offered, chose, and probed.
-  driverId: AgentDriverIdSchema.optional(),
 });
 export type TryInWorkspaceVersionPayload = z.infer<
   typeof TryInWorkspaceVersionPayload
@@ -2872,10 +2909,17 @@ export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 export const SitePackageResult = SitePackageInfo.nullable();
 export type SitePackageResult = z.infer<typeof SitePackageResult>;
 
+// One surface showing an app's preview: a tab or a pinned panel.
+const SITE_PREVIEW_HOLDER_ID = z.string().min(1).max(100);
+
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  // True when the person asked for this start, which starts the preview
+  // again even when it is running. Otherwise the surface shares it.
+  restart: z.boolean(),
 });
 export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
@@ -2916,6 +2960,9 @@ export const StartSitePreviewResult = z.object({
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
   exited: z.boolean(),
+  // Which start of the app's preview this is. Every surface showing the app
+  // shows the newest one it has heard of.
+  generation: z.number().int().nonnegative(),
   build: z
     .object({
       ok: z.boolean(),
@@ -2927,6 +2974,26 @@ export const StartSitePreviewResult = z.object({
     .optional(),
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+// What a start answers: the preview, or that another surface replaced this
+// start with a newer one before it finished. The newer start's preview then
+// arrives as a SitePreviewReplacedEvent.
+export const StartSitePreviewAnswer = z.union([
+  StartSitePreviewResult,
+  z.object({ replaced: z.literal(true) }).strict(),
+]);
+export type StartSitePreviewAnswer = z.infer<typeof StartSitePreviewAnswer>;
+
+// Another surface started the app's preview again. The surface named here
+// shows `preview` from now on, or nothing when no preview runs.
+export const SitePreviewReplacedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  generation: z.number().int().nonnegative(),
+  preview: StartSitePreviewResult.nullable(),
+});
+export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2944,550 +3011,16 @@ export type GetSitePreviewLogsResult = z.infer<
   typeof GetSitePreviewLogsResult
 >;
 
+// The surface stops showing the preview. The preview stops when no surface
+// shows it.
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 const StopSitePreviewResult = z.void();
 type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
-
-const MAX_PLUGIN_ID_CHARS = 214;
-const MAX_PLUGIN_PANEL_ID_CHARS = 120;
-const PLUGIN_ID = z.string().min(1).max(MAX_PLUGIN_ID_CHARS).refine(
-  (value) => !value.includes("\0"),
-  "plugin id must not contain NUL bytes",
-);
-const PLUGIN_PANEL_ID = z.string().min(1).max(MAX_PLUGIN_PANEL_ID_CHARS).refine(
-  (value) => !value.includes("\0"),
-  "plugin panel id must not contain NUL bytes",
-);
-const PLUGIN_ROOT = z.string().min(1).max(4096).refine(
-  (value) => !value.includes("\0"),
-  "plugin root must not contain NUL bytes",
-);
-
-export const OpenPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginRoot: PLUGIN_ROOT,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type OpenPluginPanelPayload = z.infer<typeof OpenPluginPanelPayload>;
-
-export const OpenPluginPanelResult = z.object({
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type OpenPluginPanelResult = z.infer<typeof OpenPluginPanelResult>;
-
-export const PluginPanelOpenedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type PluginPanelOpenedEvent = z.infer<typeof PluginPanelOpenedEvent>;
-
-export const StartPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  /** Where the caller is mounting this panel. Main refuses a panel whose
-   * manifest places it elsewhere, so a tab restored from before an update
-   * cannot mount a panel the plugin has since moved to the view rail. */
-  placement: z.enum(["editor", "view"]),
-}).strict();
-export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
-
-export const StartPluginPanelResult = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("ok"),
-    url: LoopbackPreviewUrl,
-    title: z.string().min(1).max(120),
-    surfaceId: z.number().int().positive(),
-  }).strict(),
-  z.object({ status: z.literal("not-registered") }).strict(),
-]);
-export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
-
-/** Main retired this exact panel preview because the active runtime no
- * longer matches it. The page restarts only when it still shows surfaceId. */
-export const PluginPanelInvalidatedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  surfaceId: z.number().int().positive(),
-}).strict();
-export type PluginPanelInvalidatedEvent = z.infer<
-  typeof PluginPanelInvalidatedEvent
->;
-
-export function parsePluginPanelInvalidatedEventForIpc(
-  value: unknown,
-): PluginPanelInvalidatedEvent | null {
-  const parsed = PluginPanelInvalidatedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-export const InvokePluginCommandPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  commandId: z.string().min(1).max(120),
-}).strict();
-export type InvokePluginCommandPayload = z.infer<
-  typeof InvokePluginCommandPayload
->;
-
-export const InvokePluginCommandResult = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("ok") }).strict(),
-  z.object({
-    status: z.literal("plugin-not-found"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("plugin-not-running"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("command-not-declared"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("command-failed"),
-    message: z.string(),
-  }).strict(),
-  // A rebuild's old-runtime stop is already draining this plugin's
-  // in-flight plugin work — refused outright rather than queued, so
-  // that wait stays bounded by the claims it began with (round-10
-  // finding 2).
-  z.object({
-    status: z.literal("plugin-rebuilding"),
-    message: z.string(),
-  }).strict(),
-]);
-export type InvokePluginCommandResult = z.infer<
-  typeof InvokePluginCommandResult
->;
-
-// Stopping names the running panel, which is keyed by workspace, plugin, and
-// panel alone. It carries no placement: a panel must stop wherever it runs.
-export const StopPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
-const StopPluginPanelResult = z.void();
-type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
-
-// Wrapper-plugin web apps: the guest is a main-process WebContentsView,
-// so the renderer never receives the guest URL — the pairing credential in
-// its fragment stays between the plugin process and main. The renderer gets
-// the title and the credential-free origin, and reports placeholder bounds.
-const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
-  (value) => !value.includes("\0"),
-  "plugin web app id must not contain NUL bytes",
-);
-
-/**
- * The instance an open targets, or null for a web app that opens one tab for
- * the whole manifest id. Null is a value here, never an absent field: which
- * of the two shapes a request means is exactly what the handlers check
- * against the manifest, so it must not arrive by omission.
- */
-const PLUGIN_WEB_APP_INSTANCE_KEY = z
-  .string()
-  .min(1)
-  .max(
-    MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
-    `plugin web app instance key: must be ${MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS} characters or fewer`,
-  )
-  .refine(
-    (value) => !value.includes("\0"),
-    "plugin web app instance key must not contain NUL bytes",
-  )
-  .nullable();
-
-export const OpenPluginWebAppPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginRoot: PLUGIN_ROOT,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type OpenPluginWebAppPayload = z.infer<typeof OpenPluginWebAppPayload>;
-
-export const OpenPluginWebAppResult = z.object({
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type OpenPluginWebAppResult = z.infer<typeof OpenPluginWebAppResult>;
-
-export const PluginWebAppOpenedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type PluginWebAppOpenedEvent = z.infer<typeof PluginWebAppOpenedEvent>;
-
-export const StartPluginWebAppPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
-
-export const StartPluginWebAppResult = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("ok"),
-    // The manifest title, or the one the plugin named for this instance.
-    // Both land here, so both answer to the same bound.
-    title: z.string().min(1).max(MAX_PLUGIN_WEB_APP_TITLE_CHARS),
-    origin: LoopbackPreviewUrl,
-  }).strict(),
-  z.object({ status: z.literal("not-registered") }).strict(),
-]);
-export type StartPluginWebAppResult = z.infer<typeof StartPluginWebAppResult>;
-
-const GUEST_BOUNDS_LIMIT = 1_000_000;
-export const SetPluginWebAppBoundsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-  bounds: z.object({
-    x: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
-    y: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
-    width: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
-    height: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
-  }).strict(),
-  visible: z.boolean(),
-}).strict();
-export type SetPluginWebAppBoundsPayload = z.infer<
-  typeof SetPluginWebAppBoundsPayload
->;
-
-export const StopPluginWebAppPayload = StartPluginWebAppPayload;
-export type StopPluginWebAppPayload = z.infer<typeof StopPluginWebAppPayload>;
-
-/** Main tells the page its guest died after the start had already answered
- * "ok". It carries no failure text: the load error can embed the start URL,
- * credential fragment included, so the page owns the words. */
-export const PluginWebAppFailedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type PluginWebAppFailedEvent = z.infer<typeof PluginWebAppFailedEvent>;
-
-export function parsePluginWebAppFailedEventForIpc(
-  value: unknown,
-): PluginWebAppFailedEvent | null {
-  const parsed = PluginWebAppFailedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-// Workspace plugin management. Main owns one pipeline for the active
-// workspace. Every action returns a discriminated result, so expected plugin
-// failures cross as bounded data instead of opaque Electron exceptions.
-// Reuses PLUGIN_ID above (PR1b/the panel schemas) rather than a second
-// plugin-id validator for the same field.
-const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
-const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
-
-// The same rule the manifest applies, restated on the wire so a link the
-// details rail is about to hand the OS browser cannot arrive over http.
-const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS)
-  .refine(isHttpsUrl, "must be an https:// URL");
-
-export const PluginPipelineError = z.object({
-  stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
-  code: z.string().min(1).max(100),
-  message: z.string().min(1).max(10_000),
-}).strict();
-export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
-
-export const PluginStatusRecord = z.object({
-  id: PLUGIN_ID,
-  directoryName: z.string().min(1).max(255),
-  rootPath: PATH_STRING,
-  valid: z.boolean(),
-  status: z.enum(PLUGIN_PIPELINE_STATUSES),
-  disabledReason: z.enum(["user", "crash-loop", "approval", "repair"]).nullable(),
-  runtimeStatus: z
-    .enum(["starting", "ready", "failed", "crashed", "disabled"])
-    .nullable(),
-  sourceHash: PLUGIN_SOURCE_HASH.nullable(),
-  approvedHash: PLUGIN_SOURCE_HASH.nullable(),
-  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
-  // Manifest metadata, bounded by the manifest schema's own limits so the two
-  // cannot drift: a value the manifest allows must never fail this parse and
-  // take the whole plugin list down with it.
-  displayName: z.string().min(1).max(120).nullable(),
-  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
-  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
-  icon: z.string().min(1).max(1024).nullable(),
-  // What the plugin declares about itself that dohc cannot derive: the
-  // version string it calls this build, and where its source, its issues, and
-  // its licence are. The URLs are re-checked as https here rather than
-  // trusted from main, because this contract is also what a test fixture and
-  // the demo bridge have to satisfy.
-  pluginVersion: z.string().min(1).max(MAX_PLUGIN_VERSION_CHARS).nullable(),
-  repository: HTTPS_URL.nullable(),
-  issues: HTTPS_URL.nullable(),
-  license: z.string().min(1).max(MAX_PLUGIN_LICENSE_CHARS).nullable(),
-  /** What the plugin declares the user may set. Values travel separately —
-   * they are per-workspace state, not part of the plugin's identity. */
-  settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
-  /** True while a build has failed and its replacement is still owed, even
-   * through a runtime health change (crash, respawn) that would otherwise
-   * hide it — see PluginPipelinePluginStatus.hasFailedReplacement. */
-  hasFailedReplacement: z.boolean(),
-  /** The plugin's declared panels. `placement` says where each one shows:
-   * "editor" opens a tab, "view" gets a button in the activity bar. The
-   * entry path never crosses — the renderer asks for a panel by id. */
-  panels: z.array(
-    z.object({
-      id: PLUGIN_PANEL_ID,
-      title: z.string().min(1).max(120),
-      placement: z.enum(["editor", "view"]),
-      icon: z.string().min(1).max(1024).nullable(),
-    }).strict(),
-  ).max(100),
-  commands: z.array(
-    z.object({
-      id: z.string().min(1).max(120),
-      title: z.string().min(1).max(120),
-    }).strict(),
-  ).max(200),
-  webApps: z.array(
-    z.object({
-      id: z.string().min(1).max(120),
-      title: z.string().min(1).max(120),
-      /** True when this app opens one tab per instance. The plugin's page
-       * has no instance to name, so it offers no Open button for one — the
-       * plugin opens these from its own panel. */
-      instanced: z.boolean(),
-    }).strict(),
-  ).max(100),
-  diagnostics: z.array(PLUGIN_DIAGNOSTIC),
-  warnings: z.array(PLUGIN_DIAGNOSTIC),
-  error: PluginPipelineError.nullable(),
-}).strict();
-export type PluginStatusRecord = z.infer<typeof PluginStatusRecord>;
-
-export const PluginActionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-}).strict();
-
-// The directory a discovered (never-installed) row's own id can never
-// safely stand in for: that id is only ever a broken manifest's directory-
-// derived fallback, a plain string that can coincide with some other,
-// unrelated plugin's real, valid manifest id. Preflight resolves the exact
-// directory the caller named, never trusting pluginId alone to disambiguate
-// which plugin that id actually means.
-export const PluginUninstallPreflightPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type PluginUninstallPreflightPayload = z.infer<
-  typeof PluginUninstallPreflightPayload
->;
-export type PluginActionPayload = z.infer<typeof PluginActionPayload>;
-
-export const ListPluginsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-}).strict();
-export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
-
-// A plugin's settings values. Bounded by the same declaration count the
-// manifest allows, because a plugin can never have more settings than it
-// declares — main resolves the stored file against the manifest before this
-// ever crosses.
-const PluginSettingsValues = z.record(
-  z.string().min(1).max(120),
-  PluginSettingValueSchema,
-).refine(
-  (values) => Object.keys(values).length <= MAX_PLUGIN_SETTINGS,
-  `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
-);
-
-// directoryName, not pluginId alone, is what settles which row's answers a
-// call reads or writes: an id is only ever a broken manifest's directory-
-// derived fallback, which can coincide with some other, unrelated plugin's
-// real id.
-export const GetPluginSettingsPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type GetPluginSettingsPayload = z.infer<typeof GetPluginSettingsPayload>;
-
-export const SetPluginSettingsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  directoryName: z.string().min(1).max(255),
-  values: PluginSettingsValues,
-}).strict();
-export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
-
-export const PluginSettingsResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), values: PluginSettingsValues }).strict(),
-  z.object({
-    ok: z.literal(false),
-    message: z.string().min(1).max(10_000),
-  }).strict(),
-]);
-export type PluginSettingsResult = z.infer<typeof PluginSettingsResult>;
-
-export const ListPluginsResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plugins: z.array(PluginStatusRecord) }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
-
-export const PluginActionResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
-  z.object({
-    ok: z.literal(false),
-    error: PluginPipelineError,
-    plugin: PluginStatusRecord.nullable(),
-  }).strict(),
-]);
-export type PluginActionResult = z.infer<typeof PluginActionResult>;
-
-const PluginUninstallCounts = z.object({
-  unchanged: z.number().int().nonnegative(),
-  modified: z.number().int().nonnegative(),
-  addedSinceBaseline: z.number().int().nonnegative(),
-  removedSinceBaseline: z.number().int().nonnegative(),
-  unknownWithoutBaseline: z.number().int().nonnegative(),
-  notRecoverableFromHistory: z.number().int().nonnegative(),
-}).strict();
-
-// Only a bounded sample of unrecoverable paths crosses the bridge; the whole
-// inventory stays in main. counts.notRecoverableFromHistory is the real
-// total, which is what the dialog counts "and N more" from.
-const PluginUninstallWarning = z.object({
-  kind: z.enum(["local-modifications", "cannot-verify-baseline", "plugin-state"]),
-  summary: z.string().min(1).max(10_000),
-  details: z.array(PLUGIN_DIAGNOSTIC),
-  counts: PluginUninstallCounts,
-  notRecoverablePathSample: z
-    .array(PATH_STRING)
-    .max(PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT),
-}).strict();
-
-export const PluginUninstallPreflightRecord = z.object({
-  verification: z.enum(["verified", "cannot-verify"]),
-  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
-  liveHash: PLUGIN_SOURCE_HASH.nullable(),
-  baselineManifestPath: PATH_STRING,
-  summary: z.string().min(1).max(10_000),
-  counts: PluginUninstallCounts,
-  stateData: z.object({
-    path: PATH_STRING,
-    fileCount: z.number().int().nonnegative(),
-    totalBytes: z.number().int().nonnegative(),
-    additionalLocations: z.number().int().nonnegative(),
-  }).strict().nullable(),
-  warning: PluginUninstallWarning.nullable(),
-}).strict();
-export type PluginUninstallPreflightRecord = z.infer<
-  typeof PluginUninstallPreflightRecord
->;
-
-export const PluginUninstallPreflightResult = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    confirmationToken: z.uuid(),
-    preflight: PluginUninstallPreflightRecord,
-  }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type PluginUninstallPreflightResult = z.infer<
-  typeof PluginUninstallPreflightResult
->;
-
-// What this plugin takes up on this machine. Measured on request rather than
-// carried on PluginStatusRecord: the walk reads every file in the installed
-// tree, and the list surface shows many plugins at once and needs none of it.
-export const PluginSizesRecord = z.object({
-  installedBytes: z.number().int().nonnegative().nullable(),
-  dataBytes: z.number().int().nonnegative().nullable(),
-}).strict();
-export type PluginSizesRecord = z.infer<typeof PluginSizesRecord>;
-
-export const PluginSizesResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), sizes: PluginSizesRecord }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
-
-// directoryName is what settles which row's bytes a call reports: an id is
-// only ever a broken manifest's directory-derived fallback, which can
-// coincide with some other, unrelated plugin's real id.
-export const PluginSizesPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
-
-// directoryName is what confirmationToken alone cannot name apart: two rows
-// can share an id (a broken manifest's directory-derived fallback colliding
-// with some other, unrelated plugin's real id), and each row's own
-// preflight confirmation has to be resolved by the exact row it was issued
-// for, not whichever row this id happens to name second.
-export const UninstallPluginPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-  confirmationToken: z.uuid(),
-}).strict();
-export type UninstallPluginPayload = z.infer<typeof UninstallPluginPayload>;
-
-export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("changed"),
-    workspaceId: WORKSPACE_ID,
-    plugin: PluginStatusRecord,
-  }).strict(),
-  // directoryName is the departed row's own — never re-derived from
-  // whatever this id currently names, which a collision can leave
-  // pointing at an entirely different, still-installed row.
-  z.object({
-    kind: z.literal("removed"),
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    directoryName: z.string().min(1).max(255),
-  }).strict(),
-  // An invalid, never-installed candidate's arrival or departure names no
-  // pluginId "changed"/"removed" could carry — this is the one honest fact
-  // discovery has to offer instead: something in this workspace's invalid
-  // candidates moved, so anything reading discovery (the plugin list)
-  // should re-check.
-  z.object({
-    kind: z.literal("discovery-changed"),
-    workspaceId: WORKSPACE_ID,
-  }).strict(),
-  // Emitted only where the pipeline itself has proven a rename, never
-  // guessed from directoryName drift on a "changed" event — a renderer
-  // tab tracking one open row retargets on this fact directly.
-  z.object({
-    kind: z.literal("renamed"),
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    from: z.string().min(1).max(255),
-    to: z.string().min(1).max(255),
-  }).strict(),
-]);
-export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;
-
-export function parsePluginStatusChangedEventForIpc(
-  value: unknown,
-): PluginStatusChangedEvent | null {
-  const parsed = PluginStatusChangedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
 
 // The daemon caps its own capture event at this many paths; a merged or
 // oversized set stops being a useful hint and the payload omits it
@@ -3519,8 +3052,7 @@ export function activityPathsAffectWorkspaceListing(
   return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
 }
 
-// Unlike plugin events, an activity ping must never be dropped on a schema
-// failure: under-notifying is the staleness bug the channel exists to
+// An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to
 // prevent. A malformed payload degrades to the global, payload-free ping.
 export function parseWorkspaceActivityEventForIpc(
   value: unknown,
@@ -3528,266 +3060,6 @@ export function parseWorkspaceActivityEventForIpc(
   const parsed = WorkspaceActivityEvent.safeParse(value);
   return parsed.success ? parsed.data : {};
 }
-
-// What one panel subscription event carries: a settled file change
-// (files.watch), or a collection record event (collections.watch). The
-// record shapes mirror the engine's fixed record event contract minus
-// workspaceId, which the enclosing event already carries.
-const PluginPanelFileWatchData = z
-  .object({
-    path: z.string(),
-    operation: z.enum(["update", "delete"]),
-    sha256: z.string().optional(),
-  })
-  .strict();
-
-// Declared attribution and the op's replication coordinate ride every record
-// event: `null` means unattributed (or a never-synced change for `source`),
-// so a subscriber can tell "undeclared" from "missing".
-const RecordEventAttributionFields = {
-  actorKind: z.enum(["human", "agent", "automation"]).nullable(),
-  onBehalfOf: z.string().nullable(),
-  depth: z.number().nullable(),
-  source: z
-    .object({ originId: z.string().min(1), originSeq: z.number() })
-    .strict()
-    .nullable(),
-};
-
-export const PluginPanelRecordChangedData = z
-  .object({
-    collectionPath: z.string().min(1),
-    recordId: z.string().min(1),
-    author: z.string().nullable(),
-    timestamp: z.number(),
-    ...RecordEventAttributionFields,
-  })
-  .strict();
-
-// previous/next are arbitrary JSON field values (an oversized one arrives
-// already replaced by the engine's truncation marker), so they revalidate
-// through the same bounded value schema every collection result uses.
-export const PluginPanelRecordFieldChangedData = z
-  .object({
-    collectionPath: z.string().min(1),
-    recordId: z.string().min(1),
-    field: z.string().min(1),
-    previous: CollectionValueSchema,
-    next: CollectionValueSchema,
-    author: z.string().nullable(),
-    timestamp: z.number(),
-    historyId: z.number(),
-    ...RecordEventAttributionFields,
-  })
-  .strict();
-
-export const PluginPanelSdkEvent = z
-  .object({
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    panelId: PLUGIN_PANEL_ID,
-    subscriptionId: z.string().min(1),
-    // Forwarded verbatim from whatever the subscribed registry emits
-    // (PluginWorkspaceEvents' "change" and record.* names today) — not a
-    // closed set this schema owns, so a later event kind slots in without a
-    // schema change.
-    event: z.string().min(1),
-    data: z.union([
-      PluginPanelFileWatchData,
-      PluginPanelRecordChangedData,
-      PluginPanelRecordFieldChangedData,
-    ]),
-  })
-  .strict();
-export type PluginPanelSdkEvent = z.infer<typeof PluginPanelSdkEvent>;
-
-export function parsePluginPanelSdkEventForIpc(
-  value: unknown,
-): PluginPanelSdkEvent | null {
-  const parsed = PluginPanelSdkEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-// A guest never supplies user or workspace identity. The containing renderer
-// identifies the open surface and main re-derives its authority.
-// The preload applies this contract before ipcRenderer.invoke. The byte cap
-// is the exact UTF-8 size of the JSON representation; 4 MiB preserves the
-// supported 2 MiB text-write payload while bounding Electron deserialization.
-export const SDK_PARAMS_MAX_BYTES = 4 * 1024 * 1024;
-export const SDK_PARAMS_MAX_DEPTH = 32;
-export const SDK_PARAMS_MAX_VALUES = 20_000;
-
-type SdkParamFrame =
-  | { kind: "visit"; value: unknown; depth: number }
-  | { kind: "leave"; value: object };
-
-function boundedJsonStringBytes(value: string, remaining: number): number {
-  let bytes = 2; // JSON quotes.
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c) {
-      bytes += 2;
-    } else if (code <= 0x1f) {
-      bytes += code === 0x08 || code === 0x09 || code === 0x0a ||
-        code === 0x0c || code === 0x0d
-        ? 2
-        : 6;
-    } else if (code <= 0x7f) {
-      bytes += 1;
-    } else if (code <= 0x7ff) {
-      bytes += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4;
-        index += 1;
-      } else {
-        // Well-formed JSON.stringify escapes lone surrogates as \uXXXX.
-        bytes += 6;
-      }
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      bytes += 6;
-    } else {
-      bytes += 3;
-    }
-    if (bytes > remaining) return remaining + 1;
-  }
-  return bytes;
-}
-
-function sdkParamsIssue(root: unknown): string | null {
-  const stack: SdkParamFrame[] = [{ kind: "visit", value: root, depth: 0 }];
-  const ancestors = new WeakSet<object>();
-  let bytes = 0;
-  let values = 0;
-
-  const addBytes = (amount: number): boolean => {
-    bytes += amount;
-    return bytes <= SDK_PARAMS_MAX_BYTES;
-  };
-
-  try {
-    while (stack.length > 0) {
-      const frame = stack.pop()!;
-      if (frame.kind === "leave") {
-        ancestors.delete(frame.value);
-        continue;
-      }
-      if (frame.depth > SDK_PARAMS_MAX_DEPTH) return "nesting is too deep";
-      values += 1;
-      if (values > SDK_PARAMS_MAX_VALUES) return "too many values";
-
-      const current = frame.value;
-      if (current === null) {
-        if (!addBytes(4)) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "string") {
-        if (!addBytes(boundedJsonStringBytes(
-          current,
-          SDK_PARAMS_MAX_BYTES - bytes,
-        ))) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "boolean") {
-        if (!addBytes(current ? 4 : 5)) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "number") {
-        if (!Number.isFinite(current)) return "numbers must be finite";
-        if (!addBytes(JSON.stringify(current).length)) {
-          return "serialized value is too large";
-        }
-        continue;
-      }
-      if (typeof current !== "object") return "value is not JSON-safe";
-      if (ancestors.has(current)) return "cyclic references are not allowed";
-
-      if (Array.isArray(current)) {
-        const keys = Object.keys(current);
-        if (
-          keys.length !== current.length ||
-          keys.some((key, index) => key !== String(index))
-        ) {
-          return "arrays must be dense and contain no extra properties";
-        }
-        if (!addBytes(2 + Math.max(0, current.length - 1))) {
-          return "serialized value is too large";
-        }
-        ancestors.add(current);
-        stack.push({ kind: "leave", value: current });
-        for (let index = current.length - 1; index >= 0; index -= 1) {
-          stack.push({ kind: "visit", value: current[index], depth: frame.depth + 1 });
-        }
-        continue;
-      }
-
-      const prototype = Object.getPrototypeOf(current);
-      if (prototype !== Object.prototype && prototype !== null) {
-        return "only plain objects and arrays are allowed";
-      }
-      const keys = Reflect.ownKeys(current);
-      if (!addBytes(2 + Math.max(0, keys.length - 1) + keys.length)) {
-        return "serialized value is too large";
-      }
-      const childValues: unknown[] = [];
-      for (const key of keys) {
-        if (typeof key !== "string") return "symbol keys are not allowed";
-        const descriptor = Object.getOwnPropertyDescriptor(current, key);
-        if (!descriptor?.enumerable || !("value" in descriptor)) {
-          return "object properties must be enumerable data values";
-        }
-        if (!addBytes(boundedJsonStringBytes(
-          key,
-          SDK_PARAMS_MAX_BYTES - bytes,
-        ))) return "serialized value is too large";
-        childValues.push(descriptor.value);
-      }
-      ancestors.add(current);
-      stack.push({ kind: "leave", value: current });
-      for (let index = childValues.length - 1; index >= 0; index -= 1) {
-        stack.push({ kind: "visit", value: childValues[index], depth: frame.depth + 1 });
-      }
-    }
-  } catch {
-    return "value could not be inspected safely";
-  }
-
-  return null;
-}
-
-const SdkParams = z.unknown().superRefine((value, ctx) => {
-  const issue = sdkParamsIssue(value);
-  if (!issue) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message:
-      `params must be JSON-safe and within ${SDK_PARAMS_MAX_BYTES} bytes, ` +
-      `${SDK_PARAMS_MAX_DEPTH} levels, and ${SDK_PARAMS_MAX_VALUES} values: ${issue}`,
-  });
-});
-
-export const InvokePluginPanelSdkPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  method: z.string().min(1).max(200),
-  params: SdkParams.optional(),
-}).strict();
-export type InvokePluginPanelSdkPayload = z.infer<
-  typeof InvokePluginPanelSdkPayload
->;
-
-export function parseInvokePluginPanelSdkPayloadForIpc(
-  value: unknown,
-): InvokePluginPanelSdkPayload {
-  return InvokePluginPanelSdkPayload.parse(value);
-}
-
-export const InvokePluginPanelSdkResult = z.object({ result: z.unknown() }).strict();
-export type InvokePluginPanelSdkResult = z.infer<
-  typeof InvokePluginPanelSdkResult
->;
 
 // Server login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -4021,7 +3293,7 @@ export type GetRelayReceivedShareResult = z.infer<
 
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
-  // Path/version shares addressed to this account (chat-channel grants are
+  // Path/version shares addressed to this account (chat grants are
   // listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
 });
@@ -4858,6 +4130,54 @@ export async function resolveSubmitShareChangesResult(
   }
 }
 
+export const PushShareDirectWritesPayload = z.object({
+  // The SHARE VIEW, resolved to its share and pinned grant in main, like
+  // SubmitShareChangesPayload.
+  workspaceId: WORKSPACE_ID,
+});
+export type PushShareDirectWritesPayload = z.infer<typeof PushShareDirectWritesPayload>;
+
+// A new Collection's batch is the largest write: its schema, an automations
+// file, and 500 records.
+const DirectWritePaths = z.array(z.string().min(1)).min(1).max(502);
+
+// How one direct write to a Collection's own files ended (ADR 0013). A stale
+// or refused write stays for Send changes.
+export const DirectWriteRow = z.discriminatedUnion("result", [
+  z.object({ result: z.literal("written"), paths: DirectWritePaths }),
+  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1) }),
+  z.object({ result: z.literal("refused"), paths: DirectWritePaths, reason: z.string() }),
+]);
+export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
+
+// One push's answer carries at most this many rows, over all its passes.
+export const MAX_DIRECT_WRITE_ROWS = MAX_SHARE_PROPOSAL_OPS;
+const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
+
+// What one push did. A failure is an ordinary result, for the reason a failed
+// submit is one: Electron does not carry custom Error properties across IPC.
+// `unavailable`: the relay knows no Edit grant of this person's on the share,
+// because the owner ended the share or stopped them. `failed` keeps the writes answered before it;
+// `lasting` says trying again will not help, as when the grant is not Edit.
+export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
+  z.object({ status: z.literal("unavailable") }),
+  z.object({
+    status: z.literal("failed"),
+    writes: DirectWriteRows,
+    errorMessage: z.string(),
+    lasting: z.boolean(),
+  }),
+]);
+export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
+
+// A direct push main ran after a save in this share view finished.
+export const ShareDirectWritesPushedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  result: PushShareDirectWritesResult,
+});
+export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
+
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -4892,7 +4212,7 @@ export type WithdrawShareChangesResult = z.infer<
 >;
 
 // ---- Shared channels (MU-C4) ----
-// A chat-channel grant: a whole channel (threads + messages + reactions)
+// A chat grant: a whole channel (threads + messages + reactions)
 // shared to another relay account, read-write by default, read-only as the
 // broadcast opt-in. Granted rows manage who a channel is shared with;
 // received rows are invitations addressed to this account; joined rows are
@@ -5133,9 +4453,14 @@ export const AutomationFailureNotice = z.object({
   claimId: z.string().min(1),
   // A chain stop never ran, and no Try again can run it.
   chainStopped: z.boolean(),
+  // The automation's name in its automations.yaml, when dohc can read it.
+  name: z.string().nullable(),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
+  // A dataset automation's failures count per instance of its dataset, which
+  // a delete and remake or a restore replaces; null for a document Collection.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
 
@@ -5153,10 +4478,252 @@ export const DismissAutomationFailurePayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: z.string().min(1),
   generation: z.number().int().nonnegative(),
+  // The notice's dataset instance. A dismissal of an earlier instance changes nothing.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type DismissAutomationFailurePayload = z.infer<
   typeof DismissAutomationFailurePayload
 >;
+
+// ---- Collection automations (the ⚡ panel) ----
+// Main parses and writes automations.yaml, so the renderer never loads the
+// file contract. A shared view holds no executor, so it answers
+// "unavailable": its automations run on the owner's computer.
+const COLLECTION_AUTOMATION_ID = z.string().min(1).max(4096);
+
+export const ListCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
+export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
+
+export const ListCollectionAutomationRunsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+});
+export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
+// A shared view keeps no runs: its automations run on the owner's computer.
+export type ListCollectionAutomationRunsResult =
+  | { status: "listed"; runs: CollectionAutomationRun[] }
+  | { status: "unavailable" };
+
+// Try again for a failed run. `startOver` confirms running an automation
+// that changed since the run began from its first step.
+export const RetryCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+  startOver: z.boolean(),
+});
+export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
+export type RetryCollectionAutomationResult = CollectionAutomationRetry;
+
+// The builder's Collection picker: every Collection, with why a step in
+// this Collection's automations cannot reach it, or null.
+export const ListAutomationTargetsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
+export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
+
+// The builder checks a draft the way saving would: what the file contract
+// refuses, and each formula's syntax error or null. Formulas are one
+// expression each, as the file stores them; only their syntax is checked.
+export const CheckCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
+  formulas: z.array(z.string().max(2_000)).max(500),
+});
+export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
+export type CheckCollectionAutomationResult = {
+  diagnostics: AutomationDiagnostic[];
+  formulaProblems: Array<string | null>;
+};
+
+// Undo for a finished run, as the person who clicked it.
+export const UndoCollectionAutomationRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+});
+export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
+export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
+
+// Stop and restore (ADR 0013): the owner stops a person they shared with and
+// puts back what that person wrote directly. Main finds the person's grants
+// on this workspace from the relay; the renderer names only the person.
+export const StopAndRestorePersonPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  userId: z.string().min(1).max(256),
+}).strict();
+export type StopAndRestorePersonPayload = z.infer<typeof StopAndRestorePersonPayload>;
+export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("restored"),
+    // Each file put back, with the forward moment its Undo restores before.
+    restored: z.array(z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID })),
+    // Files left for the owner to check, each with why.
+    review: z.array(z.discriminatedUnion("reason", [
+      z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+    ])),
+    // Runs of the person's automations undone, and those Undo could not undo.
+    runsUndone: z.number().int().nonnegative(),
+    runsLeft: z.number().int().nonnegative(),
+    // What stopped the restore part way; the files above were restored.
+    errorMessage: z.string().nullable(),
+  }).strict(),
+  // Access stopped, but this computer has not received every change the
+  // person wrote yet. Nothing was restored; trying again continues.
+  z.object({ status: z.literal("waiting") }).strict(),
+]);
+export type StopAndRestorePersonResult = z.infer<typeof StopAndRestorePersonResult>;
+export const UndoStopAndRestorePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+}).strict();
+export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
+
+// A current editor allows a step that became reachable only because an
+// editor left. `seq` names the hold the person saw.
+export const ConfirmCollectionAutomationStepPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+  step: z.string().min(1).max(512),
+  seq: z.number().int().nonnegative(),
+  // A person a formula named, whose hold this is.
+  recipient: z.string().min(1).max(1_024).optional(),
+});
+export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
+export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
+
+// Steps waiting for a current editor to allow them, one notice each, and
+// steps a narrower share stopped, one notice for all of them.
+export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
+export type ListAutomationHoldsResult = CollectionAutomationHolds;
+
+// After the saved verdicts could not be read, hold every step the roster
+// allows now. "roster-unknown" means dohc cannot check who can edit yet.
+export const ResetAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ResetAutomationHoldsPayload = z.infer<typeof ResetAutomationHoldsPayload>;
+export type ResetAutomationHoldsResult = { status: "reset" | "roster-unknown" };
+export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
+// Dismisses the stopped-steps notice. `seq` names each step's verdict the
+// person saw, so a step that stopped again since keeps its notice.
+export const DismissAutomationStopsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  stops: z.array(z.object({
+    automationId: COLLECTION_AUTOMATION_ID,
+    definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+    step: z.string().min(1).max(512),
+    seq: z.number().int().nonnegative(),
+  })).max(1_000),
+});
+export type DismissAutomationStopsPayload = z.infer<typeof DismissAutomationStopsPayload>;
+
+// The automation steps a share with these paths and access would stop,
+// asked before the share is made. `recipientEmail` is null for a link,
+// which makes an editor of whoever opens it.
+export const AutomationShareImpactPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  recipientEmail: EMAIL_STRING.nullable(),
+  paths: z.array(PATH_STRING).min(1).max(100),
+  access: SHARE_ACCESS,
+});
+export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactPayload>;
+export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
+
+// The fields in one Collection that switched-on automations set, for the
+// ⚡ marks on the table and the record's properties.
+export const ListCollectionFieldMarksPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionFieldMarksPayload = z.infer<typeof ListCollectionFieldMarksPayload>;
+export type ListCollectionFieldMarksResult = { marks: CollectionFieldMark[] };
+
+// Replaces the file's automations with these, over the content the panel
+// read (null when the file did not exist). `reformat` is the person's
+// agreement to lose the file's comments and hand formatting.
+export const WriteCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH.nullable(),
+  // The shape is only checked here; main's writer reads its own text back
+  // and refuses anything the file contract would not produce.
+  automations: z.array(z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value))).max(50),
+  reformat: z.boolean(),
+});
+export type WriteCollectionAutomationsPayload = z.infer<typeof WriteCollectionAutomationsPayload>;
+export type WriteCollectionAutomationsResult =
+  | { status: "written"; contentHash: string }
+  | { status: "conflict" }
+  // The file has entries dohc cannot read; it has to be fixed by hand.
+  | { status: "unreadable" }
+  // The writer would lose the file's comments or hand formatting, and the
+  // person has not agreed to that. Nothing was written.
+  | { status: "reformats" }
+  | { status: "refused"; diagnostics: AutomationDiagnostic[] }
+  | { status: "unavailable" };
+
+// ---- Button fields ----
+// Main decides which automation a button runs and who may press it. A window
+// makes a UUID for each press and sends it again after a lost reply. The
+// person a press acts for is main's own signed-in person, never a value a
+// window sends. A document Collection is named by its folder, and a dataset
+// Collection by its id.
+export const ListAutomationButtonsPayload = z.union([
+  z.strictObject({ workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING }),
+  z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() }),
+]);
+export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
+/** A Button field, with its dataset table's name; null in a document Collection. */
+export type ListedAutomationButton = CollectionAutomationButton & { table: string | null };
+export type ListAutomationButtonsResult = { buttons: ListedAutomationButton[] };
+
+// The record an open file is, and its Collection's buttons. Null when the
+// file is not a record in a Collection.
+export const ListRecordButtonsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type ListRecordButtonsPayload = z.infer<typeof ListRecordButtonsPayload>;
+export type ListRecordButtonsResult =
+  | { record: null }
+  | { record: CollectionRecord; collectionPath: string; buttons: CollectionAutomationButton[] };
+
+const PressedButton = {
+  workspaceId: WORKSPACE_ID,
+  field: z.string().min(1).max(256),
+  // A document record's id, or a dataset record's primary key as JSON.
+  recordId: z.string().min(1).max(1024),
+  pressId: z.uuid(),
+};
+export const PressAutomationButtonPayload = z.union([
+  z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
+  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+]);
+export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
+export type PressAutomationButtonResult =
+  // `settled` is set when a press sent again finds its run already ended;
+  // otherwise the window hears the end as an automation run event.
+  | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null }
+  // A shared view's press went to the relay, to run on the owner's computer.
+  // Its changes arrive as synced edits, and a failure as a notice.
+  | { busy: false; relayed: true }
+  // The button is running on this record for someone else.
+  | { busy: true; reason: string };
+
+/** Main to the pressing window: the engine settled the press's run. */
+export type AutomationRunSettledEvent = PressSettled & { workspaceId: string };
+/** Main to the pressing window: the run waits, and why. */
+export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; reason: PressWaitReason };
 
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
@@ -5310,114 +4877,6 @@ export const McpConfigResult = z.union([
 ]);
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
-const AgentPermissionKindSchema = z.enum([
-  "allow_once",
-  "allow_always",
-  "reject_once",
-  "reject_always",
-]);
-const AgentPermissionDecisionSchema = z.union([
-  AgentPermissionKindSchema,
-  z.literal("cancel"),
-]);
-export type AgentPermissionDecision = z.infer<typeof AgentPermissionDecisionSchema>;
-
-const AgentModelSchema = z.object({
-  id: OPAQUE_ID,
-  name: z.string().min(1).max(200),
-  planIncluded: z.boolean(),
-});
-
-const AgentDriverProbeSchema = z.object({
-  id: AgentDriverIdSchema,
-  displayName: AgentDriverNameSchema,
-  installed: z.boolean(),
-  version: z.string().max(200).optional(),
-  auth: z.object({
-    status: z.enum(["authenticated", "unauthenticated", "unknown"]),
-    label: z.string().max(200).optional(),
-  }),
-  models: z.array(AgentModelSchema).max(50),
-  errorMessage: z.string().max(500).optional(),
-});
-
-const AgentPermissionOptionSchema = z.object({
-  optionId: OPAQUE_ID,
-  name: z.string().min(1).max(100),
-  kind: AgentPermissionKindSchema,
-});
-
-const AgentPermissionRequestSchema = z.object({
-  requestId: OPAQUE_ID,
-  requestType: z.enum(["command", "file-change", "file-read", "tool", "other"]),
-  title: z.string().min(1).max(200),
-  detail: z.string().max(500).optional(),
-  locations: z.array(z.string().min(1).max(1000)).max(20),
-  options: z.array(AgentPermissionOptionSchema).max(8),
-});
-
-const AgentSessionSnapshotSchema = z.object({
-  driverId: AgentDriverIdSchema,
-  driverName: AgentDriverNameSchema,
-  status: z.enum([
-    "idle",
-    "starting",
-    "ready",
-    "running",
-    "waiting-permission",
-    "completed",
-    "failed",
-    "stopped",
-  ]),
-  startedAt: z.number(),
-  endedAt: z.number().optional(),
-  runId: OPAQUE_ID.optional(),
-  lastError: z.string().max(500).optional(),
-  messages: z.array(
-    z.object({
-      id: z.string().min(1).max(300),
-      role: z.enum(["assistant", "reasoning"]),
-      text: z.string().max(10_000),
-    }),
-  ).max(200),
-  items: z.array(
-    z.object({
-      id: z.string().min(1).max(300),
-      type: z.enum(["tool_call", "command", "file_change", "mcp_tool_call", "web_search", "plan", "other"]),
-      title: z.string().min(1).max(200),
-      detail: z.string().max(500).optional(),
-      status: z.enum(["pending", "in_progress", "completed", "failed"]),
-      locations: z.array(z.string().min(1).max(1000)).max(20),
-    }),
-  ).max(200),
-  pendingPermissions: z.array(AgentPermissionRequestSchema).max(20),
-  usage: z.object({
-    used: z.number(),
-    max: z.number().optional(),
-    input: z.number().optional(),
-    output: z.number().optional(),
-  }).optional(),
-  authNotices: z.array(z.string().min(1).max(300)).max(5),
-  loginRequired: z.boolean(),
-});
-
-export const AgentPanelSnapshotResult = z.object({
-  // This workspace's plugin drivers. The registry
-  // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
-  // merged list inside this bound instead of failing the whole list here.
-  drivers: z.array(AgentDriverProbeSchema).max(20),
-  session: AgentSessionSnapshotSchema.nullable(),
-  selectedDriverId: AgentDriverIdSchema.nullable(),
-});
-export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
-
-export const AgentPermissionResponsePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  requestId: OPAQUE_ID,
-  decision: AgentPermissionDecisionSchema,
-});
-export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
-
 export const RunnerSelfTestPayload = z.object({
   workspaceId: WORKSPACE_ID,
 }).strict();
@@ -5468,6 +4927,14 @@ export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
 // `base` is the settings the caller changed. Main writes only the difference,
 // so a caller that has not yet seen an edit made in the file cannot undo it.
+// Pins or unpins one app in one workspace's sidebar.
+export const SetAppPinnedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: SITE_ROOT_STRING,
+  pinned: z.boolean(),
+}).strict();
+export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
   base: DesktopUserSettingsSchema,
@@ -5617,33 +5084,17 @@ const WorkspaceEditorGroups = z.preprocess(
   z.array(WorkspaceEditorGroup).min(1),
 );
 
-// `plugin-view:<plugin>/<panel>`, both segments percent-encoded. The bound is
-// that worst case: each id character can encode to nine characters, because a
-// three-byte character spends "%XX" three times.
-const PLUGIN_VIEW_ID = z
+// A pinned app's view: its folder, where each character can encode to nine.
+const APP_VIEW_ID = z
   .string()
-  .max(
-    PLUGIN_VIEW_ID_PREFIX.length +
-      MAX_PLUGIN_ID_CHARS * 9 +
-      "/".length +
-      MAX_PLUGIN_PANEL_ID_CHARS * 9,
-  )
-  .refine((value) => {
-    const parsed = parsePluginViewId(value);
-    // The ids it decodes to must be ids this contract would accept anywhere
-    // else — same length caps, same refusal of NUL.
-    return (
-      parsed !== null &&
-      PLUGIN_ID.safeParse(parsed.pluginId).success &&
-      PLUGIN_PANEL_ID.safeParse(parsed.panelId).success
-    );
-  });
+  .max(APP_VIEW_ID_PREFIX.length + 4096 * 9)
+  .refine((value) => parseAppViewId(value) !== null);
 
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  // dohc's own views, or a view a plugin contributes. The catch keeps a
-  // stored id that names neither from failing the whole file.
-  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID]).catch("explorer"),
+  // dohc's own views or a pinned app. The catch keeps a stored id that names
+  // neither from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
@@ -5711,9 +5162,7 @@ export const WorkspaceUiState = z.object({
               ? "Each chat can be open in only one editor group."
               : isSiteTabPath(tab)
                 ? "An app preview can be open in only one editor group."
-                : isPluginPanelTabPath(tab)
-                  ? "A plugin panel can be open in only one editor group."
-                  : "This tab can be open in only one editor group.",
+                : "This tab can be open in only one editor group.",
         });
       } else {
         singletonOwners.add(identity);
@@ -5845,6 +5294,54 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Crash reports. Main keeps each crash on this computer as plain text and
+// sends nothing on its own. A report leaves only after the person confirms
+// in main's own dialog, which names where it goes and can show the exact
+// text. One report holds the problems recorded since the last send or
+// dismiss.
+export const CrashReportSource = z.enum(["main", "window", "gpu", "utility", "engine"]);
+export type CrashReportSource = z.infer<typeof CrashReportSource>;
+// Five problems of at most 6,000 characters each, with the header.
+export const CRASH_REPORT_MAX_CHARS = 32_768;
+export const CrashReportView = z.object({
+  // Changes whenever the text does.
+  revision: z.number().int().positive(),
+  // The last problem in this text. Dismiss removes up to it, so a newer
+  // problem stays.
+  through: z.number().int().positive(),
+  // Where the newest problem happened. The notice names it.
+  source: CrashReportSource,
+  problems: z.number().int().positive(),
+  atMs: z.number().int().nonnegative(),
+  text: z.string().min(1).max(CRASH_REPORT_MAX_CHARS),
+});
+export type CrashReportView = z.infer<typeof CrashReportView>;
+export const ReadCrashReportResult = z.object({
+  report: CrashReportView.nullable(),
+  // The host a sent report goes to. Null when this build has no report
+  // server, so the notice offers only Copy report.
+  sendTo: z.string().min(1).max(255).nullable(),
+});
+export type ReadCrashReportResult = z.infer<typeof ReadCrashReportResult>;
+export const CrashReportChangedEvent = z.undefined();
+
+export const crashReportOperations = {
+  readCrashReport: {
+    channel: "desktop:read-crash-report",
+    payload: z.object({}), result: ReadCrashReportResult, guard: "trusted-sender",
+  },
+  dismissCrashReport: {
+    channel: "desktop:dismiss-crash-report",
+    payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
+  },
+  // Opens main's dialog. Sent is true only when the person confirmed there
+  // and the server took the report.
+  sendCrashReport: {
+    channel: "desktop:send-crash-report",
+    payload: z.object({}), result: z.object({ sent: z.boolean() }), guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
@@ -5889,21 +5386,97 @@ export const NoticeRef = z.object({
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
-export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+// The signed-in account a list shows, the same key cloudSessionChanged
+// carries, or null when nobody is signed in.
+const NoticeAccountKey = z.string().min(1).max(8_192).nullable();
+export const ListNoticesResult = z.object({
+  account: NoticeAccountKey,
+  notices: z.array(NoticeRow),
+});
+export const NOTICE_MARK_BATCH_MAX = 500;
+// One notice as it opens or is dismissed, or every unread one for "Mark all
+// read", in batches. Account rows are marked only while the account the
+// list showed is still signed in.
+export const MarkNoticesPayload = z.object({
+  account: NoticeAccountKey,
+  mark: z.enum(["read", "dismissed"]),
+  notices: z.array(NoticeRef).min(1).max(NOTICE_MARK_BATCH_MAX),
+});
+export type MarkNoticesPayload = z.infer<typeof MarkNoticesPayload>;
 export const NoticesChangedEvent = z.undefined();
+// Run now on a skipped schedule's notice, from the list for `account`.
+export const RunSkippedScheduleNowPayload = z.object({
+  account: NoticeAccountKey,
+  notice: NoticeRef,
+});
+// `note` is null once the run started on this computer, or says why not.
+export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
+
+// Which of the owner's computers runs a workspace's schedules.
+const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
+const ScheduleHostComputer = z.object({
+  installId: z.string().min(1).max(256),
+  label: z.string().min(1).max(64),
+  lastSeenMs: z.number().int().nonnegative(),
+  thisComputer: z.boolean(),
+});
+export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
+export const ScheduleHostResult = z.discriminatedUnion("kind", [
+  // A workspace that never synced runs its schedules here, its only computer.
+  z.object({ kind: z.literal("this-computer") }),
+  // A shared view never runs schedules.
+  z.object({ kind: z.literal("none") }),
+  // dohc cannot ask the relay; `message` says what to do.
+  z.object({ kind: z.literal("note"), message: z.string().min(1).max(300) }),
+  z.object({
+    kind: z.literal("relay"),
+    // Rises on every change; choose and take over name the one they read.
+    generation: z.number().int().nonnegative(),
+    hostInstallId: z.string().min(1).max(256).nullable(),
+    // The computer that is handing over, while a handover waits.
+    handoverFrom: z.string().min(1).max(256).nullable(),
+    // Most recently seen first.
+    computers: z.array(ScheduleHostComputer).max(64),
+  }),
+]);
+export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
+// The workspace whose schedule host changed.
+export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+
+export const scheduleHostOperations = {
+  readScheduleHost: {
+    channel: "desktop:read-schedule-host",
+    payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Starts a handover to another of the owner's computers.
+  chooseScheduleHost: {
+    channel: "desktop:choose-schedule-host",
+    payload: ScheduleHostWorkspace.extend({
+      installId: z.string().min(1).max(256),
+      generation: z.number().int().nonnegative(),
+    }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Ends a handover without the old computer. A run can repeat if it is still on.
+  takeOverScheduleHost: {
+    channel: "desktop:take-over-schedule-host",
+    payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
 
 export const noticeOperations = {
   listNotices: {
     channel: "desktop:list-notices",
     payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
   },
-  readNotice: {
-    channel: "desktop:read-notice",
-    payload: NoticeRef, guard: "trusted-sender",
+  markNotices: {
+    channel: "desktop:mark-notices",
+    payload: MarkNoticesPayload, guard: "trusted-sender",
   },
-  dismissNotice: {
-    channel: "desktop:dismiss-notice",
-    payload: NoticeRef, guard: "trusted-sender",
+  runSkippedScheduleNow: {
+    channel: "desktop:run-skipped-schedule-now",
+    payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6048,6 +5621,7 @@ export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
       "session-unavailable",
       "lineage-transition",
       "deleted",
+      "object-changed",
       "read-only",
     ]),
   }),
@@ -6147,7 +5721,9 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
-    OperationBridge<typeof noticeOperations> {
+    OperationBridge<typeof crashReportOperations>,
+    OperationBridge<typeof noticeOperations>,
+    OperationBridge<typeof scheduleHostOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6276,54 +5852,14 @@ export interface DohcDesktopBridge
   ): Promise<ImportToDatabaseResult>;
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
-  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewAnswer>;
   getSitePreviewLogs(
     payload: GetSitePreviewLogsPayload,
   ): Promise<GetSitePreviewLogsResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
-  openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
-  onPluginPanelOpened(
-    listener: (event: PluginPanelOpenedEvent) => void,
+  onSitePreviewReplaced(
+    listener: (event: SitePreviewReplacedEvent) => void,
   ): () => void;
-  startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
-  onPluginPanelInvalidated(
-    listener: (event: PluginPanelInvalidatedEvent) => void,
-  ): () => void;
-  invokePluginCommand(
-    payload: InvokePluginCommandPayload,
-  ): Promise<InvokePluginCommandResult>;
-  stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
-  invokePluginPanelSdk(
-    payload: InvokePluginPanelSdkPayload,
-  ): Promise<InvokePluginPanelSdkResult>;
-  onPluginPanelSdkEvent(
-    listener: (event: PluginPanelSdkEvent) => void,
-  ): () => void;
-  openPluginWebApp(payload: OpenPluginWebAppPayload): Promise<OpenPluginWebAppResult>;
-  onPluginWebAppOpened(
-    listener: (event: PluginWebAppOpenedEvent) => void,
-  ): () => void;
-  startPluginWebApp(
-    payload: StartPluginWebAppPayload,
-  ): Promise<StartPluginWebAppResult>;
-  setPluginWebAppBounds(payload: SetPluginWebAppBoundsPayload): Promise<void>;
-  stopPluginWebApp(payload: StopPluginWebAppPayload): Promise<void>;
-  onPluginWebAppFailed(
-    listener: (event: PluginWebAppFailedEvent) => void,
-  ): () => void;
-  listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
-  installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  pluginUninstallPreflight(
-    payload: PluginUninstallPreflightPayload,
-  ): Promise<PluginUninstallPreflightResult>;
-  pluginSizes(payload: PluginSizesPayload): Promise<PluginSizesResult>;
-  uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
-  getPluginSettings(payload: GetPluginSettingsPayload): Promise<PluginSettingsResult>;
-  setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
@@ -6420,6 +5956,26 @@ export interface DohcDesktopBridge
   dismissAutomationFailure(
     payload: DismissAutomationFailurePayload,
   ): Promise<void>;
+  // Collection automations, for the ⚡ panel.
+  listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
+  listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
+  retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
+  undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
+  listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
+  checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
+  stopAndRestorePerson(payload: StopAndRestorePersonPayload): Promise<StopAndRestorePersonResult>;
+  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
+  confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
+  listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
+  resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
+  revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
+  dismissAutomationStops(payload: DismissAutomationStopsPayload): Promise<void>;
+  automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
+  listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
+  writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
+  listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
+  listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;
+  pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
@@ -6437,6 +5993,12 @@ export interface DohcDesktopBridge
   submitShareChanges(
     payload: SubmitShareChangesPayload,
   ): Promise<SubmitShareChangesResult>;
+  // Writes the share view's changes to a Collection's own files straight
+  // into the owner's workspace. Every other change waits for Send changes.
+  pushShareDirectWrites(
+    payload: PushShareDirectWritesPayload,
+  ): Promise<PushShareDirectWritesResult>;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;
@@ -6529,6 +6091,8 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  // Runs a cloud sync pass now and answers with the status after it.
+  retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
@@ -6536,11 +6100,6 @@ export interface DohcDesktopBridge
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
-  probeAgentDrivers(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
-  getAgentSessionState(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
-  answerAgentPermission(
-    payload: AgentPermissionResponsePayload,
-  ): Promise<AgentPanelSnapshotResult>;
   stopAgentRun(payload: StopAgentRunPayload): Promise<void>;
   resumeThreadDispatch(payload: ResumeThreadDispatchPayload): Promise<void>;
   chatDispatchStateForThread(
@@ -6553,6 +6112,7 @@ export interface DohcDesktopBridge
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
   // Reads the settings file again, applies it, and answers what is in effect.
   reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
   getUserSettingsFilePath(): Promise<string>;
   // Opens the settings file in the system's editor, creating it first when
   // there is none.
@@ -6587,9 +6147,6 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  onPluginStatusChanged(
-    listener: (event: PluginStatusChangedEvent) => void,
-  ): () => void;
   // Live push: an automation claim failed (settled here, or recorded by the
   // engine at the depth cap). A poke, not the record — the subscriber
   // re-lists through listAutomationFailures, guarded by its own workspace.
@@ -6597,9 +6154,28 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the crash report changed. A poke, not the report; the
+  // subscriber reads it again. Returns an unsubscribe function.
+  onCrashReportChanged(listener: () => void): () => void;
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // Which computer runs a workspace's schedules changed, as when a handover
+  // finished in the background.
+  onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
+  // A step started or stopped waiting for a current editor, or a share
+  // stopped a step: re-list holds and stops.
+  onAutomationHoldsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
+  // The automations main read from the workspace changed: re-read field marks.
+  onCollectionAutomationsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
+  // A press this window made settled, or waits. Each event names its
+  // workspace; a window on another workspace drops it.
+  onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
+  onAutomationRunWaiting(listener: (event: AutomationRunWaitingEvent) => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

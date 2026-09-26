@@ -6,8 +6,10 @@ import {
   NOTICE_KINDS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
+  NOTICE_TITLE_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
+  type PostableNoticeKind,
   type NoticeMark,
   type NoticeReach,
   type NoticeTarget,
@@ -15,10 +17,17 @@ import {
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { badRequest, relayError } from "../errors";
+import { badRequest, relayError, RelayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
-import { fileSideOf, visibleSharePath, type ShareSelector } from "../shareFilter";
+import {
+  fileSideOf,
+  parseStoredAnyShareSelectorJson,
+  visibleSharePath,
+  type ShareSelector,
+} from "../shareFilter";
 import type { StorageContext } from "./context";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
+import type { SyncRelayShareRow } from "./types";
 import {
   NOTICE_REMOVED_RETENTION_MS,
   NOTICE_REMOVED_ROW_LIMIT,
@@ -32,7 +41,7 @@ export interface PostNoticeInput {
   noticeId: string;
   recipientUserId: string;
   reach: NoticeReach;
-  kind: NoticeKind;
+  kind: PostableNoticeKind;
   title: string;
   body: string;
   target: NoticeTarget;
@@ -76,6 +85,9 @@ function formatNoticeCursor(cursor: NoticeCursor): string {
 export interface MarkNoticesInput {
   recipientUserId: string;
   marks: readonly { noticeId: string; mark: NoticeMark }[];
+  // The computer that dismisses. A first dismissal names it, and it hears
+  // "first" again when it asks again.
+  installId?: string;
   nowMs: number;
 }
 
@@ -109,6 +121,11 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
   if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
   storage.tx(() => {
+    if (input.kind === "schedule-skipped") {
+      const skipped = skippedScheduleNotice(noticeId, input.nowMs);
+      if (skipped === null) throw badRequest("noticeId is not a skipped schedule's notice");
+      if (reclaimedFor(storage, input.recipientUserId, skipped) !== null) throw relayError("notice_refused");
+    }
     const placement = self ? ownPlacement(storage, input) : sharedPlacement(storage, input);
     const existing = storage.db
       .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
@@ -117,37 +134,190 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
 
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
-    storage.db.prepare(
-      `INSERT INTO sync_relay_notices (
-         recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
-         kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
-         origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
-    ).run(
-      input.recipientUserId,
-      noticeId,
-      nextChangeSeq(storage, input.recipientUserId),
-      placement.workspaceId,
-      placement.recipientShareId,
-      input.kind,
-      NOTICE_KINDS[input.kind].senderKind,
-      input.senderUserId,
-      input.senderLabel,
-      input.title,
-      input.body,
-      JSON.stringify(input.target),
-      input.originInstallId,
-      input.nowMs,
-      input.nowMs + NOTICE_UNREAD_RETENTION_MS,
-    );
-    // A row placed through a share was checked against the grants of this
-    // moment, which a stored digest may not describe, so the next pull
-    // checks access again.
-    if (placement.recipientShareId !== null) {
-      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
-        .run(input.recipientUserId);
-    }
+    insertNotice(storage, { ...input, noticeId, placement });
   });
+}
+
+export interface NoticeShareReceivedInput {
+  grantId: string;
+  // The granter's name, derived by the relay.
+  senderLabel: string;
+  nowMs: number;
+}
+
+// What a waiting share notice needs now: the notice, if the grant is a
+// current named grant the recipient reads and its title can name what was
+// shared; nothing yet, if the grant is still addressed to an email or names
+// a channel the owner's log does not hold yet; or settling, if the grant
+// ended.
+type ShareNoticeState =
+  | { state: "deliver"; share: SyncRelayShareRow; recipientUserId: string; title: (senderLabel: string) => string }
+  | { state: "wait" }
+  | { state: "ended" };
+
+function shareNoticeState(storage: StorageContext, grantId: string): ShareNoticeState {
+  const current = readCurrentShareGrant(storage, { grantId });
+  if (!current || current.grant.parentGrantId !== null) return { state: "ended" };
+  if (current.grant.principalKind !== "user") return { state: "wait" };
+  const { share, grant } = current;
+  const recipientUserId = grant.principalUserId!;
+  const readable = authorizeShareGrantAction({
+    storage,
+    grantId,
+    action: "read",
+    principal: { kind: "user", userId: recipientUserId },
+  }).ok;
+  const title = readable ? shareReceivedTitle(storage, share) : null;
+  return title === null ? { state: "wait" } : { state: "deliver", share, recipientUserId, title };
+}
+
+/**
+ * The share notices `recipientUserId` can receive now, with each granter.
+ * Only these need the granter's name. Waiting rows whose grant ended are
+ * settled here; the rest stay for a later pull. A grant writes its waiting
+ * row in the transaction that makes it, and revoking it removes the row.
+ */
+export function pendingShareNotices(
+  storage: StorageContext,
+  recipientUserId: string,
+): { grantId: string; granterUserId: string }[] {
+  const waiting = () => storage.db.prepare(
+    `SELECT d.grant_id FROM sync_relay_share_notice_deliveries AS d
+     JOIN sync_relay_share_grants AS g ON g.grant_id = d.grant_id
+     WHERE g.principal_kind = 'user' AND g.principal_user_id = ?
+     ORDER BY d.created_at_ms, d.grant_id`,
+  ).all(recipientUserId).map((row) => String(row.grant_id));
+  const states = () => waiting().map((grantId) => ({ grantId, ...shareNoticeState(storage, grantId) }));
+  const now = storage.readTx(states);
+  const ended = now.some((row) => row.state === "ended");
+  return (ended ? storage.tx(() => {
+    const again = states();
+    const settle = storage.db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?");
+    for (const row of again) if (row.state === "ended") settle.run(row.grantId);
+    return again;
+  }) : now).flatMap((row) => row.state === "deliver"
+    ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId }]
+    : []);
+}
+
+/**
+ * Delivers one waiting share notice: one notice per grant, from the granter,
+ * placed through the share. Each attempt rechecks the grant. A grant that
+ * ended, or a list with no room, settles the delivery without a notice. A
+ * grant still addressed to an email, or a channel the owner's log does not
+ * name yet, leaves it waiting for a later attempt.
+ */
+export function noticeShareReceived(storage: StorageContext, input: NoticeShareReceivedInput): void {
+  const settle = () => storage.db
+    .prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
+    .run(input.grantId);
+  try {
+    storage.tx(() => {
+      const waiting = storage.db
+        .prepare("SELECT 1 FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
+        .get(input.grantId);
+      if (!waiting) return;
+      const found = shareNoticeState(storage, input.grantId);
+      if (found.state === "ended") return void settle();
+      if (found.state === "wait") return;
+      const { share, recipientUserId } = found;
+      const title = found.title(input.senderLabel);
+      const noticeId = noticeIdFrom(share.granterUserId, `share-received:${input.grantId}`);
+      const existing = storage.db
+        .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+        .get(recipientUserId, noticeId);
+      settle();
+      if (existing) return;
+      sweepExpiredNotices(storage, recipientUserId, input.nowMs);
+      makeRoom(storage, recipientUserId, share.granterUserId, input.nowMs);
+      insertNotice(storage, {
+        recipientUserId,
+        noticeId,
+        placement: { workspaceId: null, recipientShareId: share.shareId },
+        kind: "share-received",
+        senderUserId: share.granterUserId,
+        senderLabel: input.senderLabel,
+        title,
+        body: "",
+        target: { share: share.shareId },
+        originInstallId: "relay",
+        nowMs: input.nowMs,
+      });
+    });
+  } catch (error) {
+    if (!(error instanceof RelayError) || error.code !== "notice_list_full") throw error;
+    storage.tx(settle);
+  }
+}
+
+// "Ana shared Trip with you", naming what the share holds and shortening the
+// name to fit. A direct message arrives as a message request. Null while
+// the share names a channel the owner's log does not hold yet.
+function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): ((senderLabel: string) => string) | null {
+  const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+  if (!selector) return null;
+  if (!("paths" in selector)) {
+    const channelKind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
+    if (channelKind === "dm") return (senderLabel) => `${senderLabel} sent you a message request`;
+    return channelKind === "channel" ? (senderLabel) => `${senderLabel} shared a channel with you` : null;
+  }
+  const { paths } = selector;
+  const what = paths.length === 0 ? "a version"
+    : paths.length === 1 ? paths[0]!.split("/").at(-1)!
+    : `${paths.length} items`;
+  return (senderLabel) => {
+    const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
+    const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;
+    return `${senderLabel} shared ${name} with you`;
+  };
+}
+
+interface NoticeRowInput {
+  recipientUserId: string;
+  noticeId: string;
+  placement: Placement;
+  kind: NoticeKind;
+  senderUserId: string;
+  senderLabel: string;
+  title: string;
+  body: string;
+  target: NoticeTarget;
+  originInstallId: string;
+  nowMs: number;
+}
+
+// Adds a row to a list that has room for it.
+function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
+  storage.db.prepare(
+    `INSERT INTO sync_relay_notices (
+       recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
+       kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+       origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
+  ).run(
+    row.recipientUserId,
+    row.noticeId,
+    nextChangeSeq(storage, row.recipientUserId),
+    row.placement.workspaceId,
+    row.placement.recipientShareId,
+    row.kind,
+    NOTICE_KINDS[row.kind].senderKind,
+    row.senderUserId,
+    row.senderLabel,
+    row.title,
+    row.body,
+    JSON.stringify(row.target),
+    row.originInstallId,
+    row.nowMs,
+    row.nowMs + NOTICE_UNREAD_RETENTION_MS,
+  );
+  // A row placed through a share was checked against the grants of this
+  // moment, which a stored digest may not describe, so the next pull checks
+  // access again.
+  if (row.placement.recipientShareId !== null) {
+    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
+      .run(row.recipientUserId);
+  }
 }
 
 /**
@@ -209,14 +379,38 @@ export function readNoticeChanges(
   });
 }
 
-/** Sets read or dismissed once. A row already marked, removed, expired, or gone is left as it is. */
-export function markNotices(storage: StorageContext, input: MarkNoticesInput): void {
-  storage.tx(() => {
+/**
+ * Sets read or dismissed once. A row already marked, removed, expired, or
+ * gone is left as it is. Returns the notices this call dismissed for the
+ * first time ever: a receipt outlives the row, so a notice posted again
+ * after its retention is not dismissed first twice.
+ */
+export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
+  return storage.tx(() => {
+    const dismissed: string[] = [];
+    let receipts = 0;
+    const receipt = storage.db.prepare(
+      `INSERT OR IGNORE INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms, winner_install_id)
+       VALUES (?, ?, ?, ?)`,
+    );
+    const winner = storage.db.prepare(
+      `SELECT winner_install_id FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    // A skipped-schedule notice at or below its schedule's floor may be one
+    // whose earlier receipt went: its dismissal is never first.
+    const floored = (noticeId: string) => {
+      const skipped = skippedScheduleNotice(noticeId, Number.MAX_SAFE_INTEGER);
+      return skipped !== null && reclaimedFor(storage, input.recipientUserId, skipped) !== null;
+    };
     const read = storage.db.prepare(
       `SELECT read_at_ms, dismissed_at_ms FROM sync_relay_notices
        WHERE recipient_user_id = ? AND notice_id = ? AND expires_at_ms > ? AND removed_at_ms IS NULL`,
     );
     for (const { noticeId, mark } of input.marks) {
+      if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
+        const held = winner.get(input.recipientUserId, noticeId) as { winner_install_id: string | null } | undefined;
+        if (held?.winner_install_id === input.installId && !floored(noticeId)) dismissed.push(noticeId);
+      }
       const row = read.get(input.recipientUserId, noticeId, input.nowMs);
       if (!row || row.dismissed_at_ms !== null || (mark === "read" && row.read_at_ms !== null)) continue;
       const [column, retentionMs] = mark === "read"
@@ -232,8 +426,80 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): v
         input.recipientUserId,
         noticeId,
       );
+      const inserted = mark === "dismissed" &&
+        Number(receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null).changes ?? 0) === 1;
+      if (inserted) {
+        receipts += 1;
+        if (!floored(noticeId) && !dismissed.includes(noticeId)) dismissed.push(noticeId);
+      }
     }
+    if (receipts > 0) reclaimOldReceipts(storage, input.recipientUserId);
+    return dismissed;
   });
+}
+
+/** A person keeps at most this many first-dismissal receipts. */
+export const NOTICE_DISMISSAL_RECEIPTS = 10_000;
+
+// Past the quota, the oldest receipts go. A reclaimed skipped-schedule
+// notice raises its own schedule's floor to when it was dismissed, which is
+// after its first skipped time.
+function reclaimOldReceipts(storage: StorageContext, recipientUserId: string): void {
+  const { count } = storage.db
+    .prepare("SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?")
+    .get(recipientUserId) as { count: number };
+  const excess = Number(count) - NOTICE_DISMISSAL_RECEIPTS;
+  if (excess <= 0) return;
+  const oldest = storage.db.prepare(
+    `SELECT notice_id, dismissed_at_ms FROM sync_relay_notice_dismissals
+     WHERE recipient_user_id = ? ORDER BY dismissed_at_ms, notice_id LIMIT ?`,
+  ).all(recipientUserId, excess) as Array<{ notice_id: string; dismissed_at_ms: number }>;
+  const remove = storage.db.prepare(
+    "DELETE FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?",
+  );
+  const floor = storage.db.prepare(
+    `INSERT INTO sync_relay_notice_dismissal_floors (recipient_user_id, schedule_key, reclaimed_through_ms)
+     VALUES (?, ?, ?)
+     ON CONFLICT(recipient_user_id, schedule_key) DO UPDATE SET
+       reclaimed_through_ms = max(reclaimed_through_ms, excluded.reclaimed_through_ms)`,
+  );
+  for (const row of oldest) {
+    remove.run(recipientUserId, row.notice_id);
+    const skipped = skippedScheduleNotice(row.notice_id, Number.MAX_SAFE_INTEGER);
+    // A first skipped time a little ahead of the relay's clock can be later
+    // than the dismissal: the floor covers both.
+    if (skipped) floor.run(recipientUserId, skipped.schedule, Math.max(row.dismissed_at_ms, skipped.firstMs));
+  }
+}
+
+/** How far ahead of the relay's clock a skipped time may be. */
+const SKIPPED_TIME_CLOCK_ALLOWANCE_MS = 24 * 60 * 60 * 1000;
+
+// schedule-skipped:<workspace>:<automation>:<first skipped ms>, as the owner's
+// computer posts it: the schedule it names and when it first skipped, a safe
+// integer no later than the relay's clock allows. Null for any other shape.
+function skippedScheduleNotice(noticeId: string, nowMs: number): { schedule: string; firstMs: number } | null {
+  const match = /^schedule-skipped:([^:]+:.+):(0|[1-9]\d{0,15})$/u.exec(noticeId);
+  const firstMs = match ? Number(match[2]) : Number.NaN;
+  if (!match || !Number.isSafeInteger(firstMs) || firstMs > nowMs + SKIPPED_TIME_CLOCK_ALLOWANCE_MS) return null;
+  return { schedule: match[1]!, firstMs };
+}
+
+// A notice for a schedule first skipped at or before that schedule's floor
+// may be one whose receipt went, and a repost of it could be dismissed first
+// again. Answers the floor that refuses it, or null.
+function reclaimedFor(
+  storage: StorageContext,
+  recipientUserId: string,
+  skipped: { schedule: string; firstMs: number },
+): number | null {
+  const floor = storage.db
+    .prepare(
+      `SELECT reclaimed_through_ms FROM sync_relay_notice_dismissal_floors
+       WHERE recipient_user_id = ? AND schedule_key = ?`,
+    )
+    .get(recipientUserId, skipped.schedule) as { reclaimed_through_ms: number } | undefined;
+  return floor !== undefined && skipped.firstMs <= floor.reclaimed_through_ms ? floor.reclaimed_through_ms : null;
 }
 
 // A post to yourself is placed where you said. A share must be one you
@@ -297,6 +563,20 @@ function fileSidesOn(
     if (files?.versionId === null) sides.push(files);
   }
   return held ? sides : null;
+}
+
+// Whether the user named by the next parameter holds a current named or
+// link-opened grant on the share in `shareColumn`: one statement, the same
+// rule as readCurrentShareGrant.
+function holdsShareSql(shareColumn: string): string {
+  return `EXISTS (SELECT 1 FROM sync_relay_share_grants AS held_grant
+    JOIN sync_relay_shares AS held_share ON held_share.share_id = held_grant.share_id
+    WHERE held_grant.share_id = ${shareColumn} AND held_grant.principal_kind = 'user'
+      AND held_grant.principal_user_id = ? AND ${currentShareGrantSql("held_grant", "held_share")})`;
+}
+
+function holdsShare(storage: StorageContext, userId: string, shareId: string): boolean {
+  return Number(storage.db.prepare(`SELECT ${holdsShareSql("?")} AS held`).get(shareId, userId)?.held) === 1;
 }
 
 function admits(sides: ShareSelector[] | null, path: string): boolean {
@@ -372,26 +652,31 @@ function reachToken(storage: StorageContext, userId: string): string {
 // its target there moves to another share that admits its path, or loses
 // its target.
 function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs: number): void {
-  const stale = storage.readTx(() => {
-    // Nothing to check without a live, unexpired row placed through a share.
-    const throughShare = storage.db.prepare(
+  const live = `recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
+    AND removed_at_ms IS NULL AND expires_at_ms > ?`;
+  const plan = storage.readTx((): "none" | "digest" | "shares" => {
+    // A row whose target names a path needs the digest of everything that
+    // decides what the recipient reads.
+    const withPath = storage.db.prepare(
       `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
-         WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-           AND removed_at_ms IS NULL AND expires_at_ms > ?) AS present`,
+         WHERE ${live} AND json_extract(target_json, '$.path') IS NOT NULL) AS present`,
     ).get(recipientUserId, nowMs);
-    if (Number(throughShare?.present) !== 1) return false;
-    const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
-      .get(recipientUserId);
-    return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId);
+    if (Number(withPath?.present) === 1) {
+      const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+        .get(recipientUserId);
+      return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId) ? "digest" : "none";
+    }
+    // A row that points only at a share needs only a current grant on it.
+    const lost = storage.db.prepare(
+      `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+         WHERE ${live} AND NOT ${holdsShareSql("sync_relay_notices.recipient_share_id")}) AS lost`,
+    ).get(recipientUserId, nowMs, recipientUserId);
+    return Number(lost?.lost) === 1 ? "shares" : "none";
   });
-  if (!stale) return;
+  if (plan === "none") return;
   storage.tx(() => {
-    const rows = storage.db.prepare(
-      `SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
-       WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-         AND removed_at_ms IS NULL AND expires_at_ms > ?
-       ORDER BY change_seq`,
-    ).all(recipientUserId, nowMs);
+    const rows = storage.db.prepare(`SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
+       WHERE ${live} ORDER BY change_seq`).all(recipientUserId, nowMs);
     const reach = shareReach(storage, recipientUserId);
     const move = storage.db.prepare(
       `UPDATE sync_relay_notices
@@ -403,14 +688,15 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
     for (const row of rows) {
       const shareId = String(row.recipient_share_id);
       const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
-      const current = reach.sidesOn(shareId);
-      if (path === undefined ? current !== null : admits(current, path)) continue;
+      if (path === undefined ? holdsShare(storage, recipientUserId, shareId) : admits(reach.sidesOn(shareId), path)) continue;
       const workspaceId = storage.getShare(shareId)?.workspaceId;
       const movedTo = path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
       move.run(movedTo, movedTo, nextChangeSeq(storage, recipientUserId), recipientUserId, String(row.notice_id));
     }
-    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
-      .run(reachToken(storage, recipientUserId), recipientUserId);
+    if (plan === "digest") {
+      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
+        .run(reachToken(storage, recipientUserId), recipientUserId);
+    }
   });
 }
 

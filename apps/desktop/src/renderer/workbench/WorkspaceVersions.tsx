@@ -1,6 +1,7 @@
 import { SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -53,17 +54,8 @@ function versionName(
 
 const MENU_ITEM_CLASS =
   "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
-
-// Electron strips the daemon refusal's typed wire shape. Keep the retry
-// discriminator exact: an initial import may legitimately outlive any fixed
-// renderer deadline, while every other error still gets a bounded retry and
-// then the existing visible failure.
-function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
-  return ipcErrorMessage(error, "") === WORKSPACE_UPDATING_MESSAGE;
-}
 
 // Compact version selector for the editor chrome: shows the active version,
 // switches on click, creates inline, and opens compare / merge.
@@ -85,7 +77,7 @@ export function VersionMenu(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
-  onError: (message: string) => void;
+  onError: (message: string, cause: unknown) => void;
   // Bumped by the shell when another surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
   // version instead of showing a stale name.
@@ -148,7 +140,10 @@ export function VersionMenu(props: {
           return;
         } catch (error) {
           lastError = error;
-          if (!isWorkspaceUpdatingInvokeError(error)) {
+          // An initial import may outlive any fixed renderer deadline, so the
+          // engine's still-updating refusal is waited out; every other error
+          // gets a bounded retry and then the visible failure.
+          if (!isWorkspaceUpdatingError(error)) {
             failureAttempts += 1;
             if (failureAttempts >= VERSION_LOAD_FAILURE_ATTEMPTS) break;
           }
@@ -162,6 +157,7 @@ export function VersionMenu(props: {
       if (!cancelled) {
         props.onError(
           ipcErrorMessage(lastError, "Version controls are unavailable right now."),
+          lastError,
         );
       }
     })();
@@ -231,7 +227,7 @@ export function VersionMenu(props: {
         await refresh();
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
-        props.onError(ipcErrorMessage(error, "Could not switch versions."));
+        props.onError(ipcErrorMessage(error, "Could not switch versions."), error);
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.
@@ -670,8 +666,7 @@ export function VersionMenu(props: {
 
 // The "Try it in a version" task prompt (PR 0N-2). One short question; on
 // start, main creates the version, switches into it, and starts the run in a
-// single serialized gesture. If an installed agent driver is found, it does
-// the work; otherwise the run tracks the user's own agent tool.
+// single serialized gesture. The run tracks the user's own agent tool.
 // Exported for component tests; the product opens it from the version menu.
 export function TryTaskDialog(props: {
   workspaceId: string;
@@ -686,39 +681,7 @@ export function TryTaskDialog(props: {
   const [task, setTask] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [helper, setHelper] = useState<
-    | { status: "checking" }
-    | { status: "driver"; driverId: string; driverName: string }
-    | { status: "none" }
-  >({ status: "checking" });
   const liveToken = useRequestSequence();
-
-  useEffect(() => {
-    const token = liveToken.current();
-    void bridge()
-      .probeAgentDrivers({ workspaceId })
-      .then((panel) => {
-        if (!liveToken.isCurrent(token)) return;
-        // Which driver does the work is dohc's choice, not this dialog's: it
-        // reads the workspace's own default and falls back for us.
-        const selected = panel.drivers.find(
-          (driver) => driver.id === panel.selectedDriverId,
-        );
-        setHelper(
-          selected
-            ? {
-                status: "driver",
-                driverId: selected.id,
-                driverName: selected.displayName,
-              }
-            : { status: "none" },
-        );
-      })
-      .catch(() => {
-        if (!liveToken.isCurrent(token)) return;
-        setHelper({ status: "none" });
-      });
-  }, [workspaceId]);
 
   const start = useCallback(async () => {
     const trimmed = task.trim();
@@ -726,7 +689,7 @@ export function TryTaskDialog(props: {
       setError("Describe what the agent should try first.");
       return;
     }
-    if (helper.status === "checking" || busy) return;
+    if (busy) return;
     const token = liveToken.next();
     setBusy(true);
     setError(null);
@@ -737,7 +700,6 @@ export function TryTaskDialog(props: {
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
         task: trimmed,
-        ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
       });
       if (!liveToken.isCurrent(token)) return;
       props.onStarted(started.versionId);
@@ -748,7 +710,7 @@ export function TryTaskDialog(props: {
     } finally {
       releaseOperation?.();
     }
-  }, [busy, helper, props.beginLineageOperation, props.onStarted, task, workspaceId]);
+  }, [busy, props.beginLineageOperation, props.onStarted, task, workspaceId]);
 
   return (
     <Overlay onClose={() => (busy ? undefined : props.onClose())}>
@@ -796,11 +758,8 @@ export function TryTaskDialog(props: {
           data-testid="try-task-helper"
           className="mb-0 mt-1 text-[11px] leading-4 text-subtle"
         >
-          {helper.status === "checking"
-            ? "Checking for agent tools…"
-            : helper.status === "driver"
-              ? `${helper.driverName} will do the work. Its edits show up in History as they land.`
-              : "No agent app was found — start your own agent in this folder and dohc will follow what it changes."}
+          Start your own agent in this folder and dohc will follow what it
+          changes.
         </p>
         {error ? (
           <p
@@ -824,7 +783,7 @@ export function TryTaskDialog(props: {
           <button
             type="button"
             data-testid="try-task-start"
-            disabled={busy || helper.status === "checking" || task.trim().length === 0}
+            disabled={busy || task.trim().length === 0}
             onClick={() => void start()}
             className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
           >

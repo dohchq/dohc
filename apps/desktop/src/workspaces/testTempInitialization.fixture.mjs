@@ -41,7 +41,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (context.parentURL === setupUrl) {
       if (specifier === "vitest") {
-        return { url: "data:text/javascript,export function afterEach(){};export function afterAll(){}", shortCircuit: true };
+        return { url: "data:text/javascript,export function afterEach(){};export function afterAll(){};export function inject(){}", shortCircuit: true };
       }
       if (specifier === "./workspaces/testTemp") return { url: helperUrl, shortCircuit: true };
     }

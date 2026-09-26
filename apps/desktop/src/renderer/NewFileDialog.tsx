@@ -3,6 +3,7 @@ import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { withMarkdownDefault } from "./workbench/new-file-name";
+import { ipcErrorMessage } from "./ipcError";
 
 export function NewFileDialog(props: {
   workspaceId: string;
@@ -38,7 +39,7 @@ export function NewFileDialog(props: {
       });
       props.onCreated(result.path);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     } finally {
       pendingRef.current = false;
       setPending(false);

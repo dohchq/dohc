@@ -74,6 +74,16 @@ export class RelayWorkspaceUnavailableError extends Error {
   }
 }
 
+// The engine could not reach the relay at all: no connection, a timeout, or a
+// dropped transfer. Distinct from RelayWorkspaceUnavailableError, which the
+// relay itself answered.
+export class RelayUnreachableError extends Error {
+  constructor(message = "dohc could not reach the server.") {
+    super(message);
+    this.name = "RelayUnreachableError";
+  }
+}
+
 export class RelayConflictError extends Error {
   constructor(message = "Relay rejected the operation batch.") {
     super(message);
@@ -97,6 +107,29 @@ export class RelayKeyEnvelopeMissingError extends Error {
   constructor(message = "Relay is missing the workspace key envelope.") {
     super(message);
     this.name = "RelayKeyEnvelopeMissingError";
+  }
+}
+
+// Which side must update when the relay does not serve the relay API version
+// this build speaks. "app" means the relay needs a newer dohc; "server" means
+// the relay is older than this dohc.
+export type RelayApiUpdate = "app" | "server";
+
+export const RELAY_API_VERSION_CAUSE: Readonly<Record<RelayApiUpdate, string>> = {
+  app: "This server needs a newer version of dohc.",
+  server: "This server runs an older version of dohc.",
+};
+
+export class RelayApiVersionError extends Error {
+  constructor(readonly update: RelayApiUpdate) {
+    super(
+      `${RELAY_API_VERSION_CAUSE[update]} ${
+        update === "app"
+          ? "Update dohc, then try again."
+          : "Ask the person who runs it to update it."
+      }`,
+    );
+    this.name = "RelayApiVersionError";
   }
 }
 
@@ -295,6 +328,26 @@ export interface SubmitShareProposalResult {
   morePending: boolean;
 }
 
+// How one direct write to a Collection's own files ended (ADR 0013).
+// `written`: the relay wrote these paths into the granter's workspace.
+// `stale`: `stalePath` changed since this replica read it;
+// `currentBlobSha256` is the granter's content, or null when the path is
+// taken under another spelling. `refused`: the direct lane does not take this
+// write, for `reason`. A stale or refused write is not sent again, and Send
+// changes still offers it.
+export type DirectWriteReport =
+  | { paths: string[]; result: "written" }
+  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null }
+  | { paths: string[]; result: "refused"; reason: string };
+
+// What one direct push wrote. Empty when nothing was eligible, or the share
+// is below Edit. `morePending`: the scan stopped at its bound, so another
+// push has more to read.
+export interface PushDirectWritesResult {
+  writes: DirectWriteReport[];
+  morePending: boolean;
+}
+
 // One net change to one file, as the GRANTER sees it. The `current*` fields
 // are the granter's own state now, so the reviewer can see the change against
 // what it will actually land on rather than against what the recipient had.
@@ -364,8 +417,9 @@ export interface ShareProposalSettlement {
 // A Notice sent to a person lives in that person's notice list on the relay,
 // so it reaches every computer they sign in on. The relay derives who sent
 // it, what kind of sender it shows, and the sender's name. `recipients` says
-// who a kind may be sent to: "self" kinds describe the sender's own work, and
-// "readers" kinds may go to anyone who can read the notice's target path.
+// who a kind may be sent to: "self" kinds describe the sender's own work,
+// "readers" kinds may go to anyone who can read the notice's target path, and
+// "relay" kinds only the relay writes.
 export type NoticeSenderKind = "person" | "agent" | "automation";
 
 export const NOTICE_KINDS = {
@@ -374,12 +428,19 @@ export const NOTICE_KINDS = {
   "schedule-skipped": { senderKind: "automation", recipients: "self" },
   "automation-failed": { senderKind: "automation", recipients: "readers" },
   "automation-notify": { senderKind: "automation", recipients: "readers" },
+  // A share reached you. The relay writes it from the granter when a named
+  // grant becomes active for you.
+  "share-received": { senderKind: "person", recipients: "relay" },
 } as const satisfies Record<string, {
   senderKind: NoticeSenderKind;
-  recipients: "self" | "readers";
+  recipients: "self" | "readers" | "relay";
 }>;
 
 export type NoticeKind = keyof typeof NOTICE_KINDS;
+// The kinds a person or agent may post.
+export type PostableNoticeKind = {
+  [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;
+}[NoticeKind];
 
 // Lengths count code points, as a person counts characters.
 export const NOTICE_TITLE_MAX_CHARS = 120;
@@ -466,7 +527,7 @@ export type NoticeReach =
 export type PostNoticeRequest = NoticeReach & {
   noticeId: string;
   recipientUserId: string;
-  kind: NoticeKind;
+  kind: PostableNoticeKind;
   title: string;
   body: string;
   target: NoticeTarget;
@@ -520,3 +581,131 @@ export interface RelayNoticePage {
 // POST /sync/notices/marks. Read and dismissed are one-way: marking a row
 // again, or a row the relay no longer holds, changes nothing.
 export type NoticeMark = "read" | "dismissed";
+
+// The answer to POST /sync/notices/marks. `dismissed` lists the notices this
+// request dismissed first, so of all the computers that dismiss one notice,
+// exactly one hears that it did, as Run now on a skipped schedule needs. A
+// request may carry `installId`: the first dismissal names that computer,
+// and a later request from it hears "first" again, after a lost answer or a
+// crash.
+export interface NoticeMarksResponse {
+  ok: true;
+  dismissed: string[];
+}
+
+// The computer that runs a workspace's schedules and Group-message
+// automations (ADR 0012). Request bodies are at most
+// AUTOMATION_HOST_MAX_BODY_BYTES, and each owner's changes are rate limited. The relay records one host per workspace. Only the
+// owner's computers read or change it, so a collaborator's computer never
+// runs these automations. A computer runs them while the last state it read
+// names it as `host.installId` and `host.handoverFrom` is null.
+//
+// An install id names one computer's dohc install. It is the computer's own
+// claim and grants nothing: every route acts only for the workspace owner.
+export const AUTOMATION_INSTALL_ID_MAX_CHARS = 256;
+// The computer's host name, as the owner's settings show it.
+export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
+// Past this, a new computer's check-in forgets the owner's computer seen
+// longest ago, unless it is the host or handing over.
+export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
+export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
+// A release carries, as `groups`, what the next host needs so each Group
+// message starts its automations exactly once across the handover: the
+// Collection automations the computer handing over watched, and the ids of
+// the Group messages it and earlier hosts already decided, at most 2,000 of
+// them. The relay keeps it, as a JSON object it does not read, for the
+// computer the release names, until the next release or take over.
+// `groupsWatched` is the host generation at which the releasing computer
+// last watched its Group subscriptions. When the relay recorded a release or
+// take over after that, that computer ran nothing since, so its handover is
+// stale: the relay carries a handover it holds on to the next computer, and
+// after a take over, the next computer starts from now.
+export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
+// for the current host's generation; another is refused with `conflict`.
+// `generation` is the host generation the relay's last release or take over
+// started, null for none. `groups` is that release's Group handover when it
+// names the current host, and null after a take over or for another
+// computer.
+export interface RelayAutomationGroupHandoverResponse {
+  ok: true;
+  generation: number | null;
+  groups: Record<string, unknown> | null;
+}
+
+export interface RelayAutomationHost {
+  installId: string;
+  // Rises on every change. A request that changes the host names the
+  // generation it read, and a stale one is refused with `conflict`.
+  generation: number;
+  // The computer that ran these automations before the owner chose another.
+  // It stops and releases them; the new host starts after it does.
+  handoverFrom: string | null;
+  // The latest time a computer that handed over reported when it stopped:
+  // every due time at or before it ran on an earlier host. It stays through
+  // later handovers and never goes back. Null until a first release.
+  releasedThroughMs: number | null;
+}
+
+export interface RelayAutomationComputer {
+  installId: string;
+  label: string;
+  lastSeenMs: number;
+}
+
+// GET /sync/<workspaceId>/automation-host, and the answer to every POST.
+// `computers` lists the owner's computers, most recently seen first.
+export interface RelayAutomationHostState {
+  host: RelayAutomationHost | null;
+  computers: RelayAutomationComputer[];
+}
+
+// A Button press from a shared view (ADR 0012). A recipient's computer cannot
+// check an automation's reach, which needs the owner's list of who can edit,
+// so the press runs on the automation host, as a Group message does. The
+// relay records the press for the recipient's named Edit grant on the
+// Collection's folder, and the host takes it as the verified user's press.
+export const AUTOMATION_PRESS_MAX_BODY_BYTES = 4 * 1024;
+export const AUTOMATION_PRESS_ID_MAX_CHARS = 128;
+export const AUTOMATION_PRESS_ERROR_MAX_CHARS = 1000;
+// A press the host has not run by then is dropped.
+export const AUTOMATION_PRESS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export const AUTOMATION_DEFINITION_HASH_PATTERN = /^[0-9a-f]{16}$/u;
+
+export type AutomationPressState = "pending" | "accepted" | "settled";
+// How a relayed press ended, as the host reported it. `busy` means the button
+// was already running on the record for someone else, so nothing ran.
+export type AutomationPressOutcome = "done" | "skipped" | "failed" | "ended" | "busy";
+
+// The recipient's answer: the press as the relay holds it.
+export interface RelayAutomationPressReceipt {
+  pressId: string;
+  state: AutomationPressState;
+  outcome: AutomationPressOutcome | null;
+  createdAtMs: number;
+}
+
+// One press waiting for the host. `hostPressId` is the relay's id, which the
+// host passes to the engine as the press id, so no recipient's choice can
+// collide with another press. `pressedBy` is the relay-verified user.
+export interface RelayAutomationPress {
+  hostPressId: string;
+  definitionHash: string;
+  // "accepted" once the host took it. The host presses an accepted press
+  // again after a restart; its engine answers the same claim.
+  state: "pending" | "accepted";
+  automationId: string;
+  recordId: string;
+  pressedBy: string;
+  createdAtMs: number;
+}
+
+// GET /sync/<workspaceId>/automation-presses?installId=...&waitMs=...
+// Only the running host gets presses it has not settled, oldest first; any
+// other computer gets none. With `waitMs`, the relay holds the answer up to
+// that long while no press waits to be accepted.
+export interface RelayAutomationPressList {
+  presses: RelayAutomationPress[];
+}

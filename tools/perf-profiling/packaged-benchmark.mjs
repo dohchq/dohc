@@ -80,7 +80,7 @@ Object.assign(receipt, {
     'Startup renderer timestamps record observer installation, the expected visible non-inert editor predicate, and a second animation-frame callback. Already-ready samples are left-censored; no earlier readiness time is inferred and no overhead is subtracted.',
     'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
     'Keyboard uses trusted Chromium CDP input; physical keyboard/OS delivery before Chromium is not measured. EventTiming measures presentation opportunity, not photons.',
-    'Idle measures a small local workspace without cloud, sync peers or plugins. Minimized is the background condition; it does not model every occlusion/power mode.',
+    'Idle measures a small local workspace without cloud or sync peers. Minimized is the background condition; it does not model every occlusion/power mode.',
     'Win32 IsWindowVisible/IsIconic verifies the owned app window. DOM visibility is recorded separately because CDP may keep it visible while minimized. A persistent prewarmed Win32 helper verifies the window before readiness; individual round-trip overhead remains included and separately recorded.',
     'Windows IO transfer counters include file/device/network transfers and cache effects; they are not physical disk traffic.',
     'Snapshots cover observed descendants of the launched PID. Processes born and exited between samples are not included. PID and creation time are matched for deltas.',

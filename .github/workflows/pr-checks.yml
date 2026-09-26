@@ -1,15 +1,28 @@
-# Cloud CI is out of budget. PR verification uses pnpm verify:pr locally.
-# Keep dispatch-only; a manual run requires a registered local Linux x64 runner.
+# Blacksmith is off unless the repository variable BLACKSMITH_ENABLED is true.
+# While off, only manual runs allocate runners, using local Linux x64 hosts.
 # The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
+    inputs:
+      gate:
+        description: Full gate to run
+        type: choice
+        options: [all, js, rust]
+        default: all
+      runner_size:
+        description: Blacksmith vCPUs, ignored while Blacksmith is off
+        type: choice
+        options: ["4", "8"]
+        default: "4"
 
 concurrency:
-  group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  group: pr-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -20,21 +33,34 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # Manual dispatch runs both jobs. The local verifier selects from these filters.
+  # Evaluate this condition before allocating any runner. Forks stay local-only.
   changes:
     name: what changed
-    runs-on: [self-hosted, linux, x64]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.BLACKSMITH_ENABLED == 'true' && !github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 5
-    permissions:
-      pull-requests: read
     outputs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         if: github.event_name == 'pull_request'
         id: filter
         with:
+          # Use the checked-out merge commit, just like the canonical verifier.
+          # Local Git also avoids the PR files API's 3,000-file limit.
+          token: ""
+          base: ${{ github.event.pull_request.base.sha }}
           filters: |
             # .cargo/ holds audit.toml, where advisory ignores would hide;
             # .gitignore decides what the gate's own tree-provenance readings
@@ -45,6 +71,7 @@ jobs:
               - 'crates/**'
               - 'vendor/**'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -56,14 +83,13 @@ jobs:
               - 'packages/security-contract/**'
               - 'packages/workspace-contracts/**'
               - 'packages/workspace-core/**'
+              - 'packages/workspace-fs/text-media-cases.json'
               - 'packages/workspace-engine-client/**'
               - 'packages/workspace-auth/**'
               - 'packages/service-http/**'
               # Native paired-backup proof invokes the production relay fixture.
               - 'services/sync-relay/**'
               - 'packages/app-backend-runtime/**'
-              - 'examples/fundraiser/**'
-              - 'examples/stock-orders/**'
               - 'packages/live-session-contract/**'
               - '**/package.json'
               - '**/tsconfig*.json'
@@ -83,8 +109,14 @@ jobs:
             # sees the probe file that test writes into the repo root, so an
             # ignore rule can disable that regression test silently.
             js:
+              # Root inputs consumed by the self-host deployment tests and build context.
+              - 'docker-compose.self-host.yml'
+              - '.env.self-host.example'
+              - '.dockerignore'
               # Release helper tests validate packaging workflow behavior.
               - '.github/workflows/desktop-release.yml'
+              # packages/mcp's reference test compares this page with its generator.
+              - 'docs/reference/cli-mcp-sdk.md'
               # Source-backed example apps are compiled and staged by the desktop scripts.
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
@@ -115,62 +147,22 @@ jobs:
   javascript:
     name: typecheck + tests
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 30
-    # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
-    # applies the actual 0001_better_auth.sql migration and drives session and
-    # authorization behaviour through it. Its suite self-skips when no database
-    # is reachable, which is right for local dev and WRONG for CI -- a Postgres
-    # that failed to start would silently skip the collab surface's
-    # authorization tests and report green. So CI provides the database, and
-    # DOHC_REQUIRE_POSTGRES makes an unreachable one a FAILURE rather than a skip.
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: dohc
-          POSTGRES_PASSWORD: dohc
-          POSTGRES_DB: dohc
-        ports:
-          - 54329:5432
-        options: >-
-          --health-cmd "pg_isready -U dohc -d dohc"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      DOHC_REQUIRE_POSTGRES: "1"
-      # Every daemon suite resolves the binary through
-      # apps/desktop/src/testing/engineBinary, which finds the repo-root
-      # target/debug build the step below produces. No per-suite binary
-      # variable is needed; DOHC_REQUIRE_ENGINE_E2E turns a failed resolution
-      # into a failure rather than a silent skip. Override with
-      # DOHC_TEST_ENGINE_BINARY only to point at a binary somewhere else.
-      DOHC_REQUIRE_ENGINE_E2E: "1"
-      # The plugin install proofs run the real pinned pnpm against the real
-      # registry. They are the only measured evidence behind the install
-      # pins, so a checkout that cannot stage pnpm must fail here rather than
-      # report those proofs green without running them.
-      DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1"
+    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["self-hosted", "linux", "x64"]') }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # package.json engines: >=24.14.0; "24" resolves to the latest 24.x
           node-version: "24"
           cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Build app backend runtime
-        run: pnpm --filter @dohc/app-backend-runtime build
 
       - name: Rust toolchain
         run: |
@@ -178,81 +170,64 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
-      # Registry + ./target cache for the daemon debug build below. Keyed
-      # separately from the engine gate's cache: the two jobs build different
-      # subsets and would thrash a shared target cache.
+      - name: Prepare the checkout
+        run: pnpm setup:worktree
+
+      # The jobs build different subsets, so keep their target caches separate.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
 
-      - name: Fetch crate dependencies
-        run: |
-          set -euo pipefail
-          cargo fetch --locked
-
-      # The desktop capture e2e drives a REAL daemon over stdio; without this
-      # binary it self-skips. It skipped on every platform since the day it was
-      # written -- CI never built a debug daemon, and its path was hardcoded to
-      # `.exe`, which Linux cannot match -- so the only end-to-end coverage of
-      # the TypeScript desktop capture path never ran. When first forced to run
-      # it failed, on a real defect (see #298). DOHC_REQUIRE_ENGINE_E2E turns a
-      # missing binary here into a failure rather than a silent skip.
-      - name: Build the engine daemon for the desktop e2e
-        run: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
-
-      # Runs every package, not just the one a PR touched. apps/site was broken
-      # on main for weeks precisely because a red typecheck there read as noise
-      # from whichever PR happened to be running.
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Test
-        run: pnpm run test
-
-      - name: Self-host native editing
-        env:
-          POSTGRES_URL: postgres://dohc:dohc@127.0.0.1:54329/dohc
-          DOHC_SERVICE_HOST_PROOF_BINARY: ${{ github.workspace }}/target/debug/dohc-workspace-engine
-          DOHC_SERVICE_HOST_PROOF_OUTPUT: ${{ github.workspace }}/.agent-artifacts/self-host-native-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          DOHC_SERVICE_HOST_PROOF_SHA256="$(sha256sum "$DOHC_SERVICE_HOST_PROOF_BINARY" | cut -d ' ' -f 1)"
-          export DOHC_SERVICE_HOST_PROOF_SHA256
-          mkdir -p "$DOHC_SERVICE_HOST_PROOF_OUTPUT"
-          pnpm --filter @dohc/share-web exec vitest run --config vitest.self-host-native.config.ts --reporter=default --reporter=json --outputFile.json="$DOHC_SERVICE_HOST_PROOF_OUTPUT/vitest.json"
-          node --input-type=module -e "import {readSelfHostNativeProof} from './scripts/verification/verify.mjs'; readSelfHostNativeProof(process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT, process.env.DOHC_SERVICE_HOST_PROOF_BINARY, process.env.DOHC_SERVICE_HOST_PROOF_SHA256);"
-
+      # Install Xvfb before the runner starts the desktop proof's display.
       - name: Desktop system dependencies
         run: pnpm exec playwright install-deps chromium
 
-      - name: Desktop boot and persistence
-        run: xvfb-run -a pnpm qa:smoke
+      # The runner owns Postgres, native preparation, and every mandatory proof,
+      # including accounts and self-host onboarding when selected.
+      - name: Selected JavaScript gate
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: xvfb-run -a pnpm verify:pr --base "$PR_BASE_SHA" --job js
+
+      - name: Full JavaScript gate
+        if: github.event_name == 'workflow_dispatch'
+        run: xvfb-run -a pnpm verify:pr --base HEAD --job js --full
+
+      - name: Verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-js-${{ github.run_attempt }}
+          path: |
+            .agent-artifacts/verification/*/result.json
+            .agent-artifacts/verification/*/*.log
+            .agent-artifacts/verification/*/js-tests/result.json
+            .agent-artifacts/verification/*/js-tests/**/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
 
   rust:
     name: engine gate
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-    runs-on: [self-hosted, linux, x64]
+    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
-      # The gate's fixture-drift step regenerates the richdoc parity fixtures
-      # through the LIVE TypeScript oracle, so it needs the JS workspace
-      # installed. Without it that step reports SKIP rather than PASS -- which
-      # is honest, but it would mean the drift check never actually runs in CI,
-      # and drift going unnoticed is exactly what it exists to prevent.
+      # Rust fixture drift uses the live TypeScript oracle and pinned dependencies.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
 
       - name: Rust toolchain
         run: |
@@ -261,60 +236,69 @@ jobs:
           rustc -vV
           cargo --version
 
+      - name: Prepare the checkout
+        run: pnpm setup:worktree
+
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: engine-gate
 
-      # Prebuilt binaries, pinned so "cargo-deny=PASS" means the same thing
-      # on every run.
-      # The previous incarnation ran `cargo install` for both -- compiling the
-      # two tools from source cost more minutes than the rest of the gate
-      # combined. The verification steps below are what make the pin a checked
-      # fact rather than an intention.
+      # The canonical runner checks each installed version against the pins above.
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
 
-      - name: Verify pinned cargo-deny
-        run: |
-          set -euo pipefail
-          RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
-          if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
-            echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
-            exit 1
-          fi
+      # Linux also exercises cfg(unix) code absent from Windows verification.
+      - name: Selected engine gate
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: pnpm verify:pr --base "$PR_BASE_SHA" --job rust
 
-      - name: Verify pinned cargo-nextest
-        run: |
-          set -euo pipefail
-          RESOLVED_CARGO_NEXTEST_VERSION="$(cargo nextest --version | head -n 1 | awk '{print $2}')"
-          if [ "$RESOLVED_CARGO_NEXTEST_VERSION" != "$CARGO_NEXTEST_VERSION" ]; then
-            echo "::error::expected cargo-nextest $CARGO_NEXTEST_VERSION, got $RESOLVED_CARGO_NEXTEST_VERSION"
-            exit 1
-          fi
+      - name: Full engine gate
+        if: github.event_name == 'workflow_dispatch'
+        run: pnpm verify:pr --base HEAD --job rust --full
 
-      # run-rust-checks PROBES for cargo-audit and degrades to SKIP when it is
-      # absent -- honest, but it meant every PR reported "cargo-audit=SKIP"
-      # beside a row of PASSes and no advisory scan ever ran in CI. That is
-      # not hypothetical: the first run after this tool was actually installed
-      # flagged a real DoS advisory that had been sitting on main.
-      - name: Verify pinned cargo-audit
-        run: |
-          set -euo pipefail
-          # `cargo audit --version` prints "cargo-audit-audit <version>" --
-          # the cargo subcommand prefix is doubled -- so the version field is
-          # compared rather than the whole line.
-          RESOLVED_CARGO_AUDIT_VERSION="$(cargo audit --version | awk '{print $NF}')"
-          if [ "$RESOLVED_CARGO_AUDIT_VERSION" != "$CARGO_AUDIT_VERSION" ]; then
-            echo "::error::expected cargo-audit $CARGO_AUDIT_VERSION, got $RESOLVED_CARGO_AUDIT_VERSION"
-            exit 1
-          fi
+      - name: Verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-rust-${{ github.run_attempt }}
+          path: |
+            .agent-artifacts/verification/*/result.json
+            .agent-artifacts/verification/*/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
 
-      # The same script the program runs locally, so a green CI run and a green
-      # local gate mean the same thing. Linux also compiles and runs the
-      # cfg(unix) code the canonical Windows gate cannot see at all.
-      - name: Canonical engine gate
+  verification:
+    name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
+    needs: [changes, javascript, rust]
+    if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Require every selected gate
+        env:
+          JOBS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_GATE: ${{ inputs.gate || 'all' }}
         run: |
-          set -euo pipefail
-          node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log
-          node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const jobs = JSON.parse(process.env.JOBS);
+          assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
+          for (const [gate, job] of [['js', 'javascript'], ['rust', 'rust']]) {
+            if (process.env.EVENT_NAME === 'pull_request') {
+              assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
+            }
+            const selected = process.env.EVENT_NAME === 'workflow_dispatch'
+              ? process.env.REQUESTED_GATE === 'all' || process.env.REQUESTED_GATE === gate
+              : jobs.changes.outputs[gate] === 'true';
+            assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
+          }
+          NODE

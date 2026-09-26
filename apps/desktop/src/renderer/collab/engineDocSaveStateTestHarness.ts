@@ -253,7 +253,8 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       | "error"
       | "file-locked"
       | "read-only"
-      | "deleted",
+      | "deleted"
+      | "object-changed",
     seq: number,
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");

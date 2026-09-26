@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../../ipc/bridgeContract";
-import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 import {
   activateTab,
   activeGroup,
@@ -33,11 +32,6 @@ import {
   parseVersionCompareTabPath,
   versionCompareTabPath,
   isSiteTabPath,
-  isPluginDetailsTabPath,
-  isPluginPanelTabPath,
-  isPluginWebAppTabPath,
-  parsePluginDetailsTabPath,
-  pluginDetailsTabPath,
   isSingletonEditorTabPath,
   canonicalSingletonEditorTabPath,
   GRAPH_TAB_PATH,
@@ -46,12 +40,7 @@ import {
   moveTab,
   openTab,
   parseSiteTabPath,
-  parsePluginPanelTabPath,
-  parsePluginViewId,
-  parsePluginWebAppTabPath,
   parseUiState,
-  pluginViewId,
-  clearPluginView,
   pruneMissingRestoredTabs,
   serializeUiState,
   setSidebarWidth,
@@ -79,8 +68,6 @@ import {
   setFolderExpanded,
   siteTabPath,
   moveTabToGroup,
-  pluginPanelTabPath,
-  pluginWebAppTabPath,
   moveTabToNewGroup,
   focusEditorGroup,
   toggleFolderExpanded,
@@ -360,11 +347,6 @@ describe("tabs", () => {
 
   it.each([
     ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
-    [
-      "plugin panel",
-      pluginPanelTabPath("hello-plugin", "main"),
-      "dohc://plugin-panel/%68ello-plugin/main",
-    ],
   ])("keeps a process-owning %s in its existing editor group", (_label, path, alias) => {
     let state = withTabs(path, "a.md");
     state = moveTabToNewGroup(
@@ -646,149 +628,9 @@ describe("tabs", () => {
     expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
   });
 
-  it("recognizes plugin web apps as singleton virtual tabs with two encoded identities", () => {
-    const path = pluginWebAppTabPath("@dohc/acme plugin", "app/main");
-    expect(path).toBe("dohc://plugin-web/%40dohc%2Facme%20plugin/app%2Fmain");
-    expect(isPluginWebAppTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(isSingletonEditorTabPath(path)).toBe(true);
-    expect(canonicalSingletonEditorTabPath(path)).toBe(path);
-    expect(parsePluginWebAppTabPath(path)).toEqual({
-      pluginId: "@dohc/acme plugin",
-      webAppId: "app/main",
-      instanceKey: null,
-    });
-  });
-
-  it("rejects malformed plugin web app tab paths", () => {
-    for (const path of [
-      "dohc://plugin-web/",
-      "dohc://plugin-web/plugin-only",
-      "dohc://plugin-web//app",
-      "dohc://plugin-web/plugin/app/",
-      "dohc://plugin-web/plugin/app//instance",
-      "dohc://plugin-web/plugin/app/instance/extra",
-      null,
-    ]) {
-      expect(parsePluginWebAppTabPath(path)).toBeNull();
-    }
-  });
-
-  it("refuses an instance key past the bound the boundary enforces", () => {
-    const atBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS);
-    const pastBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS + 1);
-
-    expect(
-      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", atBound)),
-    ).toEqual({ pluginId: "acme", webAppId: "preview", instanceKey: atBound });
-    expect(
-      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", pastBound)),
-    ).toBeNull();
-    // ...and the shell therefore treats it as a tab path that names no app.
-    expect(
-      canonicalSingletonEditorTabPath(
-        pluginWebAppTabPath("acme", "preview", pastBound),
-      ),
-    ).toBeNull();
-  });
-
-  // A per-instance web app's tab is keyed by the instance, the way a site tab
-  // is keyed by its root: identity is a runtime value, not a manifest id.
-  it("keys a per-instance web app tab by its instance", () => {
-    const path = pluginWebAppTabPath("acme", "preview", "sites/marketing #1");
-    expect(path).toBe("dohc://plugin-web/acme/preview/sites%2Fmarketing%20%231");
-    expect(isPluginWebAppTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parsePluginWebAppTabPath(path)).toEqual({
-      pluginId: "acme",
-      webAppId: "preview",
-      instanceKey: "sites/marketing #1",
-    });
-  });
-
-  it("makes each instance its own singleton, distinct from its siblings", () => {
-    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
-    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
-    const keyless = pluginWebAppTabPath("acme", "preview");
-
-    expect(isSingletonEditorTabPath(a)).toBe(true);
-    expect(canonicalSingletonEditorTabPath(a)).toBe(a);
-    expect(canonicalSingletonEditorTabPath(b)).toBe(b);
-    expect(canonicalSingletonEditorTabPath(a)).not.toBe(
-      canonicalSingletonEditorTabPath(b),
-    );
-    expect(canonicalSingletonEditorTabPath(a)).not.toBe(
-      canonicalSingletonEditorTabPath(keyless),
-    );
-  });
-
-  it("opens two instances as two tabs and folds a repeat of one", () => {
-    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
-    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
-
-    let state = openTab(defaultWorkbenchState(), a);
-    state = openTab(state, b);
-    expect(allTabs(state).map((tab) => tab.path)).toEqual([a, b]);
-
-    state = openTab(state, a);
-    expect(allTabs(state).map((tab) => tab.path)).toEqual([a, b]);
-    expect(activeTabPath(state)).toBe(a);
-  });
-
-  it("restores both instances of one web app after a reload", () => {
-    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
-    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
-
-    let state = openTab(defaultWorkbenchState(), a);
-    state = openTab(state, b);
-
-    const restored = parseUiState(serializeUiState(state));
-    expect(allTabs(restored).map((tab) => tab.path)).toEqual([a, b]);
-    expect(activeTabPath(restored)).toBe(b);
-  });
-
-  it("recognizes a plugin's details page as a virtual tab keyed by the plugin id and its directory", () => {
-    const path = pluginDetailsTabPath("@dohc/acme plugin", "acme-dir");
-    expect(path).toBe("dohc://plugin-details/%40dohc%2Facme%20plugin/acme-dir");
-    expect(isPluginDetailsTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parsePluginDetailsTabPath(path)).toEqual({
-      pluginId: "@dohc/acme plugin",
-      directoryName: "acme-dir",
-    });
-    // A details page reads a file; it owns no process, so it is not a
-    // singleton and may sit in two editor groups like any other document.
-    expect(isSingletonEditorTabPath(path)).toBe(false);
-    expect(canonicalSingletonEditorTabPath(path)).toBeNull();
-  });
-
-  it("rejects malformed plugin details tab paths", () => {
-    for (const path of [
-      "dohc://plugin-details/",
-      "dohc://plugin-details/%ZZ",
-      "dohc://plugin-detail/t3-code",
-      // The old single-segment form: no directory, so the id alone can no
-      // longer disambiguate a collision.
-      "dohc://plugin-details/t3-code",
-      "dohc://plugin-details/t3-code/",
-      "dohc://plugin-details/t3-code/extra/segment",
-      null,
-    ]) {
-      expect(parsePluginDetailsTabPath(path)).toBeNull();
-    }
-  });
-
-  it("keeps a plugin's details tab across a restore round-trip", () => {
-    const path = pluginDetailsTabPath("t3-code", "t3-code");
-    const opened = openTab(defaultWorkbenchState(), path);
-    const restored = parseUiState(serializeUiState(opened));
-    expect(allTabs(restored).map((tab) => tab.path)).toContain(path);
-    expect(activeTabPath(restored)).toBe(path);
-  });
-
-  it("refuses a details tab at the open-tab cap, which is what the shell reports", () => {
+  it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
     // openVirtualTab turns exactly this refusal — openTab handing back the
-    // same state — into the line naming the limit. A details tab that opened
+    // same state — into the line naming the limit. A virtual tab that opened
     // some other way would slip past the cap and never be refused out loud.
     const full: WorkbenchState = {
       ...defaultWorkbenchState(),
@@ -802,46 +644,7 @@ describe("tabs", () => {
     };
     expect(allTabs(full)).toHaveLength(MAX_OPEN_TABS);
 
-    const path = pluginDetailsTabPath("t3-code", "t3-code");
-    expect(openTab(full, path)).toBe(full);
-  });
-
-  it("opens one details tab per plugin and reactivates the one already open", () => {
-    const first = pluginDetailsTabPath("t3-code", "t3-code");
-    const second = pluginDetailsTabPath("notes-widget", "notes-widget");
-    let state = openTab(defaultWorkbenchState(), first);
-    state = openTab(state, second);
-    state = openTab(state, first);
-    expect(allTabs(state).filter((tab) => tab.path === first)).toHaveLength(1);
-    expect(activeTabPath(state)).toBe(first);
-  });
-
-  it("recognizes plugin panels as virtual tabs with two encoded identities", () => {
-    const path = pluginPanelTabPath("@dohc/acme plugin", "reports/main");
-    expect(path).toBe(
-      "dohc://plugin-panel/%40dohc%2Facme%20plugin/reports%2Fmain",
-    );
-    expect(isPluginPanelTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parsePluginPanelTabPath(path)).toEqual({
-      pluginId: "@dohc/acme plugin",
-      panelId: "reports/main",
-    });
-  });
-
-  it("rejects malformed or empty plugin panel tab paths", () => {
-    for (const path of [
-      "dohc://plugin-panel/",
-      "dohc://plugin-panel/plugin-only",
-      "dohc://plugin-panel//panel",
-      "dohc://plugin-panel/plugin/",
-      "dohc://plugin-panel/plugin/panel/extra",
-      "dohc://plugin-panel/%ZZ/panel",
-      "not-a-plugin-panel-path",
-    ]) {
-      expect(parsePluginPanelTabPath(path)).toBeNull();
-    }
-    expect(parsePluginPanelTabPath(null)).toBeNull();
+    expect(openTab(full, versionCompareTabPath("version-1"))).toBe(full);
   });
 
   it("activateTab only activates an open tab", () => {
@@ -919,76 +722,6 @@ describe("views and panels", () => {
     expect(state.chatsVisible).toBe(false);
     expect(toggleChats(state).chatsVisible).toBe(true);
     expect(toggleChats(state).sidebarVisible).toBe(false);
-  });
-});
-
-describe("plugin-contributed views", () => {
-  it("round-trips a plugin view id through the rail selection", () => {
-    const viewId = pluginViewId("dohc-sites", "sites");
-    const next = setView(defaultWorkbenchState(), viewId);
-
-    expect(next.activeView).toBe(viewId);
-    expect(next.sidebarVisible).toBe(true);
-    expect(parsePluginViewId(viewId)).toEqual({
-      pluginId: "dohc-sites",
-      panelId: "sites",
-    });
-  });
-
-  it("re-selecting a plugin view toggles the panel like a built-in view", () => {
-    const viewId = pluginViewId("dohc-sites", "sites");
-    const shown = setView(defaultWorkbenchState(), viewId);
-    expect(setView(shown, viewId).sidebarVisible).toBe(false);
-  });
-
-  it("encodes ids whose characters would otherwise split the view id", () => {
-    const viewId = pluginViewId("scope/plugin", "a/b");
-    expect(parsePluginViewId(viewId)).toEqual({
-      pluginId: "scope/plugin",
-      panelId: "a/b",
-    });
-  });
-
-  it.each([
-    ["a built-in view", "explorer"],
-    ["a plugin panel tab path", "dohc://plugin-panel/p/main"],
-    ["a bare prefix", "plugin-view:"],
-    ["one segment", "plugin-view:only"],
-    ["three segments", "plugin-view:a/b/c"],
-    ["an empty segment", "plugin-view:a/"],
-  ])("does not read %s as a plugin view id", (_case, value) => {
-    expect(parsePluginViewId(value)).toBeNull();
-  });
-
-  it("keeps a plugin view selected across the persistence round-trip", () => {
-    const viewId = pluginViewId("dohc-sites", "sites");
-    const state = setView(defaultWorkbenchState(), viewId);
-
-    expect(serializeUiState(state).activeView).toBe(viewId);
-    expect(parseUiState(serializeUiState(state)).activeView).toBe(viewId);
-  });
-
-  it("falls back to the explorer for a stored view id that parses as neither", () => {
-    expect(
-      parseUiState({
-        ...serializeUiState(defaultWorkbenchState()),
-        activeView: "plugin-view:",
-      }).activeView,
-    ).toBe("explorer");
-  });
-
-  it("drops only a plugin view when its plugin is gone, keeping the panel state", () => {
-    const hidden = toggleSidebar(
-      setView(defaultWorkbenchState(), pluginViewId("dohc-sites", "sites")),
-    );
-    const cleared = clearPluginView(hidden);
-
-    expect(cleared.activeView).toBe("explorer");
-    // Uninstall must not also reopen a panel the user had collapsed.
-    expect(cleared.sidebarVisible).toBe(false);
-
-    const builtIn = setView(defaultWorkbenchState(), "history");
-    expect(clearPluginView(builtIn)).toBe(builtIn);
   });
 });
 
@@ -1091,15 +824,10 @@ describe("ui-state persistence round-trip", () => {
     expect(parseUiState(serializeUiState(state))).toEqual(state);
   });
 
-  it("round-trips the plugins view, and states written before it still parse", () => {
-    const state = setView(defaultWorkbenchState(), "plugins");
-    expect(serializeUiState(state).activeView).toBe("plugins");
-    expect(parseUiState(serializeUiState(state)).activeView).toBe("plugins");
-    // A ui-state file written before the plugins rail item existed carries a
-    // view this build still knows, and must reopen on it.
+  it("falls back to the explorer for a stored view this build does not know", () => {
     expect(
-      parseUiState({ ...serializeUiState(state), activeView: "history" }).activeView,
-    ).toBe("history");
+      parseUiState({ ...serializeUiState(defaultWorkbenchState()), activeView: "plugins" }).activeView,
+    ).toBe("explorer");
   });
 
   it("does not migrate or alias the version-1 flat-tab contract", () => {
@@ -1207,11 +935,6 @@ describe("ui-state persistence round-trip", () => {
 
   it.each([
     ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
-    [
-      "plugin panel",
-      pluginPanelTabPath("hello-plugin", "main"),
-      "dohc://plugin-panel/%68ello-plugin/main",
-    ],
   ])("keeps the first restored %s owner", (_label, path, alias) => {
     const state = parseUiState({
       version: 2,

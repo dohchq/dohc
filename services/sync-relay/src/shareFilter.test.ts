@@ -81,7 +81,7 @@ describe("share selector validation", () => {
       pathShare, { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
-      { kind: "chat-channel" as const, channelWireId: "channel-1", access: "read-write" as const },
+      { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -526,13 +526,13 @@ describe("share op filter", () => {
   });
 });
 
-// MU-C4 shared channels: the chat-channel selector + the chat branch of the
+// MU-C4 shared channels: the chat selector + the chat branch of the
 // fail-closed filter.
-describe("chat-channel share selector", () => {
+describe("chat share selector", () => {
   it("validates channelWireId and access separately", () => {
     expect(validateChatChannelShareSelector({ channelWireId: "wire-1" })).toEqual({
       ok: true,
-      selector: { kind: "chat-channel", channelWireId: "wire-1" },
+      selector: { kind: "chat", channelWireId: "wire-1" },
     });
     expect(validateChatShareAccess(undefined)).toEqual({ ok: true, access: "read-write" });
     expect(validateChatShareAccess("read-only")).toEqual({
@@ -553,7 +553,7 @@ describe("chat-channel share selector", () => {
     };
     expect(
       validateChatChannelShareSelector({ channelWireId: "wire-agent" }, kindResolver),
-    ).toMatchObject({ ok: false, code: "invalid_channel" });
+    ).toMatchObject({ ok: false, code: "invalid_chat" });
     // Unknown/pre-provisioned wires retain the existing grant-before-sync flow;
     // the durable filter serves nothing until their human kind resolves.
     expect(
@@ -564,13 +564,13 @@ describe("chat-channel share selector", () => {
         { channelWireId: "wire-malformed" },
         { channelKind: () => null },
       ),
-    ).toMatchObject({ ok: false, code: "invalid_channel" });
+    ).toMatchObject({ ok: false, code: "invalid_chat" });
   });
 });
 
 describe("presence topic gate (MU-C1 x MU-C4)", () => {
   const channelShare: ChatChannelShareSelector = {
-    kind: "chat-channel",
+    kind: "chat",
     channelWireId: "wire-1",
     access: "read-write",
   };
@@ -583,12 +583,12 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
       threadId === "thread-in" ? "wire-1" : threadId === "thread-out" ? "wire-2" : undefined,
   };
 
-  it("scopes a chat-channel member's presence to exactly the granted wire id", () => {
+  it("scopes a chat member's presence to exactly the granted wire id", () => {
     // The one allowed topic is the granted channel's wire id: a member joins
     // co-presence for that channel and nothing else.
     expect(presenceTopicAllowedForShare(channelShare, "wire-1", threadResolver)).toBe(true);
     // Another channel, a file path, or an empty topic are all refused — a
-    // chat-channel grant exposes no path-based (doc) presence at all.
+    // chat grant exposes no path-based (doc) presence at all.
     for (const topic of ["wire-2", "docs/a.md", "docs", ""]) {
       expect(presenceTopicAllowedForShare(channelShare, topic, threadResolver), topic).toBe(false);
     }
@@ -601,7 +601,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     expect(presenceTopicAllowedForShare(pathShare, "secrets/b.md")).toBe(false);
   });
 
-  // MU-C6 thread presence: a chat-channel grant also admits `chat:thread:<tid>`
+  // MU-C6 thread presence: a chat grant also admits `chat:thread:<tid>`
   // — but only for a thread that binds to the granted channel via the same
   // forge-resistant earliest-binding resolver the durable chat filter uses.
   it("admits a thread topic bound to the granted channel", () => {
@@ -650,7 +650,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
   // branch.
   it("routes a thread-shaped topic through the resolver even when channelWireId equals it (no bare-equality bypass)", () => {
     const forged: ChatChannelShareSelector = {
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: "chat:thread:thread-foreign",
       access: "read-write",
     };
@@ -676,7 +676,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
 
   it("denies channel and thread presence for an agent channel despite a matching grant", () => {
     const agentShare: ChatChannelShareSelector = {
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: "wire-agent",
       access: "read-write",
     };
@@ -726,9 +726,9 @@ describe("parseChatThreadTopic", () => {
   });
 });
 
-describe("chat-channel share op filter", () => {
+describe("chat share op filter", () => {
   const channelShare: ChatChannelShareSelector = {
-    kind: "chat-channel",
+    kind: "chat",
     channelWireId: "wire-shared",
     access: "read-write",
   };
@@ -842,6 +842,19 @@ describe("chat-channel share op filter", () => {
     // Chat ops are blob-free: no decision ever exposes a blob hash.
     const message = decide("chat.message.append", { messageId: "m1", threadId: "thread-in", authorKind: "human", authorDisplayName: "A", body: "hi", createdAtMs: 1 });
     if (message.allowed) expect(message.blobSha256s).toEqual([]);
+  });
+
+  it("serves an automation's chain depth but never its automation", () => {
+    const result = decide("chat.message.append", {
+      messageId: "m-automation", threadId: "thread-in", authorKind: "automation",
+      authorDisplayName: "Stamp", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Done", createdAtMs: 2, chainDepth: 2,
+      automationId: "collection:PRIVATE-Tasks#stamp",
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ authorKind: "automation", chainDepth: 2 });
+    expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
   });
 
   it("shares the agent owner while stripping local runner configuration", () => {
@@ -1040,7 +1053,7 @@ describe("chat-channel share op filter", () => {
     ).toBe(true);
   });
 
-  it("excludes every non-chat op kind from a chat-channel share (sentinels never leak)", () => {
+  it("excludes every non-chat op kind from a chat share (sentinels never leak)", () => {
     for (const [opKind, payload] of [
       ["workspace.init", {}],
       ["moment.append", JSON.parse(momentPayload({ path: "docs/SENTINEL-file.md" })) as Record<string, unknown>],
@@ -1068,7 +1081,7 @@ describe("chat-channel share op filter", () => {
 
   it("denies every chat op kind on an agent channel even with a matching grant", () => {
     const agentShare: ChatChannelShareSelector = {
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: "wire-agent",
       access: "read-write",
     };

@@ -209,6 +209,25 @@ export function stubScrollSpy(
   return spy;
 }
 
+// The edit toggle is `disabled={readOnly || opening}`, and a click on a
+// disabled button does nothing and does not retry. view-markdown renders while
+// the engine open is still answering, so a click fired the moment the button
+// exists is dropped whenever the open has not answered yet, and the wait for
+// the source surface then times out on a toggle that never happened. Clicking
+// a mode toggle more than once is not a fix — the modes cycle — so the enabled
+// button is the thing to wait for.
+export async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
+  return await waitFor(() => {
+    const toggle = screen.getByTestId("markdown-edit-toggle");
+    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
+      throw new Error(
+        "markdown-edit-toggle is still disabled — the document is opening",
+      );
+    }
+    return toggle;
+  });
+}
+
 export async function findSourceEditor(): Promise<CodeEditorTestHost> {
   return await waitFor(() => {
     const editor = screen.getByTestId("markdown-editor");

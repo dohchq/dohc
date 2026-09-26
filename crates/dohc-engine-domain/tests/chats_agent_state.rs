@@ -27,6 +27,7 @@ fn start(
     chats
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: thread.to_owned(),
@@ -60,6 +61,7 @@ fn send(
     chats
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread.to_owned(),
                 message_id: message.to_owned(),
@@ -776,6 +778,40 @@ fn requeue_clears_run_and_failure_atomically() {
     assert!(
         requeued && row.run_id.is_none() && row.failure_reason.is_none(),
         "clear only state -> stale run/failure survives the transition."
+    );
+}
+
+#[test]
+fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (trigger, at) in [("first", 10), ("covered", 11)] {
+        chats
+            .enqueue_dispatch(WS, trigger, "thread", at, &NO_FAULTS)
+            .expect("enqueue");
+    }
+    chats
+        .claim_next_pending(WS, "run", "agent", None, 20, &NO_FAULTS)
+        .expect("claim")
+        .expect("some claim");
+    chats
+        .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
+        .expect("fail");
+    assert!(
+        chats
+            .requeue_failed_trigger(WS, "first", "run", 31, &NO_FAULTS)
+            .expect("requeue")
+    );
+    let pending: Vec<String> = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending")
+        .into_iter()
+        .map(|row| row.trigger_message_id)
+        .collect();
+    assert_eq!(
+        pending,
+        vec!["first".to_owned(), "covered".to_owned()],
+        "the next run covers what the interrupted run never answered"
     );
 }
 

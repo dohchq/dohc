@@ -248,6 +248,190 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
+/// Private evidence for an authored create. Publication links this complete file
+/// into an absent workspace path; the link preserves identity across restart.
+pub struct AuthoredCreateStage {
+    root: PathBuf,
+    stage: PathBuf,
+    target: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct AuthoredCreatePublishError {
+    pub error: MaterializeError,
+    pub may_be_published: bool,
+}
+
+impl AuthoredCreateStage {
+    pub fn open(root: &Path, path: &str, id: &str) -> Result<Self, MaterializeError> {
+        if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(MaterializeError::UnsafeTargetPath);
+        }
+        let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
+        let target = resolve_target(&root, path)?;
+        walk_target_components(
+            &root,
+            target.parent().ok_or(MaterializeError::UnsafeTargetPath)?,
+            reject_link_or_reparse,
+        )?;
+        let stage = root
+            .join(".dohc/engine/authored-create")
+            .join(format!("{id}.stage"));
+        prepare_target_parent_symlink_free(&root, &stage)?;
+        Ok(Self {
+            root,
+            stage,
+            target,
+        })
+    }
+
+    pub fn prepare(&self, text: &str) -> Result<(), MaterializeError> {
+        if text.len() > MAX_MATERIALIZE_BYTES {
+            return Err(MaterializeError::TooLarge { actual: text.len() });
+        }
+        prepare_target_parent_symlink_free(&self.root, &self.target)?;
+        let sibling = self.preparation_sibling();
+        let prepared = (|| {
+            // Create in the destination directory to inherit its security metadata.
+            let file = write_temp(&sibling, text.as_bytes())?;
+            file.sync_all()
+                .map_err(|error| MaterializeError::io(&sibling, &error))?;
+            std::fs::hard_link(&sibling, &self.stage)
+                .map_err(|error| MaterializeError::io(&self.stage, &error))?;
+            sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
+        })();
+        let removed = remove_authored_preparation(&sibling);
+        prepared?;
+        removed?;
+        sync_parent_dir(sibling.parent(), DurabilityPolicy::per_os())
+    }
+
+    fn preparation_sibling(&self) -> PathBuf {
+        temp_sibling(
+            &self.target,
+            &format!(
+                "authored-create-{}",
+                self.stage.file_stem().expect("stage ID").to_string_lossy()
+            ),
+        )
+    }
+
+    /// False means an existing entry won. Never overwrite or follow that entry.
+    pub fn publish(&self) -> Result<bool, AuthoredCreatePublishError> {
+        self.publish_with_link(|from, to| std::fs::hard_link(from, to))
+    }
+
+    fn publish_with_link(
+        &self,
+        link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<bool, AuthoredCreatePublishError> {
+        let unpublished = |error| AuthoredCreatePublishError {
+            error,
+            may_be_published: false,
+        };
+        walk_target_components(
+            &self.root,
+            self.target
+                .parent()
+                .ok_or(MaterializeError::UnsafeTargetPath)
+                .map_err(unpublished)?,
+            ensure_real_directory,
+        )
+        .map_err(unpublished)?;
+        if let Err(error) = link(&self.stage, &self.target) {
+            // A remote server can create the link before losing its reply.
+            // Unsupported is a definitive refusal; other outcomes need identity evidence.
+            if error.kind() == ErrorKind::Unsupported {
+                return Err(unpublished(MaterializeError::io(&self.target, &error)));
+            }
+            match self.is_published() {
+                Ok(true) => {}
+                Ok(false) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
+                Ok(false) => return Err(unpublished(MaterializeError::io(&self.target, &error))),
+                Err(_) => {
+                    return Err(AuthoredCreatePublishError {
+                        error: MaterializeError::io(&self.target, &error),
+                        may_be_published: true,
+                    });
+                }
+            }
+        }
+        sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(|error| {
+            AuthoredCreatePublishError {
+                error,
+                may_be_published: true,
+            }
+        })?;
+        Ok(true)
+    }
+
+    pub fn is_published(&self) -> Result<bool, MaterializeError> {
+        // Missing evidence cannot prove either publication or a collision.
+        let stage = same_file::Handle::from_path(&self.stage)
+            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
+        let metadata = match std::fs::symlink_metadata(&self.target) {
+            Ok(metadata) => metadata,
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                return Ok(false);
+            }
+            Err(e) => return Err(MaterializeError::io(&self.target, &e)),
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+        {
+            return Ok(false);
+        }
+        let target = same_file::Handle::from_path(&self.target)
+            .map_err(|e| MaterializeError::io(&self.target, &e))?;
+        Ok(stage == target)
+    }
+
+    pub fn cleanup(&self) -> Result<(), MaterializeError> {
+        remove_authored_preparation(&self.preparation_sibling())?;
+        match std::fs::remove_file(&self.stage) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(MaterializeError::io(&self.stage, &e)),
+        }
+    }
+}
+
+fn remove_authored_preparation(path: &Path) -> Result<(), MaterializeError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(())
+        }
+        Err(error) => Err(MaterializeError::io(path, &error)),
+    }
+}
+
+/// No intent remains when this runs. Only this subsystem owns these private files.
+pub fn cleanup_authored_create_stages(root: &Path) -> Result<(), MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
+    let dir = root.join(".dohc/engine/authored-create");
+    ensure_target_symlink_free(&root, &dir)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(MaterializeError::io(&dir, &e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| MaterializeError::io(&dir, &e))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == 70
+            && name.ends_with(".stage")
+            && name[..64].bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| MaterializeError::io(&entry.path(), &e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(
@@ -861,16 +1045,34 @@ fn materialize_write_content(
     // NOTE: this read and the rename below are not atomic (no fs content-CAS);
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (see the module docs). The common case (an editor that wrote
-    // before the pipeline ran) IS caught here.
-    let current_now = if let Some(parent) = secret_parent.as_ref() {
-        parent.read_current(target_name.as_os_str(), target)?
-    } else {
-        read_current_no_follow(target)?
+    // before the pipeline ran) IS caught here. Each retry validates again after
+    // its backoff, including the final Windows exhaustion reattempt.
+    let mut validate_preimage = || {
+        let current = if let Some(parent) = secret_parent.as_ref() {
+            parent.read_current(target_name.as_os_str(), target)?
+        } else {
+            read_current_no_follow(target)?
+        };
+        if secret_root.is_some() && matches!(current, CurrentTarget::Oversized) {
+            return Err(MaterializeError::BlockedTarget);
+        }
+        Ok(preimage_matches(&job.preimage, &current))
     };
-    if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
-        return Err(MaterializeError::BlockedTarget);
-    }
-    if !preimage_matches(&job.preimage, &current_now) {
+    let replaced = if let Some(parent) = secret_parent.as_ref() {
+        replace_secret_with_bounded_retry(
+            parent,
+            tmp_name.as_os_str(),
+            target_name.as_os_str(),
+            &tmp,
+            target,
+            replacer,
+            backoff,
+            &mut validate_preimage,
+        )?
+    } else {
+        replace_with_bounded_retry(&tmp, target, replacer, backoff, &mut validate_preimage)?
+    };
+    if !replaced {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
         // is not lost; mark the job conflict (never silently replayed). The
@@ -899,22 +1101,12 @@ fn materialize_write_content(
         return Ok(JobOutcome::Conflict);
     }
 
-    // Step 5: atomic replace with bounded retry, then make the rename itself
-    // durable by syncing the parent directory (POSIX), THEN mark complete — so a
+    // Make the completed replace durable by syncing the parent directory
+    // (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
     if let Some(parent) = secret_parent.as_ref() {
-        replace_secret_with_bounded_retry(
-            parent,
-            tmp_name.as_os_str(),
-            target_name.as_os_str(),
-            &tmp,
-            target,
-            replacer,
-            backoff,
-        )?;
         parent.sync(policy)?;
     } else {
-        replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
         sync_parent_dir(target.parent(), policy)?;
     }
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -2001,7 +2193,8 @@ fn resolve_replace_exhaustion(
     err: std::io::Error,
     target: &Path,
     _reattempt: &mut dyn FnMut() -> std::io::Result<()>,
-) -> Result<(), MaterializeError> {
+    _validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
         return Err(MaterializeError::FileLocked);
     }
@@ -2010,8 +2203,11 @@ fn resolve_replace_exhaustion(
         match probe_delete_open(target) {
             DeleteProbe::Contended => return Err(MaterializeError::FileLocked),
             DeleteProbe::Opened => {
+                if !_validate()? {
+                    return Ok(false);
+                }
                 return match _reattempt() {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(true),
                     Err(retry_err) if matches!(retry_err.raw_os_error(), Some(32) | Some(33)) => {
                         Err(MaterializeError::FileLocked)
                     }
@@ -2047,25 +2243,31 @@ fn is_transient_lock(err: &std::io::Error) -> bool {
 /// sharing violations it retries; on exhaustion it fails closed with
 /// [`MaterializeError::FileLocked`] and removes the temp, leaving the job
 /// pending for startup replay. A non-transient error surfaces immediately.
+/// Returns false without consuming the temp when the preimage changed.
 fn replace_with_bounded_retry(
     tmp: &Path,
     target: &Path,
     replacer: &dyn AtomicReplacer,
     backoff: &dyn ReplaceBackoff,
-) -> Result<(), MaterializeError> {
+    validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     let mut attempt = 0u32;
     loop {
+        if !validate()? {
+            return Ok(false);
+        }
         attempt += 1;
         match replacer.try_replace(tmp, target) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    match resolve_replace_exhaustion(err, target, &mut || {
-                        replacer.try_replace(tmp, target)
-                    }) {
-                        // The resolution's single reattempt landed the
-                        // replace: the temp was consumed by the rename.
-                        Ok(()) => return Ok(()),
+                    match resolve_replace_exhaustion(
+                        err,
+                        target,
+                        &mut || replacer.try_replace(tmp, target),
+                        validate,
+                    ) {
+                        Ok(replaced) => return Ok(replaced),
                         Err(error) => {
                             let _ = std::fs::remove_file(tmp); // best-effort cleanup
                             return Err(error);
@@ -2085,6 +2287,10 @@ fn replace_with_bounded_retry(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pinned paths and retry seams keep replacement and preimage checks testable"
+)]
 fn replace_secret_with_bounded_retry(
     parent: &SecretParentGuard,
     tmp_name: &OsStr,
@@ -2093,21 +2299,30 @@ fn replace_secret_with_bounded_retry(
     target: &Path,
     replacer: &dyn AtomicReplacer,
     backoff: &dyn ReplaceBackoff,
-) -> Result<(), MaterializeError> {
+    validate: &mut dyn FnMut() -> Result<bool, MaterializeError>,
+) -> Result<bool, MaterializeError> {
     let mut attempt = 0u32;
     loop {
+        if !validate()? {
+            return Ok(false);
+        }
         attempt += 1;
         let mut pinned_replace = || parent.rename(tmp_name, target_name, tmp, target);
         match replacer.try_replace_secret(tmp, target, &mut pinned_replace) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    match resolve_replace_exhaustion(err, target, &mut || {
-                        let mut pinned_replace =
-                            || parent.rename(tmp_name, target_name, tmp, target);
-                        replacer.try_replace_secret(tmp, target, &mut pinned_replace)
-                    }) {
-                        Ok(()) => return Ok(()),
+                    match resolve_replace_exhaustion(
+                        err,
+                        target,
+                        &mut || {
+                            let mut pinned_replace =
+                                || parent.rename(tmp_name, target_name, tmp, target);
+                            replacer.try_replace_secret(tmp, target, &mut pinned_replace)
+                        },
+                        validate,
+                    ) {
+                        Ok(replaced) => return Ok(replaced),
                         Err(error) => {
                             let _ = parent.remove_file(tmp_name, tmp);
                             return Err(error);
@@ -2138,6 +2353,177 @@ fn rename_no_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authored_create_preparation_retains_only_private_identity() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-preparation").expect("scratch");
+        let stage =
+            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
+                .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        assert!(!stage.preparation_sibling().exists());
+        assert!(!stage.target.exists());
+        assert_eq!(
+            std::fs::read_to_string(&stage.stage).expect("private bytes"),
+            "authored"
+        );
+        std::fs::remove_dir(stage.target.parent().expect("parent"))
+            .expect("destination removed after preparation");
+        assert!(stage.stage.exists());
+        let reopened =
+            super::AuthoredCreateStage::open(root.path(), "nested/record.md", &"d".repeat(64))
+                .expect("reopen");
+        assert!(reopened.publish().expect("publish"));
+        assert!(reopened.is_published().expect("retained identity"));
+    }
+
+    #[test]
+    fn authored_create_failed_preparation_removes_sibling_and_preserves_existing_evidence() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-prepare-failure").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"e".repeat(64))
+            .expect("stage");
+        std::fs::write(&stage.stage, "prior evidence").expect("existing stage");
+        assert!(stage.prepare("new attempt").is_err());
+        assert!(!stage.preparation_sibling().exists());
+        assert_eq!(
+            std::fs::read_to_string(&stage.stage).expect("private bytes"),
+            "prior evidence"
+        );
+        stage.cleanup().expect("discard abandoned preparation");
+        stage.prepare("retry").expect("retry");
+    }
+
+    #[test]
+    fn authored_create_abandoned_sibling_never_becomes_user_content() {
+        let root =
+            dohc_test_scratch::ScratchDir::new_named("authored-orphan-sibling").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"f".repeat(64))
+            .expect("stage");
+        let sibling = stage.preparation_sibling();
+        std::fs::write(&sibling, "partial preparation").expect("crash before evidence link");
+        assert!(crate::floor::is_excluded_file(
+            sibling.file_name().unwrap().to_str().unwrap()
+        ));
+        stage.cleanup().expect("retry cleanup before intent");
+        assert!(!sibling.exists());
+        stage.prepare("complete").expect("prepare");
+        std::fs::hard_link(&stage.stage, &sibling).expect("crash after private evidence link");
+        stage.cleanup().expect("cleanup both private names");
+        assert!(!sibling.exists());
+        assert!(!stage.stage.exists());
+        assert!(!stage.target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authored_create_uses_ordinary_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = dohc_test_scratch::ScratchDir::new_named("authored-mode").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"1".repeat(64))
+            .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        let mode = std::fs::metadata(&stage.stage)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode & !0o600, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authored_create_inherits_destination_acl() {
+        fn powershell(path: &std::path::Path, script: &str) {
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("DOHC_ACL_PROBE", path)
+                .output()
+                .expect("powershell");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let root = dohc_test_scratch::ScratchDir::new_named("authored-acl").expect("scratch");
+        let destination = root.path().join("destination");
+        std::fs::create_dir(&destination).expect("directory");
+        powershell(
+            &destination,
+            r#"$ErrorActionPreference='Stop'; $acl=[System.IO.Directory]::GetAccessControl($env:DOHC_ACL_PROBE); $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,[System.Security.AccessControl.FileSystemRights]::Read,[System.Security.AccessControl.InheritanceFlags]'ObjectInherit,ContainerInherit',[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow); $acl.AddAccessRule($rule); [System.IO.Directory]::SetAccessControl($env:DOHC_ACL_PROBE,$acl)"#,
+        );
+        let stage =
+            super::AuthoredCreateStage::open(root.path(), "destination/record.md", &"2".repeat(64))
+                .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        stage.publish().expect("publish");
+        powershell(
+            &stage.target,
+            r#"$ErrorActionPreference='Stop'; $rules=([System.IO.File]::GetAccessControl($env:DOHC_ACL_PROBE)).GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (-not ($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' -and $_.IsInherited -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) })) { throw 'Destination inherited Read ACE is missing' }"#,
+        );
+        assert!(stage.is_published().expect("same inode"));
+        assert!(!stage.preparation_sibling().exists());
+    }
+
+    #[test]
+    fn authored_create_resolves_ambiguous_link_outcomes_by_identity() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::AlreadyExists,
+        ] {
+            let root = dohc_test_scratch::ScratchDir::new_named("ambiguous-link").expect("scratch");
+            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"a".repeat(64))
+                .expect("stage");
+            stage.prepare("authored").expect("prepare");
+            let result = stage.publish_with_link(|from, to| {
+                std::fs::hard_link(from, to)?;
+                Err(std::io::Error::from(kind))
+            });
+            assert!(result.expect("own link is published"));
+            assert!(stage.is_published().expect("identity"));
+        }
+    }
+
+    #[test]
+    fn authored_create_keeps_unknown_link_evidence_but_refuses_known_failures() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            let root = dohc_test_scratch::ScratchDir::new_named("unknown-link").expect("scratch");
+            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"b".repeat(64))
+                .expect("stage");
+            stage.prepare("authored").expect("prepare");
+            let error = stage
+                .publish_with_link(|from, _| {
+                    std::fs::remove_file(from)?;
+                    Err(std::io::Error::from(kind))
+                })
+                .expect_err("failed link");
+            assert_eq!(
+                error.may_be_published,
+                kind != std::io::ErrorKind::Unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn authored_create_link_collision_preserves_foreign_file() {
+        let root = dohc_test_scratch::ScratchDir::new_named("foreign-link").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"c".repeat(64))
+            .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        std::fs::write(root.path().join("record.md"), "foreign").expect("foreign");
+        assert!(!stage.publish().expect("collision"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("record.md")).expect("read"),
+            "foreign"
+        );
+    }
+
     use super::*;
     use dohc_engine_storage::{
         FaultAction, JobStatus, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,
@@ -2226,6 +2612,7 @@ mod tests {
             &scratch.root.join("target.md"),
             &replacer,
             &NoBackoff,
+            &mut || Ok(true),
         );
         assert_eq!(
             replacer.attempts.load(Ordering::Relaxed),
@@ -2258,10 +2645,15 @@ mod tests {
             .open(&target)
             .expect("hold handle");
         let mut reattempts = 0u32;
-        let verdict = resolve_replace_exhaustion(denied(), &target, &mut || {
-            reattempts += 1;
-            Err(denied())
-        });
+        let verdict = resolve_replace_exhaustion(
+            denied(),
+            &target,
+            &mut || {
+                reattempts += 1;
+                Err(denied())
+            },
+            &mut || Ok(true),
+        );
         assert!(matches!(verdict, Err(MaterializeError::FileLocked)));
         assert_eq!(reattempts, 0, "an observed contention needs no reattempt");
         drop(holder);
@@ -2275,10 +2667,15 @@ mod tests {
         readonly.set_readonly(true);
         std::fs::set_permissions(&read_only, readonly).expect("set read-only");
         let mut reattempts = 0u32;
-        let verdict = resolve_replace_exhaustion(denied(), &read_only, &mut || {
-            reattempts += 1;
-            Err(denied())
-        });
+        let verdict = resolve_replace_exhaustion(
+            denied(),
+            &read_only,
+            &mut || {
+                reattempts += 1;
+                Err(denied())
+            },
+            &mut || Ok(true),
+        );
         assert!(matches!(verdict, Err(MaterializeError::Io { .. })));
         assert_eq!(reattempts, 1, "an open probe spends exactly one reattempt");
         std::fs::set_permissions(&read_only, original).expect("restore permissions");
@@ -2286,10 +2683,35 @@ mod tests {
         // The contender released between attempts: the reattempt lands.
         let freed = scratch.root.join("freed.md");
         std::fs::write(&freed, b"freed").expect("write freed target");
-        let verdict = resolve_replace_exhaustion(denied(), &freed, &mut || Ok(()));
+        let verdict =
+            resolve_replace_exhaustion(denied(), &freed, &mut || Ok(()), &mut || Ok(true));
         assert!(
             verdict.is_ok(),
             "a landed reattempt resolves the exhaustion"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exhausted_replace_rechecks_preimage_before_final_attempt() {
+        let scratch = Scratch::new("exhausted-retry-preimage");
+        let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"external edit").unwrap();
+        let mut attempted = false;
+        let replaced = resolve_replace_exhaustion(
+            std::io::Error::from_raw_os_error(5),
+            &target,
+            &mut || {
+                attempted = true;
+                Ok(())
+            },
+            &mut || Ok(false),
+        )
+        .unwrap();
+        assert!(!replaced);
+        assert!(
+            !attempted,
+            "the final attempt must not bypass the preimage check"
         );
     }
 
@@ -2338,6 +2760,7 @@ mod tests {
             &scratch.root.join("target.md"),
             &replacer,
             &NoBackoff,
+            &mut || Ok(true),
         );
         assert!(matches!(result, Err(MaterializeError::FileLocked)));
     }
@@ -2438,6 +2861,107 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .expect("enqueue materialization job");
+    }
+
+    struct ContendedOnce(AtomicUsize);
+
+    impl AtomicReplacer for ContendedOnce {
+        fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(std::io::Error::from(ErrorKind::PermissionDenied));
+            }
+            std::fs::rename(from, to)
+        }
+
+        fn try_replace_secret(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(std::io::Error::from(ErrorKind::PermissionDenied));
+            }
+            pinned_replace()
+        }
+    }
+
+    struct ExternalEditDuringBackoff(PathBuf);
+
+    impl ReplaceBackoff for ExternalEditDuringBackoff {
+        fn wait_before_retry(&self, failed_attempt: u32) {
+            assert_eq!(failed_attempt, 1);
+            std::fs::write(&self.0, b"external edit").expect("external editor saves");
+        }
+    }
+
+    #[test]
+    fn ordinary_replace_retry_preserves_external_edit() {
+        let scratch = Scratch::new("ordinary-retry-preimage");
+        let mut store = EngineStore::open(&scratch.db(), 1).expect("store");
+        enqueue_write_job(&mut store, "retry", "notes.md", b"intended", 1);
+        let job = store.load_materialization_job("retry").unwrap().unwrap();
+        let target = scratch.root.join("notes.md");
+        let outcome = materialize_one(
+            &store,
+            &scratch.root,
+            &job,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &ContendedOnce(AtomicUsize::new(0)),
+                backoff: &ExternalEditDuringBackoff(target.clone()),
+                now_ms: 2,
+                faults: &NoFaults,
+            },
+        )
+        .expect("materialize");
+        assert_eq!(outcome, JobOutcome::Conflict);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert_eq!(
+            std::fs::read(conflict_sibling(&target, "retry")).unwrap(),
+            b"intended"
+        );
+        assert_eq!(
+            store
+                .load_materialization_job("retry")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
+    }
+
+    #[test]
+    fn secret_replace_retry_preserves_external_edit() {
+        let scratch = Scratch::new("secret-retry-preimage");
+        let (store, job) = prepare_secret_job(&scratch, "secret-retry", ".env");
+        let target = scratch.root.join(".env");
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=intended",
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &ContendedOnce(AtomicUsize::new(0)),
+                backoff: &ExternalEditDuringBackoff(target.clone()),
+                now_ms: 2,
+                faults: &NoFaults,
+            },
+        )
+        .expect("materialize");
+        assert_eq!(outcome, JobOutcome::Conflict);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert!(!temp_sibling(&target, &job.job_id).exists());
+        assert!(!conflict_sibling(&target, &job.job_id).exists());
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
     }
 
     #[cfg(unix)]

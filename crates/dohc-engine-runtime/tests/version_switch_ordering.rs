@@ -905,3 +905,94 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
 
     supervisor.close(&database).expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_leaves_the_same_bytes_alone_when_only_their_kind_differs() {
+    const WS: &str = "ws-switch-kind-only";
+    const PATH: &str = "trip/automations.yaml";
+    const BYTES: &[u8] = b"version: 1\nautomations: []\n";
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WS.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    // A Collection file stored as binary before capture read it as text. The
+    // disk probe now reads the same bytes as text.
+    actor
+        .capture_ingest_binary(
+            CaptureIngestBinary {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                bytes: BYTES.to_vec(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("binary head");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    std::fs::create_dir_all(scratch.path().join("trip")).expect("trip folder");
+    std::fs::write(scratch.path().join(PATH), BYTES).expect("disk");
+
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WS.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 1_700_000_000_000,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("switch");
+
+    assert_eq!(
+        std::fs::read(scratch.path().join(PATH)).expect("disk"),
+        BYTES
+    );
+    supervisor.close(&database).expect("close");
+    let connection = Connection::open(&database).expect("sqlite");
+    let jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id LIKE 'version-switch-mat_%' AND target_path = ?1",
+            [PATH],
+            |row| row.get(0),
+        )
+        .expect("switch jobs");
+    assert_eq!(jobs, 0, "equal bytes need no switch write");
+}

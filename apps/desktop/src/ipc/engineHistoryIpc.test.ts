@@ -3,7 +3,7 @@ import {
   engineMomentDetailForIpc,
   listEngineMomentsForIpc,
   versionConflictForIpc,
-  type EngineMomentAuthorNamer,
+  type EngineMomentAuthorNames,
 } from "./engineHistoryIpc";
 import {
   CompareWorkspaceVersionsResult,
@@ -20,8 +20,12 @@ import type {
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 
-const namer: EngineMomentAuthorNamer = (author) =>
-  author.onBehalfOf === "local" ? "You" : author.onBehalfOf;
+const names: EngineMomentAuthorNames = {
+  agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
+  automation: (automationId) =>
+    automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
+  named: (author) => `${author.userId}@example.com (Edit)`,
+};
 
 const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
@@ -41,7 +45,7 @@ describe("listEngineMomentsForIpc", () => {
     );
     const read = vi.fn(() => Promise.reject(updating));
 
-    await expect(listEngineMomentsForIpc(read, namer)).resolves.toEqual({
+    await expect(listEngineMomentsForIpc(read, names)).resolves.toEqual({
       status: "updating",
     });
   });
@@ -57,7 +61,7 @@ describe("listEngineMomentsForIpc", () => {
     );
 
     await expect(
-      listEngineMomentsForIpc(() => Promise.reject(unknown), namer),
+      listEngineMomentsForIpc(() => Promise.reject(unknown), names),
     ).rejects.toBe(unknown);
   });
 });
@@ -104,21 +108,51 @@ function detailWith(
 }
 
 describe("engineMomentDetailForIpc per-side content kinds", () => {
+  it("omits an agent owner label when its principal was not declared", () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "agent", agentId: "agent"};
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record).not.toHaveProperty("agentAuthorName");
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
   it("preserves the public author without invoking the agent name resolver", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     detail.moment.author = {kind: "public", principalId: "holder-2", grantId: "grant-1"};
-    const agentNamer = vi.fn(namer);
-    const record = engineMomentDetailForIpc(detail, agentNamer);
+    const agentNamer = vi.fn(names.agent);
+    const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
     expect(record.publicAuthor).toEqual(detail.moment.author);
     expect(record.agentAuthorName).toBeUndefined();
     expect(agentNamer).not.toHaveBeenCalled();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  it("names an automation author as main reads it, and nothing else", () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1};
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.automationAuthor).toEqual({ name: "Named collection:Tasks#stamp", collection: "Tasks" });
+    expect(record.agentAuthorName).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    // An id outside the Collection namespace keeps the moment's origin label.
+    detail.moment.author = {kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1};
+    expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
+  });
+  it("names a person the owner shared with as main reads them from the roster", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "named", userId: "ana", grantId: "grant-1", grantGeneration: 1};
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.namedAuthor).toEqual({ userId: "ana", label: "ana@example.com (Edit)" });
+    expect(record.agentAuthorName).toBeUndefined();
+    expect(record.publicAuthor).toBeUndefined();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),
-      namer,
+      names,
     );
     expect(record.beforeText).toBe("v1\n");
     expect(record.afterText).toBe("v2\n");
@@ -133,7 +167,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     // empty->text diff); it presents as bytes instead.
     const record = engineMomentDetailForIpc(
       detailWith({ before: binarySide(4), after: textSide("text again\n") }),
-      namer,
+      names,
     );
     expect(record.beforeText).toBeNull();
     expect(record.beforeBinary).toEqual({ byteLength: 4, sha256: BINARY_SHA });
@@ -148,7 +182,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("presents a text->binary transition honestly per side", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("text at first\n"), after: binarySide(4) }),
-      namer,
+      names,
     );
     expect(record.beforeText).toBe("text at first\n");
     expect(record.beforeBinary).toBeUndefined();
@@ -162,7 +196,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("distinguishes a binary create (no before) from a transition", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: null, after: binarySide(6) }),
-      namer,
+      names,
     );
     expect(record.beforeText).toBeNull();
     expect(record.beforeBinary).toBeUndefined();
@@ -173,7 +207,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   it("serves a binary delete moment as bytes on both populated sides", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: binarySide(4), after: binarySide(4) }, "delete"),
-      namer,
+      names,
     );
     expect(record.beforeText).toBeNull();
     expect(record.afterText).toBeNull();
@@ -195,7 +229,7 @@ describe("moment bodies the engine accepted cross the bridge", () => {
     const body = "x".repeat(2_000_001);
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide(body) }),
-      namer,
+      names,
     );
     expect(EngineMomentDetailRecord.parse(record).afterText).toBe(body);
   });
@@ -210,7 +244,7 @@ describe("moment bodies the engine accepted cross the bridge", () => {
     const body = "x".repeat(engineMaxTextBytes);
     const record = engineMomentDetailForIpc(
       detailWith({ before: null, after: textSide(body) }),
-      namer,
+      names,
     );
     expect(EngineMomentDetailRecord.parse(record).afterText).toBe(body);
   });
@@ -220,7 +254,7 @@ describe("moment bodies the engine accepted cross the bridge", () => {
     // reader who hits it gets the limit, not a bare Zod string complaint.
     const record = engineMomentDetailForIpc(
       detailWith({ before: null, after: textSide("x".repeat(ENGINE_TEXT_MAX_CHARS + 1)) }),
-      namer,
+      names,
     );
     const parsed = EngineMomentDetailRecord.safeParse(record);
     expect(parsed.success).toBe(false);

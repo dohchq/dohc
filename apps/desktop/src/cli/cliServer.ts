@@ -49,7 +49,7 @@ import {
   type GranularChatMessageSearchResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -77,7 +77,14 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import {
+  LiveDocumentEditAppliedError,
+  type LiveDocumentEditOrigin,
+  type LiveDocumentEditOutcome,
+} from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import type { DocumentEdit } from "@dohc/ydoc-projection";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -177,6 +184,25 @@ export interface CliCollectionsPort {
   writes: CliCollectionWriteSeam;
 }
 
+// Live Markdown documents for the document verbs. Main answers through the
+// editor session that holds a document, so an edit reaches an open editor
+// as the person's own typing would.
+export interface CliDocumentsPort {
+  read(path: string): Promise<{ path: string; markdown: string }>;
+  edit(input: {
+    path: string;
+    edit: DocumentEdit;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<LiveDocumentEditOutcome>;
+  // Creates the file the way the explorer does, then writes `markdown`
+  // into its live session. Refuses a path that already exists.
+  create(input: {
+    path: string;
+    markdown: string;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<{ path: string }>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -186,7 +212,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
-  listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
+  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
   readMoment(momentId: string): Promise<VersionedTextMoment | null>;
   daemonReads: {
     queryChatMessagesGranular(input: {
@@ -200,6 +226,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
+  documents?: CliDocumentsPort;
 }
 
 export interface CliRunMessageLink {
@@ -216,6 +243,11 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   localUserDisplayName(): string;
+  // The chain depth of the agent run in progress in the workspace, or 0. Every
+  // write during a run an automation started is the agent's at this depth, so
+  // an automation that woke the agent and the agent cannot start each other
+  // forever.
+  agentRunDepth(workspaceId: string): number;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -236,6 +268,8 @@ export interface CliServerOptions {
   chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  /** How many finished results and forgotten request ids each workspace keeps; tests lower them. */
+  requestIdLimits?: { results: number; ids: number };
   runMessageLinkForegroundBudgetMs?: number;
   runMessageLinkRecoveryRetryMs?: number;
   runMessageLinkRecoveryMaxPending?: number;
@@ -405,6 +439,9 @@ function rawChatMessage(
   };
 }
 
+// A history row carries only facts the path admission checked. The moment's
+// free-form summary is not sent: a rename's reads "Renamed <before> to <after>",
+// and its before path may be one current policy no longer admits.
 function rawMomentSummary(
   moment: Pick<
     VersionedTextMomentSummary,
@@ -419,7 +456,6 @@ function rawMomentSummary(
     operation: moment.operation,
     path: moment.path,
     versionId: moment.versionId,
-    ...(moment.metadata.summary ? { summary: moment.metadata.summary } : {}),
     ...(moment.author ? { author: moment.author } : {}),
     fileCount: 1 as const,
     ...(includeFiles
@@ -484,22 +520,64 @@ function decodedCollectionCursor(
   };
 }
 
+// Who a write through this socket is. While a run an automation started holds
+// the run slot, every write is that run's agent, whatever actor the caller
+// named, as disk edits during the run are: an agent that names itself a
+// person would otherwise write at depth 0 and start the chain over.
+function writeActor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): CliActor {
+  return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
+}
+
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner; a human write is
-// attributed as this device's local author under the workspace display name.
-const CLI_AGENT_AUTHOR: ChangeAuthor = {
-  kind: "agent",
-  agentId: "dohc-mcp",
-  onBehalfOf: "local",
-};
-
+// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// agent run in progress; a human write is attributed as this device's local
+// author under the workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
+  context: CliWorkspaceContext,
   options: CliServerOptions,
 ): ChangeAuthor {
-  if (actor === "agent") return CLI_AGENT_AUTHOR;
+  if (writeActor(actor, context, options) === "agent") {
+    return {
+      kind: "agent",
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      depth: options.agentRunDepth(context.workspaceId),
+    };
+  }
   return createLocalChangeAuthor(options.localUserDisplayName());
+}
+
+// Provenance for a document edit, derived here. A person types in the
+// editor, so every edit through this socket is an agent's on behalf of the
+// local owner, recorded under the name the agent gave itself or under none,
+// at the depth of the agent run in progress. Any process holding the socket
+// token could otherwise claim the person's typing.
+function documentEditOrigin(
+  agent: string | undefined,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LiveDocumentEditOrigin {
+  return {
+    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    attribution: {
+      actorKind: "agent",
+      onBehalfOf: "local",
+      depth: options.agentRunDepth(context.workspaceId),
+    },
+  };
+}
+
+function documentsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "documents are not available in this workspace",
+  };
 }
 
 async function loadChannels(
@@ -806,6 +884,7 @@ async function workspaceRelativePath(
   context: CliWorkspaceContext,
   cwd: string,
   path: string,
+  noun: string,
 ): Promise<string> {
   const absolute = resolve(cwd, path);
   const root = await realpath(resolve(context.rootPath));
@@ -813,21 +892,21 @@ async function workspaceRelativePath(
   try {
     canonical = await realpath(absolute);
     if (!isInside(root, canonical)) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     const realParent = await realpath(dirname(absolute)).catch(() => {
-      throw new CliCommandError(`attachment is not a tracked workspace file: ${path}`);
+      throw new CliCommandError(`${noun} is not a tracked workspace file: ${path}`);
     });
     if (!isInside(root, realParent)) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
     const suppliedName = basename(path);
     const unresolved = join(realParent, basename(absolute));
     if (basename(unresolved) !== suppliedName) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
     canonical = unresolved;
   }
@@ -841,7 +920,7 @@ async function resolveAttachments(
 ): Promise<Array<{ objectId: string; pathHint: string }>> {
   return Promise.all(
     paths.map(async (path) => {
-      const pathHint = await workspaceRelativePath(context, cwd, path);
+      const pathHint = await workspaceRelativePath(context, cwd, path, "attachment");
       const objectId = await context.fileObjectIdForPath(pathHint);
       if (!objectId) {
         throw new CliCommandError(
@@ -1559,6 +1638,184 @@ async function linkRunMessage(
   return warning;
 }
 
+interface FileChatStart {
+  path: string;
+  title: string;
+  body: string;
+  runId?: string;
+  agent?: string;
+}
+
+// A comment on a file takes the path a person's does: a chat linked to the
+// file, then its first message, through the one chat write module. `created`
+// says whether a chat now exists, so a retry knows whether it may start one.
+async function startFileChat(
+  context: CliWorkspaceContext,
+  input: FileChatStart,
+  options: CliServerOptions,
+): Promise<{ created: boolean; result: unknown }> {
+  let thread: ChatThread;
+  try {
+    thread = await options.chatWrites.createFileThread(context, {
+      title: input.title,
+      linkedFile: async () => {
+        const objectId = await context.fileObjectIdForPath(input.path);
+        if (!objectId) {
+          throw new Error(
+            `dohc does not track ${input.path} yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file.`,
+          );
+        }
+        return { objectId, pathHint: input.path };
+      },
+    });
+  } catch (error) {
+    return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
+  }
+  let message: ChatMessage;
+  try {
+    message = await options.chatWrites.sendMessage(context, {
+      writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
+      threadId: thread.id,
+      body: input.body,
+      resolveAttachments: async () => [],
+    });
+  } catch (error) {
+    // The chat exists now. Name it, so the caller replies there instead
+    // of starting a second one.
+    await notifyWrite(options, context);
+    const cause = error instanceof Error ? error.message : String(error);
+    return {
+      created: true,
+      result: {
+        ok: false as const,
+        reason: `dohc started chat ${thread.id} on ${input.path}, but could not post its first message (${cause}). Reply in that chat to post it.`,
+      },
+    };
+  }
+  const linkWarning = await linkRunMessage(context, {
+    actor: "agent",
+    ...(input.runId ? { runId: input.runId } : {}),
+    messageId: message.id,
+  }, options);
+  await notifyWrite(options, context);
+  return {
+    created: true,
+    result: {
+      ok: true as const,
+      path: input.path,
+      threadId: thread.id,
+      messageId: message.id,
+      ...(linkWarning ? { warning: linkWarning } : {}),
+    },
+  };
+}
+
+// The results of requests a caller sent with a request id, per workspace. A
+// caller whose request passed the socket deadline sends it again with the same
+// id and gets the first result instead of the work done twice. Kept in memory
+// while dohc runs.
+//
+// A running request is never dropped; the socket's connection limit bounds how
+// many run at once. A finished one is kept as a digest of its input and its
+// small result. Past the limit the oldest finished result is dropped and only
+// its id is kept, so a resend is refused instead of run again. Past that
+// limit too, the oldest ids go, and only then could a very old id run again.
+// The MCP tool descriptions that take a requestId state these numbers.
+const REQUEST_ID_LIMITS = { results: 1_024, ids: 16_384 };
+
+interface RememberedRequest {
+  input: string;
+  result: Promise<unknown>;
+  finished: boolean;
+}
+
+interface WorkspaceRequests {
+  requests: Map<string, RememberedRequest>;
+  forgotten: Set<string>;
+}
+
+const requestMemory = new WeakMap<CliServerOptions, Map<string, WorkspaceRequests>>();
+
+function workspaceRequests(options: CliServerOptions, workspaceId: string): WorkspaceRequests {
+  let workspaces = requestMemory.get(options);
+  if (!workspaces) {
+    workspaces = new Map();
+    requestMemory.set(options, workspaces);
+  }
+  let memory = workspaces.get(workspaceId);
+  if (!memory) {
+    memory = { requests: new Map(), forgotten: new Set() };
+    workspaces.set(workspaceId, memory);
+  }
+  return memory;
+}
+
+function forgetOldestResults(memory: WorkspaceRequests, limits: { results: number; ids: number }): void {
+  let finished = 0;
+  for (const request of memory.requests.values()) if (request.finished) finished += 1;
+  for (const [requestId, request] of memory.requests) {
+    if (finished <= limits.results) break;
+    if (!request.finished) continue;
+    memory.requests.delete(requestId);
+    memory.forgotten.add(requestId);
+    finished -= 1;
+  }
+  for (const requestId of memory.forgotten) {
+    if (memory.forgotten.size <= limits.ids) break;
+    memory.forgotten.delete(requestId);
+  }
+}
+
+async function onceForRequestId(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  requestId: string,
+  input: unknown,
+  run: () => Promise<{ done: boolean; result: unknown }>,
+): Promise<unknown> {
+  const memory = workspaceRequests(options, context.workspaceId);
+  // A digest, so a remembered edit does not keep its text in memory.
+  const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+  const remembered = memory.requests.get(requestId);
+  if (remembered) {
+    if (remembered.input !== inputKey) {
+      return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
+    }
+    return await remembered.result;
+  }
+  if (memory.forgotten.has(requestId)) {
+    return {
+      ok: false as const,
+      reason: `dohc no longer holds the result of request id ${requestId}, so it did not run it again. Read the document or the chat to see whether it happened, and send any new request with a new id.`,
+    };
+  }
+  const started = run();
+  const result = started.then((outcome) => outcome.result);
+  // A retry may never come to await it.
+  result.catch(() => undefined);
+  const entry: RememberedRequest = { input: inputKey, result, finished: false };
+  memory.requests.set(requestId, entry);
+  const limits = options.requestIdLimits ?? REQUEST_ID_LIMITS;
+  try {
+    const outcome = await started;
+    if (outcome.done) {
+      // Finished results leave in the order they finished.
+      entry.finished = true;
+      if (memory.requests.get(requestId) === entry) {
+        memory.requests.delete(requestId);
+        memory.requests.set(requestId, entry);
+      }
+      forgetOldestResults(memory, limits);
+    } else {
+      memory.requests.delete(requestId);
+    }
+    return outcome.result;
+  } catch (error) {
+    memory.requests.delete(requestId);
+    throw error;
+  }
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -1588,7 +1845,17 @@ async function dispatch(
         LIST_MOMENTS_HARD_LIMIT,
         Math.max(1, Math.floor(request.args.limit ?? 50)),
       );
-      const moments = await context.listMoments({ limit: LIST_MOMENTS_HARD_LIMIT });
+      // A path narrows the list to that file's own history, across renames.
+      let objectId: string | undefined;
+      if (request.args.path !== undefined) {
+        const path = await workspaceRelativePath(context, request.args.cwd, request.args.path, "file");
+        objectId = (await context.fileObjectIdForPath(path)) ?? undefined;
+        if (!objectId) throw new CliCommandError(`file is not a tracked workspace file: ${request.args.path}`);
+      }
+      const moments = await context.listMoments({
+        limit: LIST_MOMENTS_HARD_LIMIT,
+        ...(objectId ? { objectId } : {}),
+      });
       const selectedMoments = sinceMs === undefined
         ? moments
         : moments.filter((moment) => moment.recordedAtMs > sinceMs);
@@ -1855,7 +2122,7 @@ async function dispatch(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, options),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -1896,7 +2163,7 @@ async function dispatch(
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, options),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         return {
           ok: true as const,
@@ -1909,6 +2176,115 @@ async function dispatch(
           `failed to create a record in: ${request.args.collectionPath}`,
         );
       }
+    }
+
+    case "documentRead": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      try {
+        return { ok: true as const, ...(await documents.read(validated.normalized)) };
+      } catch (error) {
+        return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "documentEdit": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, find, replacement } = request.args;
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      const validated = validateUserWritePath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const path = validated.normalized;
+      const edit = async (): Promise<{ done: boolean; result: unknown }> => {
+        try {
+          const outcome = await documents.edit({
+            path,
+            edit: { find, replacement },
+            origin: documentEditOrigin(agent, context, options),
+          });
+          return { done: true, result: { ok: true as const, ...outcome } };
+        } catch (error) {
+          return {
+            // An edit that reached the document is remembered with its
+            // failure, so a retry does not apply it again.
+            done: error instanceof LiveDocumentEditAppliedError,
+            result: mcpFailure(error, `failed to edit document: ${request.args.path}`),
+          };
+        }
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await edit()).result;
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
+    }
+
+    case "documentCreate": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, markdown } = request.args;
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      // A new file, so the stricter materialization rules apply.
+      const validated = validateUserMaterializePath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
+        return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };
+      }
+      try {
+        return {
+          ok: true as const,
+          ...(await documents.create({
+            path: validated.normalized,
+            markdown,
+            origin: documentEditOrigin(agent, context, options),
+          })),
+        };
+      } catch (error) {
+        return mcpFailure(error, `failed to create document: ${request.args.path}`);
+      }
+    }
+
+    // A comment on a file takes the path a person's does: a chat linked to
+    // the file, then its first message, through the one chat write module.
+    case "fileChatStart": {
+      if (request.args.actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const input = {
+        path: validated.normalized,
+        title: request.args.title,
+        body: request.args.body,
+        ...(request.args.runId ? { runId: request.args.runId } : {}),
+        ...(request.args.agent ? { agent: request.args.agent } : {}),
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await startFileChat(context, input, options)).result;
+      return await onceForRequestId(
+        context,
+        options,
+        requestId,
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
+        async () => {
+          const started = await startFileChat(context, input, options);
+          return { done: started.created, result: started.result };
+        },
+      );
     }
   }
 
@@ -2096,8 +2472,9 @@ async function dispatch(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
+      const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor },
         channelId: channel.engine.id,
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
@@ -2108,7 +2485,7 @@ async function dispatch(
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
-        actor: request.args.actor,
+        actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
       }, options);
@@ -2151,8 +2528,9 @@ async function dispatch(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
+      const actor = writeActor(request.args.actor, context, options);
       const message = await options.chatWrites.sendMessage(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor },
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -2162,7 +2540,7 @@ async function dispatch(
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
-        actor: request.args.actor,
+        actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
       }, options);
@@ -2185,7 +2563,7 @@ async function dispatch(
           options.onError?.(error);
         }
       }
-      if (request.args.actor === "agent") {
+      if (actor === "agent") {
         try {
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
@@ -2227,7 +2605,7 @@ async function dispatch(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor: writeActor(request.args.actor, context, options) },
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,
@@ -2377,8 +2755,12 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const documentWriteRequest =
+    request.verb === "documentEdit" || request.verb === "documentCreate";
   const writeRequest =
     collectionWriteRequest ||
+    documentWriteRequest ||
+    request.verb === "fileChatStart" ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2388,7 +2770,9 @@ async function workspaceContextForRequest(
     throw new CliCommandError(
       collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
-        : "chats are not available in a read-only shared view",
+        : documentWriteRequest
+          ? "document changes are not available in a read-only shared view"
+          : "chats are not available in a read-only shared view",
     );
   }
   const context = await options.openWorkspace(workspace);

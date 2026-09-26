@@ -14,7 +14,7 @@ import {
 import { NOTICE_REMOVED_RETENTION_MS, NOTICE_REMOVED_ROW_LIMIT, NOTICE_ROWS_PER_SENDER } from "./storage/limits";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import { noticeReachReads, type PostNoticeInput } from "./storage/notices";
+import { NOTICE_DISMISSAL_RECEIPTS, noticeReachReads, type PostNoticeInput } from "./storage/notices";
 import type { StorageContext } from "./storage/context";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { authorizeShareGrantAction } from "./shareAuthorization";
@@ -24,7 +24,6 @@ import {
   closeTestStorages,
   countRows,
   countStorageCalls,
-  createShare,
   inspect,
   inspectDatabase,
   json,
@@ -45,12 +44,42 @@ afterEach(closeTestStorages);
 const WORKSPACE = "workspace-trip";
 
 let clock = 10_000;
+let current: SyncRelayStorage;
+let shares = 0;
+
+// A named share made in storage. A named share also sends its person a
+// notice that it arrived (shareNotices.test.ts); these tests settle that
+// delivery at once, so each sees only the notices it posts.
+function grant(input: { paths: string[]; recipientUserId: string; versionId?: string }): string {
+  const shareId = `share-${shares}`;
+  const grantId = `grant-${shares}`;
+  shares += 1;
+  current.createShare({
+    share: {
+      shareId,
+      workspaceId: WORKSPACE,
+      granterUserId: "owner",
+      selectorJson: JSON.stringify({ paths: input.paths, versionId: input.versionId ?? null }),
+      createdAtMs: clock,
+    },
+    grant: {
+      grantId, shareId, principalKind: "user", principalUserId: input.recipientUserId, principalEmail: null,
+      access: "view", generation: 1, status: "active", createdAtMs: clock, revokedAtMs: null, parentGrantId: null,
+    },
+  });
+  const db = inspectDatabase(storagePath(current));
+  db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?").run(grantId);
+  db.close();
+  return shareId;
+}
 
 async function relay(
   overrides: HandlerOverrides = {},
 ): Promise<{ h: SyncRelayHandler; storage: SyncRelayStorage }> {
   clock = 10_000;
+  shares = 0;
   const storage = await testStorage();
+  current = storage;
   const h = testHandler(storage, {
     nowMs: () => clock,
     lookupUserDisplayName: (userId) => `Name ${userId}`,
@@ -63,7 +92,7 @@ async function relay(
 // Trip is shared with Ana by name as share-0.
 async function sharedTrip(overrides: HandlerOverrides = {}) {
   const setup = await relay(overrides);
-  const shareId = await createShare(setup.h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+  const shareId = grant({ paths: ["trip"], recipientUserId: "ana" });
   return { ...setup, shareId };
 }
 
@@ -206,7 +235,7 @@ describe("notice list", () => {
 
   it("refuses a notice to yourself through a share you do not hold", async () => {
     const { h, storage, shareId } = await sharedTrip();
-    const benShare = await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ben" });
+    const benShare = grant({ paths: ["budget"], recipientUserId: "ben" });
     const toSelf = (share: string, noticeId: string) =>
       notice({ kind: "agent-run", recipientUserId: "ana", workspaceId: undefined, shareId: share, noticeId });
 
@@ -283,7 +312,7 @@ describe("notices for someone else", () => {
 
   it("lets one grantee send to another when both can read the target", async () => {
     const { h } = await sharedTrip();
-    const benShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ben" });
+    const benShare = grant({ paths: ["trip/tasks"], recipientUserId: "ben" });
     const response = await post(h, "ana", notice({ recipientUserId: "ben", workspaceId: undefined, shareId: "share-0" }));
     expect(response.status, await response.clone().text()).toBe(200);
     expect((await pull(h, "ben")).notices[0]).toMatchObject({ workspaceId: null, recipientShareId: benShare });
@@ -291,7 +320,7 @@ describe("notices for someone else", () => {
 
   it("refuses when either person cannot read the target", async () => {
     const { h, storage, shareId } = await sharedTrip();
-    await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ben" });
+    grant({ paths: ["budget"], recipientUserId: "ben" });
     const viaShare = { workspaceId: undefined, shareId };
 
     // The grantee cannot read the owner's private folder, in either direction.
@@ -319,7 +348,7 @@ describe("notices for someone else", () => {
 
   it("does not count a share of another version", async () => {
     const { h } = await relay();
-    await createShare(h, "owner", WORKSPACE, { paths: ["trip"], versionId: "draft", recipientUserId: "ana" });
+    grant({ paths: ["trip"], versionId: "draft", recipientUserId: "ana" });
     await expectRefused(await post(h, "owner", notice({ recipientUserId: "ana" })));
   });
 
@@ -340,7 +369,7 @@ describe("notices for someone else", () => {
 
   it("scopes a notice id to its sender", async () => {
     const { h } = await sharedTrip();
-    await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ben" });
+    grant({ paths: ["trip"], recipientUserId: "ben" });
     const shared = notice({ recipientUserId: "ana", noticeId: "automation-failed:x" });
 
     // Ben posts first, as if to take the id. The owner's notice still arrives.
@@ -366,8 +395,8 @@ describe("notices for someone else", () => {
 
   it("keeps notice ids apart for senders whose ids contain a colon", async () => {
     const { h } = await sharedTrip();
-    const aShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "a" });
-    const abShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "a:b" });
+    const aShare = grant({ paths: ["trip"], recipientUserId: "a" });
+    const abShare = grant({ paths: ["trip"], recipientUserId: "a:b" });
     const toAna = (shareId: string, noticeId: string) =>
       notice({ recipientUserId: "ana", workspaceId: undefined, shareId, noticeId });
     expect((await post(h, "a:b", toAna(abShare, "c"))).status).toBe(200);
@@ -382,7 +411,7 @@ describe("notices for someone else", () => {
     const setup = await relay();
     const counted = countStorageCalls(setup.storage, "claimPendingSharesForEmail");
     const h = testHandler(counted.storage, { nowMs: () => clock });
-    await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    grant({ paths: ["trip"], recipientUserId: "ana" });
     const before = counted.calls.length;
 
     await post(h, "owner", notice({ kind: "agent-run" }));
@@ -563,6 +592,144 @@ describe("pulling changes", () => {
     expect(last.notices.map((row) => [row.noticeId, row.readAtMs, row.dismissedAtMs])).toEqual([["a", 20_000, 30_000]]);
   });
 
+  it("tells only the first dismissal that it dismissed the notice", async () => {
+    const { h } = await relay();
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "b" }));
+    const answer = async (userId: string, marks: { noticeId: string; mark: "read" | "dismissed" }[]) => {
+      const response = await h(request(userId, "/sync/notices/marks", jsonBody({ marks })));
+      expect(response.status).toBe(200);
+      return await response.json();
+    };
+    expect(await answer("owner", [{ noticeId: "a", mark: "read" }, { noticeId: "b", mark: "read" }]))
+      .toEqual({ ok: true, dismissed: [] });
+    expect(await answer("ana", [{ noticeId: "a", mark: "dismissed" }]), "not ana's notice").toEqual({ ok: true, dismissed: [] });
+    // Two computers dismiss the same notice: only the first hears it did.
+    expect(await answer("owner", [{ noticeId: "a", mark: "dismissed" }, { noticeId: "a", mark: "dismissed" }]))
+      .toEqual({ ok: true, dismissed: ["a"] });
+    expect(await answer("owner", [{ noticeId: "a", mark: "dismissed" }, { noticeId: "gone", mark: "dismissed" }]))
+      .toEqual({ ok: true, dismissed: [] });
+  });
+
+  it("tells the computer that dismissed first that it did, each time it asks", async () => {
+    const { h } = await relay();
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    const dismiss = async (installId?: string) => {
+      const response = await h(request("owner", "/sync/notices/marks", jsonBody({
+        marks: [{ noticeId: "a", mark: "dismissed" }],
+        ...(installId === undefined ? {} : { installId }),
+      })));
+      return ((await response.json()) as { dismissed: string[] }).dismissed;
+    };
+    expect(await dismiss("laptop")).toEqual(["a"]);
+    expect(await dismiss("laptop"), "the answer was lost; the laptop asks again").toEqual(["a"]);
+    expect(await dismiss("desktop")).toEqual([]);
+    expect(await dismiss()).toEqual([]);
+    const bad = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: "a", mark: "dismissed" }], installId: "" })));
+    expect(bad.status).toBe(400);
+  });
+
+  it("never tells a second dismissal it was first, even after the notice is posted again", async () => {
+    const { h } = await relay();
+    const dismiss = async () => {
+      const response = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: "a", mark: "dismissed" }] })));
+      return ((await response.json()) as { dismissed: string[] }).dismissed;
+    };
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    expect(await dismiss()).toEqual(["a"]);
+    // The dismissed row outlives its retention and goes; a computer that
+    // kept the post sends it again, and the row comes back.
+    clock += NOTICE_DISMISSED_RETENTION_MS + 1;
+    await post(h, "owner", notice({ kind: "mention", noticeId: "b" }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    expect((await pull(h, "owner")).notices.find((row) => row.noticeId === "a")?.dismissedAtMs).toBeNull();
+    expect(await dismiss()).toEqual([]);
+  });
+
+  it("keeps a bounded number of receipts, and refuses only the reclaimed schedule's older notices", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    const skippedId = (automation: string, first: number) => `schedule-skipped:ws:collection:T#${automation}:${first}`;
+    context.tx(() => {
+      insert.run("owner", skippedId("report", 900), 1_000);
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, 1_000 + index);
+    });
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    const count = context.db
+      .prepare("SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?")
+      .get("owner") as { count: number };
+    expect(Number(count.count)).toBe(NOTICE_DISMISSAL_RECEIPTS);
+
+    // The report's notice, dismissed at 1000, lost its receipt: a notice for
+    // that schedule first skipped at or before then is refused.
+    const post_ = (automation: string, first: number) =>
+      h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId: skippedId(automation, first) }))));
+    await expectRefused(await post_("report", 900));
+    expect((await post_("report", 1_001)).status).toBe(200);
+    // Another schedule's notice, posted late by an offline computer, is not
+    // held to the report's floor.
+    expect((await post_("sweep", 500)).status).toBe(200);
+  });
+
+  it("never grants a first dismissal to a notice posted again before its receipt went", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    const report = `schedule-skipped:ws:collection:T#report:${clock - 100}`;
+    context.tx(() => {
+      insert.run("owner", report, clock - 50);
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, clock + index);
+    });
+    // The report's notice expired and was posted again while its receipt
+    // still stood; then that receipt is reclaimed.
+    await post(h, "owner", notice({ kind: "schedule-skipped", noticeId: report }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    const response = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: report, mark: "dismissed" }] })));
+    expect(await response.json()).toEqual({ ok: true, dismissed: [] });
+  });
+
+  it("keeps a notice stamped a little ahead of the clock from being first again after reclaim", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const ahead = `schedule-skipped:ws:collection:T#report:${clock + 60 * 60 * 1000}`;
+    await post(h, "owner", notice({ kind: "schedule-skipped", noticeId: ahead }));
+    await mark(h, "owner", [{ noticeId: ahead, mark: "dismissed" }]);
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    context.tx(() => {
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, clock + index);
+    });
+    // One more receipt reclaims the oldest: the dismissal of the notice ahead.
+    clock += NOTICE_DISMISSAL_RECEIPTS;
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    await expectRefused(await h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId: ahead })))));
+  });
+
+  it("takes only a skipped-schedule notice id in its own shape, with a time the clock allows", async () => {
+    const { h } = await relay();
+    const status = async (noticeId: string) =>
+      (await h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId }))))).status;
+    expect(await status(`schedule-skipped:ws:collection:T#r:${clock}`)).toBe(200);
+    for (const noticeId of [
+      "schedule-skipped:ws:collection:T#r:9999999999999999",
+      `schedule-skipped:ws:collection:T#r:${clock + 2 * 24 * 60 * 60 * 1000}`,
+      "schedule-skipped:ws:collection:T#r:01",
+      "schedule-skipped:collection:T#r",
+      "weekday-report:1000",
+    ]) {
+      expect(await status(noticeId), noticeId).toBe(400);
+    }
+  });
+
   it("marks only the caller's own rows", async () => {
     const { h } = await relay();
     await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
@@ -679,7 +846,7 @@ describe("pulling changes", () => {
 describe("notices after access ends", () => {
   it("moves a notice to another grant that admits it, or drops its target", async () => {
     const { h, storage, shareId } = await sharedTrip();
-    const tasksShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ana" });
+    const tasksShare = grant({ paths: ["trip/tasks"], recipientUserId: "ana" });
     await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "tasks", target: { path: "trip/tasks/pack" } }));
     await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "notes", target: { path: "trip/notes" } }));
     const before = await pull(h, "ana");
@@ -716,7 +883,7 @@ describe("notices after access ends", () => {
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
-    await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ana" });
+    grant({ paths: ["budget"], recipientUserId: "ana" });
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect((await pull(h, "ana")).notices.map((row) => row.recipientShareId)).toEqual([shareId, shareId]);
@@ -749,7 +916,7 @@ describe("notices after access ends", () => {
 
     // A grant arrives, a notice comes through it, and the grant ends, all
     // between two pulls: Ana's grants look as they did at the last check.
-    const budgetShare = await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ana" });
+    const budgetShare = grant({ paths: ["budget"], recipientUserId: "ana" });
     expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "budget", target: { path: "budget/q3" } }))).status).toBe(200);
     expect(storage.revokeShare(budgetShare, clock)).toBe(true);
 
@@ -761,7 +928,7 @@ describe("notices after access ends", () => {
     const { h, storage, shareId } = await sharedTrip({
       noticePostRateLimiter: new TokenBucketLimiter(1_000, 1, 10),
     });
-    const tasksShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ana" });
+    const tasksShare = grant({ paths: ["trip/tasks"], recipientUserId: "ana" });
     for (let index = 0; index < 5; index += 1) {
       await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}`, target: { path: `trip/tasks/${index}` } }));
     }
@@ -777,7 +944,7 @@ describe("notices after access ends", () => {
 
   it("notices when a link grant's parent moves to another share", async () => {
     const { h, storage, shareId } = await sharedTrip();
-    const benShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ben" });
+    const benShare = grant({ paths: ["trip"], recipientUserId: "ben" });
     seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret"), access: "view" });
     expect(seedDependentGrant(storage, {
       shareId, parentGrantId: "link-1", grantId: "from-link-lee", principalUserId: "lee", createdAtMs: clock,
@@ -795,7 +962,7 @@ describe("notices after access ends", () => {
 
   it("digests every read the access check makes", async () => {
     const { h, storage, shareId } = await sharedTrip();
-    await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ana" });
+    grant({ paths: ["trip/tasks"], recipientUserId: "ana" });
     seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret"), access: "view" });
     seedDependentGrant(storage, {
       shareId, parentGrantId: "link-1", grantId: "from-link-ana", principalUserId: "ana", createdAtMs: clock,

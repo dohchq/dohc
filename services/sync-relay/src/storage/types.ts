@@ -573,7 +573,23 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
-  markNotices(input: import("./notices").MarkNoticesInput): void;
+  markNotices(input: import("./notices").MarkNoticesInput): string[];
+  noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
+  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
+  readAutomationHost(input: {workspaceId: string; ownerUserId: string}): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): { generation: number | null; groups: Record<string, unknown> | null };
+  commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
+  readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
+  recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
+  listAutomationPresses(input: import("./automationPresses").HostScope & { nowMs: number }): import("@dohc/workspace-contracts/relay").RelayAutomationPress[];
+  automationPressWait(input: import("./automationPresses").HostScope & { nowMs: number }): "not-host" | "waiting" | "empty";
+  pruneExpiredAutomationPresses(nowMs: number): number;
+  acceptAutomationPresses(input: Parameters<typeof import("./automationPresses").acceptAutomationPresses>[1]): string[];
+  settleAutomationPress(input: Parameters<typeof import("./automationPresses").settleAutomationPress>[1]): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
   acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
@@ -740,6 +756,28 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): number | null;
+  listLinkRevisionLogRows(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): SyncRelayLogRow[];
+  currentObjectBlobByteLength(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    objectId: string;
+    sha256: string;
+    epochLogFloor: number;
+  }): number | null;
+  laterObjectMomentPaths(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    afterRelaySeq: number;
+    limit: number;
+  }): Array<string | null>;
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
@@ -916,6 +954,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    aboveRelaySeq?: number;
   }): SyncRelayLogRow[];
   // MU-C4 shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay

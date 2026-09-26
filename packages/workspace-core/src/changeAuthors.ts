@@ -24,6 +24,13 @@ function parseLocalAuthorLabel(label: unknown): NonEmptyLocalAuthorLabel {
   return normalized as NonEmptyLocalAuthorLabel;
 }
 
+function parseDepth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("Change author depth must be a non-negative integer.");
+  }
+  return value;
+}
+
 export function createLocalChangeAuthor(label: string): Extract<ChangeAuthor, { kind: "local" }> {
   return { kind: "local", label: parseLocalAuthorLabel(label) };
 }
@@ -46,6 +53,7 @@ export function parseChangeAuthor(value: unknown): ChangeAuthor {
         value.onBehalfOf,
         "Change author on-behalf-of id",
       ),
+      depth: parseDepth(value.depth),
     };
   }
   if (value.kind === "local") {

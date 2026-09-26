@@ -15,11 +15,15 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
-import { errorBody } from "./errors";
+import { errorBody, errorResponse } from "./errors";
+import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
-import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
+import { automationHostMaxBodyBytes } from "./automationHostRoutes";
+import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
+import { AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
@@ -352,7 +356,7 @@ const relayHandler = guardRelayResponses(storage, request => {
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
-    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready},
+    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS},
       {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
   }
   if (new URL(request.url).pathname === "/health") {
@@ -365,6 +369,8 @@ const fetchHandler = async (request: Request): Promise<Response> => {
       ...(testAuthSeam ? { presence: presence.stats() } : {}),
     }, { status: storage.unavailable.aborted ? 503 : 200 });
   }
+  const refusal = relayApiVersionRefusal(request.headers);
+  if (refusal) return errorResponse(refusal);
   return relayHandler(request);
 };
 
@@ -416,16 +422,27 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
   );
 }
 
+// Presses from shared views go when their retention ends, whether or not
+// more arrive or any host lists them.
+const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+setInterval(() => {
+  pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
+    console.error("[sync-relay] automation press prune failed:", error);
+  });
+}, AUTOMATION_PRESS_PRUNE_INTERVAL_MS).unref();
+
 const server = serveFetchHandler({
   handler: fetchHandler,
-  maxBodyBytes: (url) =>
+  streamBody: streamsRequestBody,
+  maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
+    isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
-      : MAX_BODY_BYTES,
+      : MAX_BODY_BYTES),
   oversized: (url) =>
     url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")

@@ -548,9 +548,7 @@ where
                 .map_err(map_sql)?;
             if let Some((payload_hash, result_seq)) = recorded {
                 if payload_hash != hash {
-                    return Err(CollabError::Corrupt {
-                        reason: "idempotency key reused with different content".to_owned(),
-                    });
+                    return Err(CollabError::IdempotencyKeyReused);
                 }
                 // Negative namespace: -seq (see the insert below).
                 return Ok(AppendOutcome {
@@ -686,8 +684,11 @@ where
                 // settle write, never a false claim that the file already
                 // holds the doc.
                 if let Some(seed_source) = seed_source_sha256.filter(|_| outcome.seq == 1) {
+                    // The file holds what the seed imported, so the lineage
+                    // is not ahead of it until another update lands.
                     tx.execute(
-                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4 \
+                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4, \
+                         settled_update_seq = head_update_seq \
                          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                         rusqlite::params![
                             key.workspace_id,
@@ -1676,7 +1677,8 @@ fn replace_base_snapshot(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4,regime='replicated',head_update_seq=0, \
-         head_snapshot_seq=0,last_settled_sha=NULL,seed_source_sha256=NULL, \
+         head_snapshot_seq=0,last_settled_sha=NULL,settled_update_seq=NULL, \
+         seed_source_sha256=NULL, \
          lineage_claim_status='exact', \
          lineage_claim_id=?5,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL, \
          base_origin_id=?6,base_origin_seq=?7,base_relay_seq=?8, \
@@ -1854,7 +1856,8 @@ pub fn replace_lineage_with_successor_in_tx(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4, regime='replicated', head_update_seq=0, \
-         head_snapshot_seq=0, seed_source_sha256=NULL, lineage_claim_status='exact', \
+         head_snapshot_seq=0, settled_update_seq=NULL, seed_source_sha256=NULL, \
+         lineage_claim_status='exact', \
          lineage_claim_id=?5, lineage_parent_claim_id=?6, lineage_epoch_tag=?7, \
          path=?8, last_settled_sha=?9, updated_at_ms=?10 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -2294,39 +2297,22 @@ pub struct CloseProjection {
     pub materialized_seed_source_sha256: Option<String>,
 }
 
-/// Close a session: regime-dependent. Replicated (or persist-closed-state)
-/// compacts and keeps the lineage durable; local-only prunes every CRDT row to
-/// the bare marker (the workspace file is the artifact). A caller that uses a
-/// store-backed projector supplies its digest; scenes refuse the generic
-/// projection because their portable files resolve from versioned storage.
-pub fn close_session(
-    store: &mut EngineStore,
+/// Whether a local-only close could prune this lineage without losing text:
+/// the workspace file already holds the head's bytes and no pending job still
+/// has to write them. A doc with no edits (`head_update_seq == 0`) has nothing
+/// to lose. The close hook asks the same question before it claims a lineage
+/// for the relay, so a dirty close keeps refusing instead of claiming.
+pub fn local_close_is_covered(
+    store: &EngineStore,
     key: &DocKey,
-    persist_closed_state: bool,
+    marker: &Marker,
     authoritative_projection: Option<&CloseProjection>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
-    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
-    if marker.regime == Regime::Replicated || persist_closed_state {
-        // Force a compaction (threshold 0) so the lineage is a single snapshot +
-        // no trailing updates, and never prune it.
-        return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
-            TxnOutcome::Committed(outcome) => {
-                TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
-            }
-            TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
-        });
-    }
-    // Local-only prune would discard the CRDT cache. Refuse unless the artifact
-    // already holds the head's bytes (the workspace file is the artifact: it
-    // must exist before the cache is thrown away). A doc with no edits
-    // (`head_update_seq == 0`) has nothing to lose and prunes freely.
+) -> Result<bool, CollabError> {
     if marker.head_update_seq > 0 {
         let content_sha = match authoritative_projection {
             Some(projection) => projection.sha256.clone(),
             None if marker.content_kind == ContentKind::Scene => {
-                return Err(CollabError::UnsettledClose);
+                return Ok(false);
             }
             None => {
                 let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
@@ -2369,7 +2355,7 @@ pub fn close_session(
                         })))
         })?;
         if !covered {
-            return Err(CollabError::UnsettledClose);
+            return Ok(false);
         }
         // The settle may have committed while its materialization failed
         // transiently: last_settled_sha matches the projection but the job
@@ -2403,8 +2389,41 @@ pub fn close_session(
             .map_err(map_sql)
         })?;
         if job_pending {
-            return Err(CollabError::UnsettledClose);
+            return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+/// Close a session: regime-dependent. Replicated (or persist-closed-state)
+/// compacts and keeps the lineage durable; local-only prunes every CRDT row to
+/// the bare marker (the workspace file is the artifact). A caller that uses a
+/// store-backed projector supplies its digest; scenes refuse the generic
+/// projection because their portable files resolve from versioned storage.
+pub fn close_session(
+    store: &mut EngineStore,
+    key: &DocKey,
+    persist_closed_state: bool,
+    authoritative_projection: Option<&CloseProjection>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
+    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime == Regime::Replicated || persist_closed_state {
+        // Force a compaction (threshold 0) so the lineage is a single snapshot +
+        // no trailing updates, and never prune it.
+        return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
+            TxnOutcome::Committed(outcome) => {
+                TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
+            }
+            TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
+        });
+    }
+    // Local-only prune would discard the CRDT cache. Refuse unless the artifact
+    // already holds the head's bytes (the workspace file is the artifact: it
+    // must exist before the cache is thrown away).
+    if !local_close_is_covered(store, key, &marker, authoritative_projection)? {
+        return Err(CollabError::UnsettledClose);
     }
     // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
@@ -2429,7 +2448,8 @@ pub fn close_session(
         // capture/edit into a permanent ConflictStaleTarget.
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
-             last_settled_sha = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4 \
+             last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, \
+             updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
         )

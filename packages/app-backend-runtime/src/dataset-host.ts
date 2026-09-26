@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { datasetRevisionsPreserveAccess, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetRevisionsPreserveAccess, describeApprovedDataset, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
@@ -17,6 +17,7 @@ import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
 import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
+import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -28,18 +29,18 @@ export class DatasetHostError extends Error {
 export function resolveCompatibleDatasetRevision(db: JournalDb, key: DatasetScope, reference: { revision: number; revisionSha256: string }, current?: DatasetRevision): DatasetRevision {
   const row = current ? undefined : db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
   const approved = current ?? (row ? parseDatasetRevision(JSON.parse(String(row.revision_json))) : undefined);
-  if (!approved) throw new DatasetHostError("not_authorized", "Dataset access is not permitted.");
+  if (!approved) throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
   if (reference.revision === approved.revision && reference.revisionSha256 === approved.revisionSha256) return approved;
   const saved = db.prepare("SELECT revision_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>=? ORDER BY revision").all(key.workspaceId,key.datasetId,reference.revision);
   const history = saved.map(row => parseDatasetRevision(JSON.parse(String(row.revision_json))));
   const previous = history[0];
   const executable = db.prepare("SELECT source FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
   if (!previous || previous.revision !== reference.revision || previous.revisionSha256 !== reference.revisionSha256 || history.length !== approved.revision-reference.revision || !executable)
-    throw new DatasetHostError("conflict", "Dataset access needs approval for the current revision.");
+    throw new DatasetHostError("conflict", "The Collection's rules changed. Its owner must approve this access again.");
   for (const [index, revision] of history.entries()) {
     const checkpoint = db.prepare("SELECT source FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND json_extract(cursor_json,'$.approvedRevisionHash')=? LIMIT 1").get(key.workspaceId,key.datasetId,revision.revisionSha256);
     if (revision.revision !== reference.revision+index || !datasetRevisionsPreserveAccess(revision,approved) || !checkpoint || checkpoint.source !== executable.source)
-      throw new DatasetHostError("conflict", "Dataset access needs approval for the current revision.");
+      throw new DatasetHostError("conflict", "The Collection's rules changed. Its owner must approve this access again.");
   }
   return previous;
 }
@@ -51,6 +52,18 @@ export interface DatasetAuthority {
   appId?: string;
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
+  /**
+   * Set only when an automation writes, with the depth its write declares.
+   * Attribution that grants nothing: it requires the owner caller, and owner
+   * administration refuses it.
+   */
+  automation?: { automationId: string; depth: number };
+  /**
+   * Set only when the owner's agent writes in a run an automation started,
+   * with the chain depth the run's writes declare. Attribution that grants
+   * nothing, like `automation`.
+   */
+  agent?: { depth: number };
 }
 export interface DatasetDataGrant { operationIds: string[]; discover: boolean; revision: number; revisionSha256: string }
 export interface DatasetHostOptions<Context> {
@@ -77,6 +90,13 @@ export interface DatasetHostOptions<Context> {
   accountCheckpointStage?(context: Context, allocation: Readonly<CheckpointStageAllocation>): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
+  /**
+   * Signed retained bytes of automation claims and History rows, in the ledger's
+   * transaction. It takes no context: the executor settles claims outside any request.
+   */
+  accountAutomations?(allocation: DatasetScope & { bytes: number }): void;
+  /** Called after a commit that made automation claims. A hint: the executor also drains at open. */
+  wakeAutomations?(scope: DatasetScope): void;
   recovery?: {
     directory: string;
     limits: RecoveryLimits;
@@ -110,7 +130,7 @@ type StoredGrant = DatasetDataGrant;
 type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean; createFields?: AppDatasetBinding["createFields"] };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function text(value: string, maximum = 256): string {
-  if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new DatasetHostError("invalid", "Invalid dataset identifier.");
+  if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new DatasetHostError("invalid", "Invalid Collection id.");
   return value;
 }
 function synchronous<T>(run: () => T): T {
@@ -119,23 +139,46 @@ function synchronous<T>(run: () => T): T {
   if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Dataset host callbacks must be synchronous.");
   return result;
 }
-function denied(): never { throw new DatasetHostError("not_authorized", "Dataset access is not permitted."); }
+function denied(): never { throw new DatasetHostError("not_authorized", "You do not have access to this Collection."); }
+function automation(value: DatasetAuthority["automation"], caller: AppBackendCaller): DatasetAuthority["automation"] {
+  if (value === undefined) return undefined;
+  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > DATASET_AUTOMATION_CHAIN_DEPTH) denied();
+  return { automationId: text(value.automationId, 1024), depth: value.depth };
+}
+/** The engine's bound on any declared chain depth. The chain stops well before it. */
+const MAX_DECLARED_DEPTH = 64;
+function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): DatasetAuthority["agent"] {
+  if (value === undefined) return undefined;
+  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > MAX_DECLARED_DEPTH) denied();
+  return { depth: value.depth };
+}
+/** Who made a commit, from the authority the host derived. */
+function actor(authority: DatasetAuthority): DatasetActor {
+  if (authority.automation) return { kind: "automation", ...authority.automation };
+  if (authority.agent) return { kind: "agent", depth: authority.agent.depth };
+  const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
+  if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
+  return caller.kind === "owner" ? { kind: "owner", ...app } : { kind: "link", ...app };
+}
 function scope(input: DatasetScope): DatasetScope { return { workspaceId: text(input.workspaceId), datasetId: text(input.datasetId) }; }
 function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
   if (input.kind === "data" && Object.keys(input).length === 1) return { kind: "data" };
   if (input.kind === "app" && Object.keys(input).length === 2) return { kind: "app", appId: text(input.appId) };
-  throw new DatasetHostError("invalid", "Invalid dataset access path.");
+  throw new DatasetHostError("invalid", "Invalid Collection access path.");
 }
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
-  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources]) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources, options.accountAutomations]) {
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
   const migrationCandidates=new Map<string,{candidate:DatasetMigrationCandidate;authorityKey:string;approved:DatasetRevision;previous:DatasetRevision;schemaSql:string;source:string}>();
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
+  // The journal's own database, so each commit's claims are part of it.
+  const automations = createDatasetAutomationClaims({ db, transaction, wake: options.wakeAutomations,
+    account(key, bytes) { if (options.accountAutomations) synchronous(() => options.accountAutomations!({ ...key, bytes })); } });
   transaction(() => db.exec(`
     CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoint_approval ON dohc_dataset_checkpoint_history(workspace_id,dataset_id,json_extract(cursor_json,'$.approvedRevisionHash'));
     CREATE TABLE IF NOT EXISTS dohc_dataset_catalog (
@@ -178,15 +221,17 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   function authority(context: Context, key: { workspaceId: string; datasetId?: string }, through: DatasetAccess): DatasetAuthority {
     const result = synchronous(() => options.resolveAuthority(context, { ...key, access: through }));
-    const verified = { caller: parseAppBackendCaller(result.caller), principalKey: text(result.principalKey),
+    const caller = parseAppBackendCaller(result.caller);
+    const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
-      authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024) };
+      authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
+      automation: automation(result.automation, caller), agent: agent(result.agent, caller) };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     return verified;
   }
   function owner(context: Context, key: { workspaceId: string; datasetId?: string }): DatasetAuthority {
     const result = authority(context, key, { kind: "data" });
-    if (result.caller.kind !== "owner") denied();
+    if (result.caller.kind !== "owner" || result.automation || result.agent) denied();
     return result;
   }
   function revision(key: DatasetScope): DatasetRevision {
@@ -198,18 +243,18 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const row = db.prepare("SELECT archived,generation,reason FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
     return row ? { archived: Number(row.archived) === 1, generation: Number(row.generation), reason: String(row.reason) } : { archived: false, generation: 0, reason: "" };
   }
-  function live(key: DatasetScope) { if (lifecycle(key).archived) throw new DatasetHostError("conflict", "Dataset is archived."); }
+  function live(key: DatasetScope) { if (lifecycle(key).archived) throw new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it."); }
   function artifacts(key: DatasetScope): { schemaSql: string; operationSource: string } {
     const row = db.prepare("SELECT artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
     if (!row) denied();
     const value = JSON.parse(String(row.artifacts_json));
-    if (!value || typeof value.schemaSql !== "string" || typeof value.operationSource !== "string") throw new Error("Dataset artifacts are corrupt.");
+    if (!value || typeof value.schemaSql !== "string" || typeof value.operationSource !== "string") throw new Error("This Collection's saved rules are damaged.");
     return value;
   }
   async function compile(source: string, path: string): Promise<string> {
-    if (path.endsWith(".ts") && !options.compileOperations) throw new Error("TypeScript dataset operations require the configured host compiler.");
+    if (path.endsWith(".ts") && !options.compileOperations) throw new Error("This host cannot build TypeScript Collection actions.");
     const result = options.compileOperations ? await options.compileOperations(source, path) : source;
-    if (typeof result !== "string" || !result.length || Buffer.byteLength(result) > 256 * 1024 || result.includes("\0")) throw new Error("Compiled dataset operations exceed the host limit.");
+    if (typeof result !== "string" || !result.length || Buffer.byteLength(result) > 256 * 1024 || result.includes("\0")) throw new Error("The built Collection actions are larger than this host allows.");
     return result;
   }
   function currentGrant(key: DatasetScope, value: unknown, approved: DatasetRevision): StoredGrant {
@@ -220,7 +265,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   function permissions(context: Context, key: DatasetScope, through: DatasetAccess, includeArchived = false): Permission {
     const verified = authority(context, key, through), approved = revision(key);
     const state = lifecycle(key);
-    if (state.archived && !(includeArchived && verified.caller.kind === "owner" && through.kind === "data")) throw new DatasetHostError("conflict", "Dataset is archived.");
+    if (state.archived && !(includeArchived && verified.caller.kind === "owner" && through.kind === "data")) throw new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it.");
     let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"];
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
@@ -255,18 +300,33 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields };
   }
   function describePermission(permission: Permission): DatasetDescription {
-    const { revision: approved, operations } = permission;
-    const fields = new Set(operations.flatMap(operation => operation.fieldIds));
-    const tables = new Set(operations.map(operation => operation.tableId));
-    return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
-      tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-        fields: table.fields.filter(field => fields.has(field.fieldId)).map(field => {
-          const { sqlColumn: _sqlColumn, ...description } = field;
-          if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
-          return description;
-        }) })), operations };
+    return describeApprovedDataset(permission.revision, permission.operations);
+  }
+  // The head a press of this button claims at, while this host writes the dataset and its rules have the button.
+  function pressableHead(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): DatasetCursor {
+    const key = scope(raw);
+    const head = journal.head(key, () => undefined);
+    if (!head.active) throw new DatasetHostError("conflict", "This Collection moved to a server, so its buttons can't run here.");
+    live(key);
+    const table = revision(key).definition.tables.find(candidate => candidate.tableId === raw.tableId);
+    if (!table?.fields.some(field => field.fieldId === raw.fieldId && field.type === "button")) throw new DatasetHostError("invalid", "This button is not in the Collection's approved rules.");
+    return head.cursor;
   }
   const host = {
+    /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
+    automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
+      next: automations.next, settle: automations.settle, release: automations.release, retry: automations.retry,
+      claims: automations.claims, claim: automations.claim, failures: automations.failures, pressed: automations.pressed,
+      /** Throws why this host cannot take a press of this button, as `press` would. */
+      assertPressable(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): void { pressableHead(raw); },
+      /**
+       * A press of a Button field in the approved rules, on a dataset this
+       * host still writes. The caller has checked who pressed and what they
+       * may use.
+       */
+      press(raw: DatasetScope & DatasetPressInput): DatasetPressed {
+        return automations.press({ ...raw, cursor: pressableHead(raw) });
+      } },
     deletionStatus(context: Context, raw: DatasetScope) {
       const key = scope(raw); owner(context,key);
       return { deleted: Boolean(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) };
@@ -288,6 +348,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           revision(key);
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
+          automations.forget(key);
           if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_imports'").get()) {
             for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
               db.prepare(`DELETE FROM ${table} WHERE import_id IN(SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
@@ -301,10 +362,10 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       return { deleted: true as const, datasetId: key.datasetId };
     },
     async prepareMigration(context:Context,raw:MigrateDatasetInput):Promise<DatasetMigrationCandidate> {
-      if(!options.supervisor.prepareMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      if(!options.supervisor.prepareMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const approved=verifyDatasetArtifacts(raw),key=scope({workspaceId:raw.workspaceId,datasetId:approved.datasetId}),previous=revision(key),expected={...raw.expected};
       live(key);const generation=lifecycle(key).generation,ownerToken=JSON.stringify(owner(context,key)),authorityKey=hash(JSON.stringify([ownerToken,generation]));
-      if(expected.workspaceId!==key.workspaceId||expected.datasetId!==key.datasetId||expected.approvedRevisionHash!==previous.revisionSha256||approved.revision!==previous.revision+1)throw new DatasetHostError("conflict","Dataset revision transition does not match the current approval.");
+      if(expected.workspaceId!==key.workspaceId||expected.datasetId!==key.datasetId||expected.approvedRevisionHash!==previous.revisionSha256||approved.revision!==previous.revision+1)throw new DatasetHostError("conflict","The Collection's rules changed since this change was prepared. Prepare it again.");
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(lifecycle(key).generation!==generation||JSON.stringify(owner(context,key))!==ownerToken)denied();assertDatasetAttemptsCommitted(db,key);};
       authorize();const schemaSql=raw.schemaSql,source=raw.operationSource,migrationSql=text(raw.migrationSql,256*1024),compiled=await compile(source,approved.definition.operationsPath);authorize();
       const candidate=await options.supervisor.prepareMigration({scope:key,expected,tables:previous.definition.tables.map(table=>table.sqlName),newTables:approved.definition.tables.map(table=>table.sqlName),
@@ -315,9 +376,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
     },
     async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
-      if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));
-      if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","Migration preview is unavailable. Preview it again.");
+      if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","This preview is no longer available. Preview the change again.");
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();assertDatasetAttemptsCommitted(db,key);};
       authorize();
@@ -325,7 +386,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         accountStage(allocation){if(options.accountCheckpointStage)synchronous(()=>options.accountCheckpointStage!(context,allocation));},
         account(allocation){
           const row=db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
-          if(!row||parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256!==saved.previous.revisionSha256)throw new DatasetHostError("conflict","Dataset approval changed during migration.");
+          if(!row||parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256!==saved.previous.revisionSha256)throw new DatasetHostError("conflict","The Collection's rules changed while dohc applied this change. Prepare it again.");
           const revisionJson=JSON.stringify(saved.approved),artifactsJson=JSON.stringify({schemaSql:saved.schemaSql,operationSource:saved.source}),delta=Buffer.byteLength(revisionJson)+Buffer.byteLength(artifactsJson)+256;
           if(options.accountMigration)synchronous(()=>options.accountMigration!(context,{...key,bytes:allocation.bytes-allocation.stagedCreditBytes+delta,capacityBytes:allocation.capacityBytes,capacityDeltaBytes:allocation.capacityDeltaBytes}));
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,saved.previous.revision,row.revision_json,row.artifacts_json);
@@ -334,14 +395,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       authorize();migrationCandidates.delete(raw.candidateId);return {revision:saved.approved,cursor};
     },
     migrationPreviewPage(context:Context,raw:DatasetScope & {candidateId:string;after?:string;limit?:number;signal?:AbortSignal}) {
-      if(!options.supervisor.migrationPreviewPage)throw new DatasetHostError("invalid","Migration previews are unavailable.");
-      const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));if(!saved)throw new DatasetHostError("conflict","Migration preview is unavailable.");
+      if(!options.supervisor.migrationPreviewPage)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
+      const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));if(!saved)throw new DatasetHostError("conflict","This preview is no longer available. Preview the change again.");
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();};
       return options.supervisor.migrationPreviewPage({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,authorityKey,authorize,signal:raw.signal,after:raw.after,limit:raw.limit});
     },
     async discardMigration(context:Context,raw:DatasetScope & {candidateId:string;signal?:AbortSignal}):Promise<void> {
-      if(!options.supervisor.discardMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      if(!options.supervisor.discardMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));owner(context,key);if(!saved)return;
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       await options.supervisor.discardMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,authorityKey,signal:raw.signal,authorize(){raw.signal?.throwIfAborted();owner(context,key);}});
@@ -351,7 +412,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const key = scope(raw), reason = raw.reason === undefined ? "archived by owner" : text(raw.reason, 1024);
       return transaction(() => {
         owner(context, key); const head = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
-        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "A fenced dataset cannot be archived.");
+        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "This host stopped accepting changes to this Collection, so dohc cannot archive it here.");
         const current = lifecycle(key); if (current.archived) return { archived: true, generation: current.generation, reason: current.reason };
         const generation = current.generation + 1;
         if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(reason) - Buffer.byteLength(current.reason) + (current.generation === 0 ? 256 : 0) }));
@@ -366,24 +427,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         revision(key);
         owner(context, key); const state = lifecycle(key), head = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
         if (!state.archived) return { archived: false, generation: state.generation };
-        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "A fenced dataset cannot be restored in place.");
+        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "This host stopped accepting changes to this Collection, so dohc cannot restore it here.");
         const generation = state.generation + 1;
         if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: -Buffer.byteLength(state.reason) }));
         db.prepare("UPDATE dohc_dataset_lifecycle SET archived=0,generation=?,reason='',archived_at_ms=NULL WHERE workspace_id=? AND dataset_id=? AND archived=1 AND generation=?")
           .run(generation,key.workspaceId,key.datasetId,state.generation);
-        if (Number(db.prepare("SELECT changes() AS n").get()!.n) !== 1) throw new DatasetHostError("conflict", "Dataset lifecycle changed during restore.");
+        if (Number(db.prepare("SELECT changes() AS n").get()!.n) !== 1) throw new DatasetHostError("conflict", "The Collection changed while dohc restored it. Try again.");
         return { archived: false, generation };
       });
     },
     lifecycle(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
       const key = scope(raw); owner(context, key); const state = lifecycle(key);
       revision(key); const limit = raw.limit ?? 50, after = raw.after ?? "";
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid lifecycle page size.");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Choose a page size from 1 to 100.");
       const rows = db.prepare("SELECT app_id,length(CAST(binding_json AS BLOB)) AS bytes FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id>? ORDER BY app_id LIMIT ?").all(key.workspaceId,key.datasetId,after,limit+1);
       const apps: Array<{ appId: string; binding: AppDatasetBinding }> = []; let bytes = 0;
       for (const row of rows.slice(0,limit)) {
         const size = Number(row.bytes) + Buffer.byteLength(String(row.app_id));
-        if (size > 1024 * 1024) throw new DatasetHostError("invalid", "Dataset app binding exceeds its size limit.");
+        if (size > 1024 * 1024) throw new DatasetHostError("invalid", "This app's Collection access is too large. Choose fewer actions or fields.");
         if (bytes + size > 1024 * 1024) break;
         const binding = db.prepare("SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId,key.datasetId,row.app_id)!;
         apps.push({ appId: String(row.app_id), binding: JSON.parse(String(binding.binding_json)) }); bytes += size;
@@ -392,26 +453,26 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     recoveryStatus(context: Context, raw: DatasetScope & { transferId: string }) {
       const key = scope(raw), recovery = options.recovery;
-      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      if (!recovery?.install) throw new DatasetHostError("invalid", "This host cannot restore Collections.");
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       return installer.status({ ...key, transferId: raw.transferId, authorize: () => { owner(context, key); } });
     },
     async discardRecovery(context: Context, raw: DatasetScope & { transferId: string }) {
       const key = scope(raw), recovery = options.recovery;
-      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      if (!recovery?.install) throw new DatasetHostError("invalid", "This host cannot restore Collections.");
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       await installer.discard(context, { ...key, transferId: raw.transferId, authorize: () => { owner(context, key); } });
     },
     claimRecovery(context: Context, raw: DatasetScope & { transferId: string; sourceCursor: DatasetCursor; manifestSha256: string; oldHostStopped: true; signal?: AbortSignal }) {
       const key = scope(raw), recovery = options.recovery;
-      if (!recovery?.install?.allowOwnerRecoveryClaim || raw.oldHostStopped !== true) throw new DatasetHostError("invalid", "Local recovery requires confirmation that the old host stopped.");
+      if (!recovery?.install?.allowOwnerRecoveryClaim || raw.oldHostStopped !== true) throw new DatasetHostError("invalid", "Confirm that you stopped the old host before restoring this Collection.");
       const ownerToken = JSON.stringify(owner(context, key));
       const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
       return createRecoveryInstaller({ ...recovery.install, db, transaction, journal }).claim(context, { ...raw, ...key, authorize });
     },
     async prepareRecovery(context: Context, raw: { workspaceId: string; transferId: string; manifestSha256: string; stream: AsyncIterable<Uint8Array>; signal?: AbortSignal }) {
       const recovery = options.recovery;
-      if (!recovery?.install?.allowOwnerRecoveryClaim) throw new DatasetHostError("invalid", "Local recovery is unavailable.");
+      if (!recovery?.install?.allowOwnerRecoveryClaim) throw new DatasetHostError("invalid", "This host cannot restore Collections from a recovery file.");
       const ownerToken = JSON.stringify(owner(context, { workspaceId: raw.workspaceId }));
       const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, { workspaceId: raw.workspaceId })) !== ownerToken) denied(); };
       const staged = await stageDatasetRecovery({ ...raw, stagingParent: recovery.directory, expectedManifestSha256: raw.manifestSha256, limits: recovery.limits, authorize });
@@ -419,6 +480,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         const key = scope(validated.manifest.cursor);
         if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
+        const installer = createRecoveryInstaller({ ...recovery.install!, db, transaction, journal });
+        // Installation and authority claim are separate durable steps. Opening
+        // the identical archive recovers the saved identity after a restart;
+        // the owner still must confirm the old host stopped before claiming.
+        const installed = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND manifest_hash=? AND phase='installed'")
+          .get(key.workspaceId, key.datasetId, raw.manifestSha256);
+        const saved = installed ? installer.status({ ...key, transferId: String(installed.import_id), authorize }) : null;
+        if (saved && equalRecoveryCursor(saved.sourceCursor, validated.manifest.cursor)) {
+          return { ...saved, revision: parseDatasetRevision(JSON.parse(validated.catalog.revisionJson)),
+            dispose: () => validated.dispose(),
+            async install() {
+              const current = installer.status({ ...key, transferId: saved.transferId, authorize });
+              if (!current || current.manifestSha256 !== saved.manifestSha256 || !equalRecoveryCursor(current.sourceCursor, saved.sourceCursor)) {
+                throw new DatasetHostError("conflict", "This recovery file differs from the one you started restoring. Choose the same file, or cancel the recovery.");
+              }
+              return current;
+            } };
+        }
         const assertAbsent = () => { journal.assertNotDeleted(key,authorize); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
         assertAbsent();
         return { transferId: raw.transferId, manifestSha256: raw.manifestSha256, sourceCursor: structuredClone(validated.manifest.cursor),
@@ -432,21 +511,21 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     async importRecovery(context: Context, raw: DatasetScope & { transferId: string; sourceCursor: DatasetCursor; manifestSha256: string; stream: AsyncIterable<Uint8Array>; activate?: boolean; signal?: AbortSignal }) {
       const key = scope(raw), recovery = options.recovery;
-      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      if (!recovery?.install) throw new DatasetHostError("invalid", "This host cannot restore Collections.");
       const sourceCursor = structuredClone(raw.sourceCursor), manifestSha256 = raw.manifestSha256, transferId = text(raw.transferId), activate = raw.activate === true;
-      if (sourceCursor.workspaceId !== key.workspaceId || sourceCursor.datasetId !== key.datasetId) throw new DatasetHostError("invalid", "Recovery dataset differs from the requested dataset.");
+      if (sourceCursor.workspaceId !== key.workspaceId || sourceCursor.datasetId !== key.datasetId) throw new DatasetHostError("invalid", "This recovery file holds a different Collection.");
       const ownerToken = JSON.stringify(owner(context, key)), authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       const prior = installer.status({ ...key, transferId, authorize });
       if (prior) {
-        if (prior.manifestSha256 !== manifestSha256 || !equalRecoveryCursor(prior.sourceCursor, sourceCursor)) throw new DatasetHostError("conflict", "Recovery transfer differs from its saved receipt.");
+        if (prior.manifestSha256 !== manifestSha256 || !equalRecoveryCursor(prior.sourceCursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file differs from the one you started restoring. Choose the same file, or cancel the recovery.");
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : prior;
       }
       const staged = await stageDatasetRecovery({ stream: raw.stream, stagingParent: recovery.directory, expectedManifestSha256: manifestSha256, limits: recovery.limits, signal: raw.signal, authorize });
       const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.persistentRuntime, compileOperations: options.compileOperations });
       try {
-        if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "Recovery source cursor differs.");
-        if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "Transfer requires a fenced source dataset.");
+        if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file is from a different point in the Collection's history.");
+        if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "This recovery file was saved while the Collection still accepted changes, so it cannot move the Collection. Publish the Collection's app to your sharing server to move it.");
         const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize });
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
       } finally { await validated.dispose(); }
@@ -454,7 +533,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     ...createDatasetReplicaHost({ journal, owner(context: Context, key: DatasetScope) { const authority=owner(context,key);live(key);return authority; } }),
     async exportRecovery(context: Context, raw: DatasetScope & { signal?: AbortSignal }) {
       const key=scope(raw),recovery=options.recovery;
-      if(!recovery)throw new DatasetHostError("invalid","Dataset recovery storage is not configured.");
+      if(!recovery)throw new DatasetHostError("invalid","This host cannot export Collections.");
       if(Boolean(recovery.captureAttachments)!==Boolean(recovery.openAttachment))throw new Error("Dataset recovery attachments require capture and read callbacks.");
       const ownerToken=JSON.stringify(owner(context,key)),authorize=()=>{if(JSON.stringify(owner(context,key))!==ownerToken)denied();};
       return prepareDatasetRecoveryExport({db,journal,scope:key,directory:recovery.directory,limits:recovery.limits,signal:raw.signal,authorize,
@@ -471,7 +550,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     async activate(context: Context, raw: ActivateDatasetInput): Promise<DatasetRevision> {
       const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
-      if (approved.revision !== 1) throw new Error("Initial dataset revision must be 1. Schema changes require a revision transition.");
+      if (approved.revision !== 1) throw new Error("A new Collection's rules must be revision 1. Change existing rules with a Collection change.");
       const schemaSql = raw.schemaSql, source = raw.operationSource, capacityBytes = raw.capacityBytes, signal = raw.signal;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured);
       const authorize = () => { signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
@@ -479,9 +558,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const existing = db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
       if (existing) {
         const current = parseDatasetRevision(JSON.parse(String(existing.revision_json)));
-        if (current.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset rules are already approved. Use a revision transition to change them.");
+        if (current.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "This Collection's rules are already approved. Review a Collection change to change them.");
         const currentHead = journal.head(key, authorize);
-        if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("Dataset authority is no longer active on this host.");
+        if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
         authorize(); return current;
       }
       const compiledSource = await compile(source, approved.definition.operationsPath);
@@ -505,7 +584,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       live(key); const generation = lifecycle(key).generation;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured), previous = revision(key);
       if (expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId || expected.approvedRevisionHash !== previous.revisionSha256 || approved.revision !== previous.revision + 1) {
-        throw new DatasetHostError("conflict", "Dataset revision transition does not match the current approval.");
+        throw new DatasetHostError("conflict", "The Collection's rules changed since this change was prepared. Prepare it again.");
       }
       const authorize = () => { signal?.throwIfAborted(); live(key); if (lifecycle(key).generation !== generation || JSON.stringify(owner(context, key)) !== ownerToken) denied(); assertDatasetAttemptsCommitted(db, key); };
       authorize();
@@ -517,7 +596,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         accountStage(allocation) { if (options.accountCheckpointStage) synchronous(() => options.accountCheckpointStage!(context, allocation)); },
         account(allocation) {
           const row = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
-          if (!row || parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256 !== previous.revisionSha256) throw new Error("Dataset approval changed during migration.");
+          if (!row || parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256 !== previous.revisionSha256) throw new Error("The Collection's rules changed while dohc applied this change. Prepare it again.");
           const revisionJson = JSON.stringify(approved), artifactsJson = JSON.stringify({ schemaSql, operationSource: source });
           const delta = Buffer.byteLength(revisionJson) + Buffer.byteLength(artifactsJson) + 256;
           if (options.accountMigration) synchronous(() => options.accountMigration!(context, { ...key, bytes: allocation.bytes - allocation.stagedCreditBytes + delta,
@@ -566,11 +645,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("DELETE FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").run(key.workspaceId, key.datasetId, principalKey);
         }
         else {
-          if (typeof raw.grant.discover !== "boolean" || Object.keys(raw.grant).some(key => !["operationIds", "discover", "revision", "revisionSha256"].includes(key))) throw new Error("Invalid dataset data grant.");
-          if (raw.grant.revision !== approved.revision || raw.grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset data grant needs approval for the current revision.");
+          if (typeof raw.grant.discover !== "boolean" || Object.keys(raw.grant).some(key => !["operationIds", "discover", "revision", "revisionSha256"].includes(key))) throw new Error("Invalid Collection access.");
+          if (raw.grant.revision !== approved.revision || raw.grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "The Collection's rules changed after you chose this access. Choose it again.");
           const binding = parseDatasetBinding({ kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
             revisionSha256: approved.revisionSha256, operationIds: raw.grant.operationIds }, approved);
-          if (approved.definition.operations.some(operation => binding.operationIds.includes(operation.operationId) && operation.access === "owner")) throw new Error("Owner-only operations cannot be granted.");
+          if (approved.definition.operations.some(operation => binding.operationIds.includes(operation.operationId) && operation.access === "owner")) throw new Error("Owner-only Collection actions cannot be granted to anyone else.");
           const json = JSON.stringify({ operationIds: binding.operationIds, discover: raw.grant.discover, revision: approved.revision, revisionSha256: approved.revisionSha256 });
           if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(json) + Buffer.byteLength(principalKey) + 256 - previousBytes }));
           db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,principal_key) DO UPDATE SET grant_json=excluded.grant_json,token=excluded.token")
@@ -589,7 +668,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     list(context: Context, raw: { workspaceId: string; after?: string; limit?: number; includeArchived?: boolean }): { datasets: Array<DatasetDescription & { archived: boolean }>; nextCursor: string | null } {
       const workspaceId = text(raw.workspaceId), after = raw.after === undefined ? "" : text(raw.after), limit = raw.limit ?? 50;
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Choose a page size from 1 to 100.");
       // Apply data grants in SQL so inaccessible datasets do not create page gaps or counts.
       const verified = authority(context, { workspaceId }, { kind: "data" });
       const includeArchived = raw.includeArchived === true;
@@ -613,6 +692,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         datasets.push(description); bytes += size;
       }
       return { datasets, nextCursor: rows.length > datasets.length ? datasets.at(-1)!.datasetId : null };
+    },
+    /** Every unarchived dataset's id, owner only, without reading any dataset's rules. */
+    datasetIds(context: Context, raw: { workspaceId: string }): string[] {
+      const workspaceId = text(raw.workspaceId); owner(context, { workspaceId });
+      return db.prepare("SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 ORDER BY c.dataset_id")
+        .all(workspaceId).map(row => String(row.dataset_id));
+    },
+    /** The approved revision alone, without its source artifacts. */
+    approvedRevision(context: Context, raw: DatasetScope): DatasetRevision {
+      const key = scope(raw); owner(context, key); return revision(key);
     },
     approvedArtifacts(context: Context, raw: DatasetScope) {
       const key = scope(raw);
@@ -670,7 +759,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     permissions(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
       const key = scope(raw), after = raw.after === undefined ? "" : text(raw.after, 1024), limit = raw.limit ?? 50;
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Choose a page size from 1 to 100.");
       owner(context, key); const approved = revision(key);
       const rows = db.prepare(`SELECT 'app:'||app_id AS cursor,app_id AS principal,binding_json AS metadata,'app' AS kind
           FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND 'app:'||app_id>?
@@ -705,17 +794,19 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       };
       authorize();
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
+      const committedBy = actor(permitted.authority);
       return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
         operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
-        files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize });
+        files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize,
+        recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }) });
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */
     async readOperation<T>(context: Context, raw: InvokeDatasetInput, read: (result: JsonValue, revision: number) => T): Promise<T> {
       if(read.constructor.name==="AsyncFunction")throw new DatasetHostError("invalid","Protected file reads must be synchronous.");
       const key=scope(raw),through=access(raw.access),permitted=permissions(context,key,through);
       const operation=permitted.operations.find(operation=>operation.operationId===raw.operationId);
-      if(!operation?.readOnly)throw new DatasetHostError("invalid","A protected file read requires a read-only dataset operation.");
+      if(!operation?.readOnly)throw new DatasetHostError("invalid","Choose a Collection action that only reads to open this file.");
       const result=await host.invoke(context,raw);
       return transaction(()=>{
         const check=()=>{
@@ -723,7 +814,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           const current=permissions(context,key,through);
           if(current.token!==permitted.token)denied();
           const head=db.prepare("SELECT revision,approved_revision_hash,active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
-          if(!head||head.active!==1||head.revision!==result.revision||head.approved_revision_hash!==permitted.revision.revisionSha256)throw new DatasetHostError("conflict","Dataset changed before the protected file was read. Retry it.");
+          if(!head||head.active!==1||head.revision!==result.revision||head.approved_revision_hash!==permitted.revision.revisionSha256)throw new DatasetHostError("conflict","The Collection changed before dohc opened this file. Try again.");
         };
         check();const value=synchronous(()=>read(result.result,result.revision));check();return value;
       });

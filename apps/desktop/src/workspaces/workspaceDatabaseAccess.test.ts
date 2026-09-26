@@ -16,7 +16,7 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
 const owners: WorkspaceDatabaseWorkerOwner[] = [];
 afterEach(async () => { await Promise.all(owners.splice(0).map(owner => owner.dispose())); });
 const edit: DatabaseEdit = { table: "items", op: "update", pkColumn: "id", rowId: 1, payload: { value: "changed" } };
-const author = { kind: "agent", agentId: "plugin:fixture", onBehalfOf: "local" } as const;
+const author = { kind: "agent", agentId: "fixture-agent", onBehalfOf: "local", depth: 0 } as const;
 
 async function fixture() {
   const rootPath = await createTestScratch("desktop-database-access-");

@@ -1,5 +1,6 @@
 import { AgentBadge } from "./AgentBadge";
-import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
+import { AutomationBadge } from "./AutomationBadge";
+import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -22,7 +23,7 @@ import {
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { SaveAsFileActions } from "./PostCard";
+import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 
@@ -46,9 +47,19 @@ function formatRunDuration(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+// The automation whose message started a run, when one did. A person's
+// request names nobody: their message sits right above the reply.
+function automationAsking(
+  run: ChatRunRecord,
+  messagesById: ReadonlyMap<string, ChatMessageRecord>,
+): ChatMessageRecord | undefined {
+  const trigger = messagesById.get(run.triggerMessageId);
+  return trigger?.authorKind === "automation" ? trigger : undefined;
+}
+
 // What the agent ran, under its reply: the program and how it ended, then
 // the chip that opens the details.
-function RunLine(props: { run: ChatRunRecord }) {
+function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
   const { endedAtMs, exitCode } = props.run;
   const failed = endedAtMs !== undefined && exitCode !== 0;
   const program = runnerProgram(props.run.command);
@@ -71,6 +82,7 @@ function RunLine(props: { run: ChatRunRecord }) {
         }`}
       />
       <span>{label}</span>
+      {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
       <RunChip run={props.run} />
     </div>
   );
@@ -224,6 +236,33 @@ function AttachmentChip(props: {
     >
       {content}
     </span>
+  );
+}
+
+// The automation that asked for a run, with the automation's mark and the
+// person it ran for in its tooltip.
+function RunAskedBy(props: { message: ChatMessageRecord }) {
+  const person = props.message.authorOwnerDisplayName;
+  return (
+    <span
+      data-testid="chats-run-asked-by"
+      title={person ? `for ${person}` : undefined}
+      className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
+    >
+      <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+      <span className="truncate">Asked by {props.message.authorDisplayName}</span>
+      {person ? <span className="sr-only"> for {person}</span> : null}
+    </span>
+  );
+}
+
+// A post an agent opened during a run: who asked for the run, then its chip.
+function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+  return (
+    <>
+      {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
+      <RunChip run={props.run} />
+    </>
   );
 }
 
@@ -457,12 +496,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     );
   }
   const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
   const openingTime = formatChatTime(openingMessage.createdAtMs);
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = openingMessage.authorKind === "agent";
-  const hasExplicitTitle = nav.thread.title.trim() !== openingMessage.body.split("\n", 1)[0]?.trim();
+  const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
 
   // A comment: avatar column, then a bubble that holds the name and body,
@@ -563,6 +603,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {isSystem ? "dohc" : chatAuthorLabel(comment)}
             </span>
             {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {comment.authorKind === "automation" && !isSystem ? (
+              <AutomationBadge
+                testIdPrefix="chats-comment"
+                author={comment}
+                viewerAuthorId={reactionControls.viewerAuthorId}
+                onOpenPath={props.onOpenPath}
+              />
+            ) : null}
             <time
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
@@ -657,7 +705,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </span>
           ) : null}
         </div>
-        {runRecords[comment.id] ? <RunLine run={runRecords[comment.id]} /> : null}
+        {runRecords[comment.id] ? (
+          <RunLine
+            run={runRecords[comment.id]}
+            askedBy={automationAsking(runRecords[comment.id], messagesById)}
+          />
+        ) : null}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
@@ -712,6 +765,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {chatAuthorLabel(openingMessage)}
               </span>
               {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+              {openingMessage.authorKind === "automation" ? (
+                <AutomationBadge
+                  testIdPrefix="chats-message"
+                  author={openingMessage}
+                  viewerAuthorId={reactionControls.viewerAuthorId}
+                  onOpenPath={props.onOpenPath}
+                />
+              ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">
               <span className="truncate font-mono text-[11px]">
@@ -783,7 +844,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             />
           ) : null}
           {runRecords[openingMessage.id] ? (
-            <RunChip run={runRecords[openingMessage.id]} />
+            <RunOpening
+              run={runRecords[openingMessage.id]}
+              askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
+            />
           ) : null}
           <SaveAsFileActions
             testIdPrefix="chats-message-bookmark"

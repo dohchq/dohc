@@ -1,7 +1,7 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
@@ -60,14 +60,47 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 
 // A moment authored by a dohc-tracked agent run displays as
 // "the agent name" (the same formatting rule the chat rail uses via
-// chatAuthorLabel); everything else keeps its actor-neutral origin label.
+// chatAuthorLabel), and one a Collection automation authored as the
+// automation's name and its Collection; everything else keeps its
+// actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor" | "namedAuthor">,
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.automationAuthor) return `${moment.automationAuthor.name} in ${moment.automationAuthor.collection}`;
+  if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
     : engineOriginLabel(moment.origin);
+}
+
+// Where a moment came from, as one line of History. An automation's name
+// and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
+export function EngineMomentSource(props: {
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor" | "namedAuthor">;
+  testId: string;
+  id?: string;
+}) {
+  const { moment } = props;
+  if (moment.automationAuthor) {
+    return (
+      <span id={props.id} data-testid={props.testId} className="inline-flex items-center gap-1 text-muted">
+        <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+        <span className="sr-only">Automation </span>
+        {engineMomentSourceLabel(moment)}
+      </span>
+    );
+  }
+  // Agent-authored moments speak in the olive attribution voice; everything
+  // else is a neutral origin in ink.
+  return (
+    <span
+      data-testid={props.testId}
+      className={moment.agentAuthorName !== undefined ? "text-agent" : "text-muted"}
+    >
+      {engineMomentSourceLabel(moment)}
+    </span>
+  );
 }
 
 // The group-level author: the shared agent author name when every moment in
@@ -155,12 +188,14 @@ function MomentRow(props: {
 }) {
   const { moment } = props;
   const recordedAt = formatChatTime(moment.recordedAtMs);
-  // Agent-authored moments speak in the olive attribution voice; everything
-  // else is a neutral origin in ink.
-  const isAgent = moment.agentAuthorName !== undefined;
+  // The row's name says what it opens, so an automation that wrote the
+  // change is its description.
+  const sourceId = useId();
+  const describedBySource = moment.automationAuthor !== undefined && !props.nested;
   return (
     <button
       type="button"
+      aria-describedby={describedBySource ? sourceId : undefined}
       data-testid="engine-moment-open"
       data-moment-id={moment.id}
       data-moment-path={moment.path}
@@ -206,12 +241,7 @@ function MomentRow(props: {
               engineOperationLabel(moment)
             ) : (
               <>
-                <span
-                  data-testid="engine-moment-source"
-                  className={isAgent ? "text-agent" : "text-muted"}
-                >
-                  {engineMomentSourceLabel(moment)}
-                </span>
+                <EngineMomentSource moment={moment} testId="engine-moment-source" id={sourceId} />
                 {" · "}
                 <time
                   data-testid="engine-moment-recorded-at"

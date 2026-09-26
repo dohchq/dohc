@@ -29,18 +29,31 @@ describe("markdown frontmatter helpers", () => {
     });
     expect(parseFrontmatter(array)).toEqual({ meta: {}, body: array });
     expect(applyFrontmatter(scalar, { status: "active" })).toBe(
-      ["---", "status: active", "---", "---", "just a divider", "---", "# Body"].join(
+      ["---", "status: active", "---", "", "---", "just a divider", "---", "# Body"].join(
         "\n",
       ),
     );
   });
 
-  it("treats empty and comment-only frontmatter as an empty map", () => {
+  it("treats empty and comment-only frontmatter as an empty map and keeps its comments", () => {
     const markdown = ["---", "# dohc metadata", "", "---", "# Body"].join("\n");
 
     expect(parseFrontmatter(markdown)).toEqual({ meta: {}, body: "# Body" });
     expect(applyFrontmatter(markdown, { status: "active" })).toBe(
-      ["---", "status: active", "---", "# Body"].join("\n"),
+      ["---", "# dohc metadata", "", "status: active", "---", "# Body"].join("\n"),
+    );
+  });
+
+  it("reads values the settle keeps as text and writes back only the changed key", () => {
+    const markdown = [
+      "---", "count: !custom 7", "flag: !!bool yes", "id: 99999999999999999999", "title: Draft", "---", "", "Body",
+    ].join("\n");
+
+    expect(parseFrontmatter(markdown).meta).toEqual({
+      count: "7", flag: "yes", id: "99999999999999999999", title: "Draft",
+    });
+    expect(applyFrontmatter(markdown, { ...parseFrontmatter(markdown).meta, title: "Plan" })).toBe(
+      markdown.replace("title: Draft", "title: Plan"),
     );
   });
 

@@ -31,7 +31,8 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
-    ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, HistoryPageRead, LifecycleState,
+    ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
+    CAPTURE_NEW_FILE_LIVE, CollectionReconciliation, HistoryPageRead, LifecycleState,
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,

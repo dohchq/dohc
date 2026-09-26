@@ -15,7 +15,7 @@ describe("the relay dataset compiler", () => {
     expect(await compileDatasetOperations(source, "fundraiser/backend.ts")).toContain("globalThis.operations");
   });
   it("refuses invalid syntax and oversized source before approval", async () => {
-    await expect(compileDatasetOperations("function {", "data/operations.ts")).rejects.toThrow("could not compile");
+    await expect(compileDatasetOperations("function {", "data/operations.ts")).rejects.toThrow("could not build these Collection actions");
     await expect(compileDatasetOperations(" ".repeat(256 * 1024 + 1), "data/operations.ts")).rejects.toThrow("256 KiB");
   });
 });

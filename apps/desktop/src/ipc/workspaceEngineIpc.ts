@@ -1,15 +1,14 @@
-import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
-  RestoreEngineMomentFileResult, WorkspaceIdPayload, SyncStatusResult,
+  RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { engineMomentDetailForIpc, listEngineMomentsForIpc } from "./engineHistoryIpc";
+import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import type { WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -45,8 +44,13 @@ export function createWorkspaceEngineIpc<
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
   localAgentDisplayName(): string;
+  /** An automation author as History shows it, in one workspace. */
+  automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
+  /** A person the owner shared with, as History names their direct write. */
+  namedAuthorLabel(workspaceId: string, author: Parameters<EngineMomentAuthorNames["named"]>[0]): string;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
+  retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -68,7 +72,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor, namedAuthorLabel,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -141,12 +145,16 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
-    // unit-tested); main only injects the display-name rule below.
-    // The same display-name rule the chat rail uses. AgentIntegration
-    // stamps onBehalfOf "local" for local runs, which use the configured
-    // agent name. Other labels display as stored.
-    function agentAuthorDisplayName(author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>): string {
-      return author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf;
+    // unit-tested); main only injects how authors read below. An agent takes
+    // the display-name rule the chat rail uses: AgentIntegration stamps
+    // onBehalfOf "local" for local runs, which use the configured agent name,
+    // and other labels display as stored. An automation reads as main names it.
+    function authorNames(workspaceId: string): EngineMomentAuthorNames {
+      return {
+        agent: (author) => author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf,
+        automation: (automationId) => automationAuthor(workspaceId, automationId),
+        named: (author) => namedAuthorLabel(workspaceId, author),
+      };
     }
 
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
@@ -164,7 +172,7 @@ export function createWorkspaceEngineIpc<
               ? { beforeMomentOrder: input.beforeMomentOrder }
               : {}),
           }),
-        agentAuthorDisplayName,
+        authorNames(input.workspaceId),
       );
     });
 
@@ -178,7 +186,7 @@ export function createWorkspaceEngineIpc<
       const moment = await capture.readMoment(input.momentId);
       return ReadEngineMomentResult.parse({
         moment: moment
-          ? engineMomentDetailForIpc(moment, agentAuthorDisplayName)
+          ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
           : null,
       });
     });
@@ -215,6 +223,35 @@ export function createWorkspaceEngineIpc<
         assertWritableWorkspace(operation.workspace);
         dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
       });
+    });
+    // Answers with the status after the pass, so the notice that offered
+    // Try again can say whether it worked. Only the renderer's own workspace
+    // is admitted. The pass starts inside the operation and is awaited
+    // outside it, so a pass waiting on an unreachable server does not hold
+    // the workspace open.
+    registerHandler(CHANNELS.retryCloudSync, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = RetryCloudSyncPayload.parse(payload);
+      const started = await withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "This workspace is no longer active.",
+        async (operation) => {
+          assertWritableWorkspace(operation.workspace);
+          const workspace = operation.workspace;
+          return {
+            workspace,
+            pass: dependencies.retryCloudSync(workspace.workspaceId, input.reason),
+          };
+        },
+      );
+      await started.pass;
+      return SyncStatusResult.parse(
+        await syncStatusWithOwnedProjection(
+          started.workspace,
+          activity.getStatus(started.workspace.workspaceId),
+        ),
+      );
     });
 
     registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {

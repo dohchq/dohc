@@ -133,6 +133,8 @@ type Candidate = {
   hasWebPackageSignal: boolean;
   hasFrameworkConfig: boolean;
   hasBuildOutputSignal: boolean;
+  // app.publish.json declares what an app publishes, so it makes a folder an app on its own.
+  hasPublishManifest: boolean;
   entry?: string;
   packageJson?: PackageJson;
   packageManager?: SitePackageManager;
@@ -277,9 +279,6 @@ function sitePath(root: string, child: string): string {
 
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
-  if (stripWindowsAliasSuffix(segments[0] ?? "") === "plugins") {
-    return true;
-  }
   return segments.some((segment, index) => {
     const stripped = stripWindowsAliasSuffix(segment);
     const nextStripped =
@@ -302,6 +301,7 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
     hasWebPackageSignal: false,
     hasFrameworkConfig: false,
     hasBuildOutputSignal: false,
+    hasPublishManifest: false,
     buildOutputs: new Set(),
     diagnostics: [],
   };
@@ -398,7 +398,7 @@ function parsePreview(
         path,
         "warning",
         "unsupported-preview-command-mode",
-        "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+        "Configured preview commands run only in dev mode. Static and build previews use the app's entry file or build output.",
       ),
     );
   }
@@ -699,14 +699,14 @@ function packageTitle(pkg: PackageJson | undefined): string | undefined {
 }
 
 function siteKind(candidate: Candidate): SiteKind {
-  if (candidate.hasDohcConfig || candidate.hasFrameworkConfig) return "configured";
+  if (candidate.hasDohcConfig || candidate.hasPublishManifest || candidate.hasFrameworkConfig) return "configured";
   if (candidate.hasPackageJson && candidate.hasWebPackageSignal) return "package";
   return "static";
 }
 
 function siteConfidence(candidate: Candidate): SiteConfidence {
   if (candidate.dohcConfig?.type === "site") return "high";
-  if (candidate.hasIndexHtml || candidate.hasFrameworkConfig) return "high";
+  if (candidate.hasIndexHtml || candidate.hasPublishManifest || candidate.hasFrameworkConfig) return "high";
   if (candidate.hasWebPackageSignal || candidate.hasBuildOutputSignal) return "medium";
   return "low";
 }
@@ -714,6 +714,7 @@ function siteConfidence(candidate: Candidate): SiteConfidence {
 function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
   return (
     candidate.hasIndexHtml ||
+    candidate.hasPublishManifest ||
     candidate.hasWebPackageSignal ||
     candidate.hasFrameworkConfig ||
     // Not hasBuildOutputSignal: that flag also turns on from the dohc.json's
@@ -740,6 +741,7 @@ function shouldIncludeCandidate(candidate: Candidate): boolean {
   }
   return (
     candidate.hasDohcConfig ||
+    candidate.hasPublishManifest ||
     candidate.hasIndexHtml ||
     candidate.hasWebPackageSignal ||
     candidate.hasFrameworkConfig ||
@@ -852,6 +854,11 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
         candidate.diagnostics.push(...parsed.diagnostics);
         if (parsed.config?.preview?.entry) candidate.entry = parsed.config.preview.entry;
       }
+      continue;
+    }
+
+    if (name === "app.publish.json") {
+      candidate.hasPublishManifest = true;
       continue;
     }
 

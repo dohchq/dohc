@@ -15,16 +15,28 @@ import {
   encodeCollectionQueryParams,
   type AutomationClaimNextParams,
   type AutomationClaimNextResult,
+  type AutomationClaimScheduleParams,
+  type AutomationClaimScheduleResult,
+  type AutomationRunNowParams,
+  type AutomationRunNowResult,
   type AutomationClaimSummary,
   type AutomationFailuresResult,
+  type AutomationGroupSkipsResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
+  type AutomationPressParams,
+  type AutomationPressResult,
+  type AutomationReleaseParams,
   type AutomationRetryParams,
+  type AutomationScheduleMarksResult,
   type AutomationSettleParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
+  type AutomationReleaseGroupsResult,
+  type AutomationWatchGroupsParams,
+  type AutomationWatchGroupsResult,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -53,6 +65,7 @@ import {
   VERSIONED_METHOD,
   decodeVersionedResult,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretCompareEntry,
   type SecretMomentRecord,
@@ -388,13 +401,15 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    createOnly?: boolean;
+    requestId?: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
       {
@@ -402,6 +417,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         text: input.text,
+        ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
         ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
@@ -424,7 +440,7 @@ export class VersionedLiveAdapter {
     path: string;
     bytes: Uint8Array;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
@@ -854,21 +870,29 @@ export class VersionedLiveAdapter {
     });
   }
 
+  /**
+   * Lists every file in the version, or only files under the folder `under`.
+   * The engine orders paths bytewise, so a folder's files are one run that
+   * starts after `${under}/`; the listing stops at the first path past it.
+   */
   async listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
+    under?: string;
   }): Promise<VersionedTextListEntry[]> {
     this.assertWorkspace(input.workspaceId);
+    const prefix = input.under === undefined ? "" : `${input.under}/`;
     const files: VersionedTextListEntry[] = [];
-    let afterPath: string | undefined;
+    let afterPath: string | undefined = prefix || undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.textList, {
         versionId: input.versionId,
         limit: 500,
         ...(afterPath !== undefined ? { afterPath } : {}),
       });
-      files.push(...page.files);
-      afterPath = page.nextAfterPath ?? undefined;
+      const inside = page.files.filter((file) => file.path.startsWith(prefix));
+      files.push(...inside);
+      afterPath = inside.length === page.files.length ? page.nextAfterPath ?? undefined : undefined;
     } while (afterPath !== undefined);
     return files;
   }
@@ -991,7 +1015,7 @@ export class VersionedLiveAdapter {
     expectedObjectId?: string;
     requestId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
@@ -1156,6 +1180,25 @@ export class VersionedLiveAdapter {
   }
 
   /**
+   * Stops every Group subscription in the workspace from claiming, in one
+   * engine write, and answers what the next automation host needs.
+   */
+  async releaseAutomationGroups(): Promise<AutomationReleaseGroupsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsReleaseGroups, {});
+  }
+
+  /**
+   * Sets every Group subscription this computer watches, in one engine
+   * write, taking the handover a release left for it at a new host
+   * generation.
+   */
+  async watchAutomationGroups(
+    input: AutomationWatchGroupsParams,
+  ): Promise<AutomationWatchGroupsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsWatchGroups, input);
+  }
+
+  /**
    * Takes the oldest pending claim in the executor's namespace (pending ->
    * running) with its field facts, or null.
    */
@@ -1186,6 +1229,52 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsRetry, input);
   }
 
+  /**
+   * Hands back a running claim the executor cannot run yet. It is pending
+   * again with its attempts as they were before `claimNext` served it, and
+   * the same run. A claim that is not running is refused. The engine
+   * announces nothing, so the executor drains again when what held the
+   * claim clears.
+   */
+  async releaseAutomationClaim(
+    input: AutomationReleaseParams,
+  ): Promise<AutomationClaimSummary> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRelease, input);
+  }
+
+  /**
+   * Records a Button field press and answers the claim that runs it, or
+   * busy while the button runs on the record for someone else. The engine
+   * announces a new claim with `automation.claimed`.
+   */
+  async pressAutomation(input: AutomationPressParams): Promise<AutomationPressResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsPress, input);
+  }
+
+  /**
+   * Claims a schedule's due times and moves its mark, in one transaction.
+   * The engine announces each new claim with `automation.claimed`.
+   */
+  async claimAutomationSchedule(
+    input: AutomationClaimScheduleParams,
+  ): Promise<AutomationClaimScheduleResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimSchedule, input);
+  }
+
+  /**
+   * Run now from a skipped-run notice, after this computer's dismissal was
+   * the notice's first. A new claim announces itself with
+   * `automation.claimed`; a repeat answers the claim made before.
+   */
+  async runAutomationNow(input: AutomationRunNowParams): Promise<AutomationRunNowResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRunNow, input);
+  }
+
+  /** Every schedule's mark, for the scheduler's start. */
+  async listAutomationScheduleMarks(): Promise<AutomationScheduleMarksResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsScheduleMarks, {});
+  }
+
   /** One automation's run history: its newest claims, newest first. */
   async listAutomationClaims(
     input: AutomationListClaimsParams,
@@ -1199,6 +1288,24 @@ export class VersionedLiveAdapter {
    */
   async listAutomationFailures(): Promise<AutomationFailuresResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
+  }
+
+  /** When Group messages last started nothing here for a reason a person can act on. */
+  async readAutomationGroupSkips(): Promise<AutomationGroupSkipsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsGroupSkips, {});
+  }
+
+  /**
+   * How many changes that did not originate on this computer the engine has
+   * applied to the workspace. Record it with a decision; an equal count
+   * later proves no one else's change arrived in between.
+   */
+  async remoteChangesApplied(): Promise<number> {
+    const result = await this.workspaceRequest(
+      WORKSPACE_METHOD.syncRemoteChanges,
+      {},
+    );
+    return result.applied;
   }
 
   async writeSecretFile(input: {

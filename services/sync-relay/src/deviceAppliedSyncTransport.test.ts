@@ -74,7 +74,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
       terminalCursor: 0, adoptionReplayed: false}}})),
   };
   transport = startExistingOwnerDeviceTransport({config: {client: singleton as unknown as EngineClient,
-    workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], ownerFor: () => owner,
+    workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], ownerFor: async () => owner,
     maxQueuedBytes: 2_000_000, maxFrameBytes: 1_048_576, maxUploads, maxRegistrations: 1, aggregateBytes,
     maxAdoptionBytes: 1_000_000, maxAdoptionEvents: 10, requestDeadlineMs: 30_000,
     ...(sync ? {sync: {maxClientVectorBytes: 1024, maxOutputBytes: 1_000_000}} : {})}, start, ws: device, limits, stop: () => connection?.close()});

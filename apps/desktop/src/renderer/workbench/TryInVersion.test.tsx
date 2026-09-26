@@ -11,29 +11,11 @@ import { TryTaskDialog, VersionMenu } from "./WorkspaceVersions";
 // mocked per test.
 
 const bridgeMock = {
-  probeAgentDrivers: vi.fn(),
   tryInWorkspaceVersion: vi.fn(),
   dismissTryInVersionReview: vi.fn(),
   listWorkspaceVersions: vi.fn(),
   switchWorkspaceVersion: vi.fn(),
 };
-
-function driverProbe(installed: boolean) {
-  return {
-    drivers: [
-      {
-        id: "codex",
-        displayName: "Codex",
-        installed,
-        auth: { status: "unknown" as const },
-        models: [],
-      },
-    ],
-    session: null,
-    // What dohc chose for this workspace, which is what the dialog uses.
-    selectedDriverId: installed ? "codex" : null,
-  };
-}
 
 function reviewState(overrides: Partial<TryInVersionRunState> = {}): TryInVersionRunState {
   return {
@@ -53,7 +35,6 @@ function reviewState(overrides: Partial<TryInVersionRunState> = {}): TryInVersio
 
 beforeEach(() => {
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
-  bridgeMock.probeAgentDrivers.mockResolvedValue(driverProbe(false));
   bridgeMock.tryInWorkspaceVersion.mockResolvedValue({
     versionId: "try-1",
     versionName: "Try: tidy the notes",
@@ -82,7 +63,7 @@ afterEach(() => {
 });
 
 describe("TryTaskDialog", () => {
-  it("saves the open draft first, then starts the gesture without a driver", async () => {
+  it("saves the open draft first, then starts the gesture", async () => {
     const order: string[] = [];
     const releaseOperation = vi.fn(() => {
       order.push("release");
@@ -111,11 +92,8 @@ describe("TryTaskDialog", () => {
     expect(screen.getByTestId("try-task-dialog").textContent).toContain(
       "Your unsaved changes are saved first.",
     );
-    // No installed agent tool -> honest helper line, bare run.
-    await waitFor(() =>
-      expect(screen.getByTestId("try-task-helper").textContent).toContain(
-        "No agent app was found",
-      ),
+    expect(screen.getByTestId("try-task-helper").textContent).toContain(
+      "Start your own agent in this folder",
     );
 
     await user.type(screen.getByTestId("try-task-input"), "tidy the notes");
@@ -129,34 +107,6 @@ describe("TryTaskDialog", () => {
       workspaceId: "ws-try",
       task: "tidy the notes",
     });
-  });
-
-  it("hands the task to the driver dohc chose for this workspace", async () => {
-    bridgeMock.probeAgentDrivers.mockResolvedValue(driverProbe(true));
-    const user = userEvent.setup();
-    render(
-      <TryTaskDialog
-        workspaceId="ws-try"
-        activeTabDirty={false}
-        beginLineageOperation={async () => () => {}}
-        onStarted={() => {}}
-        onClose={() => {}}
-      />,
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("try-task-helper").textContent).toContain(
-        "Codex will do the work",
-      ),
-    );
-    await user.type(screen.getByTestId("try-task-input"), "tidy the notes");
-    await user.click(screen.getByTestId("try-task-start"));
-    await waitFor(() =>
-      expect(bridgeMock.tryInWorkspaceVersion).toHaveBeenCalledWith({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: "codex",
-      }),
-    );
   });
 
   it("keeps Start disabled until the task has content, and surfaces failures inline", async () => {
@@ -442,7 +392,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       attempts += 1;
       if (attempts <= 7) {
         throw new Error(
-          "Error invoking remote method 'desktop:list-workspace-versions': Error: Workspace is still updating. Try again.",
+          "Error invoking remote method 'desktop:list-workspace-versions': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
         );
       }
       return {

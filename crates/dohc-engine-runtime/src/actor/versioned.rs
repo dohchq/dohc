@@ -50,12 +50,15 @@ pub struct MergeExecutionResult {
     pub materialize_outcome: PostCommitMaterializeOutcome,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackExecutionResult {
     pub deduped: bool,
     pub materialize_enqueued: bool,
     pub materialized: bool,
     pub materialize_outcome: PostCommitMaterializeOutcome,
+    /// Automation claims the restored text's field changes inserted, for the
+    /// caller to announce.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 impl ActorHandle {
@@ -96,6 +99,7 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     None,
+                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -132,6 +136,7 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     restore_before_moment_id.as_deref(),
+                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -562,11 +567,12 @@ pub(super) fn with_local_file_mutation_cache_reset<T>(
     mutation()
 }
 
-fn versioned_text_write_on_store(
+pub(super) fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
     restore_before_moment_id: Option<&str>,
+    finish_create: bool,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -584,14 +590,18 @@ fn versioned_text_write_on_store(
         return Err(RuntimeError::Cancelled);
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
+    // The write's author names who changed the record's fields: an agent, an
+    // automation at its chain depth, or a person.
+    let (actor, attribution) =
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
-        let result = match restore_before_moment_id {
+        let mut result = match restore_before_moment_id {
             Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
             None => write_text_in_tx(tx, input),
         }
         .map_err(RuntimeError::from)?;
-        if !result.deduped {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+        if !result.deduped
+            && let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -600,7 +610,15 @@ fn versioned_text_write_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
-                None,
+                actor.as_deref(),
+                attribution.as_ref(),
+                input.now_ms,
+            )?
+        {
+            result.automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                tx,
+                &input.workspace_id,
+                &facts,
                 input.now_ms,
             )?;
         }
@@ -625,6 +643,17 @@ fn versioned_text_write_on_store(
             result.deduped,
         )
         .map_err(RuntimeError::from)?;
+        if finish_create {
+            if let Some(request_id) = &input.request_id {
+                tx.execute(
+                    "UPDATE engine_requests SET kind = 'authored-create' WHERE request_id = ?1",
+                    [request_id],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            tx.execute("DELETE FROM authored_create_intent WHERE singleton = 1", [])
+                .map_err(StorageError::persist_public)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -660,6 +689,7 @@ fn versioned_binary_write_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 None,
                 input.now_ms,
             )?;
@@ -777,6 +807,7 @@ fn versioned_text_rename_on_store(
                     &input.version_id,
                     &result.object.object_id,
                     resulting,
+                    None,
                     None,
                     input.now_ms,
                 )
@@ -1226,6 +1257,9 @@ fn versioned_text_rollback_on_store(
         return Err(RuntimeError::SceneAssetDeletePending);
     }
     let mut restored_asset_jobs = Vec::new();
+    let mut automation_claims = Vec::new();
+    let (actor, attribution) =
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
@@ -1243,16 +1277,27 @@ fn versioned_text_rollback_on_store(
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                 |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
             );
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            // Restoring older text is a change on this computer: its field
+            // changes claim like any other write.
+            if let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
                 object_id,
                 resulting,
-                None,
+                actor.as_deref(),
+                attribution.as_ref(),
                 recorded_at_ms,
             )
-            .map_err(map_fold_error)?;
+            .map_err(map_fold_error)?
+            {
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &facts,
+                    recorded_at_ms,
+                )?;
+            }
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -1290,6 +1335,7 @@ fn versioned_text_rollback_on_store(
                      {error}"
                 );
                 return Ok(RollbackExecutionResult {
+                    automation_claims: automation_claims.clone(),
                     deduped,
                     materialize_enqueued: true,
                     materialized: false,
@@ -1319,6 +1365,7 @@ fn versioned_text_rollback_on_store(
         _ => {
             eprintln!("engine: rollback committed but loading its restore job(s) failed");
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1346,6 +1393,7 @@ fn versioned_text_rollback_on_store(
                  restore remains pending for normal replay: {error}"
             );
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1383,6 +1431,7 @@ fn versioned_text_rollback_on_store(
                  {error}"
             );
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1390,6 +1439,7 @@ fn versioned_text_rollback_on_store(
             });
         }
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: has_jobs || !restored_asset_jobs.is_empty(),
             materialized: false,
@@ -1408,6 +1458,7 @@ fn versioned_text_rollback_on_store(
         && !restored_asset_jobs.is_empty()
     {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1416,6 +1467,7 @@ fn versioned_text_rollback_on_store(
     }
     if !has_jobs {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: !restored_asset_jobs.is_empty(),
             materialized: !restored_asset_jobs.is_empty(),
@@ -1430,6 +1482,7 @@ fn versioned_text_rollback_on_store(
     if let Some(job) = job {
         if deduped && job.status != JobStatus::Pending {
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped: true,
                 materialize_enqueued: false,
                 materialized: false,
@@ -1452,6 +1505,7 @@ fn versioned_text_rollback_on_store(
             }
         };
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized,
@@ -1462,6 +1516,7 @@ fn versioned_text_rollback_on_store(
     let (Some(write_job), Some(delete_job)) = (rename_write_job, rename_delete_job) else {
         eprintln!("engine: rollback committed with an incomplete rename restore job pair");
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1471,6 +1526,7 @@ fn versioned_text_rollback_on_store(
     if deduped && write_job.status != JobStatus::Pending && delete_job.status != JobStatus::Pending
     {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped: true,
             materialize_enqueued: false,
             materialized: false,
@@ -1507,6 +1563,7 @@ fn versioned_text_rollback_on_store(
             );
         }
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1517,6 +1574,7 @@ fn versioned_text_rollback_on_store(
         Ok(Some(job)) => job,
         Ok(None) | Err(_) => {
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1540,6 +1598,7 @@ fn versioned_text_rollback_on_store(
         }
     };
     Ok(RollbackExecutionResult {
+        automation_claims: automation_claims.clone(),
         deduped,
         materialize_enqueued: true,
         materialized,
@@ -1821,6 +1880,9 @@ fn versioned_text_merge_on_store(
             match result {
                 MergeTextFileResult::Write { write, .. } => {
                     if !write.deduped {
+                        // A merge replays changes made on another version,
+                        // which claimed when they were made: it indexes the
+                        // record and claims nothing.
                         dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                             tx,
                             &input.workspace_id,
@@ -1830,6 +1892,7 @@ fn versioned_text_merge_on_store(
                                 path: &write.snapshot.path,
                                 text: &write.snapshot.text,
                             },
+                            None,
                             None,
                             input.now_ms,
                         )
@@ -1862,6 +1925,7 @@ fn versioned_text_merge_on_store(
                             &delete.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                             None,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -1879,6 +1943,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &write.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             None,
                             input.now_ms,
                         )

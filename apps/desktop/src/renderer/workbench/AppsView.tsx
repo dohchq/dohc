@@ -4,20 +4,25 @@ import {
   CircleDashed,
   FileCode2,
   Globe2,
+  Pin,
 } from "lucide-react";
 import { useState } from "react";
 import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { PrimaryButton } from "../ui/controls";
+import { IconButton, PrimaryButton } from "../ui/controls";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
+import { ipcErrorMessage } from "../ipcError";
 
 type AppsLoadState =
   | { status: "loading" }
-  | { status: "ready"; apps: SitePackageInfo[] }
-  | { status: "error"; message: string };
+  | { status: "ready"; workspaceId: string; apps: SitePackageInfo[] }
+  | { status: "error"; workspaceId: string; message: string };
 
+// Every settled file listing refetches the apps. The list and its count stay
+// on screen while that runs; only a first load, or another workspace, shows
+// loading.
 function useApps(
   workspaceId: string,
   filesSettledRevision: number,
@@ -25,25 +30,25 @@ function useApps(
   const [state, setState] = useState<AppsLoadState>({ status: "loading" });
 
   useAsyncResponseEffect(
-    () => {
-      setState({ status: "loading" });
-      return bridge().listSites({ workspaceId });
-    },
+    () => bridge().listSites({ workspaceId }),
     {
       onSuccess: (result) => {
-        setState({ status: "ready", apps: result.sites });
+        setState({ status: "ready", workspaceId, apps: result.sites });
       },
       onError: (error) => {
         setState({
           status: "error",
-          message: error instanceof Error ? error.message : "Could not load apps.",
+          workspaceId,
+          message: ipcErrorMessage(error, "Could not load apps."),
         });
       },
     },
     [workspaceId, filesSettledRevision],
   );
 
-  return state;
+  return state.status !== "loading" && state.workspaceId !== workspaceId
+    ? { status: "loading" }
+    : state;
 }
 
 function appDiagnosticLabel(app: SitePackageInfo): string | null {
@@ -65,6 +70,9 @@ export function AppsView(props: {
   // rerun and the Apps view would keep stale titles, diagnostics,
   // scripts, and preview modes until the user manually refreshed it.
   filesSettledRevision: number;
+  // Apps pinned to the sidebar in this workspace, by folder.
+  pinnedApps: readonly string[];
+  onSetPinned: (appRoot: string, pinned: boolean) => void;
   onOpenPath: (path: string) => void;
   onCreateFirstApp: () => Promise<void>;
   // A received share workspace rejects folder creation in main, including
@@ -90,7 +98,7 @@ export function AppsView(props: {
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <Globe2 size={13} aria-hidden className="text-subtle" />
         <output data-testid="sites-count" className="font-mono text-[11px] text-muted">
-          {apps.length} app{apps.length === 1 ? "" : "s"}
+          {state.status === "ready" ? `${apps.length} app${apps.length === 1 ? "" : "s"}` : null}
         </output>
       </div>
 
@@ -127,14 +135,16 @@ export function AppsView(props: {
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">
           {apps.map((app) => {
             const diagnosticLabel = appDiagnosticLabel(app);
+            const pinned = props.pinnedApps.includes(app.root);
+            const pinLabel = pinned ? "Unpin" : "Pin to sidebar";
             return (
-              <li key={app.root}>
+              <li key={app.root} className="group relative">
                 <button
                   type="button"
                   data-testid="sites-row"
                   data-root={app.root}
                   onClick={() => props.onOpenPath(siteTabPath(app.root))}
-                  className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 text-left transition-colors hover:bg-panel-2"
+                  className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 pr-10 text-left transition-colors hover:bg-panel-2"
                 >
                   <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
                     {app.packagePath ? (
@@ -189,6 +199,21 @@ export function AppsView(props: {
                     ) : null}
                   </span>
                 </button>
+                {/* A pinned app keeps its pin in view; the others show it on
+                    hover or keyboard focus. */}
+                <IconButton
+                  data-testid="sites-pin"
+                  aria-label={pinLabel}
+                  title={pinLabel}
+                  onClick={() => props.onSetPinned(app.root, !pinned)}
+                  className={`absolute right-2 top-2 ${
+                    pinned
+                      ? "text-ink"
+                      : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                  }`}
+                >
+                  <Pin size={13} aria-hidden />
+                </IconButton>
               </li>
             );
           })}

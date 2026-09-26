@@ -31,6 +31,14 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
+  /** An automation's name in its Collection's automations.yaml now, or null. */
+  automationName?(workspace: W, automationId: string): Promise<string | null>;
+  /**
+   * The chain depth of the agent run holding the workspace's run slot, or 0.
+   * Only the owner CLI, which an agent's run uses, supplies it, so an action
+   * the agent invokes during a run an automation started carries the chain on.
+   */
+  agentRunDepth?(workspace: W): number;
 }) {
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
@@ -184,7 +192,18 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "history") {
         if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
-        const result = await data.history(input); current(); return { kind: "history" as const, ...result };
+        const result = await data.history(input); current();
+        // History names each automation as its Collection names it now.
+        const names = new Map<string, string | null>();
+        for (const entry of result.entries) {
+          const automationId = entry.automation?.automationId;
+          if (automationId !== undefined && !names.has(automationId)) names.set(automationId, await dependencies.automationName?.(operation.workspace, automationId) ?? null);
+        }
+        current();
+        return { kind: "history" as const, ...result, entries: result.entries.map((entry) => {
+          const name = entry.automation && names.get(entry.automation.automationId);
+          return name && entry.automation ? { ...entry, automation: { ...entry.automation, name } } : entry;
+        }) };
       }
       if (input.action === "permissions") {
         if (!("permissions" in data) || !data.permissions) throw new Error("Publish this Collection before managing shared access.");
@@ -259,7 +278,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "invoke") {
         try {
-          const result = await data.invoke({ ...input, signal: operation.signal });
+          const agentDepth = dependencies.agentRunDepth?.(operation.workspace) ?? 0;
+          const result = await data.invoke({ ...input, signal: operation.signal, ...(agentDepth > 0 ? { agentDepth } : {}) });
           current();
           return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
         } catch (error) {

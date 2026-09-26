@@ -343,6 +343,9 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     )
     .await;
     assert_eq!(retry["lineage"], "existing");
+    // The settle above wrote the drawing, so its resumed lineage is not ahead
+    // of the file and the reopen has nothing to settle.
+    assert_eq!(retry["unsettled"], false);
     assert_eq!(retry["objectId"], opened["objectId"]);
     assert_eq!(retry["artifactAssets"], opened["artifactAssets"]);
     call(
@@ -1316,6 +1319,73 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     );
 }
 
+// A drawing the open seeded from its file holds nothing the file lacks, so a
+// reopen after a crash settles nothing and leaves the file alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seeded_drawing_reopens_with_nothing_to_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "box", "type": "rectangle", "version": 1, "versionNonce": 1,
+            "isDeleted": false, "x": 0, "y": 0, "width": 10, "height": 10, "index": "a0"
+        }],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("scene");
+    write_file(
+        scratch.path(),
+        "drawings/seeded.excalidraw",
+        artifact.as_bytes(),
+    );
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-reopen", 90).await;
+    let open = |id: u64| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "drawings/seeded.excalidraw",
+                "contentKind": "scene",
+                "seedFromArtifact": true
+            }),
+        )
+    };
+    let seeded = open(91).await;
+    assert_eq!(seeded["unsettled"], false);
+    // No settle and no close: the lineage stays, as a crash leaves it.
+    call(
+        &transport,
+        &handle,
+        92,
+        "ydoc.evict",
+        json!({ "sessionId": seeded["sessionId"] }),
+    )
+    .await;
+    let reopened = open(93).await;
+    assert_eq!(reopened["lineage"], "existing");
+    assert_eq!(reopened["unsettled"], false);
+    call(
+        &transport,
+        &handle,
+        94,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("drawings/seeded.excalidraw")).expect("file"),
+        artifact
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1388,6 +1458,8 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         )
     };
     let (opened, initial) = open(78).await;
+    // This open seeded the drawing from its file, so nothing is ahead of it.
+    assert_eq!(opened["unsettled"], false);
     let fold_opened = |update: &[u8]| {
         let doc = Ydoc::wire();
         doc.apply(update).expect("scene update applies");
@@ -2227,6 +2299,38 @@ async fn wait_for_capture_to_defer_under_live_session(
         }
     }
     panic!("capture did not report its deferred live-session write: {last_flush}");
+}
+
+/// Capture defers an empty new file a live session holds: the file is the
+/// session's creation baseline, and the session's settle records it. That is
+/// not a failure, so capture settles healthy with the file still unrecorded.
+///
+/// A healthy flush alone could come before capture saw the file. The forced
+/// reconcile rebuilds the files layer, whose first pass scans the whole
+/// workspace, so the settled flush after it covers the file.
+async fn wait_for_capture_to_settle_around_live_session(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id_base: u64,
+) {
+    call(transport, handle, id_base, "capture.reconcile", json!({})).await;
+    let id_base = id_base + 1;
+    let mut last_flush = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        last_flush = call(
+            transport,
+            handle,
+            id_base + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(true) && last_flush["degraded"] == json!(false) {
+            return;
+        }
+    }
+    panic!("capture did not settle around the live session: {last_flush}");
 }
 
 async fn moment_count_for_object(
@@ -3276,12 +3380,15 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         );
         tokio::task::yield_now().await;
     }
+    // Capture sees the settled head as one another writer owns, and on first
+    // sight leaves it alone. The lease is not what stops it, so the pass is
+    // not a failure either.
     id += 1;
     let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
     assert_eq!(
-        flushed["settled"],
-        json!(false),
-        "capture must defer the new path while its Y.Doc session holds the lease"
+        (&flushed["settled"], &flushed["degraded"]),
+        (&json!(true), &json!(false)),
+        "capture must track the Y.Doc's head without degrading: {flushed}"
     );
 
     // The same scan must leave the settled head owned by the Y.Doc.
@@ -3435,8 +3542,10 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     // Capture sees the empty artifact, but the live Y.Doc is canonical. The
-    // lease keeps capture from minting a competing head under this session.
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    // lease keeps capture from minting a competing head under this session,
+    // and capture defers the file without degrading: it is the session's
+    // creation baseline, which the session's settle records.
+    wait_for_capture_to_settle_around_live_session(&transport, &handle, 100).await;
     let ingested = call(
         &transport,
         &handle,
@@ -3539,7 +3648,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-rival", 1).await;
 
     let (path, opened) =
@@ -3619,6 +3728,66 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     )
     .await;
     assert_eq!(captured["metadataOrigin"], json!("capture"));
+
+    // The client lost that session and now reopens it: the retained draft
+    // lineage, not a fresh seed. Capture folded that lineage to the ingested
+    // bytes and recorded them as its settled file, so the next keystroke
+    // settles on top of them and never writes the draft back over them.
+    let (reopened, reopened_state) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(reopened["seedContent"], Value::Null);
+    // The keystroke is typed into the reopened document, at its end.
+    let client = Ydoc::wire();
+    client.apply(&reopened_state).expect("reopened state");
+    let before_key = client
+        .project(ContentKind::Plaintext)
+        .expect("reopened projection")
+        .content;
+    assert_eq!(before_key, "written by something else\n");
+    let end = u32::try_from(before_key.encode_utf16().count()).expect("small text");
+    let keystroke = base64::engine::general_purpose::STANDARD
+        .encode(client.plaintext_insert(end, " and one more key"));
+    let reopened_id = reopened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": reopened_id,
+            "updateBase64": keystroke
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.settle",
+        json!({ "sessionId": reopened_id, "summary": "type" }),
+    )
+    .await;
+    let on_disk = std::fs::read_to_string(scratch.path().join(&path)).expect("file");
+    assert_eq!(
+        on_disk, "written by something else\n and one more key",
+        "the keystroke lands on the ingested bytes, and the refused draft is not written"
+    );
+    assert_eq!(settled["content"], json!(on_disk));
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.close",
+        json!({ "sessionId": reopened_id, "settle": false }),
+    )
+    .await;
 
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
@@ -5126,11 +5295,7 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(
-        scratch.path(),
-        "plugins/p/README.md",
-        b"Plugin readme body.\n",
-    );
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
     let service = Arc::new(EngineService::new());
@@ -5138,7 +5303,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-seed-only", 1).await;
 
     for (id, path, seed_paragraph) in [
-        (10_u64, "plugins/p/README.md", "Plugin readme body."),
+        (10_u64, "notes/p/README.md", "Readme body."),
         (30_u64, "notes/crlf.md", "cr line"),
     ] {
         let absolute = scratch.path().join(path);
@@ -5237,11 +5402,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(
-        scratch.path(),
-        "plugins/p/README.md",
-        b"Plugin readme body.\n",
-    );
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -5252,7 +5413,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         2,
         "ydoc.open",
-        json!({ "versionId": "main", "path": "plugins/p/README.md", "contentKind": "richdoc" }),
+        json!({ "versionId": "main", "path": "notes/p/README.md", "contentKind": "richdoc" }),
     )
     .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
@@ -5260,7 +5421,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let before_moments = moment_count_for_object(&transport, &handle, 3, object_id).await;
 
     let doc = Ydoc::wire();
-    let seed_update = richdoc_update(&doc, "Plugin readme body.");
+    let seed_update = richdoc_update(&doc, "Readme body.");
     let edit_update = richdoc_update(&doc, "Edited paragraph.");
     let recorded = call(
         &transport,
@@ -5289,7 +5450,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     )
     .await;
 
-    let on_disk = std::fs::read_to_string(scratch.path().join("plugins/p/README.md"))
+    let on_disk = std::fs::read_to_string(scratch.path().join("notes/p/README.md"))
         .expect("settled artifact");
     assert!(
         on_disk.contains("Edited paragraph."),

@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
@@ -243,7 +244,7 @@ export interface ShareViewIdentity {
   relayUrl?: string;
 }
 
-// A shared CHANNEL this workspace joined through a chat-channel grant
+// A shared CHANNEL this workspace joined through a chat grant
 // (MU-C4): bidirectional — pulled into the local chat store and (when
 // read-write) pushed back through the member append route. `ended` marks a
 // revoked grant: the locally replayed copy stays readable but stops syncing.
@@ -303,7 +304,7 @@ export interface RegistryEntry extends CreatedWorkspace {
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
   // How far the owner has seen each automation's failures, by engine
-  // automation id ("<plugin>/<automation>"). The engine's failed claim rows
+  // automation id ("collection:<collection path>#<id>"). The engine's failed claim rows
   // are the durable evidence and are never deleted; a dismiss only records
   // the generation (the automation's failed-claim count) the owner saw.
   // Same rule as ShareSkippedOps.acknowledgedGeneration: a failure recorded
@@ -313,6 +314,18 @@ export interface RegistryEntry extends CreatedWorkspace {
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
   shareRoster?: ShareRoster;
+  // The computer that runs this synced workspace's schedules, as the relay
+  // last said; null when it recorded none. See automations/automationHost.ts.
+  automationHost?: RelayAutomationHost | null;
+}
+
+/**
+ * Where an automation's acknowledgment is recorded: its engine id, or for a
+ * dataset automation its id and the dataset instance its count belongs to,
+ * so a dataset made again starts with nothing acknowledged.
+ */
+export function automationFailureAckKey(failure: { automationId: string; datasetInstance: string | null }): string {
+  return failure.datasetInstance === null ? failure.automationId : `${failure.automationId}@${failure.datasetInstance}`;
 }
 
 /**
@@ -321,13 +334,13 @@ export interface RegistryEntry extends CreatedWorkspace {
  * import the wire type.
  */
 export function unacknowledgedAutomationFailures<
-  F extends { automationId: string; generation: number },
+  F extends { automationId: string; datasetInstance: string | null; generation: number },
 >(
   failures: readonly F[],
   acks: Record<string, number> | undefined,
 ): F[] {
   return failures.filter(
-    (failure) => failure.generation > (acks?.[failure.automationId] ?? 0),
+    (failure) => failure.generation > (acks?.[automationFailureAckKey(failure)] ?? 0),
   );
 }
 
@@ -412,7 +425,7 @@ export function createRegistryStore(registryFile: string) {
     if (obj.version !== 1) {
       // A future-version registry must be preserved, never silently wiped.
       throw new Error(
-        `Workspace registry version ${String(obj.version)} is newer than supported; refusing to overwrite it.`,
+        `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`,
       );
     }
     if (!Array.isArray(obj.workspaces)) {
@@ -605,6 +618,11 @@ export function createRegistryStore(registryFile: string) {
           },
         };
       });
+    },
+
+    /** Keep the relay's latest answer for which computer runs the schedules. */
+    setAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, automationHost: host }));
     },
 
     /**

@@ -6,8 +6,14 @@ Scripts that run and guard the Rust workspace engine gate. `run-rust-checks.mjs`
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | The gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc`; nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection`; those tests are compiled out of the plain workspace run), plus `cargo deny check` and `cargo audit` when installed (skip with a warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget: a 40 GB free-disk floor, one of 4 build slots, and capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
+| `run-rust-checks.mjs` | The gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `test --workspace` (`cargo nextest run`, including collab and sync crash recovery), `doctests` (`cargo test --doc`; nextest runs no doctests by design), `build daemon`, plus `cargo deny check` and `cargo audit` when installed (skip with a warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget: a 40 GB free-disk floor, one of 4 build slots, and capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
+
+The daemon build runs after the tests and selects only `dohc-workspace-engine`, with its default production features.
+This leaves the production daemon ready for desktop preparation. Different compiler settings can still require a rebuild.
+The workspace tests use testkit to enable storage fault injection.
+Normal delivery and crash recovery run in the same workspace pass, with independent fixtures.
+The verdict verifier also requires the scratch cleanup row to pass.
 
 ## Requirements
 
@@ -35,14 +41,14 @@ node tools/rust-engine-program/run-rust-checks.mjs
 It prints an `EVIDENCE (paste into the pull request)` line, e.g.:
 
 ```
-- 2026-08-13T14:55:16.852Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head b056a36b clean, 11 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS doctests=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
+- <timestamp> | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head <sha> clean, 10 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS test --workspace=PASS doctests=PASS build daemon=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
 ```
 
 `win32/x64` is Node's view of the host. The `rust cfg` field is what rustc
 reported through cargo, and the run stops before any other step unless the two
 agree — see [Native target](#native-target).
 
-`head b056a36b clean, 11 reads` is the tree the run examined. The gate reads
+`head <sha> clean, 10 reads` is the tree the run examined. The gate reads
 the tree before the first step and after each one, and reports how many
 readings agreed. It is not a claim that the tree was watched between them: a
 change made and undone inside one step is invisible to any number of readings.
@@ -60,7 +66,7 @@ Copy that line into the pull request.
 
 ## Where the gate runs
 
-CI is dispatch-only, so the gate runs locally. Run it on native Windows x64,
+With Blacksmith disabled, run the gate locally. Run it on native Windows x64,
 then again from WSL for Linux x64 (a WSL-native clone gives realistic
 filesystem semantics; `/mnt/c` works). Run `pnpm typecheck` and `pnpm test`
 on both as well. macOS has no routine gate run; produce one before any Mac

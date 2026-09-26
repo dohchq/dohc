@@ -1382,6 +1382,7 @@ describe("moveEngineStoreAside", () => {
             agentId: "dohc-mcp",
             onBehalfOf: "local",
             agentRunId: "run-1",
+            depth: 0,
           }),
         ).toBe(true);
       },
@@ -1453,6 +1454,25 @@ describe("rebuildEngineStore", () => {
     expect(d.rebuildGate.begin).not.toHaveBeenCalled();
     expect(d.rebuildGate.end).toHaveBeenCalledOnce();
   });
+
+  // The request was admitted on a cached rebuild refusal, but the folder now
+  // holds a store only an update opens. Moving it aside would lose it.
+  it.each(["migration-failed", "migrated-by-newer-build"] as const)(
+    "keeps a store the fresh probe says is %s in place",
+    async (refusal) => {
+      const d = deps({ probeStoreRefusal: vi.fn(async () => refusal) });
+
+      await expect(rebuildEngineStore(root, d)).rejects.toMatchObject({
+        name: "EngineStoreRebuildRequestError",
+        reason: "update-required",
+      });
+
+      expect(d.moveStoreAside).not.toHaveBeenCalled();
+      expect(d.rebuildGate.begin).not.toHaveBeenCalled();
+      expect(d.reopenActivity).toHaveBeenCalledOnce();
+      expect(d.rebuildGate.end).toHaveBeenCalledOnce();
+    },
+  );
 
   it("rethrows a probe failure beside a completed prior backup", async () => {
     await mkdir(backupDir);

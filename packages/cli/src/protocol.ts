@@ -10,8 +10,11 @@ import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 export const CLI_PROTOCOL_VERSION = 4;
 export const CLI_JSON_SCHEMA_VERSION = 2;
 
+// Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
+// Who wrote a message the CLI reads back.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -98,6 +101,7 @@ const momentsArgsSchema = z
     sinceMs: z.number().int().nonnegative().optional(),
     limit: z.number().int().positive().max(500).optional(),
     includeFiles: z.boolean().optional(),
+    path: z.string().min(1).max(4096).optional(),
   })
   .strict();
 const momentArgsSchema = z
@@ -110,6 +114,63 @@ const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
 const groupsFullArgsSchema = z.object(argsBase).strict();
+
+const documentPathArg = z.string().min(1).max(4096);
+// Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
+// request line over 1 MiB, which JSON escaping of both sides can reach.
+const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
+function fitsUtf8Bytes(value: string, limit: number): boolean {
+  if (value.length > limit) return false;
+  return value.length * 3 <= limit || new TextEncoder().encode(value).length <= limit;
+}
+export const documentEditTextSchema = z
+  .string()
+  .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
+    message: "Document edit text is at most 256 KiB as UTF-8.",
+  });
+// A name the calling agent gives itself, recorded as the author of its edits.
+// A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const documentReadArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg })
+  .strict();
+// A key the caller chooses for one request. Sent again with the same key,
+// after a timeout for example, the request returns its first result while
+// dohc runs instead of doing its work twice.
+export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
+const documentEditArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema.optional(),
+    path: documentPathArg,
+    find: documentEditTextSchema.min(1).optional(),
+    replacement: documentEditTextSchema,
+  })
+  .strict();
+const documentCreateArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    path: documentPathArg,
+    markdown: documentEditTextSchema,
+  })
+  .strict();
+// A comment on a file: a chat linked to it, started with its first message.
+const fileChatStartArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema.optional(),
+    runId: z.string().min(1).optional(),
+    path: documentPathArg,
+    title: z.string().min(1).max(200),
+    body: z.string().min(1),
+  })
+  .strict();
 
 // Collection field values cross the CLI socket in the engine wire's JSON
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
@@ -277,6 +338,10 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     verb: z.literal("collectionCreateRecord"),
     args: collectionCreateRecordArgsSchema,
   }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -300,7 +365,7 @@ export type CliGroup = z.infer<typeof cliGroupSchema>;
 
 const cliAuthorSchema = z
   .object({
-    kind: cliActorSchema,
+    kind: cliAuthorKindSchema,
     displayName: z.string().min(1),
   })
   .strict();
@@ -458,13 +523,21 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
-    onBehalfOf: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
+    // Named only past 0, by a run an automation started.
+    depth: z.number().int().positive().optional(),
   }).strict(),
   z.object({
     kind: z.literal("public"),
     principalId: z.string().min(1),
     grantId: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("automation"),
+    automationId: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
+    depth: z.number().int().nonnegative(),
   }).strict(),
 ]);
 const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
@@ -482,7 +555,6 @@ const rawMomentSummarySchema = z
     operation: rawMomentOperationSchema,
     path: z.string().min(1),
     versionId: z.string().min(1),
-    summary: z.string().optional(),
     author: rawMomentAuthorSchema.optional(),
     fileCount: z.literal(1),
     files: z.array(rawMomentFileSchema).optional(),
@@ -537,7 +609,7 @@ const rawChatMessageSchema = z
   .object({
     id: rawMessageIdSchema,
     threadId: rawThreadIdSchema,
-    authorKind: cliActorSchema,
+    authorKind: cliAuthorKindSchema,
     authorDisplayName: z.string().min(1),
     authorOwnerDisplayName: z.string().min(1).optional(),
     body: z.string(),
@@ -722,7 +794,32 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
-const cliResultSchemas = {
+const documentReadResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), markdown: z.string() }).strict(),
+  rawFailureSchema,
+]);
+const documentEditResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
+  rawFailureSchema,
+]);
+const documentCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+const fileChatStartResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      threadId: rawThreadIdSchema,
+      messageId: rawMessageIdSchema,
+      warning: z.string().min(1).optional(),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+
+export const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
@@ -744,6 +841,10 @@ const cliResultSchemas = {
   collectionRecord: collectionRecordResultSchema,
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
+  documentRead: documentReadResultSchema,
+  documentEdit: documentEditResultSchema,
+  documentCreate: documentCreateResultSchema,
+  fileChatStart: fileChatStartResultSchema,
 } as const;
 
 export type CliResultByVerb = {

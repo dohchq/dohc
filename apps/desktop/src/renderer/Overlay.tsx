@@ -6,13 +6,12 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
+import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { trapModalTabKey } from "./modalFocus";
 
 // Shared modal scaffold: dimmed backdrop that closes on click, with an inner
 // panel that swallows clicks. Used by the command palette, quick-open, new
-// file dialog, cloud panel, and plugin uninstall dialog so close/backdrop
-// behavior — and this keyboard behavior — stays identical everywhere.
+// file dialog, and cloud panel so close/backdrop behavior — and this keyboard behavior — stays identical everywhere.
 export function Overlay(props: {
   onClose?: () => void;
   children: ReactNode;

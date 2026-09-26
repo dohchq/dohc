@@ -6,6 +6,9 @@ import {
 } from "@dohc/security-contract/share-discussion";
 
 export const SHARED_BLOB_CANDIDATE_LIMIT = 64;
+// Moments with one content hash that a link's earlier-revision read examines.
+// Past it the read refuses rather than scanning further.
+export const LINK_REVISION_SCAN_LIMIT = 1_024;
 
 export const LINK_INVENTORY_PAGE_SIZE = 1_000;
 export const LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT = 1_000;

@@ -81,7 +81,7 @@ it.each(["revoke","discard","delete","sync seal"])("rejects async cache sealing 
 it.each(["chunk","digest"])("rejects materialization seal with damaged %s",async damage=>{
   const f=fixture(),bytes=new Uint8Array(chunkBytes+3).fill(7),staged=pendingStage(f,bytes,damage==="digest"?hash("wrong"):hash(bytes));
   if(damage==="chunk")f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(3) WHERE stage_id=? AND chunk_index=1").run(staged.stageId);
-  await expect(f.journal.sealMaterializationCheckpoint({stage:staged,authorize})).rejects.toThrow("integrity");
+  await expect(f.journal.sealMaterializationCheckpoint({stage:staged,authorize})).rejects.toThrow("saved records are damaged");
   expect(f.journal.checkpointStages({workspaceId:scope.workspaceId,authorize})[0].sealed).toBe(false);
 });
 it("requires synchronous authorization and rolls back thenable authorization side effects",async()=>{
@@ -112,7 +112,7 @@ it("streams a 100 MiB staged checkpoint and arbitrary chunk boundaries without a
   expect(f.journal.exportBlob({ scope, record: captured.checkpoint, offset: chunkBytes - 7, length: 20, authorize })).toEqual(new Uint8Array(20).fill(73));
   expect(f.largestRead).toBeLessThanOrEqual(chunkBytes);
   expect(f.journal.checkpointStages({ workspaceId: "w", authorize })).toEqual([]);
-  expect(() => f.journal.discardCheckpoint({ stage: sealed, authorize, account: f.account })).toThrow("Active checkpoints");
+  expect(() => f.journal.discardCheckpoint({ stage: sealed, authorize, account: f.account })).toThrow("cannot discard the records this Collection uses now");
 });
 
 it("retains staged reservations after restart and releases only the selected unactivated stage", () => {
@@ -132,16 +132,16 @@ it("refuses incomplete, altered, out-of-order and wrong-scope stages", () => {
   const f = fixture(), bytes = new Uint8Array(chunkBytes + 10).fill(3);
   const staged = f.journal.stageCheckpoint({ scope, expectedBytes: bytes.byteLength, sha256: hash(bytes), authorize });
   expect(() => f.journal.appendCheckpointChunk({ stage: staged, index: 1, bytes: bytes.subarray(chunkBytes), authorize })).toThrow("in order");
-  expect(() => f.journal.sealCheckpoint({ stage: staged, authorize })).toThrow("incomplete");
-  expect(() => f.journal.initialize({ ...initialization, checkpoint: staged })).toThrow("not sealed");
+  expect(() => f.journal.sealCheckpoint({ stage: staged, authorize })).toThrow("did not finish saving");
+  expect(() => f.journal.initialize({ ...initialization, checkpoint: staged })).toThrow("not ready for this Collection");
   f.journal.appendCheckpointChunk({ stage: staged, index: 0, bytes: bytes.subarray(0, chunkBytes), authorize });
   f.journal.appendCheckpointChunk({ stage: staged, index: 1, bytes: bytes.subarray(chunkBytes), authorize });
   const sealed = f.journal.sealCheckpoint({ stage: staged, authorize });
   expect(() => f.journal.appendCheckpointChunk({ stage: sealed, index: 2, bytes: new Uint8Array(1), authorize })).toThrow("in order");
-  expect(() => f.journal.initialize({ ...initialization, scope: { ...scope, datasetId: "other" }, checkpoint: sealed })).toThrow("not sealed");
+  expect(() => f.journal.initialize({ ...initialization, scope: { ...scope, datasetId: "other" }, checkpoint: sealed })).toThrow("not ready for this Collection");
   const altered = f.journal.stageCheckpoint({ scope, expectedBytes: 10, sha256: hash("different"), authorize });
   f.journal.appendCheckpointChunk({ stage: altered, index: 0, bytes: new Uint8Array(10), authorize });
-  expect(() => f.journal.sealCheckpoint({ stage: altered, authorize })).toThrow("integrity");
+  expect(() => f.journal.sealCheckpoint({ stage: altered, authorize })).toThrow("saved records are damaged");
 });
 
 it("activates quota, manifest and checkpoint references in one transaction and does not charge retries", () => {
@@ -166,7 +166,7 @@ it("rechecks authorization on each chunk and detects persisted chunk corruption"
   const record = f.journal.captureExport({ scope, authorize, capture() {} }).checkpoint;
   expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize() { throw new Error("revoked"); } })).toThrow("revoked");
   f.db.exec("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(100)");
-  expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("integrity");
+  expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("saved records are damaged");
 });
 
 it.each(["digest", "oversized"])("refuses a checkpoint chunk with %s corruption before returning bytes", damage => {
@@ -179,7 +179,7 @@ it.each(["digest", "oversized"])("refuses a checkpoint chunk with %s corruption 
     f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(?)").run(chunkBytes + 1);
   }
   const largestRead = f.largestRead;
-  expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("integrity");
+  expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("saved records are damaged");
   expect(f.largestRead).toBe(largestRead);
 });
 

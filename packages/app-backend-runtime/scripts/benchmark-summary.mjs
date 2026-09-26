@@ -1,7 +1,7 @@
 export function isExpectedOverload(label, failure) {
   if (!label.endsWith('/burst-100') || /deadline|timeout|timed out/i.test(`${failure.code ?? ''} ${failure.message ?? ''}`)) return false;
   return ['queue_full', 'worker_busy'].includes(failure.code)
-    || /^(Dataset (?:workers are busy|host queue is full|operation queue is full)|The dataset worker queue (?:is full|byte limit is full))\b/.test(failure.message ?? '');
+    || /^(dohc has too much Collection work waiting|dohc is busy with other Collections|This Collection has too much work waiting)\b/.test(failure.message ?? '');
 }
 
 export function summarizeBenchmark(evidence) {

@@ -290,7 +290,7 @@ pub struct ListMomentsQuery {
 }
 
 /// Inputs to [`crate::VersionedTextStore::write_text`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WriteText {
     pub workspace_id: String,
     pub version_id: String,
@@ -497,6 +497,10 @@ pub struct WriteResult {
     pub moment: MomentRecord,
     /// True when no new moment was needed (request replay or equal content).
     pub deduped: bool,
+    /// Automation claims the write inserted in its transaction, when it
+    /// changed a collection record's fields on this computer. The caller
+    /// announces them post-commit.
+    pub automation_claims: Vec<crate::AutomationClaim>,
 }
 
 /// Result of a caller-originated binary write. Binary bodies never travel in

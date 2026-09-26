@@ -47,18 +47,30 @@ function withValue(target: unknown, path: SettingsPath, value: unknown): unknown
   return copy;
 }
 
-function objectSchema(schema: z.ZodType): z.ZodObject | null {
+function unwrapped(schema: z.ZodType): z.ZodType {
   let current = schema;
   while (current instanceof z.ZodDefault || current instanceof z.ZodOptional) {
     current = current.unwrap() as z.ZodType;
   }
-  return current instanceof z.ZodObject ? current : null;
+  return current;
+}
+
+// The schema of one key inside an object or a record, or undefined for a key
+// the object does not have. Every key of a record is known: whether it is
+// valid is the record's to say.
+function childSchema(schema: z.ZodType, key: string): z.ZodType | undefined {
+  const inner = unwrapped(schema);
+  if (inner instanceof z.ZodObject) {
+    return Object.hasOwn(inner.shape, key) ? inner.shape[key] as z.ZodType : undefined;
+  }
+  if (inner instanceof z.ZodRecord) return inner.valueType as z.ZodType;
+  return undefined;
 }
 
 /**
- * Which keys a settings schema knows. A group is an object with defaults, so
- * each of its keys can fall back alone; an object without defaults, such as
- * an optional launch profile, is one leaf.
+ * Which keys a settings schema knows. A group is an object or a record with
+ * defaults, so each of its keys can fall back alone; an object without
+ * defaults, such as an optional launch profile, is one leaf.
  */
 export function settingKinds(
   schema: z.ZodType,
@@ -67,13 +79,12 @@ export function settingKinds(
   return (path) => {
     let current: z.ZodType | undefined = schema;
     for (const key of path) {
-      const object: z.ZodObject | null = objectSchema(current);
-      current = object && Object.hasOwn(object.shape, key)
-        ? object.shape[key] as z.ZodType
-        : undefined;
+      current = childSchema(current, key);
       if (!current) return null;
     }
-    return objectSchema(current) && isSettingsObject(valueAt(defaults, path))
+    const inner = unwrapped(current);
+    return (inner instanceof z.ZodObject || inner instanceof z.ZodRecord) &&
+      isSettingsObject(valueAt(defaults, path))
       ? "group"
       : "leaf";
   };

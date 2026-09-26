@@ -56,6 +56,12 @@ pub enum StorageError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
+    /// The store's ledger holds a migration this build does not define,
+    /// completed or not, so a newer build ran it. Refused before any byte of
+    /// the file changes; a build that defines every ledger migration opens it.
+    #[error("a newer build ran migration {ordinal} ({id}), which this build does not define")]
+    MigratedByNewerBuild { ordinal: i64, id: String },
+
     /// A backup operation failed (copy, manifest write, or restore-test). The
     /// only valid source database is never deleted on failure; a partial backup
     /// is left un-manifested and is therefore invalid-by-absence (never counted
@@ -111,6 +117,7 @@ impl StorageError {
             StorageError::InvalidInput { .. } => "invalid-input",
             StorageError::PersistFailed { .. } => "persist-failed",
             StorageError::MigrationFailed { .. } => "migration-failed",
+            StorageError::MigratedByNewerBuild { .. } => "migrated-by-newer-build",
             StorageError::BackupFailed { .. } => "backup-failed",
             StorageError::DiskFull { .. } => "disk-full",
             StorageError::PermissionDenied { .. } => "permission-denied",

@@ -1,17 +1,12 @@
+import type { WatcherEvent } from "@dohc/workspace-core";
 import type { createChatDispatchService } from "../agents/chatDispatchService";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
-import type { PluginWorkspaceRuntimes } from "../plugins/pluginWorkspaceRuntimes";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import type { WorkspaceActivityOptions } from "./workspaceActivity";
 import type {
   createWorkspaceAuthorityOwner,
   WorkspaceAuthorityLease,
 } from "./workspaceAuthorityOwner";
-
-type WatcherRuntime = NonNullable<
-  ReturnType<PluginWorkspaceRuntimes<CreatedWorkspace>["current"]>
->;
 
 export interface DesktopWorkspaceCallbacksDependencies<State> {
   findWorkspace(workspaceId: string): RegistryEntry | null | undefined;
@@ -21,10 +16,8 @@ export interface DesktopWorkspaceCallbacksDependencies<State> {
     ReturnType<typeof createWorkspaceAuthorityOwner<RegistryEntry, State>>,
     "withAuthority"
   >;
-  readonly pluginWorkspaceRuntimes: {
-    current(workspaceId: string): Pick<WatcherRuntime, "handleWatcherEvents"> | undefined;
-  };
   readonly chatDispatchService: Pick<ReturnType<typeof createChatDispatchService>, "scanWorkspace">;
+  collectionAutomationsOf(state: State): { handleWatcherEvents(events: readonly WatcherEvent[]): void };
 }
 
 export function createDesktopWorkspaceCallbacks<State>(
@@ -85,10 +78,9 @@ export function createDesktopWorkspaceCallbacks<State>(
   }
 
   const onWatcherBatch: NonNullable<WorkspaceActivityOptions["onWatcherBatch"]> = (workspace, events) => {
-    withWorkspaceAttachment(workspace, () =>
-      dependencies.pluginWorkspaceRuntimes.current(workspace.workspaceId)
-        ?.handleWatcherEvents(events),
-    );
+    withWorkspaceAttachment(workspace, (lease) => {
+      dependencies.collectionAutomationsOf(lease.state).handleWatcherEvents(events);
+    });
   };
 
   return { withWorkspaceAttachment, withWorkspaceAttachmentAsync, createRelayOnChange, onWatcherBatch };

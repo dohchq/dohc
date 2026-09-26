@@ -134,6 +134,9 @@ const OpenResultSchema = mutableStruct({
   // CRDT state. Only both absent means the session has neither source.
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
+  // The resumed lineage holds updates its workspace file may not. Always
+  // false when the lineage is absent.
+  unsettled: Schema.Boolean,
   artifactAssets: Schema.optionalKey(Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema))),
   seedContent: Schema.optionalKey(Schema.String),
   // The Yjs client the seed of seedContent is built under. The engine derives
@@ -141,6 +144,8 @@ const OpenResultSchema = mutableStruct({
   // same bytes and originates the same lineage.
   seedClientId: Schema.optionalKey(Schema.Int),
   lineageClaimId: Schema.NullOr(Schema.String),
+  // Whether this device claimed the lineage from its own unclaimed history.
+  lineageOriginatedHere: Schema.Boolean,
 });
 const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   seq: Schema.Int,
@@ -156,6 +161,7 @@ const RecordUpdateResultSchema = Schema.Union([mutableStruct({
 const ResyncResultSchema = mutableStruct({
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   lineageClaimId: Schema.NullOr(Schema.String),
+  lineageOriginatedHere: Schema.Boolean,
   recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
   artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),
 });

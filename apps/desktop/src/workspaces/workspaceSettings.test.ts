@@ -62,7 +62,7 @@ describe("workspace settings model", () => {
     // default the new group instead of silently resetting everything.
     const oldShape = {
       version: 1,
-      agents: { mcpAutoStart: true, defaultDriverId: "claude", defaultModel: null },
+      agents: { mcpAutoStart: true },
       sites: { defaultPreviewMode: "static" },
       privacy: { confirmExternalLinks: false },
     };
@@ -130,7 +130,7 @@ describe("workspace settings file store", () => {
       join(root, ".dohc", WORKSPACE_SETTINGS_FILE),
       JSON.stringify({
         version: 1,
-        agents: { mcpAutoStart: true, defaultDriverId: null, defaultModel: null },
+        agents: { mcpAutoStart: true },
         sites: { defaultPreviewMode: "auto" },
         privacy: { confirmExternalLinks: true },
       }),
@@ -278,7 +278,7 @@ describe("workspace settings file store", () => {
     // group this save does not touch.
     const repaired = {
       ...DEFAULT_WORKSPACE_SETTINGS,
-      agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultDriverId: "claude" },
+      sites: { defaultPreviewMode: "static" as const },
     };
     await writeWorkspaceSettingsFile(root, repaired);
 
@@ -291,7 +291,7 @@ describe("workspace settings file store", () => {
     });
     // What lands on disk is the repaired file plus the one edited control.
     const onDisk = await readWorkspaceSettingsFile(root);
-    expect(onDisk.settings.agents.defaultDriverId).toBe("claude");
+    expect(onDisk.settings.sites.defaultPreviewMode).toBe("static");
     expect(onDisk.settings.files.attachmentLocation).toBe("same-folder");
   });
 

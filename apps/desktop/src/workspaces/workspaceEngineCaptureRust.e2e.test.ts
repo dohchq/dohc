@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -343,6 +343,7 @@ it.skipIf(engine.missing)(
         agentId: "dohc-e2e-agent",
         onBehalfOf: "local",
         agentRunId: "run-rust-capture-author",
+        depth: 0,
       };
       await capture.setActiveAgentRun(activeRun);
       await writeFile(join(root, "agent-note.md"), "written by agent\n", "utf8");
@@ -353,10 +354,18 @@ it.skipIf(engine.missing)(
         1,
       );
       await capture.setActiveAgentRun(null);
-      expect(agentMoment?.author).toEqual({
-        kind: "agent",
-        ...activeRun,
-      });
+      // A run a person started names no depth: absent means 0.
+      const { depth: _personDepth, ...personRun } = activeRun;
+      expect(agentMoment?.author).toEqual({ kind: "agent", ...personRun });
+
+      // A run an automation started names its depth, and history keeps it.
+      const wokenRun = { ...activeRun, agentRunId: "run-rust-capture-woken", depth: 3 };
+      await capture.setActiveAgentRun(wokenRun);
+      await writeFile(join(root, "woken-note.md"), "written by a woken agent\n", "utf8");
+      capture.captureBatch([{ path: "woken-note.md", operation: "update" }]);
+      const [wokenMoment] = await waitForPathMoments(capture, "woken-note.md", 1);
+      await capture.setActiveAgentRun(null);
+      expect(wokenMoment?.author).toEqual({ kind: "agent", ...wokenRun });
 
       const draft = await capture.createVersion("Draft");
       await writeFile(join(root, "note.md"), draftText, "utf8");
@@ -790,8 +799,22 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // durably pending materialization job through the idempotent settle.
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
+        const contents = await readFile(absolute, "utf8").catch(async (error) => {
+          const diagnostic = {
+            path: absolute,
+            states: [...states],
+            errors: [...errors],
+            directory: await readdir(root).catch(
+              (listingError: NodeJS.ErrnoException) => listingError.code,
+            ),
+          };
+          if (error instanceof Error) {
+            error.message += `\nLocked-save recovery: ${JSON.stringify(diagnostic)}`;
+          }
+          throw error;
+        });
         if (
-          (await readFile(absolute, "utf8")) !== "base\n" &&
+          contents !== "base\n" &&
           states.includes("saved")
         ) {
           break;
@@ -1016,18 +1039,13 @@ it.skipIf(engine.missing)(
 
 // The engine's Markdown settlement rewrote unedited files on close —
 // mangling CRLF and trailing newlines, churning mtimes, and feeding the
-// watcher a settled write for content nobody changed. For a plugin README
-// that settled write is exactly what `PluginPipeline.handleWatcherEvents`
-// holds for approval on (main.ts wires the watcher's settled batch straight
-// into it), so merely opening and closing a plugin README disabled the
-// plugin. The engine now proves the session held nothing beyond the declared
-// seed and skips the write. This drives the full desktop feed — real daemon,
-// real capture, real fs watcher — and pins both halves: no edit means no
-// event for the pipeline to hold on; a real edit still produces one.
-// PluginPipeline.test.ts owns the other link (a README watcher event ->
-// disabled-pending-approval), so the two suites together pin the chain.
+// watcher a settled write for content nobody changed. The engine now proves
+// the session held nothing beyond the declared seed and skips the write. This
+// drives the full desktop feed — real daemon, real capture, real fs watcher —
+// and pins both halves: no edit means no watcher event; a real edit still
+// produces one.
 it.skipIf(engine.missing)(
-  "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
+  "a no-edit open and close of a README feeds the watcher nothing; a real edit still does",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-815-");
     const lifecycle = createRealDaemonLifecycle({
@@ -1047,15 +1065,15 @@ it.skipIf(engine.missing)(
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
-    const readmePath = "plugins/sample/README.md";
+    const readmePath = "notes/sample/README.md";
     // Both normalization victims at once: CRLF line endings and no trailing
     // newline. Any settle write would change these bytes.
-    const readme = "# Sample plugin\r\n\r\nOpened, never edited";
+    const readme = "# Sample\r\n\r\nOpened, never edited";
     const batches: WatcherEvent[][] = [];
     const readmeEvents = () =>
       batches.flat().filter((event) => event.path === readmePath);
     try {
-      await mkdir(join(root, "plugins", "sample"), { recursive: true });
+      await mkdir(join(root, "notes", "sample"), { recursive: true });
       await writeFile(join(root, readmePath), readme, "utf8");
       await waitForPathMoments(capture, readmePath, 1);
       const watch = startWorkspaceWatch(workspace, {

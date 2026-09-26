@@ -32,7 +32,7 @@ use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
-    IngestReason, ManifestEntry, NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds,
+    IngestReason, ManifestEntry, NativeWatcher, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
@@ -631,6 +631,29 @@ impl RestartTracker {
     }
 }
 
+/// The current files layer's hash gauge. A restarted layer replaces it, so its
+/// count can go down; readers look for movement, not growth.
+#[derive(Clone, Default)]
+pub(crate) struct ScanGauge(Arc<Mutex<Option<Arc<PoolGauge>>>>);
+
+impl ScanGauge {
+    fn set(&self, gauge: &Arc<PoolGauge>) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(gauge));
+    }
+
+    /// Files the current layer has hashed. It moves while a scan runs.
+    pub(crate) fn hashed(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |gauge| gauge.hashed() as u64)
+    }
+}
+
 /// Observable driver state for the E-shard `watcher.status` RPC and tests.
 ///
 /// One atomic word, deliberately: with separate atomics per flag, no
@@ -901,6 +924,7 @@ pub(crate) struct CaptureDriver {
     /// restart before it may apply again.
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     apply_probe: Option<CaptureApplyProbe>,
+    scan: ScanGauge,
 }
 
 /// A dropped-but-untaken driver must never keep running: cancel on Drop (the
@@ -934,6 +958,8 @@ impl CaptureDriver {
         let (open_ready_tx, open_ready) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let scan = ScanGauge::default();
+        let drive_scan = scan.clone();
         let driver_probe = apply_probe.clone();
         let drive_cancel = cancel.clone();
         let drive_status = Arc::clone(&status);
@@ -943,6 +969,7 @@ impl CaptureDriver {
             let mut env = RealEnv {
                 root,
                 actor,
+                lease_releases_seen: leases.release_generation(&workspace_id),
                 workspace_id,
                 leases,
                 status: Arc::clone(&drive_status),
@@ -954,6 +981,7 @@ impl CaptureDriver {
                 refresh_epoch: drive_refresh_epoch,
                 events,
                 apply_probe,
+                scan: drive_scan,
             };
             drive_loop(
                 &mut env,
@@ -973,7 +1001,13 @@ impl CaptureDriver {
             open_ready,
             refresh_epoch,
             apply_probe: driver_probe,
+            scan,
         }
+    }
+
+    /// The files layer's hash gauge, for a caller waiting on the startup scan.
+    pub(crate) fn scan_gauge(&self) -> ScanGauge {
+        self.scan.clone()
     }
 
     /// A clonable handle for `capture.flush`: the RPC layer clones it out of
@@ -1092,11 +1126,14 @@ impl FilesLayer {
         seed: Option<(ScanManifest, ScanGeneration)>,
         policy_fingerprint: Option<u64>,
         refresh_epoch: u64,
+        scan: &ScanGauge,
     ) -> Result<(FilesLayer, RootBoundRun), FilesError> {
         let captured_root = bind_capture_root(root)?;
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
                 .await?;
+        // Before the watcher's initial scan, so the scan's count is readable.
+        scan.set(files.gauge());
         let handle = files.handle();
         match NativeWatcher::start(root.to_path_buf(), handle, cancel.child_token()).await {
             Ok(start) => Ok((
@@ -1452,9 +1489,12 @@ const MAX_FLUSH_CYCLES: u32 = 32;
 /// What one `capture.flush` could actually promise.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FlushOutcome {
-    /// The reconcile loop reached converged: every change visible on disk at
-    /// entry has been captured and acknowledged. False means the cycle bound
-    /// was hit, the layer is down, or teardown raced the flush.
+    /// Capture is quiet: the reconcile loop reached converged, and every change
+    /// visible on disk at entry has been captured, acknowledged, or deferred
+    /// to a live document session. It does not mean every edit is on disk: a
+    /// live Y.Doc's edits can still be on their way, and the session's settle
+    /// or close writes them. False means the cycle bound was hit, the layer is
+    /// down, or teardown raced the flush.
     pub(crate) settled: bool,
     /// The files layer was up when the flush was answered.
     pub(crate) running: bool,
@@ -1798,6 +1838,9 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     leases: LeaseRegistry,
+    /// The lease release count at the last check. A capture deferred to a
+    /// live session is offered again once this moves.
+    lease_releases_seen: u64,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
@@ -1807,6 +1850,7 @@ struct RealEnv {
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     events: EngineEvents,
     apply_probe: Option<CaptureApplyProbe>,
+    scan: ScanGauge,
 }
 
 impl RealEnv {
@@ -1909,6 +1953,7 @@ impl DriverEnv for RealEnv {
             seed.into_scan_seed(),
             fingerprint_before_seed,
             refresh_epoch,
+            &self.scan,
         )
         .await
         .map_err(|_| ())?;
@@ -2062,8 +2107,15 @@ impl DriverEnv for RealEnv {
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
-        let run =
-            reconcile_if_dirty_bound(&self.root, &layer.files.handle(), cancel.child_token()).await;
+        let files = layer.files.handle();
+        offer_deferred_after_release(
+            &self.leases,
+            &self.workspace_id,
+            &mut self.lease_releases_seen,
+            &files,
+        )
+        .await;
+        let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
             Ok(RootBoundRun {
@@ -2216,14 +2268,20 @@ pub(crate) async fn reconcile_full_for_switch(
                 events,
                 apply_probe: None,
             };
-            if apply_bound_run_with_handle(
+            let applied = apply_bound_run_with_handle(
                 context,
                 &handle,
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await
-            {
+            .await;
+            // A new file an editor still holds is not recorded yet, so the
+            // switch would leave it behind.
+            let deferred = match handle.stats().await {
+                Ok(stats) => stats.deferred > 0,
+                Err(_) => true,
+            };
+            if applied && !deferred {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2300,6 +2358,8 @@ struct CaptureThreadOutcome {
     result: CaptureApplyResult,
     policy_held: bool,
     collections: Option<Result<Vec<String>, RuntimeError>>,
+    /// Automation claims the captures and the reconciliation committed.
+    automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
@@ -2416,7 +2476,10 @@ async fn apply_bound_run_with_handle(
                                     self_writes: collection_self_writes,
                                     provenance: collection_provenance,
                                 });
-                                let _ = done_tx.send(sink.reconcile_collections());
+                                let reconciled = sink.reconcile_collections();
+                                let _ = done_tx.send(
+                                    reconciled.map(|paths| (paths, sink.take_automation_claims())),
+                                );
                             });
                         match thread {
                             Ok(joiner) => {
@@ -2430,11 +2493,14 @@ async fn apply_bound_run_with_handle(
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok(Vec::new()),
+                    )) => Ok((Vec::new(), Vec::new())),
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok(paths) => paths,
+                    Ok((paths, claims)) => {
+                        crate::events::emit_automation_claimed(&events, workspace_id, &claims);
+                        paths
+                    }
                     Err(_) => {
                         status.request_collection_reconcile();
                         status.mark_degraded();
@@ -2578,6 +2644,7 @@ async fn apply_bound_run_with_handle(
                 result,
                 policy_held: sink.policy_held(),
                 collections,
+                automation_claims: sink.take_automation_claims(),
             });
         });
     let applied: Option<CaptureThreadOutcome> = match apply_thread {
@@ -2593,6 +2660,7 @@ async fn apply_bound_run_with_handle(
         mut result,
         policy_held: sink_policy_held,
         collections: collection_result,
+        automation_claims,
     }) = applied
     else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
@@ -2603,6 +2671,9 @@ async fn apply_bound_run_with_handle(
         ack_all_failed(files, plan, status).await;
         return false;
     };
+    // Claims are committed whatever else this pass decides: wake the
+    // executors now.
+    crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
     let collection_paths = match collection_result {
         Some(Ok(paths)) => paths,
         Some(Err(_)) => {
@@ -2812,6 +2883,28 @@ async fn materialize_ydoc_recoveries(
         .collect())
 }
 
+/// A path deferred to a live document session is not in the manifest yet, so
+/// the next full scan offers it again. That scan must happen once the session
+/// lets go, even when nothing on disk changes: a new file closed without an
+/// edit is otherwise never captured. Asks for it when a lease on this
+/// workspace was released since the last check and the last run deferred
+/// something.
+async fn offer_deferred_after_release(
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    releases_seen: &mut u64,
+    files: &FilesHandle,
+) {
+    let releases = leases.release_generation(workspace_id);
+    if releases == *releases_seen {
+        return;
+    }
+    *releases_seen = releases;
+    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0) {
+        files.request_rescan();
+    }
+}
+
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op
 /// marked failed, clearing the controller's `outstanding` latch while keeping
 /// the paths dirty for the next cycle's retry.
@@ -2822,6 +2915,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         captured: Vec::new(),
         not_owned_paths: Vec::new(),
         failed_applies: failed,
+        deferred_paths: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,
     };
@@ -2835,6 +2929,9 @@ mod root_bound_run_tests;
 
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests;
+
+#[cfg(test)]
+mod live_session_deferral_tests;
 
 #[cfg(test)]
 mod selected_recovery_replay_tests;

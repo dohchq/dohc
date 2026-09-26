@@ -1,5 +1,9 @@
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
+import { RecordButtonsRow } from "./collections/RecordButtonsRow";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   ENGINE_CHIP,
   EngineMayHoldDocumentNotice,
   READ_ONLY_TRANSITION_CHIP,
@@ -36,12 +40,14 @@ import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
-  applyFrontmatter,
-  orderFrontmatter,
-  parseFrontmatter,
-} from "./markdown/frontmatter";
+  frontmatterBlockFor,
+  leadingFrontmatter,
+  writtenFrontmatterKeys,
+} from "@dohc/ydoc-projection/frontmatter";
+import { orderFrontmatter } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
@@ -52,6 +58,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -61,6 +68,9 @@ import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from ".
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
+import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
+import { dirnameOf } from "./path";
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -97,9 +107,6 @@ const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
-
-const RAW_FRONTMATTER_RE =
-  /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
 
 type MarkdownEditorComponent = ForwardRefExoticComponent<
   MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
@@ -141,13 +148,11 @@ function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
   body: string;
 } {
-  const match = RAW_FRONTMATTER_RE.exec(markdown);
-  if (!match) return { frontmatter: null, body: markdown };
-  const parsed = parseFrontmatter(markdown);
-  if (parsed.body === markdown) {
-    return { frontmatter: null, body: markdown };
-  }
-  return { frontmatter: match[1] ?? "", body: parsed.body };
+  // A block that does not read stays out of the body too, as the engine keeps
+  // it, so the editor never renders it as Markdown.
+  const block = leadingFrontmatter(markdown);
+  if (!block) return { frontmatter: null, body: markdown };
+  return { frontmatter: block.text, body: markdown.slice(block.text.length) };
 }
 
 export function markdownEditorBody(markdown: string): string {
@@ -177,16 +182,30 @@ export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): s
 // not-in-version refusal — can show the same recovery.
 const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. Copy your set-aside edit to keep it.";
+const REPLACED_WITH_SET_ASIDE_EDIT_NOTICE =
+  "Another file replaced this file while you had it open. Copy your set-aside edit to keep it.";
 
-function DeletedWhileEditingNotice(props: { hasSetAsideEdit: boolean }) {
+function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): string {
+  if (cause === "object-changed") {
+    return hasSetAsideEdit
+      ? REPLACED_WITH_SET_ASIDE_EDIT_NOTICE
+      : REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
+  }
+  return hasSetAsideEdit
+    ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+    : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
+}
+
+function DeletedWhileEditingNotice(props: {
+  cause: DocumentGoneCause | null;
+  hasSetAsideEdit: boolean;
+}) {
   return (
     <div
       data-testid="deleted-while-editing-notice"
       className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
     >
-      {props.hasSetAsideEdit
-        ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
-        : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE}
+      {goneNotice(props.cause, props.hasSetAsideEdit)}
     </div>
   );
 }
@@ -262,6 +281,10 @@ export function MarkdownView(props: {
   // continuously means the inspector already holds the answer. The setter bails
   // out when the value is unchanged, so this costs a comparison per render.
   onPendingDraftChange?: (pending: boolean) => void;
+  // A record's Button fields report here: a failed run with Try again, a
+  // finished one as a fading notice. Absent, the record view shows no buttons.
+  onButtonError?: ReportButtonError;
+  onButtonNotice?: (message: string) => void;
   // The engine open, opened by the inspector and passed down. It deliberately
   // does not live here: this component is unmounted by the inspector's own
   // loading/error branch, and a version switch that removes the file makes the
@@ -734,12 +757,23 @@ export function MarkdownView(props: {
     const editorBody = wysiwygRef.current?.getMarkdown();
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
-    const liveMeta = engine.doc
-      ? (Object.fromEntries(
-          engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-        ) as Record<string, unknown>)
-      : parseFrontmatter(latestDraft.current).meta;
-    return applyFrontmatter(body, orderFrontmatter(liveMeta));
+    if (!engine.doc) {
+      return mergeMarkdownEditorBody(latestDraft.current, body);
+    }
+    const liveMeta = Object.fromEntries(
+      engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+    ) as Record<string, unknown>;
+    // The frontmatter text the settle keeps, so a copy matches the file.
+    const meta = engine.doc.getMap("meta");
+    const written = writtenFrontmatterKeys(engine.doc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const block = frontmatterBlockFor(
+      orderFrontmatter(liveMeta),
+      meta.get("dohcFrontmatterSource"),
+      body,
+      "\n",
+      written,
+    );
+    return `${block}${body}`;
   };
 
   const hasSetAsideEdit =
@@ -831,6 +865,9 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  const recordButtons = props.onButtonError && props.onButtonNotice ? (
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} />
+  ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
     // discarded — the store outlives this view and the refusal screen renders
@@ -856,6 +893,14 @@ export function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  // A record's properties show the ⚡ of the automations that set them. An
+  // editable file in a folder asks; main answers none for a folder that is
+  // not a document Collection. A shared file's automations run on its
+  // owner's computer.
+  const parentFolder = dirnameOf(props.path);
+  const fieldMarks = useCollectionFieldMarks(
+    readOnly || parentFolder === "" || isSharedWithMePath(props.path) ? null : parentFolder,
+  );
   const switchReadPendingRef = useRef(props.switchReadPending);
   switchReadPendingRef.current = props.switchReadPending;
   // The single question all three write paths ask. Both refs, because they
@@ -1302,7 +1347,9 @@ export function MarkdownView(props: {
         engine.saveState === "saving" ||
         engine.saveState === "deleted"
         ? engine.saveState
-        : "error",
+        : engine.saveState === "object-changed"
+          ? "deleted"
+          : "error",
     );
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
@@ -1769,9 +1816,17 @@ export function MarkdownView(props: {
   // to the renamed-away old path (ENOENT, swallowed) and the draft is lost.
   // Flushing through here lands the keystrokes while the path still exists.
   const { registerDraftFlush } = props;
+  const exitFlush = useRef<DraftFlush>(() => Promise.resolve());
+  const exitCapturedDraft = useRef<{ revision: number; text: string } | null>(null);
+  const captureStalledExit = useRef(() => {});
+  captureStalledExit.current = () => {
+    props.localBuffer.materializePendingDraft();
+    capturedConflictDraft.current = null;
+    captureFailedFlush();
+    exitCapturedDraft.current = { revision: draftRevision.current, text: latestDraft.current };
+  };
   useEffect(() => {
-    if (!registerDraftFlush) return;
-    registerDraftFlush((options) => {
+    const flushDraft: DraftFlush = (options) => {
       if (engineModeRef.current) {
         return flushEngineUpdatesRef.current();
       }
@@ -1794,6 +1849,7 @@ export function MarkdownView(props: {
       // Arming and reading the tail are one synchronous step, so no writer
       // can slip between them.
       flushBarrier.current = true;
+      const startedAfterUnmount = unmounted.current;
       props.localBuffer.materializePendingDraft();
       const localWritePending = writersLive.current > 0;
       const flush = (async () => {
@@ -1807,6 +1863,7 @@ export function MarkdownView(props: {
           }
           while (
             (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
+            !startedAfterUnmount &&
             !writesBlocked() &&
             !openingRef.current
           ) {
@@ -1816,6 +1873,7 @@ export function MarkdownView(props: {
             }
             await writeDraftNow({ rejectOnError: true, fromFlush: true });
           }
+          if (options?.captureOnFailure && unsavedDraft.current) captureFailedFlush();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
@@ -1829,12 +1887,22 @@ export function MarkdownView(props: {
       })();
       flushInFlight.current = flush;
       return flush;
-    });
-    return () => registerDraftFlush(null);
+    };
+    registerDraftFlush?.(flushDraft);
+    exitFlush.current = flushDraft;
+    return () => registerDraftFlush?.(null);
     // writeDraftNow and this flush read mutable state through refs plus
     // per-mount-stable props, so the first closure stays correct for the mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  useEffect(() => registerPendingEditorDraft(
+    () => !engineModeRef.current && (unsavedDraft.current || writersLive.current > 0) &&
+      (exitCapturedDraft.current?.revision !== draftRevision.current ||
+        exitCapturedDraft.current.text !== latestDraft.current),
+    options => exitFlush.current(options),
+    () => captureStalledExit.current(),
+  ), []);
 
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
@@ -1842,7 +1910,10 @@ export function MarkdownView(props: {
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
-        <DeletedWhileEditingNotice hasSetAsideEdit={hasSetAsideEdit} />
+        <DeletedWhileEditingNotice
+          cause={engine.goneCause}
+          hasSetAsideEdit={hasSetAsideEdit}
+        />
       ) : null}
       <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
     </>
@@ -1884,8 +1955,10 @@ export function MarkdownView(props: {
                 data-testid="markdown-save-state"
                 data-state={engineChipState}
                 title={
-                  engineChipState === "deleted" && hasSetAsideEdit
-                    ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+                  (engineChipState === "deleted" ||
+                    engineChipState === "object-changed") &&
+                  hasSetAsideEdit
+                    ? goneNotice(engine.goneCause, true)
                     : engineChipState === "error" && engine.saveError
                       ? engine.saveError
                       : engineChip.title
@@ -1981,11 +2054,13 @@ export function MarkdownView(props: {
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
+            {recordButtons}
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} />
+                <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
+            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState === "saved"} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2203,11 +2278,13 @@ export function MarkdownView(props: {
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
+            {recordButtons}
             {!readOnly ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2289,11 +2366,13 @@ export function MarkdownView(props: {
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly || opening}
             />
+            {recordButtons}
             {!readOnly && !opening ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
           </div>
           <div
             ref={readDocumentRef}

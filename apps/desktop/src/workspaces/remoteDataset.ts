@@ -6,6 +6,7 @@ import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, 
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { AppBackendFile } from "@dohc/security-contract/app-backend";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
+import type { RecoveryImportReceipt } from "@dohc/app-backend-runtime/recovery-install";
 import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
@@ -234,19 +235,20 @@ export function createRemoteDatasetTransferTarget(input: {
   workspaceId: string; datasetId: string; origin: string; credentials: CloudCredentials; credentialGeneration: number;
   currentCredentialGeneration(): number; signal: AbortSignal; assertCurrent(): void;
   relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
-}): DatasetTransferTarget & { status(transferId: string): Promise<DatasetTransferReceipt | null> } {
+}): DatasetTransferTarget & { status(transferId: string): Promise<RecoveryImportReceipt | null> } {
   const origin = new URL(input.origin);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("Choose a configured sharing server.");
   if (!input.credentials.relayUrl || new URL(input.credentials.relayUrl).origin !== origin.origin) throw new Error("Reconnect to this Collection's sharing server before transferring it.");
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration, currentGeneration: input.currentCredentialGeneration,
     assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
   const path = (transferId: string) => `/sync/${encodeURIComponent(input.workspaceId)}/datasets/${identity.parse(input.datasetId)}/imports/${identity.parse(transferId)}`;
-  const receiptSchema = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: CursorSchema, targetCursor: CursorSchema }).strict();
-  const receipt = (value: unknown, transferId: string): DatasetTransferReceipt | null => {
+  const receiptSchema = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: CursorSchema, targetCursor: CursorSchema.optional() }).strict();
+  const receipt = (value: unknown, transferId: string): RecoveryImportReceipt | null => {
     if (value === null) return null;
     const result = receiptSchema.parse(value);
-    if (result.transferId !== transferId || result.sourceCursor.workspaceId !== input.workspaceId || result.targetCursor.workspaceId !== input.workspaceId ||
-      result.sourceCursor.datasetId !== input.datasetId || result.targetCursor.datasetId !== input.datasetId) throw new Error("The sharing server returned another transfer receipt.");
+    if (result.transferId !== transferId || result.sourceCursor.workspaceId !== input.workspaceId ||
+      result.sourceCursor.datasetId !== input.datasetId || (result.targetCursor &&
+      (result.targetCursor.workspaceId !== input.workspaceId || result.targetCursor.datasetId !== input.datasetId))) throw new Error("The sharing server returned another transfer receipt.");
     return result;
   };
   const status = async (transferId: string, signal = input.signal) => receipt(await session.run(() => input.relayStream(input.credentials,
@@ -256,7 +258,14 @@ export function createRemoteDatasetTransferTarget(input: {
       const signal = value.signal ? AbortSignal.any([input.signal, value.signal]) : input.signal;
       signal.throwIfAborted();
       if (value.sourceCursor.workspaceId !== input.workspaceId || value.sourceCursor.datasetId !== input.datasetId) throw new Error("This transfer belongs to another Collection.");
-      const confirmed = await status(value.transferId, signal);
+      const completed = (result: RecoveryImportReceipt | null): DatasetTransferReceipt | null => {
+        if (!result) return null;
+        if (result.manifestSha256 !== value.manifestSha256 || JSON.stringify(result.sourceCursor) !== JSON.stringify(CursorSchema.parse(value.sourceCursor))) {
+          throw new Error("The sharing server returned another transfer receipt.");
+        }
+        return result.targetCursor ? { ...result, targetCursor: result.targetCursor } : null;
+      };
+      const confirmed = completed(await status(value.transferId, signal));
       if (confirmed) return confirmed;
       const chunks = value.stream[Symbol.asyncIterator]();
       const body = new ReadableStream<Uint8Array>({ async pull(controller) { try { signal.throwIfAborted(); session.assertCurrent(); const item = await chunks.next(); if (item.done) controller.close(); else controller.enqueue(item.value); } catch (error) { controller.error(error); } }, async cancel() { await chunks.return?.(); } });
@@ -265,12 +274,12 @@ export function createRemoteDatasetTransferTarget(input: {
         headers: { "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": value.manifestSha256,
           "x-dohc-dataset-source-cursor": JSON.stringify(value.sourceCursor) }, body };
       const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), request));
-      const confirmed = receipt(result, value.transferId);
+      const confirmed = completed(receipt(result, value.transferId));
       if (!confirmed) throw new Error("The sharing server did not confirm this transfer.");
       return confirmed;
       } catch (error) {
         signal.throwIfAborted(); session.assertCurrent();
-        const confirmed = await status(value.transferId, signal).catch(() => null);
+        const confirmed = completed(await status(value.transferId, signal).catch(() => null));
         if (confirmed) return confirmed;
         throw error;
       } finally { await chunks.return?.(); }

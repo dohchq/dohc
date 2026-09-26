@@ -7,6 +7,7 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
+  decodeAutomationGroupHandover,
   decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
@@ -178,6 +179,22 @@ describe("workspace wire schemas", () => {
         groups: null,
       }),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes a button field definition", () => {
+    const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+      path: "invoices",
+      status: "valid",
+      reasons: [],
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "Mark paid", type: "button" }],
+        views: [],
+      },
+      recordCount: 0,
+    });
+    expect(result.schema.fields).toEqual([{ name: "Mark paid", type: "button" }]);
   });
 
   it("accepts the shared full collection reason-code set", () => {
@@ -546,7 +563,7 @@ describe("workspace wire schemas", () => {
 describe("automations wire schemas", () => {
   const summary = {
     claimId: "claim-1",
-    automationId: "plugin:hello-plugin/triage",
+    automationId: "collection:tasks#triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
@@ -596,12 +613,58 @@ describe("automations wire schemas", () => {
         unsubscribed: false,
       }),
     ).toEqual({ unsubscribed: false });
+    const handover = {
+      floorMs: 10,
+      automations: [
+        {
+          automationId: "collection:Trip#task",
+          sinceMs: 10,
+          decided: [{ messageId: "m1", createdAtMs: 20 }],
+        },
+      ],
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { watchedGeneration: 3, handover }),
+    ).toEqual({ watchedGeneration: 3, handover });
+    expect(decodeAutomationGroupHandover(handover)).toEqual(handover);
+    expect(() =>
+      decodeAutomationGroupHandover({
+        ...handover,
+        automations: [{ ...handover.automations[0], decided: [{ messageId: "" }] }],
+      }),
+    ).toThrow();
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsWatchGroups, {
+        needsHandover: true,
+      }),
+    ).toEqual({ needsHandover: true });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsGroupSkips, { aheadAtMs: 5, lateAtMs: null }),
+    ).toEqual({ aheadAtMs: 5, lateAtMs: null });
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
     ).toEqual(claim);
+  });
+
+  it("decodes a Group message claim, whose message has no record and may carry its body truncated", () => {
+    const message = {
+      ...claim,
+      trigger: { key: "message:m1" },
+      recordId: null,
+      change: {
+        ...claim.change,
+        kind: "message",
+        fields: [],
+        message: {
+          id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
+          authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: { truncated: true, bytes: 70_000 },
+        },
+      },
+    };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, message)).toEqual(message);
   });
 
   it("decodes null from a drained claimNext", () => {
@@ -629,9 +692,35 @@ describe("automations wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
     ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary),
+    ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 3 }),
+    ).toEqual({ applied: 3 });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 1.5 }),
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes a removed record's claim keyed by its moment", () => {
+    const removed = {
+      ...claim,
+      trigger: { momentOrder: 42 },
+      change: {
+        ...claim.change,
+        kind: "removed",
+        fields: [
+          { field: "status", historyId: null, previous: { value: "done" }, next: null },
+        ],
+      },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, removed),
+    ).toEqual(removed);
   });
 
   it("decodes the claim history", () => {
@@ -648,7 +737,7 @@ describe("automations wire schemas", () => {
 
   it("decodes the failure listing and refuses a row without a generation", () => {
     const failure = {
-      automationId: "plugin:hello-plugin/triage",
+      automationId: "collection:tasks#triage",
       claimId: "claim-1",
       chainStopped: true,
       error: "chain-stopped",
@@ -668,10 +757,104 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
         failures: [
-          { automationId: "plugin:hello-plugin/triage", claimId: "claim-1", error: "x" },
+          { automationId: "collection:tasks#triage", claimId: "claim-1", error: "x" },
         ],
       }),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes keyed claims for a message, a press, and a due time", () => {
+    const keyed = (key: string, kind: string, recordId: string | null) => ({
+      ...claim,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key },
+      recordId,
+      change: { ...claim.change, kind, fields: [], fieldsOmitted: 0 },
+    });
+    const pressed = keyed("press:press-1", "button", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const due = keyed("schedule:1790000000000", "schedule", null);
+    const facts = {
+      id: "m1",
+      threadId: "t1",
+      groupId: "trip",
+      lane: "chat",
+      authorKind: "human",
+      authorDisplayName: "Ada",
+      createdAtMs: 20,
+      body: "/task Buy tickets",
+    };
+    const withMessage = (fields: Record<string, unknown>) => ({
+      ...keyed("message:m1", "message", null),
+      change: { ...keyed("message:m1", "message", null).change, message: fields },
+    });
+    const message = withMessage(facts);
+    const long = withMessage({
+      ...facts,
+      body: { truncated: true, bytes: 70_000 },
+      parentMessageId: "m0",
+      authorOwnerDisplayName: "Ice",
+      authorUserId: "ada",
+    });
+    for (const served of [pressed, due, message, long]) {
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, served)).toEqual(served);
+    }
+    const { id: _id, ...withoutId } = facts;
+    for (const malformed of [
+      { ...due, trigger: { key: "" } },
+      keyed("message:m1", "message", null),
+      withMessage({}),
+      withMessage(withoutId),
+      withMessage({ ...facts, authorKind: "robot" }),
+      withMessage({ ...facts, lane: "posts-and-chat" }),
+      withMessage({ ...facts, body: { truncated: false, bytes: 1 } }),
+      withMessage({ ...facts, createdAtMs: "20" }),
+      withMessage({ ...facts, extra: true }),
+      { ...pressed, change: { ...pressed.change, message: facts } },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes a press answer: its claim, or busy with none", () => {
+    const pressed = {
+      ...summary,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key: "press:press-1" },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada" },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
+    ).toEqual({ busy: false, claim: pressed });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: true, claim: null }),
+    ).toEqual({ busy: true, claim: null });
+    for (const malformed of [{ busy: true, claim: pressed }, { busy: false, claim: null }, { claim: pressed }]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, malformed)).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes a schedule step and the schedule marks", () => {
+    const mark = { automationId: "collection:Invoices#weekday-report", scheduleHash: "h1", throughMs: 3_000 };
+    const due = {
+      ...summary,
+      automationId: mark.automationId,
+      trigger: { key: "schedule:2000" },
+      recordId: null,
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),
+    ).toEqual({ claims: [due], mark });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsScheduleMarks, { marks: [mark] }),
+    ).toEqual({ marks: [mark] });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
+    ).toThrow(ProtocolShapeError);
+    const runNow = { ...due, trigger: { key: "run-now:schedule-skipped:ws:collection:Invoices#weekday-report:2000" } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: runNow })).toEqual({ claim: runNow });
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: null })).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, {})).toThrow(ProtocolShapeError);
   });
 
   it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {

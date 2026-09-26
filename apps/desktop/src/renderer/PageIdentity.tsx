@@ -1,6 +1,13 @@
+import {
+  frontmatterEditsRefused,
+  markdownFrontmatterEditsRefused,
+  setFrontmatterValue,
+  patchFrontmatter,
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
+} from "@dohc/ydoc-projection/frontmatter";
 import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import {
   applyFrontmatter,
@@ -44,9 +51,56 @@ export type PageIdentityProps = (
   // Read-only surfaces (truncated / shared views) show the identity but never
   // edit it.
   readOnly?: boolean;
-  // Enter / ArrowDown in the title moves focus into the body editor's start.
+  // Enter, or ArrowDown on the title's last line, moves focus into the body
+  // editor's start.
   onEnterBody?: () => void;
 };
+
+// A title is one line, so pasted or dropped line breaks become spaces.
+function oneLine(text: string): string {
+  return text.replace(/[\r\n]+/g, " ");
+}
+
+const MIRRORED_STYLES = [
+  "boxSizing", "width", "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth",
+  "fontFamily", "fontSize", "fontStyle", "fontWeight", "fontStretch", "fontFeatureSettings",
+  "fontVariationSettings", "letterSpacing", "wordSpacing", "lineHeight", "textTransform", "textIndent",
+] as const;
+
+// Whether the caret is on the title's last visual line, where ArrowDown
+// moves on to the body. A textarea gives no geometry for its text, so a
+// hidden copy with the same width and font lays it out again: the text after
+// the caret stays on one line only when the caret is on the last one.
+// Mixed-direction text splits one line into several boxes, so this compares
+// where the boxes sit, not how many there are.
+function caretOnLastLine(field: HTMLTextAreaElement): boolean {
+  const rest = field.value.slice(field.selectionEnd);
+  if (rest === "") return true;
+  const style = getComputedStyle(field);
+  const mirror = document.createElement("div");
+  for (const name of MIRRORED_STYLES) mirror.style[name] = style[name];
+  Object.assign(mirror.style, {
+    position: "absolute",
+    visibility: "hidden",
+    top: "0",
+    left: "0",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "break-word",
+  });
+  mirror.textContent = field.value.slice(0, field.selectionEnd);
+  const after = document.createElement("span");
+  after.textContent = rest;
+  mirror.append(after);
+  document.body.append(mirror);
+  try {
+    // A DOM without layout reports no boxes; that counts as one line.
+    const boxes = [...after.getClientRects()];
+    const top = Math.min(...boxes.map((box) => box.top));
+    return boxes.every((box) => box.top < top + box.height / 2);
+  } finally {
+    mirror.remove();
+  }
+}
 
 function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
   return Object.fromEntries(map.entries());
@@ -74,6 +128,8 @@ export function PageIdentity(props: PageIdentityProps) {
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
+  const [editRefused, setEditRefused] = useState(false);
+  useEffect(() => setEditRefused(false), [ydoc, body]);
   const icon =
     typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
 
@@ -81,19 +137,23 @@ export function PageIdentity(props: PageIdentityProps) {
   // there is no second save cycle: a Y.Map transaction for collab, or a
   // frontmatter rewrite handed back through onChange for local markdown.
   function writeField(key: "title" | "icon", value: string | undefined) {
-    if (readOnly) return;
-    if (ydoc) {
-      ydoc.transact(() => {
-        const map = ydoc.getMap(FRONTMATTER_FIELD);
-        if (value === undefined || value === "") map.delete(key);
-        else map.set(key, value);
-      });
-      return;
+    // An unsplittable block cannot change one property without
+    // rewriting the others, so the write is refused before it starts.
+    if (readOnly || (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body))) return;
+    try {
+      if (ydoc) {
+        if (value === undefined || value === "") patchFrontmatter(ydoc, new Map(), [key]);
+        else setFrontmatterValue(ydoc, key, value);
+      } else {
+        const next = { ...parseFrontmatter(body).meta };
+        if (value === undefined || value === "") delete next[key];
+        else next[key] = value;
+        props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
+      }
+      setEditRefused(false);
+    } catch {
+      setEditRefused(true);
     }
-    const next = { ...parseFrontmatter(body).meta };
-    if (value === undefined || value === "") delete next[key];
-    else next[key] = value;
-    props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
   }
 
   // The title keeps its own draft so typing stays smooth; it re-syncs from
@@ -101,6 +161,14 @@ export function PageIdentity(props: PageIdentityProps) {
   // (mirrors how PropertiesPanel avoids a dirty-loop with the editor).
   const [titleDraft, setTitleDraft] = useState(title);
   const titleFocused = useRef(false);
+  const titleRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleCaret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const caret = titleCaret.current;
+    if (caret === null) return;
+    titleCaret.current = null;
+    titleRef.current?.setSelectionRange(caret, caret);
+  });
   useEffect(() => {
     if (!titleFocused.current) setTitleDraft(title);
   }, [title]);
@@ -160,6 +228,7 @@ export function PageIdentity(props: PageIdentityProps) {
   return (
     <div className="dohc-page-identity group" data-testid="page-identity">
       <div className="dohc-page-identity__inner">
+        {editRefused ? <span role="status" className="dohc-page-properties__flag" title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
         <div className="dohc-page-identity__icon-row">
           {icon ? (
             <button
@@ -236,9 +305,15 @@ export function PageIdentity(props: PageIdentityProps) {
             </div>
           ) : null}
         </div>
-        <input
+        {/* A textarea so a long title wraps instead of clipping in a narrow
+            pane. The title stays one line: Enter, and ArrowDown on its last
+            visual line, move to the body, and pasted line breaks become
+            spaces. */}
+        <textarea
+          ref={titleRef}
           data-testid="page-title"
           aria-label="Page title"
+          rows={1}
           value={titleDraft}
           placeholder={props.filenameStem}
           spellCheck={false}
@@ -251,7 +326,13 @@ export function PageIdentity(props: PageIdentityProps) {
             setTitleDraft(title);
           }}
           onChange={(event) => {
-            const next = event.target.value;
+            const field = event.target;
+            const next = oneLine(field.value);
+            // Replacing a line break moves the caret to the end; keep it
+            // after the text that was typed or pasted.
+            if (next !== field.value) {
+              titleCaret.current = oneLine(field.value.slice(0, field.selectionEnd)).length;
+            }
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
           }}
@@ -259,7 +340,11 @@ export function PageIdentity(props: PageIdentityProps) {
             // During IME composition, Enter and ArrowDown pick a candidate.
             // Some browsers mark that key only with keyCode 229.
             if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-            if (event.key === "Enter" || event.key === "ArrowDown") {
+            const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+            if (
+              event.key === "Enter" ||
+              (event.key === "ArrowDown" && plain && caretOnLastLine(event.currentTarget))
+            ) {
               event.preventDefault();
               props.onEnterBody?.();
             }

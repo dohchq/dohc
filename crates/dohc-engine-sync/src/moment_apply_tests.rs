@@ -49,6 +49,199 @@ fn text_sha(text: &str) -> String {
 }
 
 #[test]
+fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
+    for kind in [ChangeActorKind::Agent, ChangeActorKind::Automation] {
+        for principal in [None, Some("owner")] {
+            let (_source_scratch, mut source) = test_store();
+            let (_peer_scratch, mut peer) = test_store();
+            crate::adopt_join_identity(
+                &mut source,
+                "ws",
+                "source",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .expect("source identity");
+            let author = moment_author_json(
+                Some("creator"),
+                Some(&ChangeAttribution {
+                    actor_kind: kind,
+                    on_behalf_of: principal.map(str::to_owned),
+                    depth: if kind == ChangeActorKind::Automation {
+                        4
+                    } else {
+                        0
+                    },
+                }),
+            )
+            .expect("declared creator");
+            VersionedTextStore::new(&mut source)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "record-object".to_owned(),
+                        path: "tasks/record.md".to_owned(),
+                        text: "created by a live document".to_owned(),
+                        moment_id: "created-moment".to_owned(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: Some(author.clone()),
+                        now_ms: 2_000,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("source moment");
+            source
+                .write_with(&NoFaults, |tx| {
+                    crate::outbound::journal_moment_append_in_tx(tx, "ws", "created-moment")
+                })
+                .expect("journal source moment");
+            let op = source
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms \
+                         FROM replication_log WHERE workspace_id='ws' AND imported=0",
+                        [],
+                        |row| {
+                            let payload: String = row.get(4)?;
+                            Ok(ReplicationEnvelope {
+                                workspace_id: row.get(0)?,
+                                origin_id: row.get(1)?,
+                                origin_seq: row.get(2)?,
+                                op_kind: row.get(3)?,
+                                payload: serde_json::from_str(&payload).expect("journal JSON"),
+                                recorded_at_ms: row.get(5)?,
+                                relay_seq: None,
+                            })
+                        },
+                    )
+                })
+                .expect("read outbound journal");
+            hydrate_texts(&mut peer, &["created by a live document"]);
+            assert_eq!(
+                apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
+                ApplyOutcome::new(ApplyDisposition::Applied(0)),
+                "{kind:?}, principal {principal:?}",
+            );
+            let history = VersionedTextStore::new(&mut peer)
+                .get_moment("ws", "created-moment")
+                .expect("peer history")
+                .expect("replicated moment");
+            assert_eq!(
+                serde_json::from_str::<Value>(history.author_json.as_deref().expect("author"))
+                    .unwrap(),
+                serde_json::from_str::<Value>(&author).unwrap(),
+            );
+        }
+    }
+}
+
+/// An agent run an automation started names its chain depth on the moments
+/// it writes, and a peer keeps it in history.
+#[test]
+fn a_peer_keeps_the_depth_an_agent_moment_names() {
+    let author = json!({
+        "kind": "agent",
+        "agentId": "dohc-chat-runner",
+        "onBehalfOf": "owner",
+        "agentRunId": "run-woken",
+        "depth": 3,
+    });
+    let (_scratch, mut peer) = test_store();
+    let mut payload = absent_text_payload("woken", "object", "doc.md", "content");
+    payload["author"] = author.clone();
+    hydrate_texts(&mut peer, &["content"]);
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+            .expect("peer apply"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0)),
+    );
+    let history = VersionedTextStore::new(&mut peer)
+        .get_moment("ws", "woken")
+        .expect("peer history")
+        .expect("replicated moment");
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
+        author,
+    );
+}
+
+/// An older computer stored an agent author with any depth it was given, 0
+/// included. A newer peer applies the moment, reads such a depth as none in
+/// its history, and keeps the replicated payload exactly as it arrived.
+#[test]
+fn a_peer_imports_an_older_computers_agent_moment_with_an_unchecked_depth() {
+    for depth in [json!(0), json!(65), json!("3")] {
+        let (_scratch, mut peer) = test_store();
+        let mut payload = absent_text_payload("older", "object", "doc.md", "content");
+        payload["author"] = json!({
+            "kind": "agent",
+            "agentId": "claude-code",
+            "onBehalfOf": "owner",
+            "depth": depth,
+        });
+        let op = envelope("older-peer", 0, "ws", payload);
+        hydrate_texts(&mut peer, &["content"]);
+        assert_eq!(
+            apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "depth {depth}",
+        );
+        let history = VersionedTextStore::new(&mut peer)
+            .get_moment("ws", "older")
+            .expect("peer history")
+            .expect("replicated moment");
+        assert_eq!(
+            serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
+            json!({"kind": "agent", "agentId": "claude-code", "onBehalfOf": "owner"}),
+            "depth {depth}",
+        );
+        let kept: String = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = 'ws' AND origin_id = 'older-peer'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("replicated payload");
+        assert_eq!(serde_json::from_str::<Value>(&kept).unwrap(), op.payload);
+    }
+}
+
+#[test]
+fn declared_moment_authors_refuse_a_null_empty_or_non_string_principal() {
+    for author in [
+        json!({"kind":"agent", "agentId":"creator"}),
+        json!({"kind":"automation", "automationId":"creator", "depth":4}),
+    ] {
+        for principal in [Value::Null, json!(""), json!(42)] {
+            let (_scratch, mut peer) = test_store();
+            let mut payload = absent_text_payload("bad-author", "object", "doc.md", "content");
+            payload["author"] = author.clone();
+            payload["author"]["onBehalfOf"] = principal.clone();
+            hydrate_texts(&mut peer, &["content"]);
+            let result =
+                apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+                    .expect("refusal is recorded");
+            assert!(
+                matches!(result.primary, ApplyDisposition::Refused(_)),
+                "{author}, principal {principal}",
+            );
+            assert_eq!(peer.table_row_count("moments").unwrap(), 0);
+            assert_eq!(peer.table_row_count("snapshots").unwrap(), 0);
+        }
+    }
+}
+
+#[test]
 fn owner_binding_read_failure_does_not_acknowledge_moment() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["remote text"]);
@@ -461,7 +654,15 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     assert!(!waiting.has_more);
     assert!(waiting.changes.is_empty());
     // Advancing ordinary sync and reopening must preserve the waiting row.
-    crate::commit_relay_cursor(&mut store, "ws", &waiting_cursor, &NoFaults, 7).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &waiting_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        7,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         1
@@ -556,13 +757,29 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .unwrap();
     assert_eq!(replay.changes, settled_changes);
     assert_ne!(replay.report_id, applied_cursor.settlement_report_id);
-    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 10).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &applied_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        10,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         1
     );
     applied_cursor.settlement_report_id = replay.report_id;
-    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 11).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &applied_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        11,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         0
@@ -1626,6 +1843,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
             settlement_report_id: None,
         },
         &NoFaults,
+        &crate::NoLiveLeases,
         3_000,
     )
     .expect("report commit");
@@ -3290,6 +3508,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 content_kind: "text",
             }],
             record_facts: Vec::new(),
+            automation_claims: Vec::new(),
         }))
     );
     store

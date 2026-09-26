@@ -1,3 +1,4 @@
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
@@ -112,6 +113,16 @@ export function useAutosavedTextDraft(props: {
   const writersLive = useRef(0);
   const flushBarrier = useRef(false);
   const flushInFlight = useRef<Promise<void> | null>(null);
+  const exitFlush = useRef<DraftFlush>(() => Promise.resolve());
+  const exitCapturedDraft = useRef<{ generation: number; text: string } | null>(null);
+  const captureStalledExit = useRef(() => {});
+  captureStalledExit.current = () => {
+    // A previous recovery may have been dismissed. Capture a fresh copy for
+    // this stalled exit before releasing its hold.
+    capturedConflictDraft.current = null;
+    captureFailedFlush();
+    exitCapturedDraft.current = { generation: editGeneration.current, text: latestDraft.current };
+  };
 
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
@@ -293,12 +304,9 @@ export function useAutosavedTextDraft(props: {
     setSaveState("saved");
   }, [orphanedDrafts, saveState, props.contentRequestId]);
 
-  useEffect(() => {
-    if (props.switchReadPending) return;
-    if (staleBaseline.current) {
-      reconcileConflictSnapshot();
-      return;
-    }
+  // Takes the read this surface renders as its baseline, unless a draft or a
+  // write owns the document.
+  function acceptLandedRead() {
     if (
       verifyAfterRequestId.current !== null &&
       latestSnapshot.current.requestId <= verifyAfterRequestId.current
@@ -307,8 +315,17 @@ export function useAutosavedTextDraft(props: {
     }
     if (unsavedDraft.current) return;
     if (writersLive.current > 0) return;
-    if (props.contentRequestId <= acceptedRequestFloor.current) return;
+    if (latestSnapshot.current.requestId <= acceptedRequestFloor.current) return;
     acceptSnapshot(latestSnapshot.current, "saved");
+  }
+
+  useEffect(() => {
+    if (props.switchReadPending) return;
+    if (staleBaseline.current) {
+      reconcileConflictSnapshot();
+      return;
+    }
+    acceptLandedRead();
     // acceptSnapshot reads mutable write state and the exact body/hash pair
     // above. The dependencies name the authoritative snapshot identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -551,6 +568,30 @@ export function useAutosavedTextDraft(props: {
   }
 
   function scheduleSave(next: string) {
+    // A busy renderer can deliver an edit before the effect above accepts the
+    // read this surface already shows. Once the edit marks the draft unsaved,
+    // that effect never accepts it, and the draft has no baseline to save
+    // against. An edit of exactly that read's text accepts it first.
+    if (
+      !switchReadPendingRef.current &&
+      !staleBaseline.current &&
+      latestDraft.current === latestSnapshot.current.body
+    ) {
+      acceptLandedRead();
+      // The shared document can refuse that read because a later read or a
+      // peer draft already moved it on. Publishing then would save this edit
+      // under the newer content hash and overwrite the newer text, so the edit
+      // is set aside and the surface shows the document as it now stands.
+      const shared = props.localBuffer.getSnapshot();
+      if (shared.initialized && shared.body !== latestDraft.current) {
+        captureOrphanedDraft(props.workspaceId, props.path, next);
+        valueRevision.current += 1;
+        setDraft(shared.body);
+        latestDraft.current = shared.body;
+        setSaveState(shared.saveState);
+        return;
+      }
+    }
     setDraft(next);
     latestDraft.current = next;
     props.localBuffer.publishDraft(next, localSource.current);
@@ -652,8 +693,7 @@ export function useAutosavedTextDraft(props: {
   }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {
-    if (!registerDraftFlush) return;
-    registerDraftFlush((options) => {
+    const flushDraft: DraftFlush = (options) => {
       if (flushInFlight.current) {
         const inFlight = flushInFlight.current;
         if (!options?.captureOnFailure) return inFlight;
@@ -663,6 +703,7 @@ export function useAutosavedTextDraft(props: {
         });
       }
       flushBarrier.current = true;
+      const startedAfterUnmount = unmounted.current;
       const localWritePending = writersLive.current > 0;
       const flush = (async () => {
         try {
@@ -673,6 +714,7 @@ export function useAutosavedTextDraft(props: {
           }
           while (
             (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
+            !startedAfterUnmount &&
             !writesBlocked()
           ) {
             if (saveTimer.current) {
@@ -681,6 +723,7 @@ export function useAutosavedTextDraft(props: {
             }
             await writeDraftNow({ rejectOnError: true, fromFlush: true });
           }
+          if (options?.captureOnFailure && unsavedDraft.current) captureFailedFlush();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
@@ -694,11 +737,21 @@ export function useAutosavedTextDraft(props: {
       })();
       flushInFlight.current = flush;
       return flush;
-    });
-    return () => registerDraftFlush(null);
+    };
+    registerDraftFlush?.(flushDraft);
+    exitFlush.current = flushDraft;
+    return () => registerDraftFlush?.(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  useEffect(() => registerPendingEditorDraft(
+      () => (unsavedDraft.current || writersLive.current > 0) &&
+        (exitCapturedDraft.current?.generation !== editGeneration.current ||
+          exitCapturedDraft.current.text !== latestDraft.current),
+      options => exitFlush.current(options),
+      () => captureStalledExit.current(),
+    ), []);
 
   return {
     draft,

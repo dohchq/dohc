@@ -33,17 +33,21 @@ export interface TableQuery {
 const PRESENT_TABLES =
   'select t.name from unnest($1::text[]) as t(name) where to_regclass(quote_ident(t.name)) is not null';
 
+/** The table crash reports go to, when they are on. Created by migration 0003_crash_reports. */
+export const CRASH_REPORT_TABLE = "crash_reports";
+
 export function createReadinessProbe(
   client: TableQuery,
-  options: { timeoutMs?: number; emailConfigured?: boolean } = {},
+  options: { timeoutMs?: number; emailConfigured?: boolean; crashReports?: boolean } = {},
 ): () => Promise<ReadinessReport> {
   const timeoutMs = options.timeoutMs ?? 3000;
+  const tables: string[] = [...REQUIRED_TABLES, ...(options.crashReports ? [CRASH_REPORT_TABLE] : [])];
   let pending: ReturnType<TableQuery["query"]> | undefined;
   return async () => {
     let rows: Array<Record<string, unknown>>;
     try {
       // Keep one probe until the database settles, even after an HTTP timeout.
-      pending ??= client.query(PRESENT_TABLES, [[...REQUIRED_TABLES]]).finally(() => { pending = undefined; });
+      pending ??= client.query(PRESENT_TABLES, [tables]).finally(() => { pending = undefined; });
       rows = (await withTimeout(pending, timeoutMs)).rows;
     } catch {
       return {
@@ -55,7 +59,7 @@ export function createReadinessProbe(
       };
     }
     const present = new Set(rows.map((row) => String(row.name)));
-    const missingTables = REQUIRED_TABLES.filter((table) => !present.has(table));
+    const missingTables = tables.filter((table) => !present.has(table));
     if (missingTables.length > 0) {
       return {
         ok: false,

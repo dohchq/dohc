@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "lib": ["DOM", "DOM.Iterable", "ES2022", "ES2024.String"] },
+  "compilerOptions": { "lib": ["DOM", "DOM.Iterable", "ES2022", "ES2024.String"], "allowImportingTsExtensions": true },
   "include": [
     "e2e/**/*.ts",
     "playwright.config.ts",

@@ -16,24 +16,24 @@ const format="dohc-dataset-worker-v1";
 function regular(path:string, optional=false):void {
   let info;
   try{info=lstatSync(path);}catch(error){if(optional&&(error as NodeJS.ErrnoException).code==="ENOENT")return;throw error;}
-  if(!info.isFile()||info.isSymbolicLink())throw new Error(`Dataset ownership path is not a regular file: ${path}`);
+  if(!info.isFile()||info.isSymbolicLink())throw new Error(`A Collection folder's owner file is not a regular file: ${path}`);
 }
 function canonical(path:string):string {
   if(typeof path!=="string"||!isAbsolute(path)||path.includes("\0"))throw new Error("Invalid dataset worker path.");
   const info=lstatSync(path);
-  if(!info.isDirectory()||info.isSymbolicLink())throw new Error(`Dataset worker directory is not a regular directory: ${path}`);
+  if(!info.isDirectory()||info.isSymbolicLink())throw new Error(`A Collection folder is not a regular folder: ${path}`);
   return realpathSync(path);
 }
 function child(root:string,directory:string):string {
   const dir=canonical(directory),name=relative(root,dir);
-  if(!/^worker-[a-f0-9-]{36}$/.test(name))throw new Error(`Dataset worker directory is outside its owned root: ${directory}`);
+  if(!/^worker-[a-f0-9-]{36}$/.test(name))throw new Error(`A Collection folder is outside the folder dohc keeps Collections in: ${directory}`);
   return dir;
 }
 function readJson(path:string):Record<string,unknown> {
   regular(path);
-  if(lstatSync(path).size>4096)throw new Error(`Dataset ownership record exceeds its limit: ${path}`);
+  if(lstatSync(path).size>4096)throw new Error(`A Collection folder's owner file is too large: ${path}`);
   try {const value=JSON.parse(readFileSync(path,"utf8"));if(!value||typeof value!=="object"||Array.isArray(value))throw Error();return value;}
-  catch{throw new Error(`Dataset ownership record is damaged; inspect it before cleanup: ${path}`);}
+  catch{throw new Error(`A Collection folder's owner file is damaged. Check it before you remove anything: ${path}`);}
 }
 function durableJson(path:string,value:unknown):void {
   const temporary=`${path}.${randomUUID()}.tmp`,fd=openSync(temporary,"wx",0o600);
@@ -50,18 +50,18 @@ function lock(path:string,create:boolean):WorkerLease {
     db.exec("BEGIN EXCLUSIVE");
     let closed=false;
     return {close(){if(closed)return;closed=true;try{db.exec("ROLLBACK");}finally{db.close();}}};
-  }catch(error){db.close();throw new Error(`Dataset worker ownership is busy or unavailable: ${path}`,{cause:error});}
+  }catch(error){db.close();throw new Error(`Another copy of dohc is using this Collection folder, or dohc cannot open it: ${path}`,{cause:error});}
 }
 function manifest(root:string,directory:string):Record<string,unknown> {
   let value:Record<string,unknown>;
-  try{value=readJson(join(directory,MANIFEST));}catch(error){throw new Error(`Dataset worker ownership is missing or damaged; inspect it before cleanup: ${directory}`,{cause:error});}
+  try{value=readJson(join(directory,MANIFEST));}catch(error){throw new Error(`A Collection folder's owner file is missing or damaged. Check it before you remove anything: ${directory}`,{cause:error});}
   if(value.format!==format||value.root!==root||value.directory!==basename(directory)||typeof value.session!=="string"||!/^[a-f0-9-]{36}$/.test(value.session))
-    throw new Error(`Unknown dataset worker directory; inspect it before cleanup: ${directory}`);
+    throw new Error(`dohc does not recognize this Collection folder. Check it before you remove anything: ${directory}`);
   return value;
 }
 function current(ownership:WorkerOwnership):void {
   const value=readJson(join(ownership.root,SESSION));
-  if(value.format!==format||value.root!==ownership.root||value.session!==ownership.session)throw new Error("Dataset worker belongs to an expired host session.");
+  if(value.format!==format||value.root!==ownership.root||value.session!==ownership.session)throw new Error("This Collection folder belongs to an earlier dohc session.");
 }
 
 /** Child holds this OS-backed SQLite lock until it closes. PIDs and expiry timers are not authority. */
@@ -71,7 +71,7 @@ export function acquireWorkerLease(directory:string,ownership:WorkerOwnership):W
   try {
     // Check after locking: a delayed child cannot open old data after startup cleanup has begun.
     current(expected);
-    if(manifest(root,dir).session!==expected.session)throw new Error("Dataset worker manifest belongs to another session.");
+    if(manifest(root,dir).session!==expected.session)throw new Error("This Collection folder belongs to another dohc session.");
     return lease;
   }catch(error){lease.close();throw error;}
 }
@@ -81,7 +81,7 @@ export async function acquireSupervisorOwnership(directory:string):Promise<Super
   const root=canonical(directory),lease=lock(join(root,LOCK),true),session=randomUUID();
   let closed=false;
   const ownership={root,session};
-  function standing(){if(closed)throw new Error("Dataset worker ownership is closed.");current(ownership);}
+  function standing(){if(closed)throw new Error("dohc already released this Collection folder.");current(ownership);}
   async function removeDirectory(path:string):Promise<void> {
     standing();const dir=child(root,path);manifest(root,dir);
     const orphan=lock(join(dir,LOCK),false);orphan.close();
@@ -96,7 +96,7 @@ export async function acquireSupervisorOwnership(directory:string):Promise<Super
       if(name.startsWith("worker-"))await removeDirectory(join(root,name));
       else if(name.startsWith(`${SESSION}.`)&&name.endsWith(".tmp")){
         const path=join(root,name),pending=readJson(path);
-        if(pending.format!==format||pending.root!==root||typeof pending.session!=="string"||!/^[a-f0-9-]{36}$/.test(pending.session))throw new Error(`Unknown dataset ownership file; inspect it before cleanup: ${path}`);
+        if(pending.format!==format||pending.root!==root||typeof pending.session!=="string"||!/^[a-f0-9-]{36}$/.test(pending.session))throw new Error(`dohc does not recognize this Collection owner file. Check it before you remove anything: ${path}`);
         await rm(path);
       }
     }

@@ -14,7 +14,6 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/app-browser",
   "@dohc/cli",
   "@dohc/live-session-contract",
-  "@dohc/sdk",
   "@dohc/security-contract",
   "@dohc/service-http",
   "@dohc/sync-relay",
@@ -45,10 +44,10 @@ export const preloadBundledRuntimeDeps = [
 
 export const mainBuildEntries = {
   main: "src/main.ts",
-  "plugin-host": "src/plugins/pluginHostProcess.ts",
-  "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
   "workspace-database-worker":
     "src/workspaces/workspaceDatabaseThread.ts",
+  "document-projection-worker":
+    "src/workspaces/documentProjectionThread.ts",
 };
 
 function effectFree(surface: "preload" | "renderer"): Plugin {

@@ -1,7 +1,8 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createWorkspaceFolder, resetFailedJoinFolder } from "./createWorkspaceFolder";
+import { createWorkspaceFolder } from "./createWorkspaceFolder";
+import { readSyncHistory, recordSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 
 let base: string;
@@ -11,7 +12,28 @@ beforeEach(async () => {
 });
 
 describe("createWorkspaceFolder", () => {
-  it("creates a fresh workspace with only its manifest", async () => {
+  it.each([false, true])("refuses linked metadata before creating or adopting a manifest (manifest present: %s)", async (hasManifest) => {
+    const root = join(base, "linked-workspace");
+    const outside = join(base, "outside");
+    await mkdir(root);
+    await mkdir(outside);
+    const manifestPath = join(outside, "manifest.json");
+    const manifest = JSON.stringify({
+      version: 1,
+      workspaceId: "outside-workspace",
+      kind: "personal",
+      mode: "local-first",
+    });
+    if (hasManifest) await writeFile(manifestPath, manifest);
+    await symlink(outside, join(root, ".dohc"), process.platform === "win32" ? "junction" : "dir");
+
+    await expect(createWorkspaceFolder({ rootPath: root, kind: "personal" })).rejects.toThrow();
+
+    expect(await readdir(outside)).toEqual(hasManifest ? ["manifest.json"] : []);
+    if (hasManifest) expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+  });
+
+  it("creates a fresh workspace with its manifest and nothing else in the folder", async () => {
     const root = join(base, "personal");
     const created = await createWorkspaceFolder({ rootPath: root, kind: "personal" });
     const manifest = JSON.parse(
@@ -24,6 +46,27 @@ describe("createWorkspaceFolder", () => {
       workspaceId: created.workspaceId,
     });
     expect(await readdir(root)).toEqual([".dohc"]);
+    expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
+  });
+
+  it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
+    const root = join(base, "reattached");
+    await createWorkspaceFolder({ rootPath: root, kind: "personal" });
+    recordSynced(root);
+    // Forgetting drops only the registry entry; attaching the folder again
+    // adopts its manifest and leaves the record.
+    await createWorkspaceFolder({ rootPath: root, kind: "personal" });
+    expect(await readSyncHistory(root)).toBe("synced");
+
+    const joined = join(base, "joined-history");
+    await createWorkspaceFolder({ rootPath: joined, kind: "personal", workspaceId: "ws-synced-elsewhere" });
+    expect(await readSyncHistory(joined), "a join synced").toBe("synced");
+
+    const legacy = join(base, "legacy");
+    await mkdir(join(legacy, ".dohc"), { recursive: true });
+    expect(await readSyncHistory(legacy), "no record is no answer").toBe("unknown");
+    await writeFile(join(legacy, ".dohc", "sync-history.json"), "{\"version\": 2, \"synced\": false}");
+    expect(await readSyncHistory(legacy)).toBe("unknown");
   });
 
   it("adopts an existing workspace instead of overwriting its identity", async () => {
@@ -61,28 +104,6 @@ describe("createWorkspaceFolder", () => {
       await readFile(join(root, ".dohc", "manifest.json"), "utf8"),
     );
     expect(manifest.workspaceId).toBe("ws-synced-elsewhere");
-  });
-
-  // Failed-first-pull contract (0P-C gate fix): a join that could not
-  // complete its first pull rolls the folder back to empty, so nothing
-  // half-joined is left behind and a retry passes the empty-folder check.
-  it("resetFailedJoinFolder returns a failed join's folder to empty", async () => {
-    const root = join(base, "failed-join");
-    await createWorkspaceFolder({
-      rootPath: root,
-      kind: "personal",
-      workspaceId: "ws-failed-join",
-    });
-    // Simulate partially materialized pull output alongside the scaffolding.
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(join(root, ".dohc", "engine", "engine.db"), "stub");
-    await writeFile(join(root, "partial.md"), "half-pulled\n");
-
-    await resetFailedJoinFolder(root);
-    expect(await readdir(root)).toEqual([]);
-    // Idempotent (and tolerant of an already-gone folder).
-    await resetFailedJoinFolder(root);
-    await resetFailedJoinFolder(join(base, "never-existed"));
   });
 
   it("never rebinds an existing manifest to a requested identity", async () => {
