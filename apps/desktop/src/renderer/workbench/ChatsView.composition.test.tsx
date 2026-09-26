@@ -573,29 +573,6 @@ describe("ChatsView mentions", () => {
 
     await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
   });
-
-  // The rows report; they do not navigate. A notification names a workspace
-  // and a run, never a conversation, so an interactive row could only lead
-  // somewhere invented.
-  it("shows an 'Addressed to me' inbox for agent asks and never makes a row clickable", async () => {
-    const notice = {
-      id: "workspace-a::run-1::asked",
-      kind: "asked" as const,
-      workspaceId: "workspace-a",
-      workspaceName: "Personal",
-      agentName: "You",
-      runId: "run-1",
-      title: "Your agent has a question",
-      body: "Which draft should I keep?",
-      createdAtMs: NOW,
-    };
-    renderView(vi.fn(), vi.fn(), { addressedToMe: [notice] });
-
-    const item = await screen.findByTestId("chats-addressed-item");
-    expect(item.textContent).toContain("Which draft should I keep?");
-    expect(item.tagName).toBe("DIV");
-    expect(item.closest("button")).toBeNull();
-  });
 });
 
 

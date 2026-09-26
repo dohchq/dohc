@@ -3,8 +3,6 @@ import type { WorkspaceSettings as ContractWorkspaceSettings } from "@dohc/works
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   ATTACHMENT_LOCATIONS,
-  DEFAULT_DRIVER_ID_MAX_LENGTH,
-  DEFAULT_MODEL_MAX_LENGTH,
   WORKSPACE_PREVIEW_MODES,
   WORKSPACE_SETTINGS_DEFAULTS,
 } from "@dohc/workspace-contracts/workspace-settings-values";
@@ -28,8 +26,6 @@ export const WorkspaceSettings = z
     agents: z
       .object({
         mcpAutoStart: z.boolean(),
-        defaultDriverId: z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH).nullable(),
-        defaultModel: z.string().min(1).max(DEFAULT_MODEL_MAX_LENGTH).nullable(),
       })
       .strict(),
     sites: z

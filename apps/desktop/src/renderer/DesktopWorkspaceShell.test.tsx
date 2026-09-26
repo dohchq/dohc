@@ -489,18 +489,6 @@ function makeBaseBridge(
       source: "stored" as const,
     })),
     detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
-    probeAgentDrivers: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    getAgentSessionState: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    answerAgentPermission: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
     readWorkspaceText: vi.fn(async (_payload: ReadWorkspaceTextPayload) => ({
       text: "# Doc\n",
       truncated: false as const,
@@ -4773,7 +4761,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
     });
     act(() => {
@@ -4866,7 +4854,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
     });
     act(() => {
@@ -4948,7 +4936,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
         expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
       },
     );
@@ -5993,7 +5981,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
     // Notifications subscribes immediately; the listing refresh listener is
     // the second live subscription and waits for workspace readiness.
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
     vi.useFakeTimers();
     try {
       act(() => {
@@ -6056,7 +6044,7 @@ describe("ui-state merge-on-load", () => {
     // A second listing is issued while the first is still in flight.
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-live.md")).toBeTruthy();
     });
     act(() => {
@@ -16591,7 +16579,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16629,7 +16617,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16660,7 +16648,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16696,7 +16684,7 @@ describe("workbench render cost", () => {
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16735,7 +16723,7 @@ describe("workbench render cost", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       },
     );
 

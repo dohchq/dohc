@@ -226,10 +226,10 @@ describe("registered workspace version handlers", () => {
 });
 
 describe("registered try-in-version handlers", () => {
-  it.each([undefined, "agent-driver"])("passes the task and driver %s through the existing manager", async (driverId) => {
+  it("passes the task through the existing manager", async () => {
     const h = harness();
-    await expect(h.invoke(ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this", ...(driverId ? { driverId } : {}) })).resolves.toEqual(tryResult);
-    expect(h.sessions.start).toHaveBeenCalledExactlyOnceWith(workspaceId, "Try this", driverId);
+    await expect(h.invoke(ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" })).resolves.toEqual(tryResult);
+    expect(h.sessions.start).toHaveBeenCalledExactlyOnceWith(workspaceId, "Try this");
     expect(h.steps).toEqual(["capture", "mark", "start", "measure"]);
     expect(h.desktopMarks.mark).toHaveBeenCalledWith("try-in-version-start");
     expect(h.desktopMarks.measureSince).toHaveBeenCalledWith("try-in-version-gesture", "try-in-version-start");

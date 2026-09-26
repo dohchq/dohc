@@ -91,26 +91,6 @@ const bridge = {
     mcpEnabled = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
-  probeAgentDrivers: vi.fn(async () => ({
-    drivers: [
-      {
-        id: "codex",
-        displayName: "Codex",
-        installed: true,
-        version: "codex 1.0",
-        auth: { status: "unknown" as const, label: "CLI login" },
-        models: [],
-      },
-      {
-        id: "fixture-driver",
-        displayName: "Claude",
-        installed: false,
-        auth: { status: "unknown" as const },
-        models: [],
-      },
-    ],
-    session: null,
-  })),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -578,10 +558,6 @@ describe("SettingsDialog", () => {
     // Usage examples are present.
     expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
     expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();
-    const probes = await screen.findAllByTestId("agent-probe-row");
-    expect(probes).toHaveLength(2);
-    expect(probes[0]?.textContent).toContain("Installed · sign-in not verified");
-    expect(probes[1]?.textContent).toContain("Not found");
   });
 
   it("does not claim an enabled MCP server is connected", async () => {

@@ -163,10 +163,8 @@ import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
-import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -919,23 +917,6 @@ export function DesktopWorkspaceShell(props: {
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
     [localAgentEnabled, localAgentName],
-  );
-  const userMentionCandidates = useMemo(
-    () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
-    [mentionCandidates],
-  );
-  const agentNotifs = useAgentNotifications({
-    workspaceId,
-    workspaceName: workspaceName(props.workspace),
-    agentName: localAgentName,
-    userCandidates: userMentionCandidates,
-  });
-  const addressedToMe = useMemo(
-    () =>
-      agentNotifs.notifications.filter(
-        (notification) => notification.kind === "asked" || notification.kind === "needs-input",
-      ),
-    [agentNotifs.notifications],
   );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
@@ -4380,7 +4361,6 @@ export function DesktopWorkspaceShell(props: {
     onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
-    addressedToMe,
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -4415,7 +4395,6 @@ export function DesktopWorkspaceShell(props: {
     onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
-    addressedToMe,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     agentSetup,
@@ -4876,8 +4855,6 @@ export function DesktopWorkspaceShell(props: {
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
                   })}
-              agentNotifications={agentNotifs.notifications}
-              onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
               {...crashReportNotice}
@@ -5840,15 +5817,6 @@ export function DesktopWorkspaceShell(props: {
           </div>
         </Overlay>
       ) : null}
-
-      {/* A blocked agent run's consent asks (the retired Agent panel's one
-          load-bearing interaction). Floats wherever the user already is —
-          answering resumes the run. */}
-      <AgentPermissionRequests
-        workspaceId={workspaceId}
-        runId={agentNotifs.pendingPermissionsRunId}
-        requests={agentNotifs.pendingPermissions}
-      />
 
       {paletteOpen ? (
         <CommandPalette
