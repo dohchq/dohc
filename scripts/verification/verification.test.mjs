@@ -267,25 +267,57 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(first.stdout, /"desktopPrepared":true/);
     assert.equal(readFileSync(join(root, "apps/desktop/dist/built.txt"), "utf8"), "new-lock");
     const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls().map(({ command, args }) => [command, args[0]]), [["pnpm", "install"], ["cargo", "build"], ["pnpm", "--filter"]]);
+    assert.deepEqual(calls().map(({ command, args }) => [command, args[0]]), [["pnpm", "install"], ["cargo", "build"], ["pnpm", "--filter"], ["pnpm", "--filter"]]);
     writeFileSync(join(root, "node_modules/installed.txt"), "stale-again");
     const reused = invoke();
     assert.equal(reused.status, 0, reused.stderr);
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
-    assert.equal(calls().length, 4);
+    assert.equal(calls().length, 5);
     assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
-    assert.equal(calls().length, 4, "the canonical verifier can reuse its completed frozen install");
+    assert.equal(calls().length, 5, "the canonical verifier can reuse its completed frozen install");
     rmSync(join(root, ".dohc-dev/verification/build.json"));
     const failed = invoke({ failInstall: true });
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /frozen install rejected/);
-    assert.equal(calls().length, 5);
+    assert.equal(calls().length, 6);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("preparation builds and reuses the share viewer, rebuilding missing or stale assets", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-viewer-"));
+  try {
+    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
+    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const viewer = join(root, "services/share-web/viewer");
+    const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse)
+      .filter(({ args }) => args[1] === "@dohc/share-web");
+    const prepare = () => {
+      const result = invoke();
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /"desktopPrepared":true/);
+      assert.equal(readFileSync(join(viewer, "dist/index.html"), "utf8"), "viewer");
+      assert.equal(readFileSync(join(viewer, "dist/assets/viewer.js"), "utf8"), "viewer script");
+    };
+    prepare();
+    assert.equal(calls().length, 1);
+    prepare();
+    assert.equal(calls().length, 1, "unchanged viewer is reused");
+    rmSync(join(viewer, "dist/index.html"));
+    prepare();
+    assert.equal(calls().length, 2, "missing entry point is rebuilt");
+    writeFileSync(join(viewer, "dist/assets/viewer.js"), "stale script");
+    prepare();
+    assert.equal(calls().length, 3, "changed assets are rebuilt");
+    writeFileSync(join(viewer, "main.ts"), "changed viewer source");
+    prepare();
+    assert.equal(calls().length, 4, "changed viewer source is rebuilt");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -338,7 +370,7 @@ test("prepared desktop checks staged compiler bytes only on Windows x64", () => 
       assert.equal(run({ statusOnly: true }).desktopPrepared, !supported, `${platform}/${arch} missing compiler`);
       assert.equal(run().desktopPrepared, true);
       const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter").length, supported ? 2 : 1);
+      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter" && args[1] === "@dohc/desktop").length, supported ? 2 : 1);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 });
@@ -766,6 +798,9 @@ for (const [kind, configurations] of Object.entries({
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => [
       `apps/desktop/${name}`, "VITE_FIXTURE=one\n", "VITE_FIXTURE=two\n",
     ]),
+    ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => [
+      `services/share-web/viewer/${name}`, "VITE_FIXTURE=one\n", "VITE_FIXTURE=two\n",
+    ]),
   ],
   engine: [
     [".cargo/config", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
@@ -784,6 +819,7 @@ for (const [kind, configurations] of Object.entries({
       git(["config", "core.excludesFile", excludes]);
       for (const [name, first, second] of configurations) {
         const path = join(root, name);
+        mkdirSync(dirname(path), { recursive: true });
         const fingerprint = () => sourceFingerprint(kind, root);
         const absent = fingerprint();
         writeFileSync(path, first);
