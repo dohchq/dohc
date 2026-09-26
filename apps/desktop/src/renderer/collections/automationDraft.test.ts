@@ -106,3 +106,10 @@ it("counts named notice recipients before a record edit", () => {
     { kind: "set", values: [], records: null, operation: null },
   ])).toEqual([[0], [1]]);
 });
+
+it("counts an agent wake before a record edit", () => {
+  expect(reachPlaces([
+    { kind: "wake-agent", text: "Hi", person: "owner" },
+    { kind: "set", values: [], records: null, operation: null },
+  ])).toEqual([[0], [1]]);
+});

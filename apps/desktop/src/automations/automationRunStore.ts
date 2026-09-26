@@ -90,6 +90,14 @@ const EffectSchema = z.union([
     byFormula: z.boolean().optional(),
   }),
   z.object({
+    kind: z.literal("wake"),
+    effectId: z.string(),
+    messageId: z.string(),
+    threadId: z.string(),
+    person: z.string(),
+    body: z.string(),
+  }),
+  z.object({
     kind: z.literal("notice"),
     name: z.string(),
     notice: z.object({

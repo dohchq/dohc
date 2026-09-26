@@ -217,6 +217,16 @@ describe("chat writes", () => {
     expect(test.store.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("writes an automation's wake in My agent without waiting for a session", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await test.writes.sendMessage(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#ask", name: "Ask", depth: 1, local: true },
+      threadId: "thread", body: "Plan", resolveAttachments: async () => [],
+    });
+    expect(test.store.sendMessage.mock.calls[0]![0]).not.toHaveProperty("authorUserId");
+  });
+
   it("makes an automation wait for a session in a synced workspace instead of posting where nobody sees", async () => {
     const test = fixture();
     test.setCredentials(null);

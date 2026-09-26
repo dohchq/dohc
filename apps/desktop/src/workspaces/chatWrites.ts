@@ -24,7 +24,9 @@ import {
 export type ChatWriter =
   | { via: "renderer" }
   | { via: "cli"; actor: "human" | "agent"; agentName?: string }
-  | { via: "automation"; automationId: string; name: string; depth: number };
+  // `local` marks a message that stays on this computer, such as a wake in
+  // "My agent", so it never waits for a session.
+  | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
 // A person or their agent: only they react.
 export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 
@@ -204,7 +206,7 @@ export function createChatWrites(dependencies: {
   async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput) {
     // Before admission, whose identity checks refuse a signed-out write to
     // a joined Group: an automation waits for a session there instead.
-    if (input.writer.via === "automation") {
+    if (input.writer.via === "automation" && !input.writer.local) {
       await warmCredentials();
       const workspace = findWorkspace(place.workspaceId);
       const synced = workspace?.remote !== undefined || (workspace?.sharedChannels?.length ?? 0) > 0;
@@ -214,7 +216,7 @@ export function createChatWrites(dependencies: {
     const { authorUserId } = admission;
     // A synced workspace's automation waits for a session: without one its
     // message would stay on this computer and reach nobody.
-    if (input.writer.via === "automation" && authorUserId === undefined &&
+    if (input.writer.via === "automation" && !input.writer.local && authorUserId === undefined &&
       findWorkspace(place.workspaceId)?.remote !== undefined) {
       throw new AutomationChatSessionWait();
     }

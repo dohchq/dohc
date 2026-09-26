@@ -196,6 +196,8 @@ import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { readChatDirectory } from "./automations/automationChat";
+import { wakeAgent } from "./automations/automationAgentWake";
+import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
@@ -3430,6 +3432,24 @@ function createCollectionAutomationsFor(
           idempotencyKey: message.effectId,
           resolveAttachments: async () => [],
         };
+        if (message.target.kind === "agent") {
+          // A wake stays in this computer's "My agent", so it never waits for a session.
+          const local = { ...common, writer: { ...common.writer, local: true as const } };
+          return await wakeAgent({
+            runnerReady: async () => {
+              const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
+              return runner.enabled && configuredRunnerCommand(runner) !== "";
+            },
+            agentChannelId: async () => (await place.store.ensureAgentChannel({ workspaceId })).id,
+            threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
+            start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
+            send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
+            recordTrigger: ({ triggerMessageId, threadId }) =>
+              agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId }),
+            scan: () => void chatDispatchService.scanWorkspace(workspaceId).catch((error: unknown) =>
+              console.error("[desktop] chat dispatch scan:", error)),
+          }, message);
+        }
         return message.target.kind === "group"
           ? await chatWrites.startThread(place, {
               ...common, channelId: message.target.channelId, lane: message.target.lane, threadId: message.threadId,

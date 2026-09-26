@@ -52,6 +52,8 @@ import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type Sto
 const RECORD_NOT_FOUND = "collection-record-not-found";
 
 export const DEADLINE_ERROR = "The automation did not finish within 5 minutes.";
+// How run history and holds name a wake's destination.
+const WAKE_TARGET_NAME = "your agent";
 export const DEFINITION_CHANGED_ERROR =
   "This automation changed after this run began. Try again to run the new version from the start. It may repeat changes, posts, direct messages, and notices the earlier run already made.";
 export const UNREADABLE_RUN_ERROR =
@@ -119,7 +121,7 @@ export interface AutomationChatDependencies {
 /** Whether any step posts, sends a direct message, or notifies someone. */
 export function sendsMessages(automation: Automation): boolean {
   const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
-    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" ||
+    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent" ||
     (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
   return walk(automation.do);
 }
@@ -478,7 +480,7 @@ async function applyPlan(
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
     // Only a dataset Collection's run plans dataset effects.
-    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice") return failed(UNREADABLE_RUN_ERROR);
+    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice" && effect.kind !== "wake") return failed(UNREADABLE_RUN_ERROR);
     // After a stop, records may have changed while the run waited, so every
     // effect checks each field before it writes. Only the first effect the
     // run had not recorded may have landed before the stop.
@@ -550,6 +552,9 @@ function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
     if (effect.kind === "notice") {
       return { ordinal: step.ordinal, writes: [{ kind: "notice" as const, noticeId: effect.notice.noticeId, name: effect.name }] };
     }
+    if (effect.kind === "wake") {
+      return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: WAKE_TARGET_NAME }] };
+    }
     if (effect.kind === "add") {
       const path = `${effect.collectionPath}/${effect.name}.md`;
       return { ordinal: step.ordinal, writes: [
@@ -600,6 +605,17 @@ async function applyEffect(
       body: effect.body,
     });
     return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
+  }
+  if (effect.kind === "wake") {
+    await dependencies.chat.write(signal, {
+      target: { kind: "agent" },
+      effectId: effect.effectId,
+      messageId: effect.messageId,
+      threadId: effect.threadId,
+      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
+      body: effect.body,
+    });
+    return [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
   }
   if (effect.kind === "notice") {
     // Each person's notice is its own effect, recorded once it is sent, so a

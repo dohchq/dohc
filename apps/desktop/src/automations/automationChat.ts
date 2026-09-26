@@ -127,7 +127,9 @@ export function cutText(text: string, max: number): string {
 export interface AutomationChatMessage {
   target:
     | { kind: "group"; channelId: string; lane: ChatThreadLane }
-    | { kind: "direct-message"; threadId: string };
+    | { kind: "direct-message"; threadId: string }
+    // The person's own agent, in its "My agent" thread for this automation.
+    | { kind: "agent" };
   /** Also the idempotency key: a retry replays the recorded message. */
   effectId: string;
   messageId: string;
@@ -143,6 +145,11 @@ const hashed = (prefix: string, value: string) =>
 /** The message id an effect writes, the same on every attempt. */
 export function automationMessageId(effectId: string): string {
   return hashed("message-auto-", effectId);
+}
+
+/** The "My agent" thread an automation's wakes go to, one per automation. */
+export function automationWakeThreadId(automationId: string): string {
+  return hashed("thread-auto-", `wake/${automationId}`);
 }
 
 /** The thread id a post starts, the same on every attempt. */

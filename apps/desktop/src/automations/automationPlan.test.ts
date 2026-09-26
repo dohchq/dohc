@@ -106,11 +106,11 @@ describe("what the executor can run", () => {
     expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
   });
 
-  it("names why it cannot wake agents, run code, schedules, or a Find the query cannot express", () => {
+  it("names why it cannot run code, schedules, or a Find the query cannot express", () => {
     const withStep = (step: string) => automation(`id: a\nname: A\nwhen: record-added\ndo: [${step}]`);
     expect(unsupportedReason(withStep("{set: {Done: true}}"))).toBeNull();
     expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toBeNull();
-    expect(unsupportedReason(withStep("{wake-agent: Hi, person: user-1}"))).toMatch(/wake agents/);
+    expect(unsupportedReason(withStep("{wake-agent: Hi, person: user-1}"))).toBeNull();
     expect(unsupportedReason(withStep("{post: Hi, group: Trip}"))).toBeNull();
     expect(unsupportedReason(withStep("{direct-message: Hi, to: [user-1, '=trigger.record.Owner']}"))).toBeNull();
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);

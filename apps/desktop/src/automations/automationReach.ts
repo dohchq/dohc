@@ -292,9 +292,11 @@ function checkOwnerStep(
         : stop(`${person?.email ?? step.person.name} cannot view ${collection.name}.`);
     }
     case "personal": {
-      // With no account known, the owner is this computer's person, and the
-      // executor acts as that person.
-      if (roster.ownerUserId !== null && step.person.userId !== roster.ownerUserId) {
+      // A personal step acts as its person, so it must name this computer's
+      // person. With no account known, dohc cannot tell who the step names,
+      // so it runs for nobody.
+      if (roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
+      if (step.person.userId !== roster.ownerUserId) {
         const person = people.find((candidate) => candidate.userId === step.person.userId);
         return stop(`This step acts as ${person?.email ?? step.person.name}, and you can also edit ${collection.name}.`);
       }
@@ -321,6 +323,9 @@ export function reachStepId(step: ReachStep, index: number): string {
       return String(index);
   }
 }
+
+export const PERSONAL_NEEDS_ACCOUNT =
+  "Sign in to your server so dohc knows who you are. A step that acts as you runs only then.";
 
 /** A verdict for each of the automation's steps, in order. */
 export function checkAutomationReach(roster: ReachRoster, automation: ReachAutomation): StepReach[] {
