@@ -5442,6 +5442,11 @@ export const ScheduleHostResult = z.discriminatedUnion("kind", [
 export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 // The workspace whose schedule host changed.
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+export const ChatDispatchUnavailableEvent = z.object({
+  workspaceId: z.string().min(1),
+  reason: z.enum(["disabled", "unconfigured"]),
+});
+export type ChatDispatchUnavailableEvent = z.infer<typeof ChatDispatchUnavailableEvent>;
 
 export const scheduleHostOperations = {
   readScheduleHost: {
@@ -6163,6 +6168,7 @@ export interface DohcDesktopBridge
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
+  onChatDispatchUnavailable(listener: (event: ChatDispatchUnavailableEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

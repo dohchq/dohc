@@ -6,6 +6,7 @@ import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectW
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
+  | "chat-no-runner"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"

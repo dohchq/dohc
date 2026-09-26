@@ -85,9 +85,6 @@ const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
-export const NO_RUNNER_NOTE =
-  "No agent runner is configured — set one up in Settings → Agents & MCP to dispatch this.";
-
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
 const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
@@ -150,6 +147,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  onNoRunner?(workspace: ChatDispatchWorkspace, reason: "disabled" | "unconfigured"): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth.
   setRunAttribution(
@@ -538,22 +536,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       );
     }
     await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
-  }
-
-  async function mostRecentAgentNoteIs(
-    workspace: ChatDispatchWorkspace,
-    threadId: string,
-    body: string,
-  ): Promise<boolean> {
-    const messages = await options.chatStoreFor(workspace).listMessages({
-      workspaceId: workspace.workspaceId,
-      threadId,
-    });
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]!;
-      if (message.author.kind === "agent") return message.body === body;
-    }
-    return false;
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
@@ -999,14 +981,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           reason: "no-runner",
         });
         if (failedCount > 0) notifyRunUpdated(workspace);
-        if (
-          failedCount === 0 ||
-          (await mostRecentAgentNoteIs(workspace, threadId, NO_RUNNER_NOTE))
-        ) {
-          continue;
-        }
+        if (failedCount === 0) continue;
         try {
-          await sendAgentMessage(workspace, threadId, NO_RUNNER_NOTE);
+          options.onNoRunner?.(workspace, command ? "disabled" : "unconfigured");
         } catch (error) {
           reportError(error);
         }

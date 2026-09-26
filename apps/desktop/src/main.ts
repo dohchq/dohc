@@ -2826,6 +2826,14 @@ function rememberPendingCliRunMessageLink(
 }
 
 const chatDispatchService = createChatDispatchService({
+  onNoRunner: (workspace, reason) => {
+    withWorkspaceAttachment(workspace, () => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== workspace.workspaceId) continue;
+        window.webContents.send(CHANNELS.chatDispatchUnavailable, { workspaceId: workspace.workspaceId, reason });
+      }
+    });
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),

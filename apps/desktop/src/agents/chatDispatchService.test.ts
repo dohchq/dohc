@@ -34,7 +34,6 @@ import {
   CHAT_DISPATCH_BUDGET_MAX,
   CHAT_DISPATCH_PUMP_MS,
   CHAT_DISPATCH_RECOVERY_BACKOFF_MS,
-  NO_RUNNER_NOTE,
   RUNNER_SELF_TEST_TIMEOUT_MS,
   createChatDispatchService,
   messageCanTrigger,
@@ -159,6 +158,7 @@ interface Fixture {
     run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null;
   }>;
   errors: unknown[];
+  noRunner: Array<{ workspace: ChatDispatchWorkspace; reason: "disabled" | "unconfigured" }>;
   notices: PostNoticeInput[];
   // Where the service keeps the runs whose notice is owed, and its own
   // view of them, which changes only once the file does.
@@ -522,6 +522,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const presence: ChatDispatchPresenceInput[] = [];
   const attributions: Fixture["attributions"] = [];
   const errors: unknown[] = [];
+  const noRunner: Fixture["noRunner"] = [];
   const notices: PostNoticeInput[] = [];
   const owedRunNoticesPath = join(stateRoot, "owed-run-notices.json");
   const owedRunNotices = createOwedRunNotices(() => owedRunNoticesPath);
@@ -629,6 +630,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
+    onNoRunner: (workspace, reason) => noRunner.push({ workspace, reason }),
     runNotices: {
       // One notice per id, as the notice store keeps them.
       post: async (input) => {
@@ -665,6 +667,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     presence,
     attributions,
     errors,
+    noRunner,
     notices,
     owedRunNoticesPath,
     owedRunNotices,
@@ -1568,37 +1571,35 @@ describe("chatDispatchService", () => {
     releaseFirst?.();
   });
 
-  it("fails no-runner triggers and keeps one setup note per thread", async () => {
-    const fixture = await createFixture({
-      runner: { enabled: false },
-    });
+  it.each([
+    { runner: { enabled: false }, reason: "disabled" },
+    { runner: { enabled: true, command: "" }, reason: "unconfigured" },
+  ] as const)("reports $reason dispatch without writing an agent message", async ({ runner, reason }) => {
+    const fixture = await createFixture({ runner });
     const trigger = await createAgentThread(fixture, {
       body: "Needs a runner.",
       authorUserId: "user_local",
+    });
+    const original = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID, threadId: trigger.threadId,
     });
 
     await activate(fixture);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
-    expect(
-      fixture.readDispatch(trigger.messageId, trigger.threadId),
-    ).toMatchObject({ state: "failed", failureReason: "no-runner" });
-    let messages = await fixture.chat.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: trigger.threadId,
-    });
-    const setupNotes = messages.filter(
-      (message) => message.body === NO_RUNNER_NOTE,
-    );
-    expect(setupNotes).toHaveLength(1);
-    expect(setupNotes[0]?.authorOwnerDisplayName).toBe("Sam");
-    expect(setupNotes[0]?.author).toEqual({
-      kind: "agent",
-      displayName: "Nova",
-    });
+    expect(fixture.readDispatch(trigger.messageId, trigger.threadId))
+      .toMatchObject({ state: "failed", failureReason: "no-runner" });
+    expect(await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID, threadId: trigger.threadId,
+    })).toEqual(original);
+    expect(fixture.noRunner).toEqual([{ workspace: fixture.workspace, reason }]);
+    expect(fixture.postedWorkspaces).toEqual([]);
+    expect(fixture.spawnCalls).toEqual([]);
 
-    await fixture.chat.sendMessage({
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.noRunner).toHaveLength(1);
+    const followUp = await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
       author: { kind: "human", displayName: "Sam" },
@@ -1606,11 +1607,10 @@ describe("chatDispatchService", () => {
       body: "Still needs the same missing runner.",
     });
     await fixture.service.scanWorkspace(WORKSPACE_ID);
-    messages = await fixture.chat.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: trigger.threadId,
-    });
-    expect(messages.filter((message) => message.body === NO_RUNNER_NOTE)).toHaveLength(1);
+    expect(fixture.noRunner).toHaveLength(2);
+    expect(await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID, threadId: trigger.threadId,
+    })).toEqual([...original, followUp]);
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
   });
 

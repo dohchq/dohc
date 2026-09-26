@@ -83,6 +83,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
@@ -798,6 +799,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  useChatDispatchNotices(workspaceId, reportShellFailure);
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render

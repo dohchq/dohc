@@ -478,6 +478,7 @@ function makeBaseBridge(
     writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
+    onChatDispatchUnavailable: vi.fn(() => () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
       settings: {
         ...DEFAULT_USER_SETTINGS,
