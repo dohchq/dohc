@@ -10,6 +10,8 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import type { DatasetAutomationClaim, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
@@ -21,6 +23,8 @@ import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   collectionAutomationId,
   COLLECTION_AUTOMATION_PREFIX,
+  datasetSubscriptionFor,
+  definitionDigest,
   definitionHash,
   fieldWritesOf,
   fieldsNamedBy,
@@ -64,9 +68,18 @@ import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./re
 //
 // It shares the engine with the plugin executor until plugins are removed.
 // Each drains only its own namespace.
+//
+// A dataset Collection's claims come from its dataset host's ledger instead,
+// where the host claims each commit it makes (ADR 0011). The drain takes
+// engine claims first, then dataset claims, one at a time, and treats both
+// the same way. dohc cannot run dataset steps yet, so without a dataset
+// runner every dataset automation is unsupported, and the executor neither
+// subscribes one nor opens the dataset host for one.
 
 export const AUTOMATIONS_FILE_NAME = "automations.yaml";
-const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml"]);
+const DATASET_FILE_NAME = "dataset.json";
+const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
+export const DATASET_AUTOMATIONS_UNSUPPORTED = "dohc cannot run automations on dataset Collections yet.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // After the deadline, a run's writes stop at their next check. A write
@@ -101,6 +114,35 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
 }
 
+/** A dataset host's claim ledger, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
+export interface DatasetAutomationLedger {
+  /** Each approved, unarchived dataset's rules. */
+  datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> };
+  subscribe(datasetId: string, subscription: DatasetAutomationSubscription): void;
+  unsubscribe(datasetId: string, automationId: string): void;
+  subscriptions(): Array<DatasetAutomationSubscription & { datasetId: string }>;
+  next(): DatasetAutomationClaim | null;
+  settle(started: DatasetAutomationClaim, outcome: SettleInput): unknown;
+  /** Hands a started claim back to pending, without counting its attempt. */
+  release(started: DatasetAutomationClaim): void;
+  retry(claimId: string): unknown;
+  /** One automation's newest claims, newest first. */
+  claims(automationId: string): DatasetAutomationClaim[];
+  /** One of an automation's claims however old, or null. */
+  claim(automationId: string, claimId: string): DatasetAutomationClaim | null;
+  failures(): Array<{ automationId: string; claimId: string }>;
+}
+
+/** Runs one dataset claim, as runCollectionAutomation runs an engine claim. */
+export type DatasetClaimRunner = (input: {
+  claim: DatasetAutomationClaim;
+  automation: Automation;
+  definition: DatasetDefinition;
+  collection: ReachCollection;
+  roster: Exclude<ReachRoster, { kind: "unknown" }>;
+  signal: AbortSignal;
+}) => Promise<CollectionAutomationRunOutcome>;
+
 export interface CollectionAutomationsOptions {
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null>;
@@ -131,6 +173,10 @@ export interface CollectionAutomationsOptions {
    */
   onAutomationsChanged(): void;
   onError(context: string, error: unknown): void;
+  /** This workspace's dataset claim ledger; resolves null when it has no dataset host. */
+  withDatasetLedger?<T>(work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null>;
+  /** Runs dataset claims. dohc cannot run dataset steps yet: only tests pass one. */
+  runDatasetClaim?: DatasetClaimRunner;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
   deadline?: (abort: () => void) => () => void;
@@ -298,6 +344,13 @@ function collectionNamed(path: string): ReachCollection {
 type OwnedAutomation = { automationId: string; collectionPath: string; automation: Automation };
 
 type SettleInput = { state: "done" } | { state: "failed"; error: string };
+/** A claim this computer holds, from the ledger that made it. */
+type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "dataset"; claim: DatasetAutomationClaim };
+/** One automation's run history and the failure its notice offers, whichever ledger holds its claims. */
+type ClaimHistory = {
+  claims: Array<Pick<AutomationClaimSummary, "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"> & { error?: string | null }>;
+  failure: string | null;
+};
 /** What a released claim waits for; later drains pass it by until that clears. */
 type WaitReason = "roster" | "held" | "busy";
 /**
@@ -322,6 +375,8 @@ export class CollectionAutomations {
    * listed.
    */
   private readonly schemaFields = new Map<string, ReadonlySet<string> | "unreadable">();
+  /** Dataset Collections, with their approved rules. Only when dohc can run dataset automations. */
+  private readonly datasets = new Map<string, DatasetDefinition>();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -332,7 +387,7 @@ export class CollectionAutomations {
    * Claims this computer holds whose release or settle the engine has not
    * taken yet. Each drain tries these first, and never runs them again.
    */
-  private readonly owed = new Map<string, { claim: AutomationClaim; action: ClaimAction }>();
+  private readonly owed = new Map<string, { held: HeldClaim; action: ClaimAction }>();
   /**
    * Claims handed back to wait, with what they wait for. A drain that the
    * engine serves one of them passes it by until that reason clears, so a
@@ -438,14 +493,22 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     void this.enqueue(async () => {
+      let datasets: Promise<Map<string, DatasetDefinition> | null> | undefined;
       for (const folder of folders) {
         this.schemaFields.delete(folder);
+        this.datasets.delete(folder);
         if (await this.options.pathExists(`${folder}/collection.yaml`)) {
           this.collections.add(folder);
           await this.readFile(folder);
-        } else {
-          this.collections.delete(folder);
+          continue;
+        }
+        this.collections.delete(folder);
+        const definition = (await (datasets ??= this.datasetFolders()))?.get(folder);
+        if (definition === undefined) {
           this.files.delete(folder);
+        } else {
+          this.datasets.set(folder, definition);
+          await this.readFile(folder);
         }
       }
       await this.readNamedSchemas();
@@ -460,6 +523,33 @@ export class CollectionAutomations {
         this.rosterChanged();
       })
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+  }
+
+  /**
+   * A dataset's approved rules changed: an approval, a migration, a restore,
+   * or an archive. Sources change before approval, so the watcher alone
+   * cannot tell. Re-index every dataset Collection and reconcile.
+   */
+  datasetsChanged(): void {
+    if (this.opened === null) return;
+    void this.enqueue(async () => {
+      const folders = await this.datasetFolders();
+      if (folders === null) return;
+      for (const path of this.datasets.keys()) {
+        if (folders.has(path)) continue;
+        this.datasets.delete(path);
+        this.files.delete(path);
+      }
+      for (const [path, definition] of folders) {
+        if (this.collections.has(path)) continue;
+        this.datasets.set(path, definition);
+        await this.readFile(path);
+      }
+      await this.reconcile(false);
+      this.publishHolds();
+    })
+      .then(() => this.rosterChanged())
+      .catch((error: unknown) => this.options.onError("reload dataset automations", error));
   }
 
   /** The wake-up: a claim event landed, a retry queued a claim, or a reconcile registered work. */
@@ -517,9 +607,11 @@ export class CollectionAutomations {
     if (this.state === "disposed") return;
     this.generation += 1;
     this.stopRuns();
-    await Promise.allSettled([this.draining]);
-    await this.payOwed((work) => this.options.withEngine(work));
+    // Disposed before the drain ends, so it starts no further drain that
+    // could take a claim again after it is handed back.
     this.state = "disposed";
+    await Promise.allSettled([this.draining]);
+    await this.payOwed(false);
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
 
@@ -528,12 +620,17 @@ export class CollectionAutomations {
     await this.ready();
     // A file change the watcher or a panel write already queued lands first.
     await this.chain;
-    const indexed = this.files.get(collectionPath);
+    // A dataset Collection dohc cannot run automations for is not in the index.
+    const unindexedDataset = !this.files.has(collectionPath) && !this.collections.has(collectionPath) &&
+      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
+    const indexed = unindexedDataset ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     if (!indexed) return { status: "missing" };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
+    const unsupported = (automation: Automation) =>
+      unindexedDataset ? DATASET_AUTOMATIONS_UNSUPPORTED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
-    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && this.cannotRun(collectionPath, entry.automation) === null
+    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
       : []);
     // Without a roster, the reason is the same for every step: dohc cannot
@@ -558,7 +655,7 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: this.cannotRun(collectionPath, automation),
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation),
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
@@ -639,6 +736,19 @@ export class CollectionAutomations {
       });
       return { path, name: target.name, stopped: reach && !reach.allowed ? reach.reason : null };
     });
+  }
+
+  /** The name an automation has in its Collection's automations.yaml now, for History; null when it has none. */
+  async nameForHistory(automationId: string): Promise<string | null> {
+    const id = parseCollectionAutomationId(automationId);
+    if (id === null) return null;
+    const indexed = this.files.get(id.collectionPath) ?? await this.parsedFile(id.collectionPath);
+    if (indexed?.file.status !== "read") return null;
+    for (const entry of indexed.file.entries) {
+      if (entry.status === "valid" && entry.automation.id === id.id) return entry.automation.name;
+      if (entry.status === "invalid" && entry.id === id.id) return entry.name;
+    }
+    return null;
   }
 
   /** Every step that waits for a current editor to allow it, one per step. */
@@ -787,7 +897,7 @@ export class CollectionAutomations {
 
   /** One automation's newest runs on this computer, newest first. */
   async runs(automationId: string, limit = 20): Promise<CollectionAutomationRun[]> {
-    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+    const listed = await this.claimHistory(automationId, false);
     if (listed === null) throw new Error("The workspace engine is not running.");
     const parsed = parseCollectionAutomationId(automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
@@ -840,10 +950,13 @@ export class CollectionAutomations {
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
     try {
-      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
-      if (listed === null) throw new Error("The workspace engine is not running.");
+      const known = this.datasets.has(parsed.collectionPath)
+        ? await this.withLiveLedger((ledger) => ledger.claim(input.automationId, input.claimId) !== null)
+        : await this.withLiveEngine(async (engine) =>
+          (await engine.listAutomationClaims({ automationId: input.automationId })).claims.some((claim) => claim.claimId === input.claimId));
+      if (known === null) throw new Error("The workspace engine is not running.");
       // Without its run history, dohc cannot tell what the run already did.
-      if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
+      if (!known) {
         return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
       }
       const runs = await runsForClaim(this.options.store, input, automation);
@@ -854,7 +967,9 @@ export class CollectionAutomations {
       const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
       if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
       this.waitingFor.delete(input.claimId);
-      const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
+      const retried = this.datasets.has(parsed.collectionPath)
+        ? await this.withLiveLedger((ledger) => ledger.retry(input.claimId))
+        : await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
       if (retried === null) throw new Error("The workspace engine is not running.");
       if (startsOver) {
         const hash = definitionHash(automation);
@@ -980,6 +1095,29 @@ export class CollectionAutomations {
     return this.options.withEngine(work);
   }
 
+  /** The dataset ledger, only while the executor runs and only when dohc can run dataset automations. */
+  private withLiveLedger<T>(work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null> {
+    if (this.state === "disposed" || this.state === "paused" || this.options.runDatasetClaim === undefined) return Promise.resolve(null);
+    return this.options.withDatasetLedger?.(work) ?? Promise.resolve(null);
+  }
+
+  /** One automation's run history, and optionally the failure its notice offers, from the ledger that holds its claims. */
+  private async claimHistory(automationId: string, withFailure: boolean): Promise<ClaimHistory | null> {
+    const id = parseCollectionAutomationId(automationId);
+    const failureOf = (failures: ReadonlyArray<{ automationId: string; claimId: string }>) =>
+      failures.find((failure) => failure.automationId === automationId)?.claimId ?? null;
+    if (id !== null && this.datasets.has(id.collectionPath)) {
+      return await this.withLiveLedger((ledger) => ({
+        claims: ledger.claims(automationId),
+        failure: withFailure ? failureOf(ledger.failures()) : null,
+      }));
+    }
+    return await this.withLiveEngine(async (engine) => ({
+      claims: (await engine.listAutomationClaims({ automationId })).claims,
+      failure: withFailure ? failureOf((await engine.listAutomationFailures()).failures) : null,
+    }));
+  }
+
   private stopRuns(): void {
     this.runAbort.abort();
     this.runAbort = new AbortController();
@@ -993,7 +1131,13 @@ export class CollectionAutomations {
     this.collections = new Set(listed.collections.map((collection) => collection.path));
     this.files.clear();
     this.schemaFields.clear();
+    this.datasets.clear();
     for (const path of this.collections) await this.readFile(path);
+    for (const [path, definition] of (await this.datasetFolders()) ?? []) {
+      if (this.collections.has(path)) continue;
+      this.datasets.set(path, definition);
+      await this.readFile(path);
+    }
     await this.readNamedSchemas();
   }
 
@@ -1027,7 +1171,7 @@ export class CollectionAutomations {
    * the Collection: a write would add a field nobody defined.
    */
   private cannotRun(collectionPath: string, automation: Automation): string | null {
-    const unsupported = unsupportedReason(automation);
+    const unsupported = this.unsupportedIn(collectionPath, automation);
     if (unsupported !== null) return unsupported;
     for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
       const fields = this.schemaFields.get(collection);
@@ -1040,17 +1184,63 @@ export class CollectionAutomations {
   }
 
   private async readFile(collectionPath: string): Promise<void> {
+    const parsed = await this.parsedFile(collectionPath);
+    if (parsed === undefined) this.files.delete(collectionPath);
+    else this.files.set(collectionPath, parsed);
+  }
+
+  private async parsedFile(collectionPath: string): Promise<IndexedFile | undefined> {
     const read = await this.options.readText(`${collectionPath}/${AUTOMATIONS_FILE_NAME}`);
-    if (read === null) {
-      this.files.delete(collectionPath);
-      return;
-    }
-    this.files.set(collectionPath, {
+    if (read === null) return undefined;
+    return {
       file: read.truncated
         ? { status: "unreadable", diagnostic: { code: "file-too-large", path: "" } }
         : parseAutomationsFile(read.text),
       contentHash: read.contentHash,
-    });
+    };
+  }
+
+  /**
+   * Each dataset Collection folder, with its approved rules. Null when dohc
+   * cannot run dataset automations, or the workspace has no dataset host. A
+   * dataset's descriptor sits beside its schema, in its Collection's folder.
+   * A dataset store that cannot open, or a dataset whose rules cannot be
+   * read, is reported and left out, so document automations still run.
+   */
+  private async datasetFolders(): Promise<Map<string, DatasetDefinition> | null> {
+    let listed: Awaited<ReturnType<DatasetAutomationLedger["datasets"]>> | null;
+    try {
+      listed = await this.withLiveLedger((ledger) => ledger.datasets());
+    } catch (error) {
+      this.options.onError("open this workspace's dataset store", error);
+      return null;
+    }
+    if (listed === null) return null;
+    for (const { datasetId, error } of listed.failures) this.options.onError(`read dataset ${datasetId}'s rules`, error);
+    const folders = new Map<string, DatasetDefinition>();
+    for (const definition of listed.definitions) {
+      const folder = posix.dirname(definition.schemaPath);
+      if (folder === ".") continue;
+      const read = await this.options.readText(`${folder}/${DATASET_FILE_NAME}`);
+      let described: unknown = null;
+      try {
+        described = read === null || read.truncated ? null : JSON.parse(read.text);
+      } catch {
+        // A descriptor that is not JSON names no dataset.
+      }
+      if (typeof described === "object" && described !== null && "datasetId" in described && described.datasetId === definition.datasetId) {
+        folders.set(folder, definition);
+      }
+    }
+    return folders;
+  }
+
+  /** Why dohc cannot run an automation in this indexed Collection yet, or null. */
+  private unsupportedIn(collectionPath: string, automation: Automation): string | null {
+    const definition = this.datasets.get(collectionPath);
+    if (definition === undefined) return unsupportedReason(automation);
+    const subscription = datasetSubscriptionFor(automation, definition);
+    return "problem" in subscription ? subscription.problem : null;
   }
 
   private definitionFor(id: { collectionPath: string; id: string }): Automation | null {
@@ -1121,10 +1311,29 @@ export class CollectionAutomations {
   private desiredSubscriptions(): Map<string, StoredSubscription> {
     const desired = new Map<string, StoredSubscription>();
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
-      if (!automation.enabled) continue;
+      if (!automation.enabled || this.datasets.has(collectionPath)) continue;
       desired.set(automationId, { automationId, path: collectionPath, ...subscriptionFor(automation.when) });
     }
     return desired;
+  }
+
+  private desiredDatasetSubscriptions(): Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }> {
+    const desired = new Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }>();
+    for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+      const definition = this.datasets.get(collectionPath);
+      if (definition === undefined || !automation.enabled) continue;
+      const watched = datasetSubscriptionFor(automation, definition);
+      if ("problem" in watched) continue;
+      desired.set(automationId, { datasetId: definition.datasetId, subscription: { automationId, ...watched, definitionHash: definitionDigest(automation) } });
+    }
+    return desired;
+  }
+
+  /** Whether the executor wants the ledger that served this claim to keep claiming for its automation. */
+  private isSubscribed(held: HeldClaim): boolean {
+    return held.source === "engine"
+      ? this.desiredSubscriptions().has(held.claim.automationId)
+      : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId === held.claim.datasetId;
   }
 
   /**
@@ -1231,43 +1440,69 @@ export class CollectionAutomations {
       changed = true;
     }
     if (changed) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    await this.reconcileDatasets(all);
+  }
+
+  /** The same diff against the dataset ledger, which keeps its own subscriptions. */
+  private async reconcileDatasets(all: boolean): Promise<void> {
+    const desired = this.desiredDatasetSubscriptions();
+    // A dataset store that cannot open stops only dataset automations.
+    await this.withLiveLedger((ledger) => {
+      for (const { datasetId, ...current } of ledger.subscriptions()) {
+        if (!current.automationId.startsWith(COLLECTION_AUTOMATION_PREFIX)) continue;
+        const wanted = desired.get(current.automationId);
+        if (wanted?.datasetId === datasetId) {
+          if (!all && isDeepStrictEqual(current, wanted.subscription)) desired.delete(current.automationId);
+          continue;
+        }
+        ledger.unsubscribe(datasetId, current.automationId);
+      }
+      for (const { datasetId, subscription } of desired.values()) ledger.subscribe(datasetId, subscription);
+    }).catch((error: unknown) => this.options.onError("update dataset automation subscriptions", error));
   }
 
   private async drain(): Promise<void> {
     // This drain's lifetime: a pause or close aborts it, and nothing it
     // started writes or settles after that.
     const stop = this.runAbort.signal;
-    const release: AutomationClaim[] = [];
+    const release: HeldClaim[] = [];
     try {
-      // What the engine has not heard yet goes first.
-      await this.payOwed((work) => this.withLiveEngine(work));
+      // What the ledgers have not heard yet goes first.
+      await this.payOwed(true);
       while (!stop.aborted) {
-        const claim = await this.withLiveEngine((engine) =>
-          engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }),
-        );
-        if (claim === null) return;
+        const held = await this.nextClaim();
+        if (held === null) return;
+        const { claimId } = held.claim;
         // From here this drain owns the claim: it settles, waits, or is left
-        // to the engine's recovery. One that still waits goes straight back.
-        const action = stop.aborted || this.waitingFor.has(claim.claimId)
+        // to its ledger's recovery. One that still waits goes straight back.
+        const action = stop.aborted || this.waitingFor.has(claimId)
           ? { kind: "release" as const }
-          : await this.execute(claim, stop);
+          : await this.execute(held, stop);
         if (action === null) continue;
         // Released at the end, so this drain does not take the claim again.
         if (action.kind === "release") {
-          release.push(claim);
-          if (action.waitsFor) this.waitingFor.set(claim.claimId, action.waitsFor);
+          release.push(held);
+          if (action.waitsFor) this.waitingFor.set(claimId, action.waitsFor);
           continue;
         }
-        this.waitingFor.delete(claim.claimId);
-        this.owed.set(claim.claimId, { claim, action });
-        if (!stop.aborted) await this.payOwed((work) => this.withLiveEngine(work), claim.claimId);
+        this.waitingFor.delete(claimId);
+        this.owed.set(claimId, { held, action });
+        if (!stop.aborted) await this.payOwed(true, claimId);
       }
     } catch (error) {
       this.options.onError("drain Collection automation claims", error);
     } finally {
-      for (const claim of release) this.owed.set(claim.claimId, { claim, action: { kind: "release" } });
-      if (!stop.aborted) await this.payOwed((work) => this.withLiveEngine(work));
+      for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
+      if (!stop.aborted) await this.payOwed(true);
     }
+  }
+
+  /** The engine's oldest pending claim, else the dataset ledger's. */
+  private async nextClaim(): Promise<HeldClaim | null> {
+    const claim = await this.withLiveEngine((engine) => engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }));
+    if (claim !== null) return { source: "engine", claim };
+    const dataset = await this.withLiveLedger((ledger) => ledger.next());
+    return dataset === null ? null : { source: "dataset", claim: dataset };
   }
 
   /**
@@ -1276,28 +1511,15 @@ export class CollectionAutomations {
    * refuses and its claim list shows the claim no longer running, its
    * recovery took the claim back, so nothing is owed and nothing settled.
    */
-  private async payOwed(
-    withEngine: <T>(work: (engine: CollectionAutomationEngine) => Promise<T>) => Promise<T | null>,
-    claimId?: string,
-  ): Promise<void> {
-    for (const [id, { claim, action }] of [...this.owed]) {
+  private async payOwed(live: boolean, claimId?: string): Promise<void> {
+    for (const [id, { held, action }] of [...this.owed]) {
       if (claimId !== undefined && id !== claimId) continue;
       let answered: boolean;
       try {
-        answered = (await withEngine(async (engine) => {
-          if (action.kind === "release") {
-            await engine.releaseAutomationClaim({ claimId: id });
-          } else {
-            await engine.settleAutomationClaim(
-              action.input.state === "failed"
-                ? { claimId: id, state: "failed", error: errorText(action.input.error) }
-                : { claimId: id, state: "done" },
-            );
-          }
-          return true;
-        })) === true;
+        answered = (await this.answer(held, action, live)) === true;
       } catch (error) {
-        if (isInvalidInputRefusal(error) && (await this.stillRunning(claim, withEngine)) === false) {
+        // The dataset ledger refuses only an attempt that is no longer current.
+        if ((held.source === "dataset" || isInvalidInputRefusal(error)) && (await this.stillRunning(held, live)) === false) {
           this.owed.delete(id);
           this.waitingFor.delete(id);
         } else {
@@ -1312,14 +1534,46 @@ export class CollectionAutomations {
     }
   }
 
-  /** Whether the engine still holds the claim as running, or null when it cannot say. */
-  private async stillRunning(
-    claim: AutomationClaim,
-    withEngine: <T>(work: (engine: CollectionAutomationEngine) => Promise<T>) => Promise<T | null>,
-  ): Promise<boolean | null> {
+  /** Tells the claim's ledger to release or settle it. Null when that ledger is unavailable. */
+  private answer(held: HeldClaim, action: ClaimAction, live: boolean): Promise<true | null> {
+    const settle: SettleInput | null = action.kind === "release" ? null
+      : action.input.state === "failed" ? { state: "failed", error: errorText(action.input.error) } : { state: "done" };
+    if (held.source === "dataset") {
+      return this.withLedger(live, (ledger) => {
+        if (settle === null) ledger.release(held.claim);
+        else ledger.settle(held.claim, settle);
+        return true as const;
+      });
+    }
+    const claimId = held.claim.claimId;
+    return this.withEngineAt(live, async (engine) => {
+      if (settle === null) await engine.releaseAutomationClaim({ claimId });
+      else await engine.settleAutomationClaim(settle.state === "failed" ? { claimId, state: "failed", error: settle.error } : { claimId, state: "done" });
+      return true as const;
+    });
+  }
+
+  /** The engine, or at close any engine still answering. */
+  private withEngineAt<T>(live: boolean, work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null> {
+    return live ? this.withLiveEngine(work) : this.options.withEngine(work);
+  }
+
+  /** The dataset ledger, or at close any ledger still open. */
+  private withLedger<T>(live: boolean, work: (ledger: DatasetAutomationLedger) => T | Promise<T>): Promise<T | null> {
+    return live ? this.withLiveLedger(work) : this.options.withDatasetLedger?.(work) ?? Promise.resolve(null);
+  }
+
+  /** Whether the claim's ledger still holds this attempt as running, or null when it cannot say. */
+  private async stillRunning(held: HeldClaim, live: boolean): Promise<boolean | null> {
+    const { automationId, claimId } = held.claim;
     try {
-      const listed = await withEngine((engine) => engine.listAutomationClaims({ automationId: claim.automationId }));
-      const found = listed?.claims.find((candidate) => candidate.claimId === claim.claimId);
+      if (held.source === "dataset") {
+        const listed = await this.withLedger(live, (ledger) => ledger.claims(automationId));
+        const found = listed?.find((candidate) => candidate.claimId === claimId);
+        return found === undefined ? null : found.state === "running" && found.attempts === held.claim.attempts;
+      }
+      const listed = await this.withEngineAt(live, (engine) => engine.listAutomationClaims({ automationId }));
+      const found = listed?.claims.find((candidate) => candidate.claimId === claimId);
       return found === undefined ? null : found.state === "running";
     } catch {
       return null;
@@ -1331,32 +1585,33 @@ export class CollectionAutomations {
    * Null leaves the claim running for the engine's recovery: a write that
    * outlived the deadline may still land.
    */
-  private async execute(claim: AutomationClaim, stop: AbortSignal): Promise<ClaimAction | null> {
+  private async execute(held: HeldClaim, stop: AbortSignal): Promise<ClaimAction | null> {
     try {
-      return await this.executeHeld(claim, stop);
+      return await this.executeHeld(held, stop);
     } catch (error) {
-      this.options.onError(`run automation claim "${claim.claimId}"`, error);
+      this.options.onError(`run automation claim "${held.claim.claimId}"`, error);
       return { kind: "release" };
     }
   }
 
-  private async executeHeld(claim: AutomationClaim, stop: AbortSignal): Promise<ClaimAction | null> {
+  private async executeHeld(held: HeldClaim, stop: AbortSignal): Promise<ClaimAction | null> {
     const release = { kind: "release" } as const;
+    const { claim } = held;
     if (this.changing.has(claim.claimId)) return release;
     const id = parseCollectionAutomationId(claim.automationId);
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
-    if (
-      id === null || automation === null || !automation.enabled ||
-      // A change in a Collection inside this one: the subscription's path
-      // covers it, and the automation does not.
-      claim.collectionPath !== id.collectionPath
-    ) {
-      if (id !== null && !this.desiredSubscriptions().has(claim.automationId)) {
-        // The automation is gone or off, so its subscription is stale.
-        void this.enqueue(() => this.dropStaleSubscription(claim.automationId, id.collectionPath));
-      }
+    const definition = id ? this.datasets.get(id.collectionPath) : undefined;
+    // An engine claim's change is in a document Collection, and not in a
+    // Collection inside this one, which the subscription's path also covers.
+    // A dataset claim's change is in the dataset this Collection keeps.
+    const inCollection = id !== null && (held.source === "engine"
+      ? definition === undefined && held.claim.collectionPath === id.collectionPath
+      : definition?.datasetId === held.claim.datasetId);
+    if (id === null || automation === null || !automation.enabled || !inCollection) {
+      // The automation is gone or off, so its subscription is stale.
+      if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
       return { kind: "settle", input: { state: "done" }, settled: async () => undefined };
     }
     // A claim this version cannot run, or that names a field its Collection
@@ -1371,12 +1626,18 @@ export class CollectionAutomations {
     const roster = await this.options.roster();
     if (stop.aborted) return release;
     if (roster.kind === "unknown") return { kind: "release", waitsFor: "roster" };
-    const held = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
+    const stepHeld = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
     // A step that reach allows only because an editor left waits for a
     // current editor to confirm it.
     if (stop.aborted) return release;
-    if (held) return { kind: "release", waitsFor: "held" };
-    const outcome = await this.runWithDeadline(claim, automation, id.collectionPath, roster, stop);
+    if (stepHeld) return { kind: "release", waitsFor: "held" };
+    const collection = collectionNamed(id.collectionPath);
+    const runDataset = this.options.runDatasetClaim;
+    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => {
+      if (held.source === "engine") return runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop });
+      if (runDataset === undefined || definition === undefined) throw new Error(DATASET_AUTOMATIONS_UNSUPPORTED);
+      return runDataset({ claim: held.claim, automation, definition, collection, roster, signal });
+    });
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.
@@ -1419,7 +1680,7 @@ export class CollectionAutomations {
   }
 
   /** The engine has the claim as done, so its saved run can leave run history in time. */
-  private async markSettled(claim: AutomationClaim, automation: Automation): Promise<void> {
+  private async markSettled(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation): Promise<void> {
     try {
       const runs = await runsForClaim(this.options.store, claim, automation);
       if (!runs.unreadable && runs.done && !runs.done.settled) {
@@ -1439,15 +1700,11 @@ export class CollectionAutomations {
   private async pruneRuns(automationId: string): Promise<void> {
     try {
       await this.options.store.prune(automationId, async () => {
-        const read = await this.withLiveEngine(async (engine) => ({
-          listed: await engine.listAutomationClaims({ automationId }),
-          failures: await engine.listAutomationFailures(),
-        }));
+        const read = await this.claimHistory(automationId, true);
         if (read === null) return null;
-        const notice = read.failures.failures.find((failure) => failure.automationId === automationId);
         return new Set([
-          ...read.listed.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
-          ...(notice ? [notice.claimId] : []),
+          ...read.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
+          ...(read.failure === null ? [] : [read.failure]),
         ]);
       });
     } catch (error) {
@@ -1462,11 +1719,9 @@ export class CollectionAutomations {
    * deadline's grace: the claim stays running for the engine's recovery.
    */
   private async runWithDeadline(
-    claim: AutomationClaim,
-    automation: Automation,
-    collectionPath: string,
-    roster: Exclude<ReachRoster, { kind: "unknown" }>,
+    claimId: string,
     stopped: AbortSignal,
+    runClaim: (signal: AbortSignal) => Promise<CollectionAutomationRunOutcome>,
   ): Promise<CollectionAutomationRunOutcome | null> {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -1479,21 +1734,14 @@ export class CollectionAutomations {
       }, { once: true });
     });
     try {
-      const run = runCollectionAutomation(this.runDependencies(), {
-        claim,
-        automation,
-        collection: collectionNamed(collectionPath),
-        roster,
-        signal: controller.signal,
-        stopped,
-      }).catch((error: unknown): CollectionAutomationRunOutcome => ({
+      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome => ({
         kind: "failed",
         error: errorText(error),
         timedOut: controller.signal.aborted,
       }));
       const outcome = await Promise.race([run, outlived]);
       if (outcome === "outlived") {
-        this.options.onError(`run automation claim "${claim.claimId}"`, new Error("A write did not stop after the deadline."));
+        this.options.onError(`run automation claim "${claimId}"`, new Error("A write did not stop after the deadline."));
         return null;
       }
       return outcome;
@@ -1562,9 +1810,16 @@ export class CollectionAutomations {
     return `${name} took too long ${TIMEOUTS_BEFORE_SWITCH_OFF} times in a row, and dohc could not switch it off. Switch it off in ${path}.`;
   }
 
-  private async dropStaleSubscription(automationId: string, path: string): Promise<void> {
-    if (this.desiredSubscriptions().has(automationId)) return;
-    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path }));
+  private async dropStaleSubscription(held: HeldClaim): Promise<void> {
+    if (this.isSubscribed(held)) return;
+    const { automationId } = held.claim;
+    if (held.source === "dataset") {
+      await this.withLiveLedger((ledger) => ledger.unsubscribe(held.claim.datasetId, automationId));
+      return;
+    }
+    const id = parseCollectionAutomationId(automationId);
+    if (id === null) return;
+    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path: id.collectionPath }));
     if (removed !== null && this.subscribed.delete(automationId)) {
       await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     }

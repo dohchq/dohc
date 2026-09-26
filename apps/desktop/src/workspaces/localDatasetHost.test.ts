@@ -460,6 +460,61 @@ describe("local dataset owner adapter", () => {
     ]);
   });
 
+  it("writes as an automation only through a context the host made, names it, and wakes the executor", async () => {
+    let wakes = 0;
+    const {host} = await open({onAutomationClaims: () => { wakes += 1; }}), approved = await activate(host);
+    const [own, other] = ["collection:items#welcome", "collection:items#tally"];
+    for (const automationId of [own, other]) host.automations.subscribe(id(1), {automationId, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(automationId)});
+    expect(host.automations.datasets()).toEqual({definitions: [approved.revision.definition], failures: []});
+    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1});
+    const step = call(approved, id(6), "step", {name: "Pens"});
+    expect(await host.automations.invoke(context, step)).toMatchObject({replayed: false});
+    // The commit's claims are made and its wake has run by the time the step returns.
+    expect(wakes).toBe(1);
+    // Its own automation claims nothing; the other claims at the depth the write declared.
+    const claimed = host.automations.next();
+    expect(claimed).toMatchObject({automationId: other, depth: 1, actor: {kind: "automation", automationId: own, depth: 1}});
+    // A claim is found by its id, but only under its own automation.
+    expect(host.automations.claim(other, claimed!.claimId)).toMatchObject({claimId: claimed!.claimId, state: "running"});
+    expect(host.automations.claim(own, claimed!.claimId)).toBeNull();
+    expect(host.automations.next()).toBeNull();
+    // Its retries keep an identity derived from the workspace and automation, apart from the owner's.
+    const principal = digest(JSON.stringify(["dohc-dataset-automation-v1", "w", own]));
+    expect(host.history({datasetId: id(1)}).entries).toEqual([expect.objectContaining({
+      automation: {automationId: own, depth: 1}, callerReference: digest(JSON.stringify([principal, {kind: "data"}])),
+    })]);
+    expect(await host.automations.invoke(context, step)).toMatchObject({replayed: true});
+    expect(await host.action(step)).toMatchObject({replayed: false});
+    // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
+    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
+    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow(/not permitted/);
+    expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
+  });
+
+  it("tells the executor after each change to a dataset's approved rules or lifecycle", async () => {
+    let changes = 0;
+    const {host} = await open({onDatasetsChanged: () => { changes += 1; }}), approved = await activate(host);
+    expect(changes).toBe(1);
+    expect(host.automations.datasets().definitions).toEqual([approved.revision.definition]);
+    host.archive({datasetId: id(1)});
+    expect(changes).toBe(2);
+    expect(host.automations.datasets()).toEqual({definitions: [], failures: []});
+    host.restore({datasetId: id(1)});
+    expect(changes).toBe(3);
+    // A refused change tells nothing.
+    await expect(host.approve({preparationId: "gone", revisionSha256: approved.revision.revisionSha256})).rejects.toThrow(/expired/);
+    expect(changes).toBe(3);
+  });
+
+  it("lists every other dataset's rules when one dataset's rules cannot be read", async () => {
+    const {host, workspaceRoot} = await open(), approved = await activate(host);
+    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+    try { db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run("w", "0-broken", "{", "{}"); } finally { db.close(); }
+    const listed = host.automations.datasets();
+    expect(listed.definitions).toEqual([approved.revision.definition]);
+    expect(listed.failures).toEqual([{datasetId: "0-broken", error: expect.any(Error)}]);
+  });
+
   it("requires exact approval and revision, and separates queries from actions", async () => {
     const {host} = await open(), fixture = sources();
     const prepared = await host.prepare({descriptorPath:"items/dataset.json",adapter:fixture.adapter});

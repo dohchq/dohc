@@ -9,6 +9,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
@@ -66,10 +67,14 @@ export function parseCollectionAutomationId(
  * into a fresh run.
  */
 export function definitionHash(automation: Automation): string {
+  return definitionDigest(automation).slice(0, 16);
+}
+
+/** The whole SHA-256 that `definitionHash` shortens, as the dataset ledger keeps it. */
+export function definitionDigest(automation: Automation): string {
   return createHash("sha256")
     .update(JSON.stringify([automation.when, automation.if, automation.do]))
-    .digest("hex")
-    .slice(0, 16);
+    .digest("hex");
 }
 
 /** A step with its position among all steps, counted depth first. */
@@ -219,10 +224,10 @@ const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
  * executor subscribes only automations it can run; the ⚡ panel shows the
  * reason for the rest.
  */
+const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
+
 export function unsupportedReason(automation: Automation): string | null {
-  if (!RECORD_TRIGGERS.has(automation.when.kind)) {
-    return "dohc can run automations that start from a record change. Other triggers come later.";
-  }
+  if (!RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
   const DATASET = "dohc cannot run automations on dataset tables and operations yet.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   const steps = orderSteps(automation.do);
@@ -324,6 +329,35 @@ export function subscriptionFor(trigger: AutomationTrigger): { kinds: Automation
     default:
       return { kinds: ["added", "changed"] };
   }
+}
+
+/**
+ * The dataset ledger subscription a dataset Collection's automation needs:
+ * its table, and its watched fields as field ids of the approved rules. Or
+ * why the automation cannot watch the dataset.
+ */
+export function datasetSubscriptionFor(
+  automation: Automation,
+  definition: DatasetDefinition,
+): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } {
+  const trigger = automation.when;
+  if (!RECORD_TRIGGERS.has(trigger.kind) || !("table" in trigger)) return { problem: RECORD_TRIGGERS_ONLY };
+  const table = trigger.table === null
+    ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
+    : definition.tables.find((candidate) => candidate.name === trigger.table);
+  if (table === undefined) {
+    return { problem: trigger.table === null
+      ? `${definition.name} has several tables. Name the one this automation watches.`
+      : `${definition.name} has no table named ${trigger.table}.` };
+  }
+  const { kinds, fields } = subscriptionFor(trigger);
+  const fieldIds: string[] = [];
+  for (const name of fields ?? []) {
+    const field = table.fields.find((candidate) => candidate.name === name);
+    if (field === undefined) return { problem: `${table.name} has no field named ${name}.` };
+    fieldIds.push(field.fieldId);
+  }
+  return { tableId: table.tableId, kinds: [...kinds].sort(), fieldIds: fields === undefined ? null : fieldIds.sort() };
 }
 
 /** The Collections each step reaches, for the reach check (ADR 0012). */

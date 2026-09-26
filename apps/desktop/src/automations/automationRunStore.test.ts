@@ -38,6 +38,12 @@ describe("the automation run store", () => {
     expect(await readdir(join(root, ".dohc", "automations"))).toEqual(expect.arrayContaining(["runs", "subscriptions.json", "timeouts.json"]));
   });
 
+  it("reads one fresh store from two places at once", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"));
+    const reads = await Promise.all([store.runsOf(AUTOMATION, "atc_one"), store.runsOf(AUTOMATION, "atc_two")]);
+    expect(reads).toEqual([{ runs: [], unreadable: false }, { runs: [], unreadable: false }]);
+  });
+
   it("reports a saved run it cannot read, so the claim never starts over as if it had none", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root);
