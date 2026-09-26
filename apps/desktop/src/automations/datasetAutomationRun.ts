@@ -80,7 +80,9 @@ function errorText(error: unknown): string {
 }
 
 type Rules = { datasetId: string; revision: number; revisionSha256: string };
-type Row = { id: DatasetRecordId; version: number; values: Record<string, JsonValue> };
+/** A record as a generated read returns it: its id, version, and values by field id. */
+export type DatasetRow = { id: DatasetRecordId; version: number; values: Record<string, JsonValue> };
+type Row = DatasetRow;
 
 /** Rows from a generated read's result. */
 function rowsOf(result: DatasetInvocationResult): Row[] {
@@ -132,7 +134,7 @@ async function invoke(
  * a whole number's predecessor, or for text the smallest id, "\u0000", which
  * starts the first page itself.
  */
-async function readRecord(
+function readRecord(
   host: DatasetRunHost,
   context: LocalDatasetAutomationContext,
   rules: Rules,
@@ -140,13 +142,23 @@ async function readRecord(
   table: DatasetTable,
   recordId: DatasetRecordId,
   signal: AbortSignal,
-): Promise<Row | null> {
+): Promise<DatasetRow | null> {
+  return readDatasetRecord((operationId, input) => invoke(host, context, rules, operationId, input, READ_KEY, signal), read, table, recordId);
+}
+
+/** One record by its id through `call`, as readRecord describes. */
+export async function readDatasetRecord(
+  call: (operationId: string, input: JsonObject) => Promise<DatasetInvocationResult>,
+  read: DatasetOperation,
+  table: DatasetTable,
+  recordId: DatasetRecordId,
+): Promise<DatasetRow | null> {
   const key = table.fields.find((field) => field.type !== "button" && field.sqlColumn === table.primaryKey)!;
   const input: JsonObject = read.fieldIds.includes(key.fieldId) ? { limit: 1, filters: [{ fieldId: key.fieldId, value: recordId }] }
     : typeof recordId === "number" ? { limit: 1, after: { id: recordId, value: recordId - 1 } }
     : recordId === "\u0000" ? { limit: 1 }
     : { limit: 1, after: { id: "\u0000", value: recordId } };
-  const [row] = rowsOf(await invoke(host, context, rules, read.operationId, input, READ_KEY, signal));
+  const [row] = rowsOf(await call(read.operationId, input));
   return row !== undefined && row.id === recordId ? row : null;
 }
 
@@ -463,7 +475,7 @@ function addedRecord(run: StoredRun, ordinal: number): DatasetRecordId | null {
 }
 
 /** An invocation's result, or the refusal an operation answered with. */
-async function send(call: () => Promise<DatasetInvocationResult>): Promise<{ value: DatasetInvocationResult } | { refused: { code: string; message: string } }> {
+export async function send(call: () => Promise<DatasetInvocationResult>): Promise<{ value: DatasetInvocationResult } | { refused: { code: string; message: string } }> {
   try {
     return { value: await call() };
   } catch (error) {

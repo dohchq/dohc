@@ -55,6 +55,7 @@ import {
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { datasetAutomationProblem, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
 import { runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
@@ -121,7 +122,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
 }
 
 /** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
-export interface DatasetAutomationHost extends DatasetRunHost {
+export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   /** Each approved, unarchived dataset's rules. */
   datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> };
   subscribe(datasetId: string, subscription: DatasetAutomationSubscription): void;
@@ -1033,7 +1034,9 @@ export class CollectionAutomations {
 
   /**
    * Undo for a finished run: its fields go back where no one changed them
-   * since, and the records it added move to the trash through `trash`.
+   * since. In a document Collection the records it added move to the trash
+   * through `trash`; in a dataset each reversible edit goes back through its
+   * approved edit as the person on this computer, and added records stay.
    */
   async undo(
     input: { automationId: string; claimId: string },
@@ -1042,13 +1045,17 @@ export class CollectionAutomations {
     definitionHashes?: ReadonlySet<string>,
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
+    const parsed = parseCollectionAutomationId(input.automationId);
+    const dataset = parsed !== null && this.datasets.has(parsed.collectionPath);
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
     try {
-      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
-      if (listed === null) throw new Error("The workspace engine is not running.");
-      const claim = listed.claims.find((candidate) => candidate.claimId === input.claimId);
+      const claims = dataset
+        ? await this.withLiveHost((host) => host.claims(input.automationId), true)
+        : (await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId })))?.claims ?? null;
+      if (claims === null) throw new Error("The workspace engine is not running.");
+      const claim = claims.find((candidate) => candidate.claimId === input.claimId);
       if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
       if (claim.state !== "done" && claim.state !== "failed") {
         return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
@@ -1068,16 +1075,34 @@ export class CollectionAutomations {
       // under a newer definition too. One whose Undo stopped part way is
       // undone again: what is already back stays as it is.
       const pending = runs.filter((run) => run.undo !== "done");
+      // A dataset edit goes back only under the rules it ran under, so a
+      // rules change refuses before anything below is saved or sent. Dataset
+      // Undo reads every run of the claim, those saved undone too, so a retry
+      // after only some were saved done sends the same requests as before and
+      // replays their receipts instead of writing again.
+      if (dataset) {
+        const changed = await this.withLiveHost((host) => datasetUndoRulesChanged(host, runs), true);
+        if (changed === null) throw new Error("The workspace's dataset host is not open.");
+        if (changed) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
+      }
       // Saved before anything is reversed, so no run resumes over what this
       // puts back, even if it stops part way.
       for (const run of pending) {
         if (run.undo === null) await this.options.store.save({ ...run, undo: "started", updatedAtMs: this.nowMs() });
       }
-      const undone = await undoCollectionAutomationRuns({
-        withReads: (work) => this.withLiveEngine(work),
-        withRecordWrites: this.options.withRecordWrites,
-        trash,
-      }, pending, this.runAbort.signal);
+      const undone = dataset
+        ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, input.claimId, runs, async (request) => {
+          // Kept with the claim's newest run, whichever runs are saved undone.
+          const newest = runs.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+          await this.options.store.recordUndoRequest(newest, request);
+          newest.undoRequests.push(request);
+        }, this.runAbort.signal), true)
+        : await undoCollectionAutomationRuns({
+          withReads: (work) => this.withLiveEngine(work),
+          withRecordWrites: this.options.withRecordWrites,
+          trash,
+        }, pending, this.runAbort.signal);
+      if (undone === null) throw new Error("The workspace's dataset host is not open.");
       for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
       return { status: "undone", ...undone };
     } finally {

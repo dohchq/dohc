@@ -22,10 +22,14 @@ export interface CollectionAutomationUndone {
   reverted: number;
   /** Records the run added, moved to the trash. */
   removed: number;
+  /** Records the run added to a dataset. They stay: the dataset's rules decide what can be deleted. */
+  kept: number;
   /** Fields someone changed after the run, left as they are. */
   changedSince: number;
   /** Fields on records that are no longer in their Collection. */
   missing: number;
+  /** Fields a dataset edit changed whose rules do not let it be undone. */
+  irreversible: number;
 }
 
 export interface CollectionAutomationUndoDependencies {
@@ -98,7 +102,7 @@ export async function undoCollectionAutomationRuns(
   signal: AbortSignal,
 ): Promise<CollectionAutomationUndone> {
   const { added, records } = changesOf(runs);
-  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, changedSince: 0, missing: 0 };
+  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0 };
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;

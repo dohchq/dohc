@@ -15,6 +15,8 @@ import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } fro
 import type { ReachRoster } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, type CollectionAutomationEngine } from "./collectionAutomations";
+import { UNDONE_RUN_ERROR } from "./collectionAutomationRun";
+import { DATASET_UNDO_RULES_CHANGED } from "./datasetAutomationUndo";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
 // dohc's generated operations in its worker, its commits claim through its
@@ -128,6 +130,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let hostOpen = options.hostOpen ?? true;
   // Rules the executor sees in place of the approved ones, as after a schema change it indexes.
   let indexed: DatasetDefinition | null = null;
+  // Whether saved rules still resolve, as before an approved change that drops them.
+  let rulesResolve = true;
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
@@ -155,9 +159,10 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
       opened.push(open);
       if (!hostOpen && !open) return null;
       const override = indexed;
-      const automations = override === null ? host.automations : { ...host.automations,
+      const current = override === null ? host.automations : { ...host.automations,
         datasets: () => ({ definitions: [override], failures: [] as Array<{ datasetId: string; error: unknown }> }),
         revision: (datasetId: string) => ({ ...host.automations.revision(datasetId), definition: override }) };
+      const automations = rulesResolve ? current : { ...current, resolves: () => false };
       const result = await work(automations);
       wake();
       return result;
@@ -171,6 +176,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     setRoster: (next: ReachRoster) => { roster = next; },
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
     changeRules: (next: DatasetDefinition) => { indexed = next; executor!.datasetsChanged(); },
+    dropRules: () => { rulesResolve = false; },
   };
 }
 
@@ -496,6 +502,56 @@ describe("Collection automations on a dataset", () => {
     // Two operations and six fields, once the change is indexed.
     await f.until(async () => await steps() === 8);
     expect(heldFields()).toEqual([`field:${id(3)}`, `field:${SECRET}`]);
+    await f.executor.dispose();
+  });
+
+  it("undoes a run's edits as the person, keeping fields someone changed since and the records it added", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid(`      - set:
+          Status: Closed
+          Notes: Closed by automation
+        operation: invoices.edit
+      - add-record:
+          Notes: Log
+        operation: invoices.create
+`));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open", [NOTES]: "draft" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    // Someone changes Notes after the run: Undo keeps it, and puts Status back.
+    await f.edit(invoice, { [NOTES]: "mine" });
+    const claimId = f.claims()[0]!.claimId;
+    const trash = async () => { throw new Error("A dataset's added records stay."); };
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId }, trash)).toEqual({
+      status: "undone", reverted: 1, removed: 0, kept: 1, changedSince: 1, missing: 0, irreversible: 0,
+    });
+    expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open", [NOTES]: "mine", [PAID]: true });
+    expect((await f.records()).some((row) => row.values[NOTES] === "Log")).toBe(true);
+    // The owner undid it, not the automation.
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).not.toHaveProperty("automation");
+    // Run history shows it undone, and neither Undo nor Try again runs it again.
+    expect(await f.executor.runs(AUTOMATION)).toEqual([expect.objectContaining({ claimId, undone: true })]);
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId }, trash)).toEqual({ status: "refused", reason: "You already undid this run." });
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId, startOver: false })).toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open", [NOTES]: "mine" });
+    await f.executor.dispose();
+  });
+
+  it("refuses to undo a run whose rules no longer resolve, before it saves or sends anything", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const claimId = f.claims()[0]!.claimId;
+    f.dropRules();
+    expect(await f.executor.undo({ automationId: AUTOMATION, claimId }, async () => undefined))
+      .toEqual({ status: "refused", reason: DATASET_UNDO_RULES_CHANGED });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
+    // Nothing marks the run undone, so it still reads as a run that can be undone later.
+    const { runs } = await createAutomationRunStore(f.root).runsOf(AUTOMATION, claimId);
+    expect(runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
   });
 });

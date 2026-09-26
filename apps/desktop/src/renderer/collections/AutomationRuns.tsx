@@ -32,9 +32,13 @@ export function undoSentence(undone: Undone): string {
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(`Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
+  if (undone.kept > 0) parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
   if (undone.changedSince > 0) parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
   if (undone.missing > 0) {
     parts.push(`${count(undone.missing, "field is", "fields are")} on records no longer in the Collection.`);
+  }
+  if (undone.irreversible > 0) {
+    parts.push(`The Collection's rules do not let dohc undo ${count(undone.irreversible, "change", "changes")}.`);
   }
   return parts.join(" ");
 }
@@ -98,7 +102,7 @@ function RunRow(props: {
   const [open, setOpen] = useState(false);
   const canRetry = run.state === "failed" && !run.chainStopped && !run.undone;
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
-    run.writes.some((write) => write.kind === "field" || write.kind === "created");
+    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit");
   return (
     <li data-testid={`automation-run-${run.claimId}`} className="border-b border-line px-3 py-2 last:border-b-0">
       <div className="flex items-start gap-2">
