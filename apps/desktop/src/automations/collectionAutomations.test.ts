@@ -19,6 +19,7 @@ import {
   TIMEOUTS_BEFORE_SWITCH_OFF,
   UNREADABLE_REACH,
   type CollectionAutomationEngine,
+  type CollectionAutomationsOptions,
 } from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 import {
@@ -56,7 +57,7 @@ interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc 
 // automation off, so each test Collection defines them all.
 const FIELDS = [
   "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
-  "Project", "Finished on", "A", "B", "C", "D", "E", "Details", "Stamped", "Asked by",
+  "Project", "Finished on", "Archived on", "A", "B", "C", "D", "E", "Details", "Stamped", "Asked by",
 ];
 const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
 
@@ -90,12 +91,14 @@ async function world(options: {
   for (const [collection, body] of Object.entries(options.automations)) await writeAutomations(collection, body);
 
   const records = new Map<string, FakeRecord>();
+  let claimCount = 0;
   const journal = new Map<string, string>();
   const journaled: Array<{ path: string; field?: string; idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }> = [];
   const authored: Array<{ path: string; author: unknown }> = [];
   const claims = new Map<string, AutomationClaim>();
   const pending: AutomationClaim[] = [];
   const subscriptions = new Map<string, unknown>();
+  const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
   const waiters = new Set<() => void>();
   const events: string[] = [];
@@ -212,6 +215,31 @@ async function world(options: {
       }
       return { failures: [...newest.values()].map(({ automationId, claimId }) => ({ automationId, claimId })) };
     },
+    // The engine's rules: a new or changed schedule only sets its mark, and
+    // each due time claims once.
+    claimAutomationSchedule: async ({ automationId, scheduleHash, run, throughMs }) => {
+      const mark = marks.get(automationId);
+      const inserted: AutomationClaim[] = [];
+      if (mark?.scheduleHash === scheduleHash) {
+        for (const due of run) {
+          if ([...claims.values()].some((known) => known.automationId === automationId && "key" in known.trigger && known.trigger.key === `schedule:${due}`)) continue;
+          claimCount += 1;
+          const created: AutomationClaim = {
+            claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `schedule:${due}` },
+            recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
+            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+            state: "pending", attempts: 0, run: 1, createdAtMs: due + 1_000, updatedAtMs: 0,
+          };
+          claims.set(created.claimId, created);
+          pending.push(created);
+          inserted.push(created);
+        }
+      }
+      const next = { automationId, scheduleHash, throughMs };
+      marks.set(automationId, next);
+      return { claims: inserted, mark: next };
+    },
+    listAutomationScheduleMarks: async () => ({ marks: [...marks.values()] }),
     releaseAutomationClaim: async ({ claimId }) => {
       const claim = claims.get(claimId)!;
       if (claim.state !== "running") throw new Error("Automation claim is not running.");
@@ -316,7 +344,7 @@ async function world(options: {
   const failuresChanged: string[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   // A new executor over the same engine, files, and saved runs, as after a restart.
-  const makeExecutor = () => new CollectionAutomations({
+  const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => new CollectionAutomations({
     withEngine: async (work) => await work(engine),
     withRecordWrites: async (signal, work) => {
       await options.withRecordWrites?.(signal, events);
@@ -378,10 +406,10 @@ async function world(options: {
     onError: (context, error) => { errors.push({ context, error }); },
     withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
+    ...extra,
   });
   const executor = makeExecutor();
 
-  let claimCount = 0;
   const claim = (automationId: string, record: FakeRecord, change: Partial<RecordChange> = {}) => {
     claimCount += 1;
     const created: AutomationClaim = {
@@ -499,7 +527,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
 
     expect(claim.state).toBe("done");
-    // A schedule cannot run yet, so only the record trigger subscribes.
+    // A schedule claims when it is due, so only the record trigger subscribes.
     expect([...w.subscriptions.keys()]).toEqual(["collection:Tasks#stamp"]);
     expect(w.subscriptions.get("collection:Tasks#stamp")).toEqual({
       automationId: "collection:Tasks#stamp", path: "Tasks", kinds: ["changed"], fields: ["Status"],
@@ -535,6 +563,91 @@ describe("Collection automations", () => {
 
     w.executor.handlePulledPaths(["Tasks/notes.md", "Tasks/automations.yaml"]);
     await w.until(() => !w.subscriptions.has(TASKS));
+  });
+
+  it("times a schedule's switch-on at the index read that sees it", async () => {
+    const sweep = (enabled: boolean, title = "Swept") => [
+      "  - id: sweep",
+      "    name: Sweep",
+      `    enabled: ${enabled}`,
+      "    when: {schedule: hour, timezone: UTC}",
+      `    do: [{add-record: {Title: ${title}}}]`,
+    ].join("\n");
+    const w = await world({ automations: { Tasks: sweep(true) } });
+    let now = 1_000;
+    let read: () => void = () => undefined;
+    const executor = w.makeExecutor({ nowMs: () => now, onSchedulesChanged: () => read() });
+    const reread = async (body: string) => {
+      await w.writeAutomations("Tasks", body);
+      const done = new Promise<void>((resolve) => { read = resolve; });
+      executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      await done;
+    };
+    await executor.open();
+    expect(executor.schedules()?.map((entry) => entry.enabledSince), "on as the executor opened").toEqual([null]);
+
+    // Switched off and on again before any scheduler step looks.
+    await reread(sweep(false));
+    expect(executor.schedules()).toEqual([]);
+    now = 2_000;
+    await reread(sweep(true));
+    now = 3_000;
+    await reread(sweep(true, "Swept again"));
+    expect(executor.schedules()?.map((entry) => entry.enabledSince), "an edit that keeps it on keeps the time").toEqual([2_000]);
+    await executor.dispose();
+  });
+
+  it("runs a schedule's due time on the records a Find returns, with the due time as now", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: day, at: '09:00', timezone: UTC}",
+      "    do:",
+      "      - find: record.Status == \"Done\"",
+      "        as: done",
+      "      - set: {Archived on: '=today()'}",
+      "        records: done",
+      "  - id: off",
+      "    name: Off",
+      "    enabled: false",
+      "    when: {schedule: hour, timezone: UTC}",
+      "    do: [{add-record: {Title: Never}}]",
+      "  - id: nowhere",
+      "    name: Nowhere",
+      "    when: {schedule: hour, timezone: Mars/Olympus}",
+      "    do: [{add-record: {Title: Never}}]",
+    ].join("\n") } });
+    const done = w.addRecord("Tasks", "done", { Status: "Done" });
+    const open = w.addRecord("Tasks", "open", { Status: "Doing" });
+    expect(w.executor.schedules(), "unknown until the executor opens").toBeNull();
+    await w.executor.open();
+    expect(w.executor.schedules()?.map((entry) => entry.automationId)).toEqual(["collection:Tasks#sweep"]);
+    const [sweep] = w.executor.schedules() ?? [];
+    const due = Date.UTC(2026, 8, 25, 9);
+    expect(await w.executor.claimSchedule({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, run: [], throughMs: due - 1 }))
+      .toEqual({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due - 1 });
+    await w.executor.claimSchedule({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, run: [due], throughMs: due });
+    const claim = [...w.claims.values()].find((candidate) => candidate.change.kind === "schedule")!;
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(done)).toEqual({ Status: "Done", "Archived on": "2026-09-25" });
+    expect(w.fieldsOf(open)).toEqual({ Status: "Doing" });
+    expect(await w.executor.scheduleMarks()).toEqual([
+      { automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due },
+    ]);
+    // A synced workspace does not run schedules yet, and says so.
+    const synced = w.makeExecutor({ runsSchedules: async () => false });
+    await synced.open();
+    const syncedList = await synced.automationsIn("Tasks");
+    expect(syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].cannotRun : null)
+      .toBe("Schedules run only in a workspace that has never synced, for now.");
+    await synced.dispose();
+    // This computer's parser refuses a zone it does not know, so that
+    // schedule is off here with its diagnostic.
+    const listed = await w.executor.automationsIn("Tasks");
+    const nowhere = listed.status === "read" ? listed.automations[2] : null;
+    expect(nowhere).toMatchObject({ valid: false, id: "nowhere", diagnostics: [{ code: "invalid-timezone" }] });
   });
 
   it("finds records, changes each with its own values, branches, and adds records it then changes", async () => {
@@ -1824,13 +1937,13 @@ describe("Collection automations", () => {
   });
 
   it("fails a claim for an automation this version cannot run, with the reason the panel shows", async () => {
-    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    when: {schedule: day, timezone: UTC}\n    do: [{find: 'true', as: all}]\n" } });
+    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    when: record-added\n    do: [{run: 'return 1'}]\n" } });
     const claim = w.claim("collection:Tasks#later", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
     await w.settledClaim(claim);
     expect(claim).toMatchObject({
       state: "failed",
-      error: "dohc can run automations that start from a record change. Other triggers come later.",
+      error: "dohc cannot run code steps yet.",
     });
     expect(w.journaled).toEqual([]);
   });
