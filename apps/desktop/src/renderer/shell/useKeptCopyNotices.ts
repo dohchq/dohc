@@ -18,8 +18,8 @@ export function keptCopyMessage(path: string): string {
 export function useKeptCopyNotices(input: {
   workspaceId: string;
   workspaceIsReady: boolean;
-  show: (copies: readonly KeptCopyNotice[]) => void;
-  showSaved: (message: string, open: () => void) => void;
+  show: (copies: readonly KeptCopyNotice[], more: boolean) => void;
+  showSaved: (message: string, open: (() => void) | null) => void;
   reportShellError: (fallback: string, error: unknown, retry: (() => void) | null) => void;
   openFile: (path: string) => void;
 }): () => Promise<void> {
@@ -34,13 +34,13 @@ export function useKeptCopyNotices(input: {
   const refresh = useCallback(async (): Promise<void> => {
     const request = reads.next();
     try {
-      const { keptCopies } = await bridge().listKeptCopies({ workspaceId });
+      const { keptCopies, more } = await bridge().listKeptCopies({ workspaceId });
       if (!reads.isCurrent(request)) return;
       latest.current.show(keptCopies.map((copy) => ({
         id: copy.id,
         message: keptCopyMessage(copy.path),
         save: () => save(copy),
-      })));
+      })), more);
     } catch (error) {
       if (!reads.isCurrent(request)) return;
       latest.current.reportShellError(
@@ -56,12 +56,13 @@ export function useKeptCopyNotices(input: {
         .saveKeptCopy({ workspaceId, id: copy.id })
         .then(async ({ path }) => {
           if (!workspace.isCurrent(epoch)) return;
-          if (path !== null) {
-            latest.current.showSaved(
-              `Saved the other copy of ${copy.path} as ${path}`,
-              () => latest.current.openFile(path),
-            );
-          }
+          // Null: a crash, an agent or another window got there first.
+          latest.current.showSaved(
+            path === null
+              ? `The other copy of ${copy.path} was already saved or removed.`
+              : `Saved the other copy of ${copy.path} as ${path}`,
+            path === null ? null : () => latest.current.openFile(path),
+          );
           await refresh();
         })
         .catch((error: unknown) => {

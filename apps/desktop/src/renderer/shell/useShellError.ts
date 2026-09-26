@@ -20,6 +20,8 @@ export type ShellErrorKind =
   | "cloud-sync"
   | "import-files"
   | "share-refresh"
+  | "kept-copies-summary"
+  | "kept-copies-more"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -59,6 +61,7 @@ export function useShellError(workspaceId: string) {
   // Kept copies already shown in this workspace. A row the person dismissed
   // stays dismissed until the workspace opens again.
   const shownKeptCopies = useRef(new Set<number>());
+  const shownKeptCopiesMore = useRef(false);
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -135,6 +138,7 @@ export function useShellError(workspaceId: string) {
   useEffect(() => {
     setShellErrors([]);
     shownKeptCopies.current = new Set();
+    shownKeptCopiesMore.current = false;
   }, [workspaceId]);
 
   const reportShellError = useCallback(
@@ -292,39 +296,63 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   // One row per kept copy the engine lists. A copy listed for the first time
-  // arrives as a toast; a copy no longer listed, because it was saved, loses
-  // its row.
-  const showKeptCopies = useCallback((copies: readonly KeptCopyNotice[]) => {
+  // arrives as a toast; several at once arrive as one summary toast instead.
+  // A copy no longer listed, because it was saved, loses its row. `more`
+  // says the engine kept copies past its list, and holds one row of its own.
+  const showKeptCopies = useCallback((copies: readonly KeptCopyNotice[], more: boolean) => {
     const listed = new Set(copies.map((copy) => copy.id));
     const atMs = Date.now();
-    const fresh: ShellError[] = copies
-      .filter((copy) => !shownKeptCopies.current.has(copy.id))
-      .map((copy) => {
-        shownKeptCopies.current.add(copy.id);
-        nextId.current += 1;
-        return {
-          id: `shell-error-${nextId.current}`,
-          message: copy.message,
-          retry: null,
-          action: { label: "Save copy", run: copy.save },
-          keptCopyId: copy.id,
-          atMs,
-          seen: false,
-        };
-      });
+    const row = (fields: Omit<ShellError, "id" | "atMs">): ShellError => {
+      nextId.current += 1;
+      return { ...fields, id: `shell-error-${nextId.current}`, atMs };
+    };
+    const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
+    for (const copy of arrived) shownKeptCopies.current.add(copy.id);
+    const summarized = arrived.length > 1;
+    const fresh: ShellError[] = arrived.map((copy) => row({
+      message: copy.message,
+      retry: null,
+      action: { label: "Save copy", run: copy.save },
+      keptCopyId: copy.id,
+      seen: summarized,
+    }));
+    if (summarized) {
+      fresh.push(row({
+        message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+        retry: null,
+        kind: "kept-copies-summary",
+        seen: false,
+      }));
+    }
+    const addMore = more && !shownKeptCopiesMore.current;
+    shownKeptCopiesMore.current = more;
+    const moreRow = row({
+      message: "dohc kept more copies than Notices can list. Save these copies to see the rest.",
+      retry: null,
+      kind: "kept-copies-more",
+      seen: true,
+    });
     setShellErrors((current) => {
-      const stays = current.filter(
-        (error) => error.keptCopyId === undefined || listed.has(error.keptCopyId),
-      );
-      return fresh.length === 0 && stays.length === current.length
+      const added = addMore ? [...fresh, moreRow] : fresh;
+      const stays = current.filter((error) =>
+        (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
+        (error.kind !== "kept-copies-more" || more) &&
+        (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)));
+      return added.length === 0 && stays.length === current.length
         ? current
-        : [...stays, ...fresh];
+        : [...stays, ...added];
     });
   }, []);
-  // A saved copy's row opens the copy.
+  // What a Save copy did: a saved copy's row opens the copy, and a copy
+  // that was already gone says so.
   const showKeptCopySaved = useCallback(
-    (message: string, open: () => void) => {
-      push({ message, retry: null, tone: "success", action: { label: "Open", run: open, ends: true } });
+    (message: string, open: (() => void) | null) => {
+      push({
+        message,
+        retry: null,
+        tone: "success",
+        ...(open ? { action: { label: "Open", run: open, ends: true } } : {}),
+      });
     },
     [push],
   );

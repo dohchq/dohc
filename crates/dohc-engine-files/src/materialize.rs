@@ -2208,17 +2208,33 @@ pub fn save_kept_displacement(
 }
 
 /// `notes (kept copy).md`, then `notes (kept copy 2).md`. A name with no
-/// extension, or only a leading dot, takes the suffix at its end.
+/// extension, or only a leading dot, takes the suffix at its end. The stem
+/// is shortened so the name fits [`MAX_KEPT_COPY_NAME_BYTES`]; the suffix and
+/// the extension stay whole.
 fn kept_copy_name(file_name: &str, n: u32) -> String {
     let suffix = match n {
         1 => " (kept copy)".to_owned(),
         n => format!(" (kept copy {n})"),
     };
-    match file_name.rfind('.') {
-        Some(dot) if dot > 0 => format!("{}{suffix}{}", &file_name[..dot], &file_name[dot..]),
-        _ => format!("{file_name}{suffix}"),
+    let (stem, extension) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 && file_name.len() - dot + suffix.len() < MAX_KEPT_COPY_NAME_BYTES => {
+            file_name.split_at(dot)
+        }
+        _ => (file_name, ""),
+    };
+    let mut keep = MAX_KEPT_COPY_NAME_BYTES
+        .saturating_sub(suffix.len() + extension.len())
+        .min(stem.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
     }
+    format!("{}{suffix}{extension}", &stem[..keep])
 }
+
+/// The longest file name, in UTF-8 bytes, a kept copy takes. Most file
+/// systems allow 255 bytes or 255 UTF-16 units per name, and 255 bytes of
+/// UTF-8 never needs more than 255 UTF-16 units.
+const MAX_KEPT_COPY_NAME_BYTES: usize = 255;
 
 /// Resolve this job's unresolved displacements, and any other job's for the
 /// same path, before it runs, including a displaced file whose row a power
@@ -3984,6 +4000,29 @@ mod tests {
         assert_eq!(kept_copy_name("a.tar.gz", 1), "a.tar (kept copy).gz");
         assert_eq!(kept_copy_name(".env", 1), ".env (kept copy)");
         assert_eq!(kept_copy_name("Makefile", 3), "Makefile (kept copy 3)");
+    }
+
+    /// A name near the file-system limit gives up stem bytes, never its
+    /// extension or suffix, and never splits a character.
+    #[test]
+    fn kept_copy_names_fit_the_name_limit() {
+        let long = format!("{}.md", "a".repeat(252));
+        let copy = kept_copy_name(&long, 12);
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(copy.ends_with("a (kept copy 12).md"), "{copy}");
+
+        let wide = format!("{}.md", "é".repeat(126));
+        let copy = kept_copy_name(&wide, 1);
+        assert!(copy.len() <= MAX_KEPT_COPY_NAME_BYTES, "{}", copy.len());
+        assert!(copy.ends_with("é (kept copy).md"), "{copy}");
+
+        let dotted = format!("a.{}", "b".repeat(253));
+        let copy = kept_copy_name(&dotted, 1);
+        assert_eq!(copy.len(), MAX_KEPT_COPY_NAME_BYTES);
+        assert!(
+            copy.starts_with("a.b") && copy.ends_with("b (kept copy)"),
+            "{copy}"
+        );
     }
 
     /// The no-replace rename claims an empty name and refuses an occupied

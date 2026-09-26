@@ -17,8 +17,9 @@ afterEach(() => {
 
 function harness(initial: KeptCopy[]) {
   let kept = initial;
+  let more = false;
   const bridge = {
-    listKeptCopies: vi.fn(async () => ({ keptCopies: kept, more: false })),
+    listKeptCopies: vi.fn(async () => ({ keptCopies: kept, more })),
     saveKeptCopy: vi.fn(async ({ id }: { workspaceId: string; id: number }) => {
       const copy = kept.find((entry) => entry.id === id);
       kept = kept.filter((entry) => entry.id !== id);
@@ -43,7 +44,7 @@ function harness(initial: KeptCopy[]) {
     bridge,
     openFile,
     result: rendered.result,
-    keep: (copies: KeptCopy[]) => { kept = copies; },
+    keep: (copies: KeptCopy[], past = false) => { kept = copies; more = past; },
   };
 }
 
@@ -106,5 +107,42 @@ describe("useKeptCopyNotices", () => {
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
         "Saved the other copy of a.md as a (kept copy).md",
       ]));
+  });
+
+  it("says so when the copy was already saved or removed", async () => {
+    const h = harness([{ id: 3, path: "a.md", keptAtMs: 1 }]);
+    h.bridge.saveKeptCopy.mockResolvedValueOnce({ path: null });
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
+    h.keep([]);
+
+    act(() => h.result.current.runShellErrorAction(h.result.current.shellErrors[0]!.id));
+    await waitFor(() =>
+      expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
+        "The other copy of a.md was already saved or removed.",
+      ]));
+    expect(h.result.current.shellErrors[0]!.action).toBeUndefined();
+  });
+
+  it("announces several copies with one toast, keeps a row each, and a row for copies past the list", async () => {
+    const h = harness([
+      { id: 3, path: "a.md", keptAtMs: 1 },
+      { id: 4, path: "b.md", keptAtMs: 2 },
+    ]);
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
+    h.keep([{ id: 3, path: "a.md", keptAtMs: 1 }, { id: 4, path: "b.md", keptAtMs: 2 }], true);
+    await act(async () => await h.result.current.refresh());
+    await act(async () => await h.result.current.refresh());
+    const rows = h.result.current.shellErrors.map(({ message, seen }) => ({ message, seen }));
+    expect(rows).toEqual([
+      { message: keptCopyMessage("a.md"), seen: true },
+      { message: keptCopyMessage("b.md"), seen: true },
+      { message: "dohc kept 2 copies of files other programs changed.", seen: false },
+      { message: "dohc kept more copies than Notices can list. Save these copies to see the rest.", seen: true },
+    ]);
+
+    // Once every copy is saved, the summary and the overflow row go too.
+    h.keep([]);
+    await act(async () => await h.result.current.refresh());
+    expect(h.result.current.shellErrors).toEqual([]);
   });
 });
