@@ -22,7 +22,7 @@ const HOUR = 60 * MINUTE;
 const NINE = Date.UTC(2026, 8, 25, 9);
 
 function scheduled(trigger: AutomationScheduleTrigger, automationId = "collection:Tasks#report"): ScheduledAutomation {
-  return { automationId, trigger, scheduleHash: scheduleHash(trigger), enabledSince: null };
+  return { automationId, name: "Report", trigger, scheduleHash: scheduleHash(trigger), enabledSince: null };
 }
 
 const hourly = scheduled({ kind: "schedule", every: "hour", at: ":00", timezone: "UTC" }, "collection:Tasks#hourly");
@@ -100,6 +100,16 @@ describe("planScheduleStep", () => {
     expect(planScheduleStep(hourly, mark, NINE, NINE - 90 * MINUTE)).toEqual({
       run: [NINE - HOUR, NINE],
       throughMs: NINE,
+      skipped: { first: [NINE - 4 * HOUR, NINE - 3 * HOUR, NINE - 2 * HOUR], count: 3 },
+    });
+    expect(planScheduleStep(hourly, mark, NINE, NINE - 90 * MINUTE, [], NINE - 150 * MINUTE), "ran elsewhere up to 6:30")
+      .toEqual({ run: [NINE - HOUR, NINE], throughMs: NINE, skipped: { first: [NINE - 2 * HOUR], count: 1 } });
+    expect(planScheduleStep({ ...hourly, enabledSince: NINE - 150 * MINUTE }, mark, NINE, NINE - 90 * MINUTE), "switched on at 6:30")
+      .toEqual({ run: [NINE - HOUR, NINE], throughMs: NINE, skipped: { first: [NINE - 2 * HOUR], count: 1 } });
+    const long = planScheduleStep(hourly, markOf(hourly, NINE - 30 * HOUR), NINE, NINE - 90 * MINUTE)!;
+    expect(long.skipped, "lists five, counts all").toEqual({
+      first: [0, 1, 2, 3, 4].map((hours) => NINE - (29 - hours) * HOUR),
+      count: 28,
     });
     expect(planScheduleStep(hourly, markOf(hourly, NINE), NINE + 30 * MINUTE, 0), "nothing due").toBeNull();
     expect(planScheduleStep(hourly, markOf(hourly, NINE + HOUR), NINE, 0), "a mark ahead of the clock").toBeNull();
@@ -166,6 +176,90 @@ describe("AutomationScheduler", () => {
     expect(work.steps).toEqual([
       { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 1 * MINUTE + 3 * HOUR },
     ]);
+    scheduler.dispose();
+  });
+
+  it("reports skipped due times before it moves the mark past them, and again if the report fails", async () => {
+    const time = fakeClock(NINE + 3 * MINUTE);
+    const reports: Array<{ steps: number; first: number[]; count: number }> = [];
+    let failing = true;
+    const errors: string[] = [];
+    let work: ReturnType<typeof fakeSource>;
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (context) => { errors.push(context); },
+      onSkipped: async (_workspaceId, schedule, skipped) => {
+        reports.push({ steps: work.steps.length, ...skipped });
+        expect(schedule.automationId).toBe(hourly.automationId);
+        if (failing) throw new Error("The notice could not be kept.");
+      },
+    });
+    work = fakeSource([hourly], [markOf(hourly, NINE - 3 * HOUR)]);
+    scheduler.add("ws", work.source, here);
+    await idle(scheduler);
+    expect(reports).toEqual([{ steps: 0, first: [NINE - 2 * HOUR, NINE - HOUR], count: 2 }]);
+    expect(work.steps, "the mark stays").toEqual([]);
+    expect(errors).toEqual(['step the schedules in workspace "ws"']);
+
+    failing = false;
+    scheduler.wake();
+    await idle(scheduler);
+    expect(reports.at(-1), "the same report, so the same notice").toEqual({ steps: 0, first: [NINE - 2 * HOUR, NINE - HOUR], count: 2 });
+    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    scheduler.dispose();
+  });
+
+  it("takes back a skip report when the schedule changed while it was posted, and reports afresh", async () => {
+    const time = fakeClock(NINE + 3 * MINUTE);
+    const reported: number[][] = [];
+    const withdrawn: number[][] = [];
+    let work: ReturnType<typeof fakeSource>;
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      onSkipped: async (_workspaceId, _schedule, skipped) => {
+        reported.push(skipped.first);
+        // Switched off and on at 7:30 while the notice was posted.
+        if (reported.length === 1) work.setSchedules([{ ...hourly, enabledSince: NINE - 90 * MINUTE }]);
+      },
+      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => { withdrawn.push(skipped.first); },
+    });
+    work = fakeSource([hourly], [markOf(hourly, NINE - 3 * HOUR)]);
+    scheduler.add("ws", work.source, here);
+    await idle(scheduler);
+    expect(reported).toEqual([[NINE - 2 * HOUR, NINE - HOUR], [NINE - HOUR]]);
+    expect(withdrawn, "the first report named a skip that did not happen").toEqual([[NINE - 2 * HOUR, NINE - HOUR]]);
+    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    scheduler.dispose();
+  });
+
+  it("keeps skipping a sleep when its skip report was taken back", async () => {
+    const time = fakeClock(NINE + 90 * MINUTE);
+    const reported: number[][] = [];
+    const withdrawn: number[][] = [];
+    let work: ReturnType<typeof fakeSource>;
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      onSkipped: async (_workspaceId, _schedule, skipped) => {
+        reported.push(skipped.first);
+        // Switched off and on at 11:30 while the first report was posted.
+        if (reported.length === 1) work.setSchedules([{ ...hourly, enabledSince: NINE + 150 * MINUTE }]);
+      },
+      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => { withdrawn.push(skipped.first); },
+    });
+    work = fakeSource([hourly], [markOf(hourly, NINE + 90 * MINUTE)]);
+    scheduler.add("ws", work.source, here);
+    await idle(scheduler);
+    // Asleep from 10:45 to 12:15, across eleven and twelve.
+    time.advance(15 * MINUTE);
+    scheduler.suspended();
+    time.advance(90 * MINUTE);
+    scheduler.resumed();
+    await idle(scheduler);
+    expect(withdrawn).toEqual([[NINE + 2 * HOUR, NINE + 3 * HOUR]]);
+    expect(reported.at(-1)).toEqual([NINE + 3 * HOUR]);
+    expect(work.steps.flatMap((step) => step.run), "nothing slept through runs").toEqual([]);
     scheduler.dispose();
   });
 

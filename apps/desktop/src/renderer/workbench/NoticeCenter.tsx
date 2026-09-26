@@ -436,6 +436,9 @@ export function NoticeCenter(props: {
   // aborts.
   onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
   onDismissSentNotice?: (notice: NoticeRow) => void;
+  // Run now on a skipped schedule's notice. Resolves to null once the run
+  // started here, or to a sentence that says why it did not.
+  onRunSentNoticeNow?: (notice: NoticeRow) => Promise<string | null>;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
   // someone dismisses it.
@@ -487,6 +490,26 @@ export function NoticeCenter(props: {
     cancelOpen();
     setSentNotes(new Map());
   }, [cancelOpen, sentAccount]);
+  // The Run now on its way, by row key: another waits until it answers.
+  const [runningKey, setRunningKey] = useState<string | null>(null);
+  const { onRunSentNoticeNow } = props;
+  const runSentNoticeNow = useCallback(
+    async (notice: NoticeRow) => {
+      if (!onRunSentNoticeNow) return;
+      const key = sentKey(sentAccount, notice);
+      setRunningKey(key);
+      let note: string | null;
+      try {
+        note = await onRunSentNoticeNow(notice);
+      } catch (error) {
+        note = error instanceof Error ? error.message : "The automation did not start.";
+      } finally {
+        setRunningKey((current) => (current === key ? null : current));
+      }
+      if (note !== null) setSentNotes((current) => new Map(current).set(key, note));
+    },
+    [onRunSentNoticeNow, sentAccount],
+  );
   const { onOpenSentNotice } = props;
   const openSentNotice = useCallback(
     async (notice: NoticeRow) => {
@@ -1631,6 +1654,10 @@ export function NoticeCenter(props: {
                       const openNotice = openable && props.onOpenSentNotice
                         ? () => void openSentNotice(notice)
                         : undefined;
+                      const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
+                        ? () => void runSentNoticeNow(notice)
+                        : undefined;
+                      const running = runningKey === key;
                       const dismissNotice = props.onDismissSentNotice
                         ? () => {
                             cancelOpen(key);
@@ -1661,15 +1688,27 @@ export function NoticeCenter(props: {
                                   <span className="sr-only">Unread</span>
                                 </span>
                               ) : null}
+                              {runNow ? (
+                                <button
+                                  type="button"
+                                  data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                  aria-busy={running || undefined}
+                                  disabled={runningKey !== null}
+                                  onClick={runNow}
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                                >
+                                  {running ? "Starting…" : "Run now"}
+                                </button>
+                              ) : null}
                               {openNotice ? (
                                 <button
                                   type="button"
                                   data-testid={`sent-notice-${notice.noticeId}-open`}
                                   aria-busy={busy || undefined}
                                   onClick={openNotice}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50"
+                                  className={`${runNow ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50`}
                                 >
-                                  {busy ? "Opening…" : "Open"}
+                                  {busy ? "Opening…" : notice.kind === "schedule-skipped" ? "Open automation" : "Open"}
                                 </button>
                               ) : null}
                               {dismissNotice ? (
@@ -1681,7 +1720,7 @@ export function NoticeCenter(props: {
                                     focusPastRow(event.currentTarget);
                                     dismissNotice();
                                   }}
-                                  className={`${openNotice ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                                  className={`${openNotice || runNow ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                                 >
                                   <X size={11} aria-hidden />
                                 </button>

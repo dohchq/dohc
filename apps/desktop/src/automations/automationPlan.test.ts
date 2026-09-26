@@ -11,6 +11,7 @@ import {
   expressionProblem,
   findQueryOf,
   localIsoTime,
+  runNowSkippedFrom,
   parseCollectionAutomationId,
   planRun,
   scheduleDueAt,
@@ -195,6 +196,22 @@ describe("schedule claims", () => {
       const zonedRun = { ...run, automation: zoned, claim: scheduled(`schedule:${instant}`) };
       expect(evaluationRequest(zonedRun, instant).scope.trigger, timezone).toEqual({ kind: "schedule", dueAt });
     }
+  });
+
+  it("runs a Run now claim at its claim time, with when the skipped runs began", () => {
+    const first = Date.UTC(2026, 8, 22, 9);
+    const key = `run-now:schedule-skipped:ws-1:collection:Tasks#sweep:${first}`;
+    expect(runNowSkippedFrom(scheduled(key))).toBe(first);
+    for (const other of [`schedule:${first}`, "run-now:other:1", `run-now:schedule-skipped:${first}`]) {
+      expect(runNowSkippedFrom(scheduled(other)), other).toBeNull();
+    }
+    const run = { message: null, chat: null, automation: sweep, claim: scheduled(key), record: null, found: new Map() };
+    expect(triggerMatches(run)).toBe(true);
+    expect(evaluationRequest(run, due).scope.trigger).toEqual({
+      kind: "schedule",
+      dueAt: "2026-09-25T09:00:00.000+00:00",
+      skipped: "2026-09-22T09:00:00.000+00:00",
+    });
   });
 
   it("hashes the schedule, so a changed time or zone starts a new mark", () => {

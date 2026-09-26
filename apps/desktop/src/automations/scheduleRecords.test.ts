@@ -8,6 +8,7 @@ import { createScheduleRecords, parseScheduleRecord } from "./scheduleRecords";
 const record: ScheduleRecord = {
   schedules: [{
     automationId: "collection:Tasks#report",
+    name: "Weekday report",
     trigger: { kind: "schedule", every: "week", at: "09:00", days: ["mon"], timezone: "Europe/London" },
     scheduleHash: "abc123",
     enabledSince: null,

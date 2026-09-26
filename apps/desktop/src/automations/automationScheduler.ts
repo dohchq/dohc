@@ -29,6 +29,17 @@ export const MAX_TIMER_MS = 15 * 60_000;
 export const CLOCK_JUMP_MS = 2_000;
 /** The engine's bound on the due times one step claims. */
 export const MAX_RUNS_PER_STEP = 100;
+/** One step looks at most this many due times; the rest wait for the next. */
+export const MAX_DUE_TIMES_PER_STEP = 10_000;
+/** A skipped-run notice lists this many times. */
+export const SKIPPED_TIMES_LISTED = 5;
+
+/** Due times a step skipped, reported before the mark moves past them. */
+export interface SkippedRuns {
+  /** The first skipped times, earliest first. */
+  first: number[];
+  count: number;
+}
 
 /** One workspace's schedules, as its Collection executor keeps them. */
 export interface ScheduleSource {
@@ -81,6 +92,13 @@ export interface AutomationSchedulerOptions {
   onRecord?(workspaceId: string, record: ScheduleRecord | null): void;
   /** A schedule of a workspace that is not open is due: open it, and close it after its runs. */
   openInBackground?(workspaceId: string): Promise<void>;
+  /**
+   * A step is about to skip due times. The mark moves past them only after
+   * this resolves, so a crash can repeat a report and never lose one.
+   */
+  onSkipped?(workspaceId: string, schedule: ScheduledAutomation, skipped: SkippedRuns): Promise<void>;
+  /** The schedule changed while its skip was reported, so that skip did not happen: take the report back. */
+  onSkipWithdrawn?(workspaceId: string, schedule: ScheduledAutomation, skipped: SkippedRuns): Promise<void>;
 }
 
 /** Wall time this computer did not live through: after `from`, up to and including `through`. */
@@ -90,38 +108,47 @@ export interface SkippedSpan {
 }
 
 /**
- * What one schedule's step claims: the due times to run and the mark's new
- * position, or null when nothing is due. Due times at or before
- * `coveredFrom` or the schedule's switch-on, or in a skipped span, are
- * skipped.
+ * What one schedule's step claims: the due times to run, the mark's new
+ * position, and the due times it skips, or null when nothing is due. Due
+ * times at or before `coveredFrom`, or in a skipped span, are skipped. Due
+ * times at or before the schedule's switch-on, or `reportFrom`, are not
+ * this computer's to report: they are passed over without a word.
  */
 export function planScheduleStep(
   schedule: ScheduledAutomation,
   mark: AutomationScheduleMark | undefined,
   nowMs: number,
   coveredFrom: number,
-  skipped: readonly SkippedSpan[] = [],
-): { run: number[]; throughMs: number } | null {
+  skippedSpans: readonly SkippedSpan[] = [],
+  reportFrom = Number.NEGATIVE_INFINITY,
+): { run: number[]; throughMs: number; skipped?: SkippedRuns } | null {
   if (mark === undefined || mark.scheduleHash !== schedule.scheduleHash) return { run: [], throughMs: nowMs };
   if (mark.throughMs >= nowMs) return null;
   const first = nextDue(schedule.trigger, mark.throughMs);
   if (first === null || first > nowMs) return null;
+  const quietUntil = Math.max(reportFrom, schedule.enabledSince ?? reportFrom);
+  const due = dueTimes(schedule.trigger, Math.max(mark.throughMs, schedule.enabledSince ?? mark.throughMs), nowMs, MAX_DUE_TIMES_PER_STEP);
   const run: number[] = [];
-  // Past the bound, the rest wait for the next step instead of being skipped.
-  const collect = (after: number, until: number) => {
-    if (after < until) run.push(...dueTimes(schedule.trigger, after, until, MAX_RUNS_PER_STEP - run.length));
-    return run.length === MAX_RUNS_PER_STEP;
-  };
-  let from = Math.max(mark.throughMs, coveredFrom, schedule.enabledSince ?? coveredFrom);
-  for (const span of [...skipped].sort((left, right) => left.from - right.from)) {
-    if (from >= nowMs) break;
-    if (span.through <= from) continue;
-    if (collect(from, Math.min(span.from, nowMs))) return { run, throughMs: run.at(-1)! };
-    from = span.through;
+  const skipped: SkippedRuns = { first: [], count: 0 };
+  // Past a bound, the rest wait for the next step instead of being skipped.
+  let throughMs = due.length === MAX_DUE_TIMES_PER_STEP ? due.at(-1)! : nowMs;
+  for (const time of due) {
+    if (time > coveredFrom && spanAt(skippedSpans, time) === undefined) {
+      run.push(time);
+      if (run.length === MAX_RUNS_PER_STEP) {
+        throughMs = time;
+        break;
+      }
+    } else if (time > quietUntil) {
+      if (skipped.first.length < SKIPPED_TIMES_LISTED) skipped.first.push(time);
+      skipped.count += 1;
+    }
   }
-  if (from < nowMs && collect(from, nowMs)) return { run, throughMs: run.at(-1)! };
-  return { run, throughMs: nowMs };
+  return skipped.count > 0 ? { run, throughMs, skipped } : { run, throughMs };
 }
+
+const sameSkip = (left: SkippedRuns | undefined, right: SkippedRuns | undefined) =>
+  left?.count === right?.count && JSON.stringify(left?.first) === JSON.stringify(right?.first);
 
 const spanAt = (skipped: readonly SkippedSpan[], instant: number | null) =>
   instant === null ? undefined : skipped.find((span) => span.from < instant && instant <= span.through);
@@ -142,6 +169,8 @@ interface Workspace {
    * mark for starts here instead of at now, once.
    */
   unmarkedFrom: number | null;
+  /** Skipped due times at or before this ran elsewhere, or may have: not reported. */
+  reportFrom: number;
   /** What the last full step found, kept while the workspace is closed. */
   record: ScheduleRecord | null;
   openingInBackground: boolean;
@@ -204,6 +233,7 @@ export class AutomationScheduler {
       coveredFrom: this.options.clock.now() - START_GRACE_MS,
       skipped: [],
       unmarkedFrom: null,
+      reportFrom: Number.NEGATIVE_INFINITY,
       record,
       openingInBackground: false,
       retryOpenAt: null,
@@ -223,6 +253,8 @@ export class AutomationScheduler {
     const now = this.options.clock.now();
     workspace.coveredFrom = startAfterMs === null ? now : Math.max(workspace.coveredFrom, startAfterMs);
     workspace.unmarkedFrom = startAfterMs === null ? null : workspace.coveredFrom;
+    // Without a release, another computer may have run anything before now.
+    workspace.reportFrom = Math.max(workspace.reportFrom, startAfterMs ?? now);
     this.wake();
   }
 
@@ -425,9 +457,30 @@ export class AutomationScheduler {
           marks.get(automationId)?.scheduleHash === schedule.scheduleHash ? null : { run: [], throughMs: from });
         if (adopted === null) return null;
       }
-      const claimed = await claim(automationId, (schedule) =>
-        planScheduleStep(schedule, marks.get(automationId), now, workspace.coveredFrom, workspace.skipped));
+      const plan = (schedule: ScheduledAutomation) =>
+        planScheduleStep(schedule, marks.get(automationId), now, workspace.coveredFrom, workspace.skipped, workspace.reportFrom);
+      // Reported before the mark moves past them. The claim plans again from
+      // the schedule as it is then: when the schedule changed while the
+      // notice was posted, the reported skip is not the one that happens,
+      // so the notice is taken back and the next step reports afresh.
+      const current = source.schedules()?.find((schedule) => schedule.automationId === automationId);
+      const skipped = current ? plan(current)?.skipped : undefined;
+      if (current && skipped) await this.options.onSkipped?.(workspaceId, current, skipped);
+      let reported = skipped === undefined;
+      const claimed = await claim(automationId, (schedule) => {
+        const step = plan(schedule);
+        if (!sameSkip(step?.skipped, skipped)) return null;
+        reported = true;
+        return step && { run: step.run, throughMs: step.throughMs };
+      });
       if (claimed === null) return null;
+      if (!reported && current && skipped) {
+        // This mark did not move: the spans it still has to skip stay.
+        through = Math.min(through, marks.get(automationId)?.throughMs ?? Number.NEGATIVE_INFINITY);
+        await this.options.onSkipWithdrawn?.(workspaceId, current, skipped);
+        this.wake();
+        continue;
+      }
       if (claimed !== "nothing") through = Math.min(through, claimed.throughMs);
     }
     workspace.unmarkedFrom = null;

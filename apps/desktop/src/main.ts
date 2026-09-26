@@ -110,6 +110,7 @@ import {
   ShareHandoffStatus,
   crashReportOperations,
   noticeOperations,
+  type NoticeRef,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -197,6 +198,8 @@ import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { AutomationScheduler } from "./automations/automationScheduler";
 import { computerLabel, createAutomationHosts } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
+import { skippedRunsNotice } from "./automations/skippedRunsNotice";
+import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
@@ -3430,10 +3433,16 @@ const automationScheduler = new AutomationScheduler({
     void appLifecycle.backgroundReasonsChanged().catch((error: unknown) => console.error("[desktop] dispatch tray:", error));
   },
   openInBackground: (workspaceId) => runSchedulesInBackground(workspaceId),
+  // Posted to the owner, and kept here until it reaches the relay.
+  onSkipped: (workspaceId, schedule, skipped) =>
+    noticeStore().postNotice(skippedRunsNotice({ workspaceId, schedule, skipped })),
+  onSkipWithdrawn: (workspaceId, schedule, skipped) =>
+    noticeStore().withdraw(skippedRunsNotice({ workspaceId, schedule, skipped }).noticeId),
 });
 
 // What each workspace's schedules need when no window has it open.
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
+const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
 // At start, every workspace this computer ran schedules for waits for its
 // next due time, open or not.
@@ -3470,6 +3479,75 @@ async function runSchedulesInBackground(workspaceId: string): Promise<void> {
     // A window or the CLI that opened the workspace meanwhile keeps it open.
     await release();
   }
+}
+
+// Run now on a skipped schedule's notice. The notice's first dismissal on
+// the relay picks the one computer that runs it; this one opens the
+// workspace the way a due time would, claims the run, and lets it run.
+// Resolves to null once the run started here, or to why it did not.
+async function runSkippedScheduleNow(ref: NoticeRef, account: string | null): Promise<string | null> {
+  const listed = await noticeStore().list();
+  const notice = listed.notices.find((row) => row.store === ref.store && row.noticeId === ref.noticeId);
+  const automationId = notice?.target?.automation;
+  if (!notice || notice.kind !== "schedule-skipped" || !automationId || notice.workspaceId === null) {
+    return "This notice has no schedule to run.";
+  }
+  // Saved before the dismissal, so a crash before the claim resumes it.
+  const intent: RunNowIntent = { notice: ref, account, workspaceId: notice.workspaceId, automationId };
+  await runNowIntents.save(intent);
+  return await continueRunNow(intent);
+}
+
+// The rest of a Run now, from its saved intent. The relay names this
+// computer as the dismissal's winner, so asking again answers "first" again,
+// and the engine's claim is one per notice, so a repeat runs nothing twice.
+async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
+  const workspace = findWorkspace(intent.workspaceId);
+  if (!workspace || workspace.shareView !== undefined) {
+    await runNowIntents.remove(intent.notice);
+    return "This workspace isn't on this computer. Run it from the computer that has it.";
+  }
+  const dismissal = await noticeStore().dismissFirst(intent.notice, intent.account);
+  // The dismissal may have landed with its answer lost: the intent stays,
+  // and the next start or window focus asks again.
+  if (dismissal === "unanswered") return "dohc could not reach your server. It runs this once it does.";
+  if (dismissal === "not-first") {
+    await runNowIntents.remove(intent.notice);
+    return "This already ran from another computer.";
+  }
+  await desktopEngine.startup;
+  const release = await acquireDispatchRunActivity(workspace);
+  try {
+    const automations = withWorkspaceAttachment(workspace, (held) => held.state.collectionAutomations);
+    if (!automations || !activity.engineCaptureFor(workspace.workspaceId)) {
+      return "dohc could not open this workspace to run the automation.";
+    }
+    automationHosts.open(workspace.workspaceId);
+    await automations.open();
+    if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
+      return "dohc could not start the automation. Its engine did not answer.";
+    }
+    // The claim is in the engine now; it runs from there.
+    await runNowIntents.remove(intent.notice);
+    await automations.idle();
+    return null;
+  } finally {
+    await release();
+  }
+}
+
+// Every Run now a crash or a lost answer left unfinished.
+let resumingRunNow: Promise<void> | null = null;
+function resumeRunNow(): void {
+  resumingRunNow ??= (async () => {
+    for (const intent of await runNowIntents.list()) {
+      const note = await continueRunNow(intent).catch((error: unknown) =>
+        error instanceof Error ? error.message : String(error));
+      if (note !== null) console.warn(`[desktop] Run now for "${intent.notice.noticeId}": ${note}`);
+    }
+  })().finally(() => {
+    resumingRunNow = null;
+  });
 }
 
 // The last window closed and dohc stays in the tray for its schedules: a
@@ -4409,6 +4487,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       }
       void watchRecordedSchedules().catch((error: unknown) =>
         console.warn("[desktop] Schedules: read the recorded schedules:", error));
+      resumeRunNow();
+      app.on("browser-window-focus", () => resumeRunNow());
       powerMonitor.on("suspend", () => automationScheduler.suspended());
       powerMonitor.on("resume", () => automationScheduler.resumed());
       powerMonitor.on("unlock-screen", () => automationScheduler.wake());
@@ -5463,6 +5543,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, noticeOperations, {
     listNotices: () => noticeStore().list(),
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
+    runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
   });
 
   workspaceEngineIpc.registerYDoc();
