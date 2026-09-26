@@ -74,6 +74,44 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
+  it("files one sync failure row at a time, with or without a toast", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() =>
+      result.current.reportSyncFailure(
+        { message: "dohc could not sync this workspace.", detail: "Error: refused", toast: false },
+        retry,
+      ),
+    );
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      kind: "cloud-sync",
+      details: [["Detail", "Error: refused"]],
+      seen: true,
+    });
+    act(() =>
+      result.current.reportSyncFailure(
+        { message: "dohc could not reach the server.", detail: "RelayUnreachableError", toast: true },
+        retry,
+      ),
+    );
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      message: "dohc could not reach the server.",
+      seen: false,
+    });
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    act(() =>
+      result.current.reportSyncFailure(
+        { message: "dohc could not sync this workspace.", detail: "Error: refused", toast: false },
+        retry,
+      ),
+    );
+    act(() => result.current.clearSyncFailure());
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("keeps a raw cause for Copy details out of the message", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() =>

@@ -950,16 +950,6 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (props.syncStatus?.syncFailing) {
-      next.push({
-        id: "cloud-sync-failing",
-        tone: "warning",
-        title: "Cloud sync is failing",
-        body: "Cloud sync is failing for this workspace. Changes stay safe locally and sync will keep retrying.",
-        Icon: AlertTriangle,
-      });
-    }
-
     if (props.agentActive) {
       next.push({
         id: "agent-active",

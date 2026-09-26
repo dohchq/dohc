@@ -80,6 +80,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -812,6 +813,8 @@ export function DesktopWorkspaceShell(props: {
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4755,6 +4758,28 @@ export function DesktopWorkspaceShell(props: {
       });
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
+  const retryCloudSyncCommand = useCallback(
+    (askedFor: string, reason: "person" | "reconnect") =>
+      bridge().retryCloudSync({ workspaceId: askedFor, reason }),
+    [],
+  );
+  const syncFailureNotice = useSyncFailureNotice({
+    workspaceId,
+    failure: syncStatus === null ? undefined : (syncStatus.syncFailure ?? null),
+    retryCloudSync: retryCloudSyncCommand,
+    report: reportSyncFailure,
+    clear: clearSyncFailure,
+  });
+  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const dismissWorkspaceError = useCallback(
+    (id: string) => {
+      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
+        syncFailureNotice.noteDismissed();
+      }
+      dismissShellError(id);
+    },
+    [dismissShellError, shellErrors, syncFailureNotice],
+  );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
@@ -5020,7 +5045,7 @@ export function DesktopWorkspaceShell(props: {
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
-              onDismissWorkspaceError={dismissShellError}
+              onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView
                 ? {}

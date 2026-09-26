@@ -385,6 +385,13 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+// Who asked for a sync pass now. A person's retry counts toward the attempts
+// a failure's notice weighs; a retry on reconnecting or waking does not.
+export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
+  reason: z.enum(["person", "reconnect"]),
+});
+export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
@@ -1236,6 +1243,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     "syncing",
     "local-changes",
     "conflict",
+    "sync-failed",
     "cloud-disconnected",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
@@ -1255,9 +1263,17 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
-  // Additive (0P-B relay sync): true after repeated non-auth sync failures.
-  // Local changes remain safe and the engine keeps retrying with backoff.
-  syncFailing: z.boolean().optional(),
+  // Why the last sync pass failed, present until a pass succeeds. Local work
+  // is saved either way, and the engine keeps retrying with backoff.
+  syncFailure: z
+    .object({
+      cause: z.enum(["server-unreachable", "unknown"]),
+      detail: z.string(),
+      // When this failure began, and how many passes have failed since.
+      sinceMs: z.number(),
+      attempts: z.number().int().positive(),
+    })
+    .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
@@ -6856,6 +6872,8 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  // Runs a cloud sync pass now and answers with the status after it.
+  retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
