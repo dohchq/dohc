@@ -3613,6 +3613,15 @@ const desktopEngine = createDesktopEngine({
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
+  noteNoAtomicPlacement: (workspaceId) => {
+    try {
+      withWorkspaceActivityState(workspaceId, (lease) =>
+        workspaceActivity.recordAtomicPlacementUnavailable(lease.state.activity),
+      );
+    } catch {
+      // The workspace closed since the engine wrote; nothing to show.
+    }
+  },
 });
 const {
   requireEngineSessions, closeRelayTransportWorkspace, closeAllRelayTransportWorkspaces,

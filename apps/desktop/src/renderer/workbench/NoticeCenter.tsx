@@ -991,18 +991,6 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true: the drive does not change while the workspace
-    // is open. Saves still work; the row states the limit and the way out.
-    if (props.syncStatus?.atomicPlacementUnavailable) {
-      next.push({
-        id: "atomic-placement-unavailable",
-        tone: "warning",
-        title: "This drive can't fully protect saves",
-        body: "This drive can't protect a file that another program changes at the same moment dohc saves it. Keep the workspace on your computer's own drive to avoid that.",
-        Icon: AlertTriangle,
-      });
-    }
-
     if (props.agentActive) {
       next.push({
         id: "agent-active",

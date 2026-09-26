@@ -7,8 +7,8 @@
 
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
-    StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
-    run_pending_jobs, workspace_lacks_atomic_placement,
+    StdReplacer, backoff_delay, materialize_secret_one, recover_displacements,
+    recover_path_displacements, run_pending_jobs, workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -2424,4 +2424,46 @@ fn a_filesystem_without_atomic_no_replace_writes_and_reports_the_limit() {
         vec![JobOutcome::Completed]
     );
     assert!(!workspace_lacks_atomic_placement(ordinary.workspace()));
+}
+
+/// A crash left a replace between its renames. After the restart, only the
+/// recovery sweep runs, and it puts the file back with a check-then-rename on
+/// this drive. The workspace reports the limit from recovery alone.
+#[test]
+fn recovery_after_a_restart_on_a_drive_without_atomic_renames_reports_the_limit() {
+    let sc = Scratch::new("no-atomic-recovery");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &NoAtomicRename, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(!sc.target("a.md").exists());
+        assert!(
+            !workspace_lacks_atomic_placement(sc.workspace()),
+            "nothing was placed before the crash"
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    recover_displacements(
+        &store,
+        sc.workspace(),
+        None,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &NoAtomicRename,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
+    )
+    .expect("recover");
+    assert_eq!(
+        read(&sc, "a.md").as_deref(),
+        Some(PREIMAGE),
+        "the file is back"
+    );
+    assert!(workspace_lacks_atomic_placement(sc.workspace()));
 }
