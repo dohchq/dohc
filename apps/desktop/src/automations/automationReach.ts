@@ -84,6 +84,9 @@ export type ReachStep =
   | { kind: "dataset-field"; collection: ReachCollection; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
   // `channelWireId` is null for a Group that has not synced yet.
   | { kind: "post"; group: { channelWireId: string | null; name: string } }
+  // A Group whose messages start the automation: every editor must be able
+  // to read it, so nobody copies a Group they cannot read into the Collection.
+  | { kind: "read-group"; group: { channelWireId: string | null; name: string } }
   | { kind: "notify"; person: ReachPerson }
   // A personal step, such as waking this person's agent.
   | { kind: "personal"; person: ReachPerson };
@@ -290,6 +293,11 @@ function checkOwnerStep(
       return person && reaches(person, collection.path, "view")
         ? ALLOWED
         : stop(`${person?.email ?? step.person.name} cannot view ${collection.name}.`);
+    }
+    case "read-group": {
+      const blocked = editors.find((person) =>
+        !person.grants.some((grant) => grant.channel !== null && grant.channel.wireId === step.group.channelWireId));
+      return blocked ? stop(`${nameOf(blocked)} cannot read ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "personal": {
       // A personal step acts as its person, so it must name this computer's

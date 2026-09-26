@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
-import { datasetFindOf } from "./automationPlan";
+import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
 import { datasetAutomationProblem, datasetEffectKey, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
@@ -33,6 +33,12 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it("refuses Group-message triggers on datasets", () => {
+    const fromMessage = automation("      - add-record:\n          Status: New\n        operation: invoices.create\n", "group-message: Team");
+    expect(datasetSubscriptionFor(fromMessage, definition))
+      .toEqual({ problem: "Automations on dataset Collections can't start from Group messages." });
+  });
+
   it.each([
     "post: Done\n        group: Team",
     "direct-message: Done\n        to: [user_ana]",

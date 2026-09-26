@@ -113,3 +113,10 @@ it("counts an agent wake before a record edit", () => {
     { kind: "set", values: [], records: null, operation: null },
   ])).toEqual([[0], [1]]);
 });
+
+it("leaves the Group trigger verdict before its step verdicts", () => {
+  expect(reachPlaces([
+    { kind: "post", text: "Hi", group: "Trip" },
+    { kind: "set", values: [], records: null, operation: null },
+  ], 1)).toEqual([[1], [2]]);
+});

@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { AutomationClaim, ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { AutomationClaim, AutomationClaimMessage, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -20,7 +20,7 @@ import {
   UNREADABLE_REACH,
   type CollectionAutomationEngine,
 } from "./collectionAutomations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 import {
   AutomationChatSessionWait,
   automationMessageId,
@@ -56,7 +56,7 @@ interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc 
 // automation off, so each test Collection defines them all.
 const FIELDS = [
   "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
-  "Project", "Finished on", "A", "B", "C", "D", "E", "Details", "Stamped",
+  "Project", "Finished on", "A", "B", "C", "D", "E", "Details", "Stamped", "Asked by",
 ];
 const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
 
@@ -74,6 +74,10 @@ async function world(options: {
   refused?: { settle: number; stillRunning?: boolean };
   /** The workspace's chats, for automations that post. */
   channels?: ChatDirectoryChannel[];
+  /** Whether this computer runs Group-message automations; true unless a test says otherwise. */
+  runsGroupTriggers?: boolean;
+  /** Whole message bodies by id, for claims that carried them truncated. */
+  messageBodies?: Record<string, string>;
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -364,6 +368,8 @@ async function world(options: {
         if (!messages.some((written) => written.effectId === message.effectId)) messages.push(message);
       },
     },
+    runsGroupTriggers: () => options.runsGroupTriggers ?? true,
+    readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
     postNotice: async (notice, signal) => {
       noticeSignals.push(signal);
       await beforeNotice?.(notice);
@@ -2535,4 +2541,162 @@ describe("Collection automations that wake your agent", () => {
     expect(others).toMatchObject({ state: "failed", error: "This step acts as that person, and you can also edit Tasks." });
     expect(w.messages).toEqual([]);
   });
+});
+
+describe("Collection automations that a Group message starts", () => {
+  const TRIP: ChatDirectoryChannel = {
+    id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "posts", wireId: "trip", runningThreadId: null,
+  };
+  const task = [
+    "  - id: task",
+    "    name: Add a task",
+    "    when: {group-message: Trip, starts-with: /task}",
+    "    do: [{add-record: {Title: '=message.body.slice(6)', Asked by: '=person.name'}}]",
+  ].join("\n");
+  const messageClaim = (
+    w: Awaited<ReturnType<typeof world>>,
+    message: Partial<AutomationClaimMessage> = {},
+  ) => {
+    const claim = w.claim("collection:Tasks#task", w.addRecord("Tasks", "unused", {}), { fields: [] });
+    claim.recordId = null;
+    claim.trigger = { key: "message:m1" };
+    claim.change = { ...claim.change, kind: "message", message: {
+      id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
+      authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: "/task Buy tickets", ...message,
+    } };
+    return claim;
+  };
+  const added = (w: Awaited<ReturnType<typeof world>>) =>
+    [...w.records.values()].filter((record) => record.path.startsWith("Tasks/task-")).map((record) => w.fieldsOf(record));
+
+  it("includes Group reads in share warnings and held summaries", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    expect(await w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).toMatchObject([{ target: "Trip", action: "read" }]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", target: "Trip", action: "read" }, { verdict: "allowed" }] } }] });
+  });
+
+  it("subscribes to its Group's messages on the computer that runs them, and only there", async () => {
+    const here = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await here.executor.open();
+    await here.until(() => here.subscriptions.has("collection:Tasks#task"));
+    expect(here.subscriptions.get("collection:Tasks#task")).toEqual({
+      automationId: "collection:Tasks#task", groupId: "trip", startsWith: "/task",
+    });
+
+    const elsewhere = await world({ channels: [TRIP], automations: { Tasks: task }, runsGroupTriggers: false });
+    await elsewhere.executor.open();
+    const file = await elsewhere.executor.automationsIn("Tasks");
+    if (file.status !== "read") throw new Error("unreadable fixture");
+    const [automation] = file.automations;
+    expect(automation).toMatchObject({ cannotRun: expect.stringContaining("only on your main computer") });
+    expect(elsewhere.subscriptions.has("collection:Tasks#task")).toBe(false);
+  });
+
+  it("runs for a Group message with the message and its author in its formulas", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+  });
+
+  it("reads a body its claim carried truncated", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task }, messageBodies: { m1: "/task Pack the bags" } });
+    const claim = messageClaim(w, { body: { truncated: true, bytes: 70_000 } });
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(added(w)).toEqual([{ Title: "Pack the bags", "Asked by": "Ana" }]);
+  });
+
+  it("skips a message from another Group or without the starting text, as the automation reads now", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const otherGroup = messageClaim(w, { groupId: "family" });
+    const noCommand = messageClaim(w, { body: "hello" });
+    await w.executor.open();
+    await w.settledClaim(otherGroup);
+    await w.settledClaim(noCommand);
+
+    expect([otherGroup.state, noCommand.state]).toEqual(["done", "done"]);
+    expect(added(w)).toEqual([]);
+  });
+
+  it("stops a resumed run whose Group is no longer the one its message came from", async () => {
+    const LOG: ChatDirectoryChannel = { ...TRIP, id: "log", name: "Log", slug: "log", wireId: "log" };
+    const channels = [TRIP, LOG];
+    const relay = [
+      "  - id: task",
+      "    name: Relay",
+      "    when: {group-message: Trip, starts-with: /task}",
+      "    do: [{post: 'Asked: {message.body}', group: Log}]",
+    ].join("\n");
+    const w = await world({ channels, automations: { Tasks: relay } });
+    let signedIn = false;
+    w.beforeChatWrite(async () => { if (!signedIn) throw new AutomationChatSessionWait(); });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+
+    // While the run waited, "Trip" came to name another Group.
+    channels[0] = { ...TRIP, id: "trip-2", wireId: "trip-2" };
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: GROUP_CHANGED_ERROR });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("does not run a message claim, and drops its subscription, once this computer no longer runs Group triggers", async () => {
+    const options: Parameters<typeof world>[0] = { channels: [TRIP], automations: { Tasks: task } };
+    const w = await world(options);
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // Sync turned on: this computer is not the main one any more.
+    options.runsGroupTriggers = false;
+    const claim = messageClaim(w);
+    w.executor.notifyClaimed();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: expect.stringContaining("only on your main computer") });
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
+    expect(added(w)).toEqual([]);
+  });
+
+  it("holds a Group trigger an editor's leaving newly allows, until Allow", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const first = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "bob@dohc.test cannot read Trip." });
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    const second = messageClaim(w);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({ action: "read", target: "Trip", stoppedFor: "bob@dohc.test" });
+    await w.executor.confirmReach(hold!);
+    await w.settledClaim(second);
+    expect(second.state).toBe("done");
+  });
+
+  it("stops when an editor cannot read the Group", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim).toMatchObject({ state: "failed", error: "bob@dohc.test cannot read Trip." });
+    expect(added(w)).toEqual([]);
+  });
+
 });

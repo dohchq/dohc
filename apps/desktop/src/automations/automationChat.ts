@@ -195,7 +195,10 @@ export function chatNeedsOf(automations: readonly Automation[]): ChatNeeds {
       }
     }
   };
-  for (const automation of automations) walk(automation.do);
+  for (const automation of automations) {
+    if (automation.when.kind === "group-message") needs.groups.add(automation.when.group);
+    walk(automation.do);
+  }
   return needs;
 }
 

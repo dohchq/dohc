@@ -53,7 +53,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
 const task = { id: "rec_task", path: "Tasks/one.md", values: { Status: "Done", Count: 2 } };
 
 function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): RunInputs {
-  return { automation: definition, claim: claim(), record: task, found: new Map(), chat: null, ...overrides };
+  return { automation: definition, claim: claim(), record: task, found: new Map(), message: null, chat: null, ...overrides };
 }
 
 describe("automation ids", () => {
@@ -114,6 +114,9 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(withStep("{post: Hi, group: Trip}"))).toBeNull();
     expect(unsupportedReason(withStep("{direct-message: Hi, to: [user-1, '=trigger.record.Owner']}"))).toBeNull();
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
+    // A Group message starts an automation dohc can run.
+    const fromGroup = (step: string) => automation(`id: a\nname: A\nwhen: {group-message: Trip}\ndo: [${step}]`);
+    expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
     expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/dataset/);

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionGetRecordParams,
@@ -52,6 +52,21 @@ import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type Sto
 const RECORD_NOT_FOUND = "collection-record-not-found";
 
 export const DEADLINE_ERROR = "The automation did not finish within 5 minutes.";
+export const GROUP_CHANGED_ERROR =
+  "The Group this automation watches changed after this message arrived, so the run stopped before sending anything more.";
+
+/**
+ * Why a message claim's Group is not the one the automation watches now,
+ * or null when it is.
+ */
+function boundGroup(automation: Automation, claim: AutomationClaim, chat: ChatDirectory | null): string | null {
+  const trigger = automation.when;
+  const message = claim.change.kind === "message" ? claim.change.message : null;
+  if (trigger.kind !== "group-message" || !message) return "not-a-group-message";
+  const group = chat?.group(trigger.group);
+  if (!group || "problem" in group) return "no-group";
+  return group.channelId === message.groupId ? null : "another-group";
+}
 // How run history and holds name a wake's destination.
 const WAKE_TARGET_NAME = "your agent";
 export const DEFINITION_CHANGED_ERROR =
@@ -86,6 +101,8 @@ export interface CollectionAutomationRunDependencies {
    * sends; throws NoticeNotSentError when it did not reach its person.
    */
   postNotice(notice: AutomationNotice, signal: AbortSignal): Promise<void>;
+  /** A message's whole body, for one whose claim carried it truncated; null when the engine is unavailable. */
+  readMessageBody(messageId: string): Promise<string | null>;
   /**
    * Keeps a verdict for each person a formula named, as for any step, and
    * says which of them wait for a current editor to allow them.
@@ -265,9 +282,17 @@ export async function runCollectionAutomation(
   // Where the automation's messages go, found once for the reach check and
   // the plan.
   let chat: ChatDirectory | null = null;
-  if (sendsMessages(automation)) {
+  if (sendsMessages(automation) || automation.when.kind === "group-message") {
     chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
     if (chat === null) return { kind: "wait", reason: "engine" };
+  }
+  // A Group message runs only while the automation's Group is still the
+  // one the message came from, on every attempt: the reach check below reads
+  // the Group the file names now, and a saved plan carries the message it
+  // was made from.
+  if (claim.change.kind === "message") {
+    const bound = boundGroup(automation, claim, chat);
+    if (bound !== null) return current?.plan ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
   }
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
@@ -417,7 +442,13 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, chat };
+  let message: RunInputs["message"] = null;
+  if (claim.change.kind === "message") {
+    const read = await groupMessage(dependencies, input, chat);
+    if ("outcome" in read) return stop(read.outcome);
+    message = read.message;
+  }
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   // Formulas read `now` as the time of the change, so every attempt plans
   // the same values.
@@ -438,6 +469,36 @@ async function plan(
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
   return { kind: "plan", steps: planned.steps };
+}
+
+/**
+ * The claim's Group message, with its whole body, when the automation still
+ * watches that Group for such a message. The automation's file may have
+ * changed since the engine claimed the message.
+ */
+async function groupMessage(
+  dependencies: CollectionAutomationRunDependencies,
+  input: CollectionAutomationRunInput,
+  chat: ChatDirectory | null,
+): Promise<{ message: JsonObject } | { outcome: CollectionAutomationRunOutcome }> {
+  const { claim, automation } = input;
+  const trigger = automation.when;
+  const claimed = claim.change.kind === "message" ? claim.change.message : null;
+  if (trigger.kind !== "group-message") return { outcome: { kind: "skipped" } };
+  if (!claimed) return { outcome: failed("This run's claim did not carry its message.") };
+  const group = chat?.group(trigger.group);
+  if (!group) return { outcome: { kind: "wait", reason: "engine" } };
+  if ("problem" in group) return { outcome: failed(group.problem) };
+  if (group.channelId !== claimed.groupId) return { outcome: { kind: "skipped" } };
+  let body = claimed.body;
+  if (typeof body !== "string") {
+    const whole = await dependencies.readMessageBody(claimed.id);
+    if (whole === null) return { outcome: { kind: "wait", reason: "engine" } };
+    body = whole;
+  }
+  const startsWith = trigger.startsWith;
+  if (startsWith !== null && !body.replace(/^[\s\uFEFF]+/u, "").startsWith(startsWith)) return { outcome: { kind: "skipped" } };
+  return { message: { ...claimed, body } };
 }
 
 /** Where the record with `recordId` is now, or null when it left the Collection. */

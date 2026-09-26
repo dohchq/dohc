@@ -268,12 +268,14 @@ const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
   "record-added", "record-changed", "field-changed", "record-removed", "starts-matching",
 ]);
 
+const DATASET_GROUP_TRIGGER_UNSUPPORTED = "Automations on dataset Collections can't start from Group messages.";
+const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
+
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
  * executor subscribes only automations it can run; the ⚡ panel shows the
  * reason for the rest.
  */
-const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
 
 export function unsupportedReason(automation: Automation): string | null {
   const DATASET = "Only a dataset Collection's automations can name tables and operations.";
@@ -293,7 +295,7 @@ export function unsupportedReason(automation: Automation): string | null {
  * reads a Find condition the way the Collection's records can be queried.
  */
 export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
-  if (!RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
+  if (automation.when.kind !== "group-message" && !RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -406,6 +408,7 @@ export function datasetSubscriptionFor(
   definition: DatasetDefinition,
 ): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } {
   const trigger = automation.when;
+  if (trigger.kind === "group-message") return { problem: DATASET_GROUP_TRIGGER_UNSUPPORTED };
   if (!RECORD_TRIGGERS.has(trigger.kind) || !("table" in trigger)) return { problem: RECORD_TRIGGERS_ONLY };
   const table = trigger.table === null
     ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
@@ -451,6 +454,15 @@ export function reachStepsOf(
   const bindings = bindingsOf(steps);
   const target = (path: string | null) => (path === null ? collection : collectionNamed(path));
   const reach: ReachStep[] = [];
+  if (automation.when.kind === "group-message") {
+    const group = chat?.group(automation.when.group);
+    reach.push({
+      kind: "read-group",
+      group: group && !("problem" in group)
+        ? { channelWireId: group.wireId, name: group.name }
+        : { channelWireId: null, name: automation.when.group },
+    });
+  }
   for (const { step } of everyStep(steps)) {
     if (step.kind === "set") {
       const bound = step.records === null ? null : bindings.get(step.records);
@@ -580,6 +592,8 @@ export interface RunInputs {
   found: ReadonlyMap<number, readonly RunRecord[]>;
   /** Finds whose page has more matches. Their partial records must not enter the scope. */
   truncatedFinds?: ReadonlySet<number>;
+  /** The Group message that started the run, with its whole body; null for a record change. */
+  message: JsonObject | null;
   /** Where posts and direct messages go; null when the automation sends none. */
   chat: ChatDirectory | null;
 }
@@ -603,6 +617,8 @@ export function triggerMatches(inputs: RunInputs): boolean {
         change.fields.some((fact) => trigger.fields!.includes(fact.field)));
     case "starts-matching":
       return change.kind === "added" || change.kind === "changed";
+    case "group-message":
+      return change.kind === "message";
     case "field-changed": {
       if (change.kind !== "changed") return false;
       const fact = change.fields.find((candidate) => candidate.field === trigger.field);
@@ -737,8 +753,13 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
     bound[BEFORE_BINDING] = recordBefore(record, claim);
   }
   const triggerRecord = record ? recordScope(record) : null;
+  const { message } = inputs;
+  const author = message && typeof message.authorUserId === "string" && typeof message.authorDisplayName === "string"
+    ? { id: message.authorUserId, name: message.authorDisplayName }
+    : null;
   const scope: AutomationScope = {
     ...(triggerRecord ? { record: triggerRecord } : {}),
+    ...(message ? { message } : {}),
     previous: previousValues(claim),
     trigger: {
       kind: trigger.kind,
@@ -746,8 +767,8 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
       fields: claim.change.fields.map((fact) => fact.field),
       record: triggerRecord,
     },
-    // Claims do not yet name the person who made the change.
-    person: null,
+    // A Group message names its author; record claims do not yet name the person.
+    person: author,
     bindings: bound,
     now: localIsoTime(nowMs),
   };

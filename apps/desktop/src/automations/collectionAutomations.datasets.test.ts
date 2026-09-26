@@ -11,6 +11,7 @@ import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createTestScratch } from "../workspaces/testTemp";
+import { chatDirectoryOf, type ChatDirectoryChannel } from "./automationChat";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import type { ReachRoster } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
@@ -59,7 +60,9 @@ afterAll(() => sharedEvaluator.close());
 const hosts: LocalDatasetHost[] = [];
 afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); });
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator } = {}) {
+const TEAM: ChatDirectoryChannel = { id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team", runningThreadId: null };
+
+async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean } = {}) {
   const root = await createTestScratch("dohc-dataset-automations-");
   for (const [path, text] of Object.entries(files)) {
     await mkdir(join(root, dirname(path)), { recursive: true });
@@ -120,8 +123,11 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const records = async () => ((await host.query({ ...rules, operationId: LIST, input: { limit: 100 }, idempotencyKey: "read" })).result as
     { rows: Array<{ id: string; version: number; values: Record<string, JsonValue> }> }).rows;
 
+  // Group subscriptions the executor asks the engine for.
+  const subscribed: unknown[] = [];
   const engine = {
     listCollections: async () => ({ collections: [] }),
+    subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),
     listAutomationFailures: async () => ({ failures: [] }),
@@ -135,8 +141,13 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
+    runsGroupTriggers: () => options.groups ?? false,
+    readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async () => { throw new Error("Dataset automations cannot notify people."); },
-    chat: { directory: async () => null, write: async () => { throw new Error("Dataset automations cannot send chat messages."); } },
+    chat: {
+      directory: async () => options.groups ? chatDirectoryOf([TEAM], { kind: "owner", ownerUserId: "user-owner", grants: [] }) : null,
+      write: async () => { throw new Error("Dataset automations cannot send chat messages."); },
+    },
     withEngine: async (work) => await work(engine),
     withRecordWrites: async () => { throw new Error("Dataset runs write through their own operations."); },
     readText: async (path) => {
@@ -172,7 +183,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, create, edit, record, records, until, errors, opened, writeAutomations, makeExecutor,
+    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     setRoster: (next: ReachRoster) => { roster = next; },
@@ -410,6 +421,38 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.host.automations.failures().length === 0);
     await f.executor.dispose();
   }, 60_000);
+
+  it("refuses a claimed run of a hand-written automation with a chat step, with the plain sentence", async () => {
+    const f = await world({ roster: UNKNOWN });
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "pending");
+    await f.writeAutomations(closePaid("      - set:\n          Status: Closed\n        operation: invoices.status\n      - post: Paid\n        group: Team\n"));
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    const sentence = "Automations on dataset Collections can't post in chat, notify people, or wake agents.";
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(sentence));
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]).toMatchObject({ error: sentence });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("gives a dataset automation that a Group message starts no subscription", async () => {
+    const f = await world({ groups: true });
+    await f.writeAutomations("  - id: from-team\n    name: From Team\n    when:\n      group-message: Team\n    do:\n" +
+      "      - add-record:\n          Status: New\n        operation: invoices.create\n");
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ status: "read", automations: [
+      expect.objectContaining({ cannotRun: "Automations on dataset Collections can't start from Group messages." }),
+    ] });
+    expect(f.subscribed).toEqual([]);
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    expect(f.errors).toEqual([]);
+    await f.executor.dispose();
+  });
 
   it("unsubscribes an automation that is switched off, and settles its waiting claim without running it", async () => {
     const f = await world({ roster: UNKNOWN });

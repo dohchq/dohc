@@ -404,6 +404,12 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
+  /** One message, whole. A Group automation reads a body its claim carried truncated. */
+  async getMessage(input: { workspaceId: string; messageId: string }): Promise<ChatMessage> {
+    this.assertWorkspace(input.workspaceId);
+    return (await this.request(CHATS_METHOD.messageGet, { messageId: input.messageId })).message;
+  }
+
   async resolveChatDecision(input: {
     workspaceId: string;
     threadId: string;

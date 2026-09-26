@@ -15,7 +15,6 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
-  type AutomationChangeKind,
   type AutomationClaim,
   type AutomationClaimSummary,
 } from "@dohc/workspace-engine-client";
@@ -43,7 +42,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import { sameSubscriptionTarget, unsubscribeParams, type AutomationRunStore, type RunWrite, type StoredRun, type StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -108,13 +107,9 @@ const MAX_SETTLE_ERROR_CHARS = 1000;
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listCollections(): Promise<CollectionListResult>;
-  subscribeAutomation(input: {
-    automationId: string;
-    path: string;
-    kinds: AutomationChangeKind[];
-    fields?: string[];
-  }): Promise<unknown>;
-  unsubscribeAutomation(input: { automationId: string; path: string }): Promise<unknown>;
+  /** Records under a path, or one Group's messages. */
+  subscribeAutomation(input: StoredSubscription): Promise<unknown>;
+  unsubscribeAutomation(input: { automationId: string; path: string } | { automationId: string; groupId: string }): Promise<unknown>;
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
@@ -163,6 +158,13 @@ export interface CollectionAutomationsOptions {
   store: AutomationRunStore;
   /** Where automations post and send direct messages, and the writer they use. */
   chat: AutomationChatDependencies;
+  /**
+   * Whether this computer runs Group-message automations: only the owner's
+   * main computer registers them, so each message claims once.
+   */
+  runsGroupTriggers(): boolean;
+  /** A message's whole body, for a claim that carried it truncated. */
+  readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
   /** Sends one notice from this workspace. */
   postNotice: CollectionAutomationRunDependencies["postNotice"];
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
@@ -257,7 +259,7 @@ export interface CollectionAutomationHold {
   collection: string;
   /** A Collection, a Group, or a direct message. */
   target: string;
-  action: "change" | "find" | "post" | "notify" | "wake";
+  action: "change" | "find" | "post" | "notify" | "wake" | "read";
   /** A person a formula named: the hold is theirs, not the step's. */
   recipient?: string;
   /** The editor whose reach stopped the step. */
@@ -436,6 +438,8 @@ export class CollectionAutomations {
    * found them. Reach reads it; a run reads its own.
    */
   private chat: ChatDirectory | null = null;
+  /** The Groups Group-message automations watch, found for their subscriptions. */
+  private groups: ChatDirectory | null = null;
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
@@ -702,7 +706,7 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation),
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation) ?? this.groupTriggerProblem(automation),
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
@@ -1451,7 +1455,17 @@ export class CollectionAutomations {
     const desired = new Map<string, StoredSubscription>();
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       if (!automation.enabled || this.datasets.has(collectionPath)) continue;
-      desired.set(automationId, { automationId, path: collectionPath, ...subscriptionFor(automation.when) });
+      const trigger = automation.when;
+      if (trigger.kind === "group-message") {
+        if (this.groupTriggerProblem(automation) !== null) continue;
+        const group = this.groups?.group(trigger.group);
+        if (!group || "problem" in group) continue;
+        desired.set(automationId, {
+          automationId, groupId: group.channelId, ...(trigger.startsWith !== null ? { startsWith: trigger.startsWith } : {}),
+        });
+        continue;
+      }
+      desired.set(automationId, { automationId, path: collectionPath, ...subscriptionFor(trigger) });
     }
     return desired;
   }
@@ -1473,6 +1487,31 @@ export class CollectionAutomations {
     return held.source === "engine"
       ? this.desiredSubscriptions().has(held.claim.automationId)
       : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId === held.claim.datasetId;
+  }
+
+  /** Why a Group-message automation cannot run here, or null. */
+  private groupTriggerProblem(automation: Automation): string | null {
+    if (automation.when.kind !== "group-message") return null;
+    if (!this.options.runsGroupTriggers()) {
+      return "A Group message starts this automation only on your main computer. Choosing it comes in a later version of dohc.";
+    }
+    const group = this.groups?.group(automation.when.group);
+    return group && "problem" in group ? group.problem : null;
+  }
+
+  /** Finds each Group a Group-message automation names, for its subscription. */
+  private async loadGroups(): Promise<void> {
+    const groups = new Set(this.everyAutomation().flatMap(({ automation }) =>
+      automation.when.kind === "group-message" ? [automation.when.group] : []));
+    if (groups.size === 0) return;
+    try {
+      // Only Groups are read, so no roster is needed.
+      const directory = await this.options.chat.directory(
+        { kind: "owner", ownerUserId: null, grants: [] }, { groups, people: new Set() });
+      if (directory) this.groups = directory;
+    } catch (error) {
+      this.options.onError("find the Groups automations watch", error);
+    }
   }
 
   /**
@@ -1561,12 +1600,15 @@ export class CollectionAutomations {
    * lost; subscribing replaces a pair's filter, so it is safe to repeat.
    */
   private async reconcile(all: boolean): Promise<void> {
+    await this.loadGroups();
     const desired = this.desiredSubscriptions();
     let changed = false;
     for (const [automationId, subscription] of [...this.subscribed]) {
-      if (desired.has(automationId)) continue;
+      // A subscription to another path or Group goes; the same pair is replaced in place.
+      const wanted = desired.get(automationId);
+      if (wanted && sameSubscriptionTarget(wanted, subscription)) continue;
       const removed = await this.withLiveEngine((engine) =>
-        engine.unsubscribeAutomation({ automationId, path: subscription.path }),
+        engine.unsubscribeAutomation(unsubscribeParams(subscription)),
       );
       // Engine unavailable: keep the entry so the next reconcile retries it.
       if (removed === null) continue;
@@ -1762,6 +1804,16 @@ export class CollectionAutomations {
     if (unsupported !== null) {
       return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
     }
+    // A message claim runs, or resumes, only where Group triggers run: after
+    // sync turns on, this computer may no longer be the one. Its Group
+    // subscription goes at once, so no further message claims here.
+    if (held.source === "engine" && held.claim.change.kind === "message") {
+      const problem = this.groupTriggerProblem(automation);
+      if (problem !== null) {
+        void this.enqueue(() => this.reconcile(false));
+        return { kind: "settle", input: { state: "failed", error: problem }, settled: () => this.pruneRuns(claim.automationId) };
+      }
+    }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
     const roster = await this.options.roster();
@@ -1936,9 +1988,10 @@ export class CollectionAutomations {
 
   /** Finds where automations post again, when any automation does. */
   private async loadChat(roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<void> {
-    if (!this.everyAutomation().some(({ automation }) => sendsMessages(automation))) return;
+    if (!this.everyAutomation().some(({ automation }) => sendsMessages(automation) || automation.when.kind === "group-message")) return;
     try {
-      const sending = this.everyAutomation().map(({ automation }) => automation).filter(sendsMessages);
+      const sending = this.everyAutomation().map(({ automation }) => automation)
+      .filter((automation) => sendsMessages(automation) || automation.when.kind === "group-message");
       this.chat = (await this.options.chat.directory(roster, chatNeedsOf(sending))) ?? this.chat;
     } catch (error) {
       this.options.onError("read where automations post", error);
@@ -1955,6 +2008,7 @@ export class CollectionAutomations {
       store: this.options.store,
       nowMs: this.nowMs,
       chat: this.options.chat,
+      readMessageBody: this.options.readMessageBody,
       recipientVerdicts: (input) => this.recipientVerdicts(input),
       postNotice: this.options.postNotice,
     };
@@ -2015,7 +2069,8 @@ export class CollectionAutomations {
     }
     const id = parseCollectionAutomationId(automationId);
     if (id === null) return;
-    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path: id.collectionPath }));
+    const stored = this.subscribed.get(automationId) ?? { automationId, path: id.collectionPath, kinds: [] };
+    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation(unsubscribeParams(stored)));
     if (removed !== null && this.subscribed.delete(automationId)) {
       await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     }
@@ -2025,6 +2080,8 @@ export class CollectionAutomations {
 function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
   return reach.kind === "post"
     ? { target: reach.group.name, action: "post" as const }
+    : reach.kind === "read-group"
+      ? { target: reach.group.name, action: "read" }
     : reach.kind === "notify"
       ? { target: reach.person.name, action: "notify" }
     : reach.kind === "personal"
