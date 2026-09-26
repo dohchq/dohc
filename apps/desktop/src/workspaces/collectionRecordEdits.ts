@@ -1,3 +1,4 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -499,6 +500,10 @@ async function createRecordFile(
         }),
     );
   } catch (error) {
+    const collision = error instanceof VersionedTextStoreError
+      ? error.code === "target-path-exists"
+      : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
+    if (!collision) throw error;
     const existing = await fileRecordId(context, requestedPath).catch(
       () => undefined,
     );

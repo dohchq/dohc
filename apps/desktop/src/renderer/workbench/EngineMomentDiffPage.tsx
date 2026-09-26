@@ -16,6 +16,7 @@ import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
 import { parseMomentDiffTabPath } from "./workbenchState";
 import { hasBlockingModal } from "../modalFocus";
 import { PanelLoading } from "./PanelLoading";
+import { ipcErrorMessage } from "../ipcError";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -160,7 +161,7 @@ export function EngineMomentDiffPage({
       setRestoreState({
         status: "error",
         message:
-          error instanceof Error ? error.message : "Could not undo this restore.",
+          ipcErrorMessage(error, "Could not undo this restore."),
       });
     } finally {
       releaseOperation?.();
@@ -275,7 +276,7 @@ export function EngineMomentDiffPage({
       setRestoreState({
         status: "error",
         message:
-          error instanceof Error ? error.message : "Could not restore this file.",
+          ipcErrorMessage(error, "Could not restore this file."),
       });
     } finally {
       releaseOperation?.();

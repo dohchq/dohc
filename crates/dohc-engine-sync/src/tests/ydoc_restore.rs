@@ -103,7 +103,6 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
             "updateBlobSha256":pending_sha, "lineageClaimId":binding.lineage_claim_id, "isBaseState":false
         }),
     );
-    #[cfg(feature = "fault-injection")]
     {
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
         assert!(matches!(

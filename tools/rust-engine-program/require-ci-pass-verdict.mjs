@@ -18,16 +18,12 @@ const requiredSteps = [
   "fixture drift",
   "fmt --check",
   "clippy -D warnings",
-  "build --workspace",
   "test --workspace",
   // The workspace test run is nextest, which runs no doctests by design.
   // Without this row a runner swap silently drops every doctest the
   // workspace has, and the verdict still reads green.
   "doctests",
-  // The collab crash tier only compiles under `--features fault-injection`,
-  // so a verdict line without this row proves the exactly-once tests never
-  // ran — exactly the omission that let them go unexecuted for a month.
-  "test collab crash tier",
+  "build daemon",
   "cargo-deny",
   // cargo-audit was deliberately absent from this list because CI did not
   // install the tool, so the gate probed for it and reported SKIP -- which
@@ -36,6 +32,7 @@ const requiredSteps = [
   // so a SKIP here is a regression in the install, not an honest absence,
   // and must fail the gate rather than read as green.
   "cargo-audit",
+  "scratch leak",
 ];
 
 // The summary field is a list of rows joined by one space and nothing else. A
