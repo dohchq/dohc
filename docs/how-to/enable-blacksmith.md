@@ -80,9 +80,12 @@ The canonical verifier records the tested commit and base in `result.json`.
 Require the `PR verification` result after enabling CI and confirming the repository plan supports required checks.
 When this job runs, it succeeds only when selection succeeds and every selected gate passes.
 Intentionally unselected gates must be skipped; failed or cancelled gates cannot pass.
-GitHub treats jobs skipped by their condition as passing required checks.
-Forks, drafts, and all PRs while Blacksmith is off therefore still require recorded local evidence before merging.
-A skipped check is not verification evidence.
+GitHub accepts skipped checks when their names match a required check.
+In the observed disabled run, GitHub left this job's dynamic name unexpanded.
+A required `PR verification` check can therefore remain `Expected` for a skipped run.
+Resolve the fork-verification policy in issue #1193 before requiring this check for outside contributors.
+Forks, drafts, and all PRs while Blacksmith is off still need recorded local evidence before merging.
+A skipped check provides no verification evidence.
 Manual runs report `Manual verification`, so a partial benchmark cannot satisfy the required PR check.
 Retain evidence for every gate selected by the PR.
 
@@ -92,8 +95,8 @@ Record the run URL and verification scope in the PR before artifacts expire.
 
 ## Turn it off
 
+Remove `PR verification` from required checks before turning cloud CI off.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-Remove `PR verification` from required checks while cloud CI is off.
 Resume local verification. Manual dispatch returns to self-hosted runners.
