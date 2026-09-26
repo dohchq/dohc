@@ -96,7 +96,7 @@ pub use relay::{
     ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
     ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
     SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
-    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

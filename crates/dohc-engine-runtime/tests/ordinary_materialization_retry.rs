@@ -1,4 +1,4 @@
-use dohc_engine_domain::{DeleteTextFile, VersionedTextStore, WriteText};
+use dohc_engine_domain::{DeleteTextFile, RenameTextFile, VersionedTextStore, WriteText};
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::MomentMaterializationChange;
@@ -167,6 +167,14 @@ async fn materialize_page(
     disk: impl FnOnce(&std::path::Path),
     page: Vec<MomentMaterializationChange>,
 ) -> ScratchDir {
+    materialize_pages(moments, disk, vec![page]).await
+}
+
+async fn materialize_pages(
+    moments: impl FnOnce(&mut VersionedTextStore<'_>),
+    disk: impl FnOnce(&std::path::Path),
+    pages: Vec<Vec<MomentMaterializationChange>>,
+) -> ScratchDir {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     {
@@ -183,17 +191,27 @@ async fn materialize_page(
     disk(scratch.path());
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 10).unwrap().actor;
-    actor
-        .materialize_relay_page(
-            "workspace".into(),
-            scratch.path().to_path_buf(),
-            page,
-            Arc::new(()),
-            11,
-            CancellationToken::new(),
-        )
-        .await
-        .expect("the page materializes");
+    for page in pages {
+        actor
+            .materialize_relay_page(
+                "workspace".into(),
+                scratch.path().to_path_buf(),
+                page,
+                Arc::new(()),
+                11,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("the page materializes");
+    }
+    supervisor.close(&db).expect("close actor");
+    assert!(
+        EngineStore::open(&db, 12)
+            .unwrap()
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .is_empty()
+    );
     scratch
 }
 
@@ -298,4 +316,93 @@ async fn directory_replacement_retries_after_the_delete_batch() {
         std::fs::read_to_string(scratch.path().join("d")).unwrap(),
         "file d"
     );
+}
+
+async fn case_only_rename_matches_sequential_replay(text: &str, write_first: bool) {
+    // Main probes and materializes each entry before moving to the next.
+    // Single-entry pages reproduce that order without a second implementation.
+    for (source, destination) in [("FILE.md", "file.md"), ("file.md", "FILE.md")] {
+        let mut page = vec![change(source, "delete"), change(destination, "write")];
+        if write_first {
+            page.reverse();
+        }
+        let seed = |domain: &mut VersionedTextStore<'_>| {
+            domain
+                .write_text(&write_at(source, "o-file", "old", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        from_path: source.into(),
+                        to_path: destination.into(),
+                        moment_id: "m2".into(),
+                        request_id: None,
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            domain
+                .write_text(&write_at(destination, "o-file", text, "m3", 3), &NoFaults)
+                .unwrap();
+        };
+        let disk = |root: &std::path::Path| std::fs::write(root.join(source), "old").unwrap();
+        let sequential = materialize_pages(
+            seed,
+            disk,
+            page.iter().cloned().map(|change| vec![change]).collect(),
+        )
+        .await;
+        let batched = materialize_page(seed, disk, page).await;
+        let files = |root: &std::path::Path| {
+            let mut files: Vec<_> = std::fs::read_dir(root)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_file())
+                .map(|entry| (entry.file_name(), std::fs::read(entry.path()).unwrap()))
+                .collect();
+            files.sort();
+            files
+        };
+        assert_eq!(
+            files(batched.path()),
+            files(sequential.path()),
+            "{source} -> {destination}, write_first={write_first}"
+        );
+        if !write_first {
+            assert_eq!(
+                files(batched.path()),
+                vec![(
+                    std::ffi::OsString::from(destination),
+                    text.as_bytes().to_vec()
+                )]
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_rename_equal_bytes_delete_first() {
+    case_only_rename_matches_sequential_replay("old", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_rename_equal_bytes_write_first() {
+    case_only_rename_matches_sequential_replay("old", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_rename_changed_bytes_delete_first() {
+    case_only_rename_matches_sequential_replay("new", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_rename_changed_bytes_write_first() {
+    case_only_rename_matches_sequential_replay("new", true).await;
 }

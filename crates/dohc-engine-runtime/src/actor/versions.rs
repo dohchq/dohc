@@ -21,7 +21,7 @@ use dohc_engine_storage::{
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -945,9 +945,9 @@ impl ActorHandle {
             // directory (delete `notes`, write `notes/work.md`) or the reverse
             // (delete `d/a.md`, write `d`). Deletes under another changed path
             // run first, and the page runs in batches that each hold no two
-            // paths where one is inside the other, so every probe sees the
-            // effects of the batches before it. Each batch shares one synced
-            // displacement commit.
+            // paths that alias or where one is inside the other. Aliases keep
+            // their page order, matching sequential replay. Every probe sees
+            // earlier batches; each batch shares one displacement commit.
             let mut changes = changes;
             changes.retain(|change| change.version_id == active);
             let inside_another = |path: &str, all: &[dohc_engine_sync::MomentMaterializationChange]| {
@@ -957,23 +957,32 @@ impl ActorHandle {
                 .iter()
                 .map(|change| change.operation == "delete" && inside_another(&change.path, &changes))
                 .collect();
-            let mut keyed: Vec<(bool, dohc_engine_sync::MomentMaterializationChange)> =
-                first.into_iter().zip(changes.drain(..)).collect();
-            keyed.sort_by(|(a_first, a), (b_first, b)| {
-                b_first.cmp(a_first).then_with(|| {
-                    let depth = a.path.split('/').count().cmp(&b.path.split('/').count());
-                    if *a_first { depth.reverse() } else { depth }
-                }).then_with(|| a.path.cmp(&b.path))
+            let mut alias_order = HashMap::new();
+            let mut keyed: Vec<_> = first.into_iter().zip(changes).map(|(first, change)| {
+                let key: Vec<String> = change.path.split('/').map(dohc_engine_sync::collision_key).collect();
+                // Give every alias the first occurrence's sort position. The
+                // stable sort then retains their original relative order.
+                let order = alias_order.entry(key.clone()).or_insert_with(|| {
+                    (first, change.path.split('/').count(), change.path.clone())
+                }).clone();
+                (order, key, change)
+            }).collect();
+            keyed.sort_by(|(a, _, _), (b, _, _)| {
+                b.0.cmp(&a.0).then_with(|| {
+                    if a.0 { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }
+                }).then_with(|| a.2.cmp(&b.2))
             });
             let mut projections: Vec<SwitchProjection> = Vec::new();
+            let mut batch_aliases = HashSet::new();
             let mut deleted: Vec<String> = Vec::new();
-            for (_, change) in keyed {
+            for (_, key, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                if projections.iter().any(|planned| {
+                if batch_aliases.contains(&key) || projections.iter().any(|planned| {
                     is_inside(&planned.spec.target_path, &change.path)
                         || is_inside(&change.path, &planned.spec.target_path)
                 }) {
                     run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
+                    batch_aliases.clear();
                 }
                 // A file replacing a directory whose tracked files this page
                 // deleted: the empty directory gives way.
@@ -1024,6 +1033,7 @@ impl ActorHandle {
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
+                batch_aliases.insert(key);
                 projections.push(planned_projection(&workspace_id, &active, change.path, operation, sha,
                     preimage, now_ms, now_ms, secret, inline));
             }
