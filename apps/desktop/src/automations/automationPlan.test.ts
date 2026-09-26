@@ -18,6 +18,7 @@ import {
   unsupportedReason,
   type RunInputs,
 } from "./automationPlan";
+import { chatDirectoryOf } from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -52,7 +53,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
 const task = { id: "rec_task", path: "Tasks/one.md", values: { Status: "Done", Count: 2 } };
 
 function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): RunInputs {
-  return { automation: definition, claim: claim(), record: task, found: new Map(), ...overrides };
+  return { automation: definition, claim: claim(), record: task, found: new Map(), chat: null, ...overrides };
 }
 
 describe("automation ids", () => {
@@ -105,10 +106,13 @@ describe("what the executor can run", () => {
     expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
   });
 
-  it("names why it cannot run messages, code, schedules, or a Find the query cannot express", () => {
+  it("names why it cannot run notices, code, schedules, or a Find the query cannot express", () => {
     const withStep = (step: string) => automation(`id: a\nname: A\nwhen: record-added\ndo: [${step}]`);
     expect(unsupportedReason(withStep("{set: {Done: true}}"))).toBeNull();
-    expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toMatch(/messages/);
+    expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toMatch(/notices/);
+    expect(unsupportedReason(withStep("{wake-agent: Hi, person: user-1}"))).toMatch(/wake agents/);
+    expect(unsupportedReason(withStep("{post: Hi, group: Trip}"))).toBeNull();
+    expect(unsupportedReason(withStep("{direct-message: Hi, to: [user-1, '=trigger.record.Owner']}"))).toBeNull();
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
     expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
@@ -448,5 +452,32 @@ describe("a formula's syntax, for the builder", () => {
     expect(expressionProblem("(() => { while (true) {} })()")).toBeNull();
     expect(expressionProblem("record.Status ==")).toBe("Unexpected token.");
     expect(expressionProblem("1 2")).toBe("Unexpected text at character 3.");
+  });
+});
+
+describe("messages", () => {
+  const directory = chatDirectoryOf(
+    [{ id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "both", wireId: "trip", runningThreadId: null }],
+    { kind: "owner", ownerUserId: null, grants: [] },
+  );
+  const tell = automation("id: t\nname: T\nwhen: record-added\ndo: [{post: 'Hi {record.Status}', group: Trip}]");
+  const key = { claimId: "atc_1", hash: "h" };
+
+  it("posts the text the evaluator rendered, and refuses a message with no text", () => {
+    const run = inputs(tell, { chat: directory });
+    const request = evaluationRequest(run, 0);
+    expect(request.formulas).toEqual([{
+      kind: "text", parts: [{ kind: "text", text: "Hi " }, { kind: "expression", expression: "record.Status" }],
+    }]);
+    expect(planRun(run, request, [{ ok: true, value: "Hi Done  \r\n" }], key)).toMatchObject({
+      kind: "plan",
+      steps: [{ ordinal: 0, effects: [{
+        kind: "message", effectId: "atc_1/h/0/post", to: { kind: "group", channelId: "trip", lane: "posts" }, body: "Hi Done",
+      }] }],
+    });
+    expect(planRun(run, request, [{ ok: true, value: " \n" }], key))
+      .toEqual({ kind: "failed", error: "The message in step 1 is empty.", timedOut: false });
+    expect(planRun(run, request, [{ ok: true, value: 5 }], key))
+      .toEqual({ kind: "failed", error: "The message in step 1 is not text.", timedOut: false });
   });
 });

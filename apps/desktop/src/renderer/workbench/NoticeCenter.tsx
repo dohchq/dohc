@@ -1,3 +1,4 @@
+import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
@@ -258,7 +259,7 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
     const entry = automations.get(stop.automationId) ??
       { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
     const who = stop.stoppedFor ?? "Someone you shared with";
-    entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
+    entry.reasons.add(`${who} cannot ${automationReachCopy(stop, true)}.`);
     automations.set(stop.automationId, entry);
   }
   const [only] = automations.values();
@@ -786,9 +787,9 @@ export function NoticeCenter(props: {
       });
     }
     for (const hold of props.automationHolds ?? []) {
-      const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
+      const reach = automationReachCopy(hold);
       next.push({
-        id: `automation-hold-${hold.automationId}-${hold.step}`,
+        id: `automation-hold-${hold.automationId}-${hold.step}${hold.recipient ? `-${hold.recipient}` : ""}`,
         tone: "warning",
         title: `Automation "${hold.automationName}" is waiting`,
         body: hold.stoppedFor

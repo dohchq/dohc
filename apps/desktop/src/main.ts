@@ -195,6 +195,7 @@ import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
+import { readChatDirectory } from "./automations/automationChat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
@@ -876,6 +877,7 @@ const credentialSessionCache =
     // The notice list shows the signed-in account's notices.
     notifyNoticesChanged();
     if (snapshot.credentials) void noticeStore().sync();
+    if (snapshot.credentials) resumeAutomationSessionWaits();
   });
 async function refreshCredentialCache(): Promise<void> {
   try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
@@ -3413,6 +3415,28 @@ function createCollectionAutomationsFor(
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
+    chat: {
+      directory: (roster, needs) => withWorkspaceAttachmentAsync(workspace, (lease) =>
+        readChatDirectory(linkedChatStoreFor(lease), workspaceId, roster, needs)),
+      // The same write path as every other chat write, as the automation.
+      write: (signal, message) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
+        const place = { workspaceId, store: linkedChatStoreFor(lease) };
+        const common = {
+          writer: { via: "automation" as const, ...message.automation },
+          // chatWrites checks it just before the row.
+          signal,
+          body: message.body,
+          messageId: message.messageId,
+          idempotencyKey: message.effectId,
+          resolveAttachments: async () => [],
+        };
+        return message.target.kind === "group"
+          ? await chatWrites.startThread(place, {
+              ...common, channelId: message.target.channelId, lane: message.target.lane, threadId: message.threadId,
+            })
+          : await chatWrites.sendMessage(place, { ...common, threadId: message.target.threadId });
+      }),
+    },
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {
@@ -3432,6 +3456,11 @@ function createCollectionAutomationsFor(
       });
     },
   });
+}
+
+// A new session lets automations that waited to post try again.
+function resumeAutomationSessionWaits(): void {
+  for (const workspaceId of workspaceAuthorities.workspaceIds()) collectionAutomationsOf(workspaceId)?.sessionChanged();
 }
 
 const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
@@ -3527,6 +3556,7 @@ const chatWrites = createChatWrites({
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
   scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
+  notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;

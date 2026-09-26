@@ -270,6 +270,16 @@ describe("automation failure notices", () => {
     await userEvent.click(within(many).getByRole("button", { name: "Dismiss notice" }));
     expect(onDismissAutomationStops).toHaveBeenLastCalledWith(stops);
   });
+
+  it("names the Group a held post would post in", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+      step: "1", seq: 5, collection: "Trip", target: "Planning", action: "post", stoppedFor: null,
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
+    expect(notice.textContent).toContain("A step in Trip can post in Planning. Allow it to run?");
+  });
 });
 
 describe("update toast", () => {
@@ -1921,4 +1931,13 @@ describe("notices sent to you", () => {
       expect(screen.queryByTestId("sent-notice-toast")).toBeNull();
     });
   });
+});
+
+it("names the chat permission that stopped a step", async () => {
+  renderNotices({ automationStops: [{
+    automationId: "collection:Tasks#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+    step: "0", seq: 1, collection: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test",
+  }] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");
 });

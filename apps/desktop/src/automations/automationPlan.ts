@@ -10,11 +10,12 @@ import {
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import type { Automation } from "@dohc/workspace-contracts/automations";
+import { automationTextParts, type Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "../workspaces/collectionRecordEdits";
 import type { ReachCollection, ReachStep } from "./automationReach";
+import { automationMessageId, automationThreadId, type ChatDirectory } from "./automationChat";
 
 // What one run of a Collection automation does, worked out before anything
 // is written. The executor reads the trigger record and every Find, asks the
@@ -294,10 +295,14 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
   for (const { step } of everyStep(steps)) {
     switch (step.kind) {
       case "notify":
-      case "post":
-      case "direct-message":
       case "wake-agent":
-        return "dohc cannot send messages from automations yet.";
+        return "dohc cannot send notices or wake agents from automations yet.";
+      case "post":
+        formulas += 1;
+        break;
+      case "direct-message":
+        formulas += 1 + step.to.filter(isFormula).length;
+        break;
       case "run":
       case "run-file":
         return "dohc cannot run code steps yet.";
@@ -413,11 +418,27 @@ export function datasetSubscriptionFor(
   return { tableId: table.tableId, kinds: [...kinds].sort(), fieldIds: fields === undefined ? null : fieldIds.sort() };
 }
 
-/** The Collections each step reaches, for the reach check (ADR 0012). */
+/** A post to the direct message with `userId`, as the reach check reads it. */
+function directMessageReach(chat: ChatDirectory | null, userId: string): ReachStep {
+  const target = chat?.directMessage(userId);
+  return {
+    kind: "post",
+    group: target && !("problem" in target)
+      ? { channelWireId: target.wireId, name: target.name }
+      : { channelWireId: null, name: "a direct message" },
+  };
+}
+
+/**
+ * The Collections and chats each step reaches, for the reach check (ADR
+ * 0012). A direct message to a person a formula names is checked once the
+ * formula has run.
+ */
 export function reachStepsOf(
   automation: Automation,
   collection: ReachCollection,
   collectionNamed: (path: string) => ReachCollection,
+  chat: ChatDirectory | null,
 ): ReachStep[] {
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
@@ -431,6 +452,18 @@ export function reachStepsOf(
       reach.push({ kind: "change-records", collection: target(step.collection) });
     } else if (step.kind === "find") {
       reach.push({ kind: "find-records", collection: target(step.collection) });
+    } else if (step.kind === "post") {
+      const group = chat?.group(step.group);
+      reach.push({
+        kind: "post",
+        group: group && !("problem" in group)
+          ? { channelWireId: group.wireId, name: group.name }
+          : { channelWireId: null, name: step.group },
+      });
+    } else if (step.kind === "direct-message") {
+      for (const person of step.to) {
+        if (!isFormula(person) && typeof person.value === "string") reach.push(directMessageReach(chat, person.value));
+      }
     }
   }
   return reach;
@@ -530,6 +563,8 @@ export interface RunInputs {
   found: ReadonlyMap<number, readonly RunRecord[]>;
   /** Finds whose page has more matches. Their partial records must not enter the scope. */
   truncatedFinds?: ReadonlySet<number>;
+  /** Where posts and direct messages go; null when the automation sends none. */
+  chat: ChatDirectory | null;
 }
 
 /**
@@ -576,7 +611,10 @@ type Slot =
   | { kind: "if"; ordinal: number }
   | { kind: "value"; ordinal: number; field: string }
   // One answer per record a Find returned, in order.
-  | { kind: "values"; ordinal: number; field: string };
+  | { kind: "values"; ordinal: number; field: string }
+  | { kind: "text"; ordinal: number }
+  // A direct message's person that a formula names.
+  | { kind: "person"; ordinal: number; index: number };
 
 export interface EvaluationRequest {
   scope: AutomationScope;
@@ -611,11 +649,14 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
   const findGuards: NonNullable<AutomationFormula["when"]> = [];
+  const guarded = (when: NonNullable<AutomationFormula["when"]>) => {
+    const guards = [...when, ...findGuards];
+    return guards.length ? { when: guards } : {};
+  };
   const add = (slot: Slot, source: string, when: NonNullable<AutomationFormula["when"]> = []) => {
     const index = formulas.length;
     slots.push(slot);
-    const guards = [...when, ...findGuards];
-    formulas.push({ kind: "expression", source, ...(guards.length ? { when: guards } : {}) });
+    formulas.push({ kind: "expression", source, ...guarded(when) });
     return index;
   };
   const conditions: NonNullable<AutomationFormula["when"]> = [];
@@ -648,6 +689,15 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
         addSteps(entry.then, [...when, { index, truthy: true }]);
         addSteps(entry.otherwise, [...when, { index, truthy: false }]);
         continue;
+      }
+      if (step.kind === "post" || step.kind === "direct-message") {
+        slots.push({ kind: "text", ordinal });
+        formulas.push({ kind: "text", parts: automationTextParts(step.text) ?? [{ kind: "text", text: step.text }], ...guarded(when) });
+        if (step.kind === "direct-message") {
+          step.to.forEach((person, index) => {
+            if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression, when);
+          });
+        }
       }
       if (step.kind !== "set" && step.kind !== "add-record") continue;
       const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
@@ -701,7 +751,23 @@ export type PlannedTarget = { recordId: string; collectionPath: string; path: st
 
 export type PlannedEffect =
   | { kind: "set"; target: PlannedTarget; fields: PlannedField[] }
-  | { kind: "add"; collectionPath: string; recordId: string; name: string; fields: Array<{ field: string; value: JsonValue }> };
+  | { kind: "add"; collectionPath: string; recordId: string; name: string; fields: Array<{ field: string; value: JsonValue }> }
+  | {
+      kind: "message";
+      /** Also the idempotency key, so a retry writes the message once. */
+      effectId: string;
+      messageId: string;
+      threadId: string;
+      to:
+        | { kind: "group"; channelId: string; lane: "posts" | "chat" }
+        | { kind: "direct-message"; userId: string; threadId: string };
+      /** The Group or direct message, as reach and run history name it. */
+      name: string;
+      channelWireId: string;
+      body: string;
+      /** A formula named the person, so their reach is checked once the plan names them. */
+      byFormula?: boolean;
+    };
 
 export interface PlannedStep {
   ordinal: number;
@@ -726,9 +792,38 @@ function slotSubject(slot: Slot): string {
       return "The condition this automation waits for";
     case "if":
       return `The condition in step ${slot.ordinal + 1}`;
+    case "text":
+      return `The message in step ${slot.ordinal + 1}`;
+    case "person":
+      return `The person in step ${slot.ordinal + 1}`;
     default:
       return `The formula for "${slot.field}" in step ${slot.ordinal + 1}`;
   }
+}
+
+// A chat message's largest body, as the engine bounds it.
+const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
+
+/** A message's evaluated text as the body it posts, or why it cannot be one. */
+function messageBody(value: JsonValue): string | { problem: string } {
+  if (typeof value !== "string") return { problem: "is not text." };
+  const body = value.replace(/\r\n?/g, "\n").trimEnd();
+  if (body.trim().length === 0) return { problem: "is empty." };
+  if (Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) return { problem: "is longer than 64 KiB." };
+  return body;
+}
+
+/** The people the run's formulas named for direct messages, so only their conversations are read. */
+export function formulaPeople(request: EvaluationRequest, results: readonly AutomationOutcome<JsonValue>[]): string[] {
+  const people = new Set<string>();
+  request.slots.forEach((slot, index) => {
+    const result = results[index];
+    if (slot.kind !== "person" || !result?.ok) return;
+    for (const value of Array.isArray(result.value) ? result.value : [result.value]) {
+      if (typeof value === "string" && value.length > 0) people.add(value);
+    }
+  });
+  return [...people];
 }
 
 /** The seed of every id and idempotency key a step's effects use. */
@@ -748,10 +843,21 @@ export function planRun(
   key: { claimId: string; hash: string },
 ): RunPlan {
   const answers = new Map<string, JsonValue>();
-  const slotKey = (slot: Slot) =>
-    slot.kind === "value" || slot.kind === "values"
-      ? `${slot.kind}:${slot.ordinal}:${slot.field}`
-      : slot.kind === "if" || slot.kind === "find" ? `${slot.kind}:${slot.ordinal}` : slot.kind;
+  const slotKey = (slot: Slot) => {
+    switch (slot.kind) {
+      case "value":
+      case "values":
+        return `${slot.kind}:${slot.ordinal}:${slot.field}`;
+      case "if":
+      case "find":
+      case "text":
+        return `${slot.kind}:${slot.ordinal}`;
+      case "person":
+        return `person:${slot.ordinal}:${slot.index}`;
+      default:
+        return slot.kind;
+    }
+  };
   for (const [index, slot] of request.slots.entries()) {
     const result = results[index];
     if (!result) return { kind: "failed", error: "The evaluator did not answer every formula.", timedOut: false };
@@ -767,7 +873,7 @@ export function planRun(
     }
     answers.set(slotKey(slot), result.value);
   }
-  const { automation, claim, record, found } = inputs;
+  const { automation, claim, record, found, chat } = inputs;
   const trigger = automation.when;
   if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") {
     const fact = claim.change.fields.find((candidate) => candidate.field === trigger.field);
@@ -812,6 +918,58 @@ export function planRun(
       if ("then" in entry) {
         const problem = walk(answers.get(`if:${ordinal}`) ? entry.then : entry.otherwise);
         if (problem !== null) return problem;
+        continue;
+      }
+      if (step.kind === "post" || step.kind === "direct-message") {
+        const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
+        if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
+        if (chat === null) return "dohc could not read this workspace's chats.";
+        const seed = stepKey(key.claimId, key.hash, ordinal);
+        const effects: PlannedEffect[] = [];
+        if (step.kind === "post") {
+          const group = chat.group(step.group);
+          if ("problem" in group) return group.problem;
+          const effectId = `${seed}/post`;
+          effects.push({
+            kind: "message",
+            effectId,
+            messageId: automationMessageId(effectId),
+            threadId: automationThreadId(effectId),
+            to: { kind: "group", channelId: group.channelId, lane: group.lane },
+            name: group.name,
+            channelWireId: group.wireId,
+            body,
+          });
+        } else {
+          // Each person, and whether only a formula named them.
+          const people = new Map<string, boolean>();
+          for (const [index, person] of step.to.entries()) {
+            const value = isFormula(person) ? (answers.get(`person:${ordinal}:${index}`) ?? null) : person.value;
+            for (const userId of Array.isArray(value) ? value : [value]) {
+              if (typeof userId !== "string" || userId.length === 0) {
+                return `Step ${ordinal + 1} names a person that is not a person's id.`;
+              }
+              people.set(userId, (people.get(userId) ?? true) && isFormula(person));
+            }
+          }
+          for (const [userId, byFormula] of people) {
+            const target = chat.directMessage(userId);
+            if ("problem" in target) return target.problem;
+            const effectId = `${seed}/dm/${userId}`;
+            effects.push({
+              kind: "message",
+              effectId,
+              messageId: automationMessageId(effectId),
+              threadId: target.threadId,
+              to: { kind: "direct-message", userId, threadId: target.threadId },
+              name: target.name,
+              channelWireId: target.wireId,
+              body,
+              ...(byFormula ? { byFormula } : {}),
+            });
+          }
+        }
+        planned.push({ ordinal, effects });
         continue;
       }
       if (step.kind === "add-record") {

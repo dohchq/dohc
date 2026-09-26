@@ -87,3 +87,15 @@ describe("each step's reach verdicts", () => {
     ])).toEqual([[0], [1, 2, 3], [], [4]]);
   });
 });
+
+it("keeps chat recipients and nested record steps at their runtime reach indices", () => {
+  const set = { kind: "set" as const, values: [], records: null, operation: null };
+  expect(reachPlaces([
+    { kind: "post", text: "Hi", group: "Trip" },
+    { kind: "if", if: "true", do: [{ kind: "direct-message", text: "Hi", to: [
+      { kind: "literal", value: "ana" }, { kind: "formula", expression: "Owner" },
+      { kind: "literal", value: "ana" },
+    ] }, set], otherwise: [set] },
+    set,
+  ])).toEqual([[0], [1, 2, 3, 4], [5]]);
+});

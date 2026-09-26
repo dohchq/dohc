@@ -87,6 +87,7 @@ export function useAutomationHolds(
         definitionHash: hold.definitionHash,
         step: hold.step,
         seq: hold.seq,
+        ...(hold.recipient ? { recipient: hold.recipient } : {}),
       }),
       "Couldn't allow that automation step.",
     ),

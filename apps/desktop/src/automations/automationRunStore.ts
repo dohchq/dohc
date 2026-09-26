@@ -75,6 +75,20 @@ const EffectSchema = z.union([
     tableId: z.string(),
     values: z.array(z.object({ fieldId: z.string(), field: z.string(), value: JsonValueSchema })),
   }),
+  z.object({
+    kind: z.literal("message"),
+    effectId: z.string(),
+    messageId: z.string(),
+    threadId: z.string(),
+    to: z.union([
+      z.object({ kind: z.literal("group"), channelId: z.string(), lane: z.enum(["posts", "chat"]) }),
+      z.object({ kind: z.literal("direct-message"), userId: z.string(), threadId: z.string() }),
+    ]),
+    name: z.string(),
+    channelWireId: z.string(),
+    body: z.string(),
+    byFormula: z.boolean().optional(),
+  }),
 ]);
 const WriteSchema = z.union([
   z.object({
@@ -116,6 +130,8 @@ const WriteSchema = z.union([
   }),
   z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
+  // A post or direct message the automation wrote, and where it went.
+  z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
 ]);
 // A dataset edit refused because its record changed, sent again: the record's
 // new version, the fields still to write, and what the re-read kept.
@@ -250,6 +266,7 @@ const ReachVerdictsSchema = z.object({
     stoppedFor: z.string().nullable(),
     narrowed: z.literal(true).optional(),
     seq: z.number().int().nonnegative(),
+    recipient: z.object({ userId: z.string(), name: z.string(), action: z.enum(["post", "notify"]) }).optional(),
   })),
 });
 

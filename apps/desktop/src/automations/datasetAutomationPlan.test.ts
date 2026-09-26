@@ -33,6 +33,21 @@ function automation(steps: string, when = "field-changed: Status"): Automation {
 }
 
 describe("dataset automation steps", () => {
+  it.each([
+    "post: Done\n        group: Team",
+    "direct-message: Done\n        to: [user_ana]",
+    "notify: Done\n        to: [user_ana]",
+    "wake-agent: Review this\n        person: user_ana",
+  ])("refuses chat steps on datasets, including nested branches: %s", (step) => {
+    const chat = automation("      - " + step + "\n").do;
+    const base = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
+    for (const steps of [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
+      [{ kind: "if" as const, if: "false", do: base.do, otherwise: chat }]]) {
+      expect(datasetAutomationProblem({ ...base, do: steps }, generated))
+        .toBe("Automations on dataset Collections can't post in chat, notify people, or wake agents.");
+    }
+  });
+
   it("says which approved operation a step lacks, in the words the step card shows", () => {
     expect(datasetAutomationProblem(automation("      - set:\n          Finished on: '=today()'\n        operation: invoices.edit\n"), generated))
       .toBe("Budget has no approved edit that changes Finished on.");

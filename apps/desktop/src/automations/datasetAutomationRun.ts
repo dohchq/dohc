@@ -284,7 +284,7 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const inputs: RunInputs = { chat: null, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   const request = evaluationRequest(inputs, claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
@@ -314,6 +314,7 @@ function datasetEffects(
             values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
           };
         }
+        if (effect.kind !== "set") throw new Error("Dataset automations cannot send chat messages.");
         let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
         if ("addedBy" in effect.target) {
           target = { addedBy: effect.target.addedBy };
