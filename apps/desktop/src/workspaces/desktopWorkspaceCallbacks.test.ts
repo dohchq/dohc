@@ -29,15 +29,11 @@ function fixture() {
   });
   const notifyRenderer = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["notifyRenderer"]>();
   const handleWatcherEvents = vi.fn<(events: readonly WatcherEvent[]) => void>();
-  const collectionWatcherEvents = vi.fn<(events: readonly WatcherEvent[]) => void>();
-  const runtime = { handleWatcherEvents };
-  const current = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["pluginWorkspaceRuntimes"]["current"]>(() => runtime);
   const scanWorkspace = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"]["scanWorkspace"]>(async () => undefined);
   const live: {
-    runtimes: DesktopWorkspaceCallbacksDependencies<State>["pluginWorkspaceRuntimes"];
     dispatch: DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"];
     initialized: boolean;
-  } = { runtimes: { current }, dispatch: { scanWorkspace }, initialized: false };
+  } = { dispatch: { scanWorkspace }, initialized: false };
   const lateReads: string[] = [];
   const callbacks = createDesktopWorkspaceCallbacks({
     findWorkspace: (id) => registry.get(id),
@@ -47,15 +43,11 @@ function fixture() {
       if (!live.initialized) throw new Error("Authority owner is not initialized");
       lateReads.push("authorities"); return authorities;
     },
-    get pluginWorkspaceRuntimes() {
-      if (!live.initialized) throw new Error("Plugin runtime is not initialized");
-      lateReads.push("runtimes"); return live.runtimes;
-    },
     get chatDispatchService() {
       if (!live.initialized) throw new Error("Dispatch service is not initialized");
       lateReads.push("dispatch"); return live.dispatch;
     },
-    collectionAutomationsOf: () => ({ handleWatcherEvents: collectionWatcherEvents }),
+    collectionAutomationsOf: () => ({ handleWatcherEvents }),
   });
   live.initialized = true;
   function attach() {
@@ -64,30 +56,20 @@ function fixture() {
     lease.release();
     return attached;
   }
-  return { workspace, registry, authorities, disposed, notifyRenderer, handleWatcherEvents, collectionWatcherEvents,
-    current, scanWorkspace, live, lateReads, callbacks, attach };
+  return { workspace, registry, authorities, disposed, notifyRenderer, handleWatcherEvents,
+    scanWorkspace, live, lateReads, callbacks, attach };
 }
 
 describe("desktop workspace callbacks", () => {
-  it("constructs before late owners and forwards the exact watcher batch to the current runtime and automations", () => {
+  it("constructs before late owners and forwards the exact watcher batch to the workspace's automations", () => {
     const test = fixture();
     expect(test.lateReads).toEqual([]);
     const workspace = test.attach();
     test.callbacks.onWatcherBatch(workspace, events);
-    expect(test.current).toHaveBeenCalledWith(workspace.workspaceId);
-    expect(test.handleWatcherEvents).toHaveBeenCalledWith(events);
-    expect(test.handleWatcherEvents.mock.calls[0]![0]).toBe(events);
-    // The workspace's Collection automations read the same batch.
-    expect(test.collectionWatcherEvents).toHaveBeenCalledWith(events);
-    const replacement = vi.fn<(events: readonly WatcherEvent[]) => void>();
-    test.live.runtimes = { current: vi.fn(() => ({ handleWatcherEvents: replacement })) };
-    test.callbacks.onWatcherBatch(workspace, events);
-    expect(replacement).toHaveBeenCalledWith(events);
     expect(test.handleWatcherEvents).toHaveBeenCalledOnce();
+    expect(test.handleWatcherEvents.mock.calls[0]![0]).toBe(events);
     expect(test.notifyRenderer).not.toHaveBeenCalled();
     expect(test.scanWorkspace).not.toHaveBeenCalled();
-    test.live.runtimes = { current: vi.fn(() => undefined) };
-    expect(() => test.callbacks.onWatcherBatch(workspace, events)).not.toThrow();
   });
 
   it("drops both actual callbacks during retirement and after identical reattachment", async () => {
@@ -99,7 +81,7 @@ describe("desktop workspace callbacks", () => {
     try {
       test.callbacks.onWatcherBatch(original, events);
       oldRelay();
-      expect(test.current).not.toHaveBeenCalled();
+      expect(test.handleWatcherEvents).not.toHaveBeenCalled();
       expect(test.notifyRenderer).not.toHaveBeenCalled();
       expect(test.scanWorkspace).not.toHaveBeenCalled();
       expect(test.disposed).toEqual([]);
@@ -108,7 +90,7 @@ describe("desktop workspace callbacks", () => {
     expect(replacement.attachmentId).not.toBe(original.attachmentId);
     test.callbacks.onWatcherBatch(original, events);
     oldRelay();
-    expect(test.current).not.toHaveBeenCalled();
+    expect(test.handleWatcherEvents).not.toHaveBeenCalled();
     expect(test.notifyRenderer).not.toHaveBeenCalled();
     test.callbacks.onWatcherBatch(replacement, events);
     test.callbacks.createRelayOnChange(replacement)();
@@ -119,13 +101,13 @@ describe("desktop workspace callbacks", () => {
     expect(test.disposed).toEqual([original.attachmentId, replacement.attachmentId]);
   });
 
-  it("drops missing registry callbacks without resolving plugin or dispatch owners", () => {
+  it("drops missing registry callbacks without resolving automation or dispatch owners", () => {
     const test = fixture();
     const workspace = test.attach();
     test.registry.delete(workspace.workspaceId);
     test.callbacks.onWatcherBatch(workspace, events);
     test.callbacks.createRelayOnChange(workspace)();
-    expect(test.current).not.toHaveBeenCalled();
+    expect(test.handleWatcherEvents).not.toHaveBeenCalled();
     expect(test.notifyRenderer).not.toHaveBeenCalled();
     expect(test.scanWorkspace).not.toHaveBeenCalled();
     expect(test.lateReads).toEqual([]);
@@ -163,7 +145,7 @@ describe("desktop workspace callbacks", () => {
       test.callbacks.onWatcherBatch(workspace, events);
       expect(test.notifyRenderer).toHaveBeenCalledOnce();
       expect(test.scanWorkspace).toHaveBeenCalledExactlyOnceWith(workspace.workspaceId);
-      expect(test.current).not.toHaveBeenCalled();
+      expect(test.handleWatcherEvents).not.toHaveBeenCalled();
       scan.resolve();
       await retired;
       expect(test.disposed).toEqual([workspace.attachmentId]);

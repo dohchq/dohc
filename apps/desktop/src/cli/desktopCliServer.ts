@@ -146,8 +146,8 @@ export function createDesktopCliServer<State>(
     const store = linkedChatStoreFor(workspace);
     const daemon = currentDaemon();
     if (!daemon) throw new Error("The workspace engine is not running.");
-    // The CLI's collection writes ride the same seam plugin SDK edits take,
-    // resolved per write under the physical workspace's authority, so a
+    // The CLI's collection writes ride the desktop's one collection write
+    // seam, resolved per write under the physical workspace's authority, so a
     // retired-and-reattached workspace refuses instead of falling through to
     // its successor. A write ends with the CLI request that asked for it.
     const cliCollectionEdit = <T>(
@@ -221,12 +221,9 @@ export function createDesktopCliServer<State>(
       // Engine-backed collection reads and writes for the CLI/MCP verbs.
       // withEngineAdapter derives the attachment (and share-view session mode)
       // from the registered workspace itself — the renderer collection routes'
-      // authority, reached from main's side. The plugin SDK's owned read port
-      // wraps the same call in receivedShareEngine.workspaceForRegistered; the
-      // CLI resolved this workspace by cwd above, so it already holds the
-      // registered entry that wrapper would look up. Writes go through the
-      // desktop's one collection write seam, the same path plugin SDK edits
-      // take.
+      // authority, reached from main's side. The CLI resolved this workspace
+      // by cwd above, so it already holds the registered entry. Writes go
+      // through the desktop's one collection write seam.
       collections: {
         writes: {
           setFields: (input) =>

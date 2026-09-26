@@ -79,9 +79,6 @@ import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 // the drain. Until the engine takes the settle or the release, the executor
 // keeps the claim and tries again on its next drain, without running it.
 //
-// It shares the engine with the plugin executor until plugins are removed.
-// Each drains only its own namespace.
-//
 // A dataset Collection's claims come from its dataset host's ledger instead,
 // where the host claims each commit it makes (ADR 0011). The drain takes
 // engine claims first, then dataset claims, one at a time, and treats both

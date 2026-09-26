@@ -126,7 +126,7 @@ test("literal input guard accepts imports, fixture reads, and CSS covered by the
 
 test("literal input guard detects undeclared inputs and production use of test-only edges", () => {
   const files = [
-    { path: "packages/sdk/src/new.test.ts", source: 'import "../../workspace-core/src/index";' },
+    { path: "packages/brand/src/new.test.ts", source: 'import "../../workspace-core/src/index";' },
     { path: "apps/site/src/new.ts", source: 'import "@dohc/cli/dataset";' },
     { path: "packages/workspace-auth/src/new.ts", source: 'readFile(new URL("../../workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url))' },
   ];

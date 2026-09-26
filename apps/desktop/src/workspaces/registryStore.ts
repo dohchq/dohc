@@ -304,7 +304,7 @@ export interface RegistryEntry extends CreatedWorkspace {
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
   // How far the owner has seen each automation's failures, by engine
-  // automation id ("<plugin>/<automation>"). The engine's failed claim rows
+  // automation id ("collection:<collection path>#<id>"). The engine's failed claim rows
   // are the durable evidence and are never deleted; a dismiss only records
   // the generation (the automation's failed-claim count) the owner saw.
   // Same rule as ShareSkippedOps.acknowledgedGeneration: a failure recorded

@@ -57,40 +57,6 @@ export const WORKBENCH_MENU_COMMANDS = [
   "unpin-app",
 ] as const;
 
-export const PLUGIN_PIPELINE_STATUSES = [
-  "discovered",
-  "queued",
-  "snapshotting",
-  "installing",
-  "scanning",
-  "building",
-  "starting",
-  "ready",
-  "failed",
-  "crashed",
-  "disabled",
-  "disabled-pending-approval",
-  "disabled-pending-repair",
-  "invalid",
-  "uninstalling",
-] as const;
-
-export const PLUGIN_PIPELINE_ERROR_STAGES = [
-  "discovery",
-  "snapshot",
-  "install",
-  "scan",
-  "build",
-  "state",
-  "runtime",
-  "uninstall",
-] as const;
-
-// How many unrecoverable paths the uninstall preflight sends to the renderer.
-// The dialog lists this sample and says how many more there are; a plugin
-// tree can hold thousands, and the whole inventory stays in main.
-export const PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT = 20;
-
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
 // schema enforces them at both ends of the channel.
@@ -193,30 +159,6 @@ export const CHANNELS = {
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
   sitePreviewReplaced: "desktop:site-preview-replaced",
-  openPluginPanel: "desktop:open-plugin-panel",
-  startPluginPanel: "desktop:start-plugin-panel",
-  invokePluginCommand: "desktop:invoke-plugin-command",
-  stopPluginPanel: "desktop:stop-plugin-panel",
-  pluginPanelInvalidated: "desktop:plugin-panel-invalidated",
-  invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
-  openPluginWebApp: "desktop:open-plugin-web-app",
-  startPluginWebApp: "desktop:start-plugin-web-app",
-  setPluginWebAppBounds: "desktop:set-plugin-web-app-bounds",
-  stopPluginWebApp: "desktop:stop-plugin-web-app",
-  pluginWebAppFailed: "desktop:plugin-web-app-failed",
-  listPlugins: "desktop:list-plugins",
-  installPlugin: "desktop:install-plugin",
-  disablePlugin: "desktop:disable-plugin",
-  enablePlugin: "desktop:enable-plugin",
-  approvePlugin: "desktop:approve-plugin",
-  rebuildPlugin: "desktop:rebuild-plugin",
-  pluginUninstallPreflight: "desktop:plugin-uninstall-preflight",
-  pluginSizes: "desktop:plugin-sizes",
-  uninstallPlugin: "desktop:uninstall-plugin",
-  getPluginSettings: "desktop:get-plugin-settings",
-  setPluginSettings: "desktop:set-plugin-settings",
-  pluginStatusChanged: "desktop:plugin-status-changed",
-  pluginPanelSdkEvent: "desktop:plugin-panel-sdk-event",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",

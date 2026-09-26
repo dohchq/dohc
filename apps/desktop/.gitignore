@@ -7,14 +7,7 @@ release/
 # unpacked extraResources.
 resources/workspace-engine/
 resources/cli-bin/
-resources/plugin-tools/
 resources/app-compiler/
 resources/app-compiler.staging-*/
 resources/app-backend-runtime/
 resources/app-backend-runtime.staging-*/
-
-# scripts/stage-plugin-tools.mjs builds the new tree beside the live one and
-# swaps it in with a rename. A replaced tree stays until the app that holds a
-# file in it stops.
-resources/plugin-tools.staging/
-resources/plugin-tools.replaced-*/

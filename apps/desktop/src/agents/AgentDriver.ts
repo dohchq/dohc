@@ -1,4 +1,3 @@
-import type { PluginJsonValue } from "@dohc/sdk/node";
 
 export type AgentDriverId = string;
 
@@ -90,7 +89,7 @@ export interface AgentSessionStartInput {
   workspaceRoot: string;
   mode: "approval-required" | "auto-accept-edits" | "full-access";
   model?: string;
-  resumeCursor?: PluginJsonValue;
+  resumeCursor?: unknown;
   mcp: { command: string; args: string[]; env?: Record<string, string> };
   onEvent: (event: AgentEvent) => void;
   permissionPolicy?: (event: Extract<AgentEvent, { kind: "permission-request" }>) => PermissionDecision | null;
@@ -99,7 +98,7 @@ export interface AgentSessionStartInput {
 
 export interface AgentSession {
   readonly sessionId: string;
-  readonly resumeCursor?: PluginJsonValue;
+  readonly resumeCursor?: unknown;
   prompt(input: {
     text: string;
     attachments?: Array<{ type: "image"; pathOrUrl: string }>;

@@ -1,22 +1,7 @@
 import { workspacePathKey } from "./workspacePathKey";
-import type {
-  CollectionGetParams,
-  CollectionGetRecordParams,
-  CollectionGetRecordResult,
-  CollectionGetResult,
-  CollectionListResult,
-  CollectionQueryParams,
-  CollectionQueryResult,
-} from "@dohc/workspace-contracts";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
-import type { WorkspaceTextReadResult } from "./workspaceAssets";
-import type { DatabaseSnapshotView } from "./workspaceDatabase";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
 import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
-import type {
-  WorkspaceSdkReadPort,
-  WorkspaceSdkSearchView,
-} from "./workspaceSdkHost";
 
 export interface OwnedWorkspaceSearchSource {
   target: ShareViewFilesTarget;
@@ -25,24 +10,8 @@ export interface OwnedWorkspaceSearchSource {
   prefix?: string;
 }
 
-/**
- * The engine's collection index reads for this workspace. Main derives them
- * from the workspace's engine adapter; the port passes them through with the
- * same scope its file reads have — the whole owned workspace — so a caller
- * holding this port reads collections exactly where it reads files.
- */
-export interface OwnedWorkspaceCollectionReadSource {
-  list(): Promise<CollectionListResult>;
-  get(params: CollectionGetParams): Promise<CollectionGetResult>;
-  query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
-  getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
-}
-
-export interface OwnedWorkspaceSdkReadPortInput {
-  readText(path: string): Promise<WorkspaceTextReadResult>;
+export interface OwnedWorkspaceReadPortInput {
   listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
-  readDatabase(path: string): Promise<DatabaseSnapshotView>;
-  collections: OwnedWorkspaceCollectionReadSource;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
@@ -52,14 +21,19 @@ export interface OwnedWorkspaceSdkReadPortInput {
   ) => void;
 }
 
-export interface OwnedWorkspaceSearchView extends WorkspaceSdkSearchView {
+/** What a search over the owned workspace may read and return. */
+export interface OwnedWorkspaceSearchView {
+  includeGlob?: string;
+  allowPath(path: string): boolean;
   // null means every path belongs to the local workspace, so callers do not
   // need an owner listing to filter a full-workspace search.
   listing: ListWorkspaceFilesResult | null;
 }
 
-export interface OwnedWorkspaceSdkReadPort
-  extends Omit<WorkspaceSdkReadPort, "prepareSearch"> {
+/** The owned workspace's file listing and search scope: owner bytes for
+ * received shares, the disk for everything else. */
+export interface OwnedWorkspaceReadPort {
+  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
   prepareSearch(path?: string): Promise<OwnedWorkspaceSearchView>;
 }
 
@@ -92,17 +66,11 @@ function includeGlobForOwnerListing(
   return `${literalGlob(folder ?? requestedPath)}/**`;
 }
 
-export function createOwnedWorkspaceSdkReadPort(
-  input: OwnedWorkspaceSdkReadPortInput,
-): OwnedWorkspaceSdkReadPort {
+export function createOwnedWorkspaceReadPort(
+  input: OwnedWorkspaceReadPortInput,
+): OwnedWorkspaceReadPort {
   return {
-    readText: input.readText,
     listFiles: input.listFiles,
-    readDatabase: input.readDatabase,
-    listCollections: () => input.collections.list(),
-    getCollection: (params) => input.collections.get(params),
-    queryCollectionRecords: (params) => input.collections.query(params),
-    getCollectionRecord: (params) => input.collections.getRecord(params),
 
     async prepareSearch(requestedPath): Promise<OwnedWorkspaceSearchView> {
       if (!input.hasShareState && requestedPath === undefined) {

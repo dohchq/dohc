@@ -135,8 +135,8 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.automationAuthor).toEqual({ name: "Named collection:Tasks#stamp", collection: "Tasks" });
     expect(record.agentAuthorName).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
-    // A plugin's automation keeps the moment's origin label.
-    detail.moment.author = {kind: "automation", automationId: "plugin:tools/stamp", onBehalfOf: "local", depth: 1};
+    // An id outside the Collection namespace keeps the moment's origin label.
+    detail.moment.author = {kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1};
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
   it("names a person the owner shared with as main reads them from the roster", () => {

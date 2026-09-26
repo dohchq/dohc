@@ -172,7 +172,7 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
 };
 
 // A Collection automation's engine id is "collection:<collection path>#<id>".
-// Its definition lives in the Collection's automations.yaml, not in a plugin.
+// Its definition lives in the Collection's automations.yaml.
 export function collectionAutomationOf(
   automationId: string,
 ): { collection: string; id: string } | null {
@@ -187,42 +187,39 @@ export function collectionAutomationOf(
 // engine-recorded reason codes get their own honest sentences; every other
 // error is the handler's own text. The copy must never claim the handler
 // threw when it did not run at all (chain-stopped) or did not finish
-// (reclaim-exhausted). A Collection automation's way forward is the
-// notice's Try again and Open automation, so its body only states what
-// happened; a plugin's names its source.
+// (reclaim-exhausted). The way forward is the notice's Try again and Open
+// automation, so the body only states what happened.
 function automationFailureCopy(failure: AutomationFailureNotice): {
   title: string;
   body: string;
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  const collection = collectionAutomationOf(failure.automationId);
-  const name = failure.name ?? collection?.id ?? failure.automationId;
-  const next = (step: string) => (collection ? "" : ` Open the plugin's source to ${step}.`);
+  const name = failure.name ?? collectionAutomationOf(failure.automationId)?.id ?? failure.automationId;
   if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
         `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${name}" did not run.${next("shorten the chain")}`,
+        `"${name}" did not run.`,
     };
   }
   if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
       title: `Automation "${name}" did not finish`,
-      body: `${count}dohc stopped retrying a run that did not finish.${next("check the handler")}`,
+      body: `${count}dohc stopped retrying a run that did not finish.`,
     };
   }
   return {
     title: `Automation "${name}" failed`,
-    body: `${count}${sentence(failure.error)}${next("fix the handler")}`,
+    body: `${count}${sentence(failure.error)}`,
   };
 }
 
 // One automation failure as a notice, for its row and its toast: the copy,
 // the report Copy puts on the clipboard, and the ways forward. A Collection
 // automation offers Try again, except after a chain stop, and Open
-// automation; a plugin's names its source in the body instead.
+// automation.
 function automationFailureNotice(
   failure: AutomationFailureNotice,
   handlers: {

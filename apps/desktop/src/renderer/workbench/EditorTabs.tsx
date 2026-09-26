@@ -15,14 +15,8 @@ import {
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
-  isPluginDetailsTabPath,
-  isPluginPanelTabPath,
-  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
-  parsePluginDetailsTabPath,
-  parsePluginPanelTabPath,
-  parsePluginWebAppTabPath,
   parseTransactionalCollectionTabPath,
 } from "./workbenchState";
 
@@ -31,29 +25,11 @@ export function momentDiffName(label?: string): string {
   return name ? `Diff: ${name}` : "History change";
 }
 
-// A plugin's own names — its display name and its web apps' titles — live in
-// its manifest, which the tab path cannot carry and this strip cannot read.
-// `label` is that name once a mounted plugin page has reported it, and the id
-// from the path is the fallback until then (a tab restored on launch has no
-// page yet).
 function fileName(path: string, label?: string): string {
   if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isPluginPanelTabPath(path)) {
-    return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
-  }
-  if (isPluginWebAppTabPath(path)) {
-    // Until the app starts and reports its own title, every instance of one
-    // web app would read alike. The instance key is what the user picked, so
-    // it names the tab in the meantime.
-    const webApp = parsePluginWebAppTabPath(path);
-    return label ?? webApp?.instanceKey ?? webApp?.webAppId ?? "Plugin app";
-  }
-  if (isPluginDetailsTabPath(path)) {
-    return label ?? parsePluginDetailsTabPath(path)?.pluginId ?? "Plugin";
-  }
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
   }
@@ -66,21 +42,6 @@ function tabTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isPluginPanelTabPath(path)) {
-    const panel = parsePluginPanelTabPath(path);
-    return panel ? `${panel.pluginId} — ${panel.panelId}` : "Plugin panel";
-  }
-  if (isPluginWebAppTabPath(path)) {
-    const webApp = parsePluginWebAppTabPath(path);
-    if (!webApp) return "Plugin app";
-    return `${webApp.pluginId} — ${label ?? webApp.instanceKey ?? webApp.webAppId}`;
-  }
-  // A plugin's details tab and its app tab can sit side by side under the
-  // same name, so the tooltip is what tells them apart.
-  if (isPluginDetailsTabPath(path)) {
-    const details = parsePluginDetailsTabPath(path);
-    return details ? `Plugin details: ${details.pluginId}` : "Plugin details";
-  }
   if (isMomentDiffTabPath(path)) {
     return label ? `History diff: ${label}` : "History change";
   }
@@ -693,8 +654,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
-  /** Display names the tab path cannot supply, keyed by path: plugin titles
-   * from manifests and moment paths from history records. */
+  /** Display names the tab path cannot supply, keyed by path: moment paths
+   * from history records. */
   tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
   // knowable for every tab — the store outlives the keyed inspectors — so an

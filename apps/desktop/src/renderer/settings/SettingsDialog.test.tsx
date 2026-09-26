@@ -12,7 +12,7 @@ import {
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
-import { pushOverlay, removeOverlay } from "../guestBlockingUi";
+import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
 import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import { SettingsDialog } from "./SettingsDialog";
@@ -127,14 +127,6 @@ const bridge = {
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
-  listPlugins: vi.fn(async () => ({ ok: true as const, plugins: [] })),
-  installPlugin: vi.fn(),
-  disablePlugin: vi.fn(),
-  enablePlugin: vi.fn(),
-  approvePlugin: vi.fn(),
-  pluginUninstallPreflight: vi.fn(),
-  uninstallPlugin: vi.fn(),
-  onPluginStatusChanged: vi.fn(() => () => {}),
   getUserSettings: vi.fn(async () => ({
     settings: DEFAULT_USER_SETTINGS,
     source: "default" as const,

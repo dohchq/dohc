@@ -51,8 +51,8 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * run. `main`'s `assertWritableWorkspace` is one line over this.
  *
  * PRESENCE, at every level. The handlers this guards write workspace state
- * outside the received-share file owner — assets, database edits, plugin
- * state, settings, and similar disk-backed surfaces. A raw-disk write into a
+ * outside the received-share file owner — assets, database edits, settings,
+ * and similar disk-backed surfaces. A raw-disk write into a
  * shared view would leave the projection describing content no moment states,
  * so nothing the recipient could ever send, and the next pull would overwrite
  * it.

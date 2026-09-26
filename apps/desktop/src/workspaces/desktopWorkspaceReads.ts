@@ -1,13 +1,7 @@
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { createDesktopEngine } from "./desktopEngine";
 import type { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
-import {
-  createOwnedWorkspaceFileReader,
-  type OwnedWorkspaceDatabaseReader,
-} from "./ownedWorkspaceFileReader";
-import { createOwnedWorkspaceSdkReads } from "./ownedWorkspaceSdkReads";
-import type { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
+import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
+import { createOwnedWorkspaceReads } from "./ownedWorkspaceReads";
 import type { RegistryEntry } from "./registryStore";
 import { overlayCanonicalShareMountFiles } from "./shareMounts";
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
@@ -20,10 +14,6 @@ import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;
   readonly shareViewFiles: Pick<ShareViewFiles, "read" | "list">;
-  readonly receivedShareEngine: Pick<
-    ReturnType<typeof createReceivedShareEngineAccess>,
-    "workspaceForRegistered"
-  >;
   readonly ensureOwnedProjectionTargetCurrent: ReturnType<
     typeof createOwnedProjectionRepairer
   >;
@@ -33,15 +23,11 @@ export interface DesktopWorkspaceReadsDependencies {
       operation: Pick<WorkspaceAuthorityOperation<RegistryEntry, unknown>, "workspace">,
     ) => Result | Promise<Result>,
   ): Promise<Result>;
-  withEngineAdapter<Result>(
-    workspace: EngineWorkspace,
-    work: (adapter: VersionedLiveAdapter) => Promise<Result>,
-  ): Promise<Result | null>;
   isRecordValue(value: unknown): value is Record<string, unknown>;
 }
 
 export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsDependencies) {
-  const { withPhysicalWorkspaceOperation, withEngineAdapter, isRecordValue } = dependencies;
+  const { withPhysicalWorkspaceOperation, isRecordValue } = dependencies;
 
   async function shareViewFilesTargetForPath(
     workspace: { workspaceId: string },
@@ -158,52 +144,10 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
 
   function ownedWorkspaceReadsFor(
     workspace: RegistryEntry & { readonly attachmentId: symbol },
-    databaseReader?: OwnedWorkspaceDatabaseReader,
   ) {
-    // The same engine boundary the renderer's collections.* IPC uses: a
-    // received share reads its share engine, everything else the local one.
-    const collectionAdapter = async <T>(
-      work: (adapter: VersionedLiveAdapter) => Promise<T>,
-    ): Promise<T> => {
-      const result = await withEngineAdapter(
-        dependencies.receivedShareEngine.workspaceForRegistered(workspace),
-        work,
-      );
-      if (result === null) throw new Error("The workspace engine is not running.");
-      return result;
-    };
-    return createOwnedWorkspaceSdkReads({
+    return createOwnedWorkspaceReads({
       workspace,
-      files: dependencies.shareViewFiles,
-      ...(databaseReader ? { databaseReader } : {}),
       listFiles: (scope) => listOwnedWorkspaceFilesFor(workspace, scope),
-      collections: {
-        // "No collections" is the honest empty answer without a capture;
-        // the addressed reads below must name the missing capability instead.
-        list: async () =>
-          (await withEngineAdapter(
-            dependencies.receivedShareEngine.workspaceForRegistered(workspace),
-            async (adapter) => await adapter.listCollections(),
-          )) ?? { collections: [] },
-        get: ({ collectionPath }) =>
-          collectionAdapter(
-            async (adapter) => await adapter.getCollection({ collectionPath }),
-          ),
-        query: (params) =>
-          collectionAdapter(
-            async (adapter) => await adapter.queryCollectionRecords(params),
-          ),
-        getRecord: ({ collectionPath, recordId, historyLimit, beforeHistoryId }) =>
-          collectionAdapter(
-            async (adapter) =>
-              await adapter.getCollectionRecord({
-                collectionPath,
-                recordId,
-                historyLimit,
-                ...(beforeHistoryId === undefined ? {} : { beforeHistoryId }),
-              }),
-          ),
-      },
       repairProjection: (target) =>
         dependencies.ensureOwnedProjectionTargetCurrent({
           rootPath: workspace.rootPath,

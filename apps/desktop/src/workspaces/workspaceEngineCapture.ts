@@ -382,7 +382,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // and a save-state bookkeeper that counts at hand-over instead vouches for
   // edits still sitting in the queue.
   // `options.actorOriginId` is the author the engine records this update
-  // under (an agent's id from the SDK/MCP write seam), and
+  // under (an agent's id from the CLI/MCP write seam), and
   // `options.attribution` is the declared provenance recorded beside it
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
   // call; a dead-generation revive or recovery replay re-journals canonical
@@ -3407,7 +3407,7 @@ export function createWorkspaceEngineCapture(
     writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
       return enqueueResult("write authored text", async () => {
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const observedBytes = Buffer.byteLength(text, "utf8");
         if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
@@ -3435,7 +3435,7 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);

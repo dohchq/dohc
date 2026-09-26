@@ -79,17 +79,11 @@ import type {
   WithdrawShareChangesResult,
   McpConfigResult,
   NoticeRow,
-  PluginPanelOpenedEvent,
-  PluginStatusChangedEvent,
-  PluginStatusRecord,
-  PluginWebAppOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
-  SetPluginWebAppBoundsPayload,
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
-  StartPluginPanelResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
   SyncDmsResult,
@@ -130,10 +124,6 @@ import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
-  pluginDetailsTabPath,
-  pluginViewId,
-  pluginPanelTabPath,
-  pluginWebAppTabPath,
   versionCompareTabPath,
   VIEW_IDS,
 } from "./workbench/workbenchState";
@@ -360,12 +350,6 @@ function makeBaseBridge(
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
-  let pluginPanelOpenedCallback:
-    | ((event: PluginPanelOpenedEvent) => void)
-    | null = null;
-  let pluginWebAppOpenedCallback:
-    | ((event: PluginWebAppOpenedEvent) => void)
-    | null = null;
   return {
     platform,
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
@@ -373,10 +357,6 @@ function makeBaseBridge(
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
-      pluginPanelOpenedCallback?.(event),
-    emitPluginWebAppOpened: (event: PluginWebAppOpenedEvent) =>
-      pluginWebAppOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -697,34 +677,6 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    onPluginPanelOpened: vi.fn(
-      (callback: (event: PluginPanelOpenedEvent) => void) => {
-        pluginPanelOpenedCallback = callback;
-        return () => {
-          pluginPanelOpenedCallback = null;
-        };
-      },
-    ),
-    onPluginWebAppOpened: vi.fn(
-      (callback: (event: PluginWebAppOpenedEvent) => void) => {
-        pluginWebAppOpenedCallback = callback;
-        return () => {
-          pluginWebAppOpenedCallback = null;
-        };
-      },
-    ),
-    listPlugins: vi.fn(async () => ({
-      ok: true as const,
-      plugins: [] as PluginStatusRecord[],
-    })),
-    // The details rail measures on mount. Without this the page crashes into
-    // the editor's error boundary a tick after it paints, so anything the
-    // page does later is a race the test can only lose.
-    pluginSizes: vi.fn(async () => ({
-      ok: true as const,
-      sizes: { installedBytes: null, dataBytes: null },
-    })),
-    onPluginStatusChanged: vi.fn(() => () => undefined),
     listAutomationFailures: vi.fn(
       async (
         _payload: ListAutomationFailuresPayload,
@@ -775,16 +727,6 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
-    startPluginWebApp: vi.fn(async () => ({
-      status: "ok" as const,
-      title: "T3 Code",
-      origin: "http://127.0.0.1:49161",
-    })),
-    setPluginWebAppBounds: vi.fn(
-      async (_payload: SetPluginWebAppBoundsPayload) => undefined,
-    ),
-    stopPluginWebApp: vi.fn(async () => undefined),
-    onPluginWebAppFailed: vi.fn(() => () => undefined),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -798,16 +740,6 @@ function makeBaseBridge(
       status: "accepted" as const,
     })),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
-    startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
-      status: "ok" as const,
-      url: "http://127.0.0.1:49160/" as const,
-      title: "Hello panel",
-      surfaceId: 1,
-    })),
-    stopPluginPanel: vi.fn(async () => undefined),
-    invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
-    onPluginPanelSdkEvent: vi.fn(() => () => undefined),
-    onPluginPanelInvalidated: vi.fn(() => () => undefined),
   };
 }
 
@@ -1316,802 +1248,6 @@ afterEach(async () => {
   forgetSyncFailureNoticesForTests();
 });
 
-describe("plugin panel tabs", () => {
-  const path = pluginPanelTabPath("hello-plugin", "main");
-
-  it("opens a requested panel only in its workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: "ws-other",
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "main" }).dataset.active).toBe(
-      "true",
-    );
-  });
-
-  it("restores the panel tab, mounts its page, and stops it when closed", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "main" }).title).toBe(
-      "hello-plugin — main",
-    );
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-        placement: "editor",
-      }),
-    );
-
-    await user.click(screen.getByRole("button", { name: "Close main" }));
-    await waitFor(() =>
-      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      }),
-    );
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-  });
-
-  it("stops the old panel before mounting it for another workspace", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const view = renderShell(bridge);
-    await screen.findByTestId("plugin-panel-page");
-    const otherWorkspace: Workspace = {
-      ...WORKSPACE,
-      workspaceId: "ws-other",
-      rootPath: "/home/sam/dohc/other",
-    };
-
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={otherWorkspace}
-        workspaces={[otherWorkspace]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: otherWorkspace.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-        placement: "editor",
-      }),
-    );
-  });
-});
-
-describe("plugin web app tabs", () => {
-  const path = pluginWebAppTabPath("t3-code", "app");
-  const GUEST_RECT = {
-    x: 10,
-    y: 20,
-    width: 640,
-    height: 480,
-    top: 20,
-    left: 10,
-    right: 650,
-    bottom: 500,
-    toJSON: () => ({}),
-  } as DOMRect;
-  let rectSpy: { mockRestore: () => void } | null = null;
-
-  beforeEach(() => {
-    // The file's module-level stub is removed by the global afterEach's
-    // unstubAllGlobals, so every test after the first must stub it again.
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
-  });
-
-  afterEach(() => {
-    rectSpy?.mockRestore();
-    rectSpy = null;
-  });
-
-  function lastReportedVisibility(
-    bridge: ReturnType<typeof makeBridge>,
-  ): boolean | undefined {
-    const calls = bridge.setPluginWebAppBounds.mock.calls;
-    return calls.at(-1)?.[0]?.visible;
-  }
-
-  it("explains the 100 open-tab limit when the plugin's app cannot open", async () => {
-    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
-      id: `group-${index}`,
-      tabs: [`file-${index}.md`],
-      activeTab: `file-${index}.md`,
-      size: 0.01,
-    }));
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups,
-        activeEditorGroup: "group-0",
-      }),
-    );
-    // The files exist, so the listing does not prune the restored tabs.
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
-      files: editorGroups.map((group) => ({
-        path: group.activeTab,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    renderShell(bridge);
-    await screen.findByTestId("tab-file-0.md");
-
-    act(() => {
-      bridge.emitPluginWebAppOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "t3-code",
-        webAppId: "app",
-        instanceKey: null,
-      });
-    });
-
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-      "open the tab without reading the refusal: the user clicks Open in plugin settings, the dialog closes, and nothing appears — with nothing on screen naming the limit that refused it.",
-    ).toContain(
-      "This workspace has 100 open tabs; the limit is 100. Close a tab to open another tab.",
-    );
-    expect(screen.queryByTestId(`tab-${path}`)).toBeNull();
-  });
-
-  it("labels the tab with the title the plugin's manifest declares", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${path}`);
-    await waitFor(() => expect(tab.textContent, "label from the tab path: the tab reads 'app', the id, and the name the user installed never appears. The title arrives with the app's own start — no second trip to main, which racing the plugin's on-demand host start proved to break it (e2e, 4 of 6 runs).").toContain("T3 Code"));
-    await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
-  });
-
-  it("never carries one workspace's title onto another workspace's tab", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const view = renderShell(bridge);
-    const tab = await screen.findByTestId(`tab-${path}`);
-    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
-
-    // The same plugin id can be installed at another title in another
-    // workspace, so the learned title is scoped to the workspace that
-    // answered — and the next workspace's own start is what relabels it.
-    const pending = deferred<{ status: "ok"; title: string; origin: string }>();
-    bridge.startPluginWebApp.mockReturnValueOnce(pending.promise);
-    const otherWorkspace: Workspace = {
-      ...WORKSPACE,
-      workspaceId: "ws-other",
-      rootPath: "/home/sam/dohc/other",
-    };
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={otherWorkspace}
-        workspaces={[otherWorkspace]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(screen.getByTestId(`tab-${path}`).textContent, "drop the workspace scope: the tab keeps showing the first workspace's title for an app that has not started here.").not.toContain(
-        "T3 Code",
-      ),
-    );
-
-    await act(async () => {
-      pending.resolve({
-        status: "ok",
-        title: "T3 Code (other)",
-        origin: "http://127.0.0.1:49162",
-      });
-      await Promise.resolve();
-    });
-    await waitFor(() =>
-      expect(screen.getByTestId(`tab-${path}`).textContent).toContain(
-        "T3 Code (other)",
-      ),
-    );
-  });
-
-  // A WebContentsView guest composites above the whole renderer. Nothing the
-  // shell paints can cover it, so an overlay that overlaps the editor area
-  // would take clicks meant for the dialog under the pointer.
-  it("hides the guest while the command palette is open", async () => {
-    rectSpy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockReturnValue(GUEST_RECT);
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-    await screen.findByTestId("plugin-web-app-frame");
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-
-    fireEvent(
-      window,
-      new KeyboardEvent("keydown", {
-        key: "K",
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    await screen.findByTestId("command-palette");
-
-    await waitFor(() => expect(lastReportedVisibility(bridge), "drop the overlay signal: the guest keeps painting over the palette and keeps its clicks.").toBe(false));
-  });
-
-  it("hides the guest while the settings dialog is open, and restores it after", async () => {
-    rectSpy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockReturnValue(GUEST_RECT);
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-    await screen.findByTestId("plugin-web-app-frame");
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-
-    act(() => bridge.emitMenuCommand("settings"));
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
-
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-  });
-});
-
-describe("plugin activity-bar views", () => {
-  const viewId = pluginViewId("hello-plugin", "hello-view");
-  const viewPanel = {
-    id: "hello-view",
-    title: "Hello view",
-    placement: "view" as const,
-    icon: "icon.svg",
-  };
-
-  function withViewPlugin(
-    bridge: ReturnType<typeof makeBridge>,
-    overrides: Partial<PluginStatusRecord> & {
-      commands?: { id: string; title: string }[];
-    } = {},
-  ) {
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        {
-          id: "hello-plugin",
-          directoryName: "hello-plugin",
-          rootPath: "/workspace/plugins/hello-plugin",
-          valid: true,
-          status: "ready",
-          disabledReason: null,
-          runtimeStatus: "ready",
-          sourceHash: "a".repeat(64),
-          approvedHash: "a".repeat(64),
-          installedBaselineHash: "a".repeat(64),
-          displayName: "Hello Plugin",
-          description: null,
-          publisher: null,
-          pluginVersion: null,
-          repository: null,
-          issues: null,
-          license: null,
-          icon: null,
-          settings: [],
-          commands: [],
-          panels: [
-            { id: "main", title: "Hello", placement: "editor", icon: null },
-            viewPanel,
-          ],
-          webApps: [],
-          diagnostics: [],
-          warnings: [],
-          error: null,
-          ...overrides,
-        },
-      ] as PluginStatusRecord[],
-    }));
-    return bridge;
-  }
-
-  it("invokes a plugin command from the command palette", async () => {
-    const invokePluginCommand = vi.fn(async () => ({
-      status: "ok" as const,
-    }));
-    const bridge = Object.assign(
-      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-        commands: [{ id: "hello.write", title: "Write hello note" }],
-      }),
-      { invokePluginCommand },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Hello Plugin: Write hello note",
-      ),
-    );
-
-    await waitFor(() =>
-      expect(invokePluginCommand).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        commandId: "hello.write",
-      }),
-    );
-  });
-
-  // reportShellError shows error.message and drops the fallback whenever
-  // the error carries one — a terse backend cause alone would name
-  // neither the command nor that a command failed (round-10 finding 4).
-  it("names the command and the cause when a plugin command fails with a terse outcome", async () => {
-    const invokePluginCommand = vi.fn(async () => ({
-      status: "command-failed" as const,
-      message: "timeout",
-    }));
-    const bridge = Object.assign(
-      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-        commands: [{ id: "hello.write", title: "Write hello note" }],
-      }),
-      { invokePluginCommand },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Hello Plugin: Write hello note",
-      ),
-    );
-
-    const banner = await screen.findByTestId("workspace-shell-error");
-    expect(banner.textContent).toContain("Write hello note");
-    expect(banner.textContent).toContain("timeout");
-  });
-
-  // assertWritableWorkspace refuses on the share's presence alone, so every
-  // invocation from a shared view was a dead click before this filter — the
-  // palette must not offer what it can never do (round-8 finding 2).
-  it("offers no plugin commands from a shared view", async () => {
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-      commands: [{ id: "hello.write", title: "Write hello note" }],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: {
-        shareId: "share-1",
-        granterEmail: "granter@dohc.test",
-        access: "edit",
-      },
-    });
-
-    await user.keyboard("{Control>}k{/Control}");
-    const palette = await screen.findByTestId("command-palette");
-    // The palette itself renders and lists something, so an empty list
-    // here is the filter working, not the palette failing to open.
-    await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("Hello Plugin: Write hello note"))
-      .toBeNull();
-  });
-
-  it("lists contributed views after the workspace opens", async () => {
-    const workspaceOpen = deferred<SyncStatusResult>();
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
-    bridge.openWorkspace = vi.fn(() => workspaceOpen.promise);
-
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalled());
-    expect(bridge.listPlugins).not.toHaveBeenCalled();
-    expect(bridge.onPluginStatusChanged).not.toHaveBeenCalled();
-
-    await act(async () => {
-      workspaceOpen.resolve(SYNC_STATUS);
-    });
-
-    expect(await screen.findByTestId(`activity-${viewId}`)).toBeTruthy();
-    expect(bridge.onPluginStatusChanged).toHaveBeenCalled();
-  });
-
-  it("opens a contributed view's panel in the side panel", async () => {
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId(`activity-${viewId}`));
-
-    // The side panel names the view and mounts the panel behind it — the
-    // same panel machinery an editor tab uses, asked for by (plugin, panel).
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "hello-view",
-        placement: "view",
-      }),
-    );
-    expect(
-      screen.getByTestId("side-panel").querySelector("header")?.textContent,
-    ).toBe("Hello view");
-  });
-
-  it("restores the plugin view the user left open before a restart", async () => {
-    const bridge = withViewPlugin(
-      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
-    );
-    renderShell(bridge);
-
-    const rail = await screen.findByTestId(`activity-${viewId}`);
-    await waitFor(() => expect(rail.getAttribute("aria-current")).toBe("page"));
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-  });
-
-  it("names the plugin to turn back on when its view is off", async () => {
-    const bridge = withViewPlugin(
-      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
-      { status: "disabled", disabledReason: "user", runtimeStatus: "disabled" },
-    );
-    renderShell(bridge);
-
-    const off = await screen.findByTestId("plugin-view-off");
-    expect(off.textContent).toContain("Hello view is off");
-    expect(off.textContent).toContain("Hello Plugin is turned off");
-    // A turned-off plugin contributes no button, and no panel starts for it.
-    expect(screen.queryByTestId(`activity-${viewId}`)).toBeNull();
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-    expect(bridge.startPluginPanel).not.toHaveBeenCalled();
-
-    // The way back is on this surface: the empty state opens the list that
-    // can turn the plugin on again.
-    await userEvent.click(screen.getByTestId("plugin-view-off-open-plugins"));
-    expect(
-      screen.getByTestId("activity-plugins").getAttribute("aria-current"),
-    ).toBe("page");
-  });
-
-  it("says so when the plugin list will not load", async () => {
-    const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
-    );
-    bridge.listPlugins = vi.fn(async () => {
-      throw new Error("The plugin pipeline is unavailable.");
-    });
-    renderShell(bridge);
-
-    const unknown = await screen.findByTestId("plugin-view-unknown");
-    expect(unknown.textContent).toContain("Could not load plugins");
-    // The selection stands: a list dohc could not read is no evidence the
-    // plugin is gone.
-    expect(screen.queryByTestId("activity-explorer")?.getAttribute("aria-current"))
-      .toBeNull();
-  });
-
-  it("drops the selection once the plugin is gone", async () => {
-    const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
-    );
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [] as PluginStatusRecord[],
-    }));
-    renderShell(bridge);
-
-    const explorer = await screen.findByTestId("activity-explorer");
-    await waitFor(() =>
-      expect(explorer.getAttribute("aria-current")).toBe("page"),
-    );
-    expect(screen.queryByTestId("plugin-view-off")).toBeNull();
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-  });
-});
-
-describe("plugin details tabs", () => {
-  const detailsPath = pluginDetailsTabPath("t3-code", "t3-code");
-
-  function withPlugins(
-    bridge: ReturnType<typeof makeBridge>,
-    displayName: string | null = null,
-  ) {
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        {
-          id: "t3-code",
-          directoryName: "t3-code",
-          rootPath: "/workspace/plugins/t3-code",
-          valid: true,
-          status: "ready",
-          disabledReason: null,
-          runtimeStatus: "ready",
-          sourceHash: "a".repeat(64),
-          approvedHash: "a".repeat(64),
-          installedBaselineHash: "a".repeat(64),
-          displayName,
-          description: null,
-          publisher: null,
-          pluginVersion: null,
-          repository: null,
-          issues: null,
-          license: null,
-          icon: null,
-          settings: [],
-          commands: [],
-          panels: [],
-          webApps: [],
-          hasFailedReplacement: false,
-          diagnostics: [],
-          warnings: [],
-          error: null,
-        },
-      ] as PluginStatusRecord[],
-    }));
-    return bridge;
-  }
-
-  it("opens a plugin's details tab from its row in the plugins list", async () => {
-    const bridge = withPlugins(makeBridge(Promise.resolve(STORED_STATE)));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId("activity-plugins"));
-    await userEvent.click(await screen.findByTestId("plugin-open-details"));
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    // This plugin declares no name of its own, so the id is its name. The
-    // tooltip is what says which of a plugin's tabs this one is.
-    expect(tab.textContent).toContain("t3-code");
-    expect(tab.title).toBe("Plugin details: t3-code");
-    // The row now reads as the selected one, like the explorer's open file.
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("plugin-row").getAttribute("data-selected"),
-      ).toBe("true"),
-    );
-  });
-
-  // A discovered row's id is only ever a broken manifest's directory-
-  // derived fallback, which can coincide with some other, unrelated
-  // plugin's real id — two rows sharing one id string is a real, reachable
-  // state, not a hypothetical. Before carrying directoryName through
-  // open-details and the tab path, clicking the second-sorting row always
-  // reopened whichever row `.find((entry) => entry.id === pluginId)` hit
-  // first.
-  it("opens the exact row clicked, not the first one sharing its id, when two rows collide", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const rowFields = {
-      rootPath: "/workspace/plugins/x",
-      valid: true,
-      status: "ready" as const,
-      disabledReason: null,
-      runtimeStatus: "ready" as const,
-      sourceHash: "a".repeat(64),
-      approvedHash: "a".repeat(64),
-      installedBaselineHash: "a".repeat(64),
-      description: null,
-      publisher: null,
-      pluginVersion: null,
-      repository: null,
-      issues: null,
-      license: null,
-      icon: null,
-      settings: [],
-      panels: [],
-      webApps: [],
-      commands: [],
-      hasFailedReplacement: false,
-      diagnostics: [],
-      warnings: [],
-      error: null,
-    };
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        { ...rowFields, id: "chat-plugin", directoryName: "chat-a", displayName: "Chat A" },
-        { ...rowFields, id: "chat-plugin", directoryName: "chat-b", displayName: "Chat B" },
-      ] as PluginStatusRecord[],
-    }));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId("activity-plugins"));
-    const rows = await screen.findAllByTestId("plugin-row");
-    expect(rows).toHaveLength(2);
-    const rowB = rows.find((row) => within(row).queryByText("Chat B"));
-    if (!rowB) throw new Error("Chat B row not found among the rendered rows.");
-    await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
-
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("chat-b");
-    expect(within(page).getByText("Chat B")).toBeTruthy();
-  });
-
-  it("restores a plugin's details tab and mounts its page", async () => {
-    const bridge = withPlugins(
-      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    expect(tab.title).toBe("Plugin details: t3-code");
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
-  });
-
-  // The row, the page header, and the tab are three views of one plugin. Once
-  // the page has read the manifest, all three say the name the user installed.
-  it("relabels the details tab with the plugin's name once its page reads it", async () => {
-    const bridge = withPlugins(
-      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
-      "T3 Code",
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    await waitFor(() => expect(tab.textContent, "drop the label from the details branch: the tab keeps reading 't3-code' while the page header reads 'T3 Code'.").toContain("T3 Code"));
-    expect(
-      within(await screen.findByTestId("plugin-details-page")).getByRole(
-        "heading",
-        { name: "T3 Code" },
-      ),
-    ).toBeTruthy();
-    // The id still separates this tab from the plugin's app tab.
-    expect(tab.title).toBe("Plugin details: t3-code");
-  });
-
-  // A tab that follows a rename only tracked that in memory. A tab switch
-  // remounts the page, whose tracking reseeds from the tab's own virtual
-  // path — still the original, now-vacated directory, if nothing ever
-  // retargets that path. This pins the fix end to end: the tab's own path
-  // itself must move, so a remount reads the directory the plugin actually
-  // renamed to.
-  it("stays on the renamed plugin after switching tabs away and back", async () => {
-    const bridge = withPlugins(makeBridge(Promise.resolve(
-      storedStateWithTabs([detailsPath, "dohc://graph"], detailsPath),
-    )));
-    // Every subscriber, not the last one to subscribe: usePluginCatalog
-    // mounts once per surface that shows a plugin, and this shell can have
-    // more than one open at a time — a single tracked listener would only
-    // ever reach whichever happened to subscribe most recently.
-    const statusListeners = new Set<(event: PluginStatusChangedEvent) => void>();
-    bridge.onPluginStatusChanged = vi.fn(
-      (listener: (event: PluginStatusChangedEvent) => void) => {
-        statusListeners.add(listener);
-        return () => {
-          statusListeners.delete(listener);
-        };
-      },
-    ) as unknown as typeof bridge.onPluginStatusChanged;
-    const dispatchPluginStatusChanged = (event: PluginStatusChangedEvent) => {
-      for (const listener of statusListeners) listener(event);
-    };
-    renderShell(bridge);
-
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("t3-code");
-
-    // The rename: same id, new directoryName, nothing left at the old one.
-    // Reported both live (the event a mounted page hears) and as the
-    // catalog's own new ground truth (what a fresh fetch — the remount
-    // below triggers one — reads back): a real rescan would settle to
-    // exactly this, not just notify of it.
-    const renamedRow = {
-      id: "t3-code",
-      directoryName: "t3-code-renamed",
-      rootPath: "/workspace/plugins/t3-code-renamed",
-      valid: true,
-      status: "ready",
-      disabledReason: null,
-      runtimeStatus: "ready",
-      sourceHash: "a".repeat(64),
-      approvedHash: "a".repeat(64),
-      installedBaselineHash: "a".repeat(64),
-      displayName: null,
-      description: null,
-      publisher: null,
-      pluginVersion: null,
-      repository: null,
-      issues: null,
-      license: null,
-      icon: null,
-      settings: [],
-      panels: [],
-      webApps: [],
-      commands: [],
-      hasFailedReplacement: false,
-      diagnostics: [],
-      warnings: [],
-      error: null,
-    } satisfies PluginStatusRecord;
-    bridge.listPlugins = vi.fn(async () => ({ ok: true as const, plugins: [renamedRow] }));
-    act(() => {
-      dispatchPluginStatusChanged({
-        kind: "renamed",
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "t3-code",
-        from: "t3-code",
-        to: "t3-code-renamed",
-      });
-      dispatchPluginStatusChanged({
-        kind: "changed",
-        workspaceId: WORKSPACE.workspaceId,
-        plugin: renamedRow,
-      });
-    });
-    await waitFor(() =>
-      expect(screen.getByTestId("plugin-details-page").getAttribute("data-directory-name"))
-        .toBe("t3-code-renamed"),
-    );
-
-    // The tab's own path retargeted: the renamed path's tab now exists, and
-    // the original, now-vacated one is gone.
-    const renamedPath = pluginDetailsTabPath("t3-code", "t3-code-renamed");
-    await screen.findByTestId(`tab-${renamedPath}`);
-    expect(screen.queryByTestId(`tab-${detailsPath}`)).toBeNull();
-
-    // Switch away — unmounts the details page — then back.
-    await userEvent.click(await screen.findByTestId("tab-dohc://graph"));
-    await waitFor(() =>
-      expect(screen.queryByTestId("plugin-details-page")).toBeNull(),
-    );
-    await userEvent.click(await screen.findByTestId(`tab-${renamedPath}`));
-
-    // Remounted from the tab's own (retargeted) path, not from stale, in-
-    // memory tracking a fresh mount never had — still the renamed plugin.
-    const remounted = await screen.findByTestId("plugin-details-page");
-    expect(remounted.getAttribute("data-directory-name")).toBe("t3-code-renamed");
-    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
-  });
-});
-
 describe("global letter shortcut ownership", () => {
   function dispatchShortcut(
     key: string,
@@ -2554,8 +1690,7 @@ describe("collection folders", () => {
 
   // assertWritableWorkspace refuses createWorkspaceFile on the share's
   // presence alone, so New collection from a shared view is a dead click —
-  // the palette must not offer what it can never do, exactly as it already
-  // withholds plugin commands there.
+  // the palette must not offer what it can never do.
   it("does not offer New collection from a read-only shared view", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
@@ -2649,85 +1784,6 @@ describe("editor groups", () => {
 
     await waitFor(() =>
       expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
-    );
-    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
-  });
-
-  it("keeps a plugin panel selected when an older duplicate-file open finishes flushing", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const panelPath = pluginPanelTabPath("hello-plugin", "main");
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          {
-            id: "left",
-            tabs: ["race-a.md"],
-            activeTab: "race-a.md",
-            size: 0.5,
-          },
-          {
-            id: "right",
-            tabs: ["b.md"],
-            activeTab: "b.md",
-            size: 0.5,
-          },
-        ],
-        activeEditorGroup: "right",
-      }),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
-      files: ["race-a.md", "b.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    bridge.readWorkspaceText = vi.fn(async ({ relativePath }) => ({
-      text: relativePath === "race-a.md" ? "# Race\n" : "# B\n",
-      truncated: false as const,
-      contentHash: "a".repeat(64),
-    }));
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const left = await screen.findByTestId("editor-group-left");
-    const right = await screen.findByTestId("editor-group-right");
-    await user.type(
-      await enterMarkdownSource(user, left),
-      " dirty",
-    );
-
-    fireEvent.pointerDown(right);
-    await waitFor(() => expect(right.dataset.active).toBe("true"));
-    await user.click(fileTreeRow("race-a.md"));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-    await waitFor(() =>
-      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
-        "true",
-      ),
-    );
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-
-    await waitFor(() =>
-      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
-        "true",
-      ),
     );
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
@@ -9533,7 +8589,7 @@ describe("share changes review", () => {
 // re-raises anything unacknowledged.
 describe("automation failure notices", () => {
   const FAILURE = {
-    automationId: "hello-plugin/triage",
+    automationId: "collection:tasks#triage",
     claimId: "atc_failed",
     chainStopped: false,
     name: null,
@@ -9542,7 +8598,7 @@ describe("automation failure notices", () => {
     generation: 1,
     datasetInstance: null,
   };
-  const NOTICE_ID = "notice-automation-failure-hello-plugin/triage";
+  const NOTICE_ID = "notice-automation-failure-collection:tasks#triage";
 
   it("raises the notice from the engine's failed claims and dismisses by the generation on screen", async () => {
     const user = userEvent.setup();
@@ -9552,11 +8608,8 @@ describe("automation failure notices", () => {
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId(NOTICE_ID);
-    expect(notice.textContent).toContain(
-      'Automation "hello-plugin/triage" failed',
-    );
+    expect(notice.textContent).toContain('Automation "triage" failed');
     expect(notice.textContent).toContain("handler exploded");
-    expect(notice.textContent).toContain("Open the plugin's source");
 
     // Dismiss sends the generation ON SCREEN — a failure recorded since
     // this render has a higher one, so a stale click cannot hide it — and
@@ -9568,7 +8621,7 @@ describe("automation failure notices", () => {
     });
     expect(bridge.dismissAutomationFailure).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      automationId: "hello-plugin/triage",
+      automationId: "collection:tasks#triage",
       generation: 1,
       datasetInstance: null,
     });
@@ -10204,24 +9257,6 @@ describe("content search", () => {
     const reopenedInclude = await screen.findByTestId("search-include");
     expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
-  });
-
-  // Plugins moved out of the settings dialog and onto the rail.
-  it("opens the plugin browser from the Plugins rail item", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("activity-bar");
-    expect(screen.queryByTestId("plugins-view")).toBeNull();
-
-    await user.click(screen.getByTestId("activity-plugins"));
-
-    expect(await screen.findByTestId("plugins-view")).toBeTruthy();
-    expect(screen.getByTestId("plugins-filter")).toBeTruthy();
-    await waitFor(() => expect(bridge.listPlugins).toHaveBeenCalled());
-    // The panel header names the view the rail selected.
-    expect(screen.getByTestId("side-panel").textContent).toContain("Plugins");
   });
 });
 
