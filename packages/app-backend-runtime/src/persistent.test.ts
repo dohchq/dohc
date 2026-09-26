@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
-import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
+import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PersistentRuntimeOptions, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
 import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
@@ -27,13 +27,13 @@ function operation(expected=initial,input:PersistentPrepareInput["input"]={}):Pe
 function event(prepared:PreparedOperation, previous=initial) {
   return {proposalId:prepared.proposalId,previousDigest:previous.digest,revision:previous.revision+1,digest:hash(previous.digest+prepared.changesetSha256),changesetSha256:prepared.changesetSha256,changeset:prepared.changeset};
 }
-async function fixture(run:(context:{root:string;open:(input?:Partial<PersistentOpenInput>,launch?:AppRuntimeLauncher)=>Promise<PersistentAppBackend>})=>Promise<void>):Promise<void> {
+async function fixture(run:(context:{root:string;open:(input?:Partial<PersistentOpenInput>,launch?:AppRuntimeLauncher,runtime?:Omit<PersistentRuntimeOptions,"launch">)=>Promise<PersistentAppBackend>})=>Promise<void>):Promise<void> {
   const root=await mkdtemp(join(tmpdir(),"dohc-persistent-test-"));
   const workers:PersistentAppBackend[]=[];let sequence=0;
   try {
-    await run({root,async open(input={},launch){
+    await run({root,async open(input={},launch,runtime={}){
       const directory=join(root,String(++sequence));await mkdir(directory);
-      const worker=await openPersistentAppBackend({directory,schemaSql,tables:["items"],scope,cursor:initial,...input},{launch});
+      const worker=await openPersistentAppBackend({directory,schemaSql,tables:["items"],scope,cursor:initial,...input},{...runtime,launch});
       workers.push(worker);return worker;
     }});
   } finally {
@@ -607,11 +607,13 @@ describe("persistent dataset worker",()=>{
           child.on("error",options.onError);child.on("close",options.onExit);
           return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
         };
-        const worker=await open({limits:{cpuBudgetMs:5_000}},launch);
-        // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
-        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
+        // This test is about the CPU budget, not the silence watchdog: under a loaded gate the 6 s stop plus the
+        // query can pass 30 s without a progress report. 50 s stays inside the test's 60 s limit, so a real stall still fails.
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:50_000});
+        // A fraction of a second of CPU even under heavy load, well inside the budget.
+        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000000) SELECT sum(x) AS total FROM n')}}"});
         await stall;
-        expect(prepared.result).toEqual([{total:50000005000000}]);
+        expect(prepared.result).toEqual([{total:2000001000000}]);
         // Stopped for 6 s inside a 5 s budget, and not charged for it.
         expect(suspendedAt).toBeGreaterThan(0);
         expect(repliedAt).toBeGreaterThan(resumedAt);
