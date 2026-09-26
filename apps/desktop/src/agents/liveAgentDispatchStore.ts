@@ -359,6 +359,8 @@ export function createLiveAgentDispatchStore(
         async (adapter) =>
           await adapter.runRecordsForThread(workspaceId, threadId, options),
       )) as Record<string, AgentRunRecord>,
+    latestRunForThread: async (workspaceId, threadId) =>
+      await invoke(async (adapter) => await adapter.latestRunForThread(workspaceId, threadId)),
     getRunRecord: async (
       runId,
       requestOptions?: AgentDispatchRequestOptions,

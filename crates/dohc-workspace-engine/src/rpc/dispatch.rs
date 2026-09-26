@@ -785,6 +785,10 @@ impl EngineService {
                 self.chats_dispatch_run_records_for_thread(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.dispatch.latestRunForThread" => {
+                self.chats_dispatch_latest_run_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.dispatch.getRunRecord" => {
                 self.chats_dispatch_get_run_record(&ctx, request.workspace, request.params)
                     .await?
@@ -1204,6 +1208,7 @@ mod tests {
             "chats.dispatch.fail",
             "chats.dispatch.failPendingForThread",
             "chats.dispatch.getRunRecord",
+            "chats.dispatch.latestRunForThread",
             "chats.dispatch.getThreadPauseState",
             "chats.dispatch.isThreadPaused",
             "chats.dispatch.listAppQuitRecoveries",

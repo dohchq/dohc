@@ -20,6 +20,7 @@ const engineering = {
 };
 
 const showResult: ShowResult = {
+  dispatch: { paused: null, lastRun: null },
   thread: {
     id: "th_8f2k1c",
     title: "Conflict handling should feel like a doc editor",
@@ -53,6 +54,7 @@ describe("markdown renderers", () => {
     expect(renderShowMarkdown(showResult)).toMatchInlineSnapshot(`
       "# Conflict handling should feel like a doc editor
       thread: th_8f2k1c · #engineering · 1 comments · open decisions: 1
+      dispatch: {"paused":null,"lastRun":null}
 
       **Sam Rivera** · 2026-07-03T04:05:06.000Z · msg_root · needs-decision(open)
       Right now versioning pops a merge dialog...

@@ -33,29 +33,27 @@ const notice = (reason: ChatDispatchNotice["reason"], message: string = `Agent d
 it("replays background notices, replaces each reason, and clears dismissed rows across windows", async () => {
   const h = setup();
   h.store.report("a", notice("no-runner"));
-  h.store.report("a", { ...notice("run-failed"), runId: "run", logPath: "C:/logs/run.log" });
   h.store.report("a", notice("budget-paused"));
   const first = h.mount();
   const second = h.mount();
   await act(async () => {});
-  expect(first.result.current.shellErrors).toHaveLength(3);
-  expect(first.result.current.shellErrors[1]?.details).toContainEqual(["Log", "C:/logs/run.log"]);
+  expect(first.result.current.shellErrors).toHaveLength(2);
   const row = first.result.current.shellErrors[0]!;
   act(() => first.result.current.hideShellError(row.id));
   expect(first.result.current.shellErrors[0]?.seen).toBe(true);
   expect(h.dismiss).not.toHaveBeenCalled();
   act(() => h.store.report("a", notice("no-runner", "Dispatch is off.")));
-  expect(first.result.current.shellErrors).toHaveLength(3);
+  expect(first.result.current.shellErrors).toHaveLength(2);
   const replacement = first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner")!;
   expect(replacement).toMatchObject({ message: "Dispatch is off.", seen: false });
   await act(async () => first.result.current.dismissShellError(replacement.id));
   expect(h.dismiss).toHaveBeenCalledOnce();
-  expect(first.result.current.shellErrors).toHaveLength(2);
-  expect(second.result.current.shellErrors).toHaveLength(2);
+  expect(first.result.current.shellErrors).toHaveLength(1);
+  expect(second.result.current.shellErrors).toHaveLength(1);
   first.unmount(); second.unmount();
   const reopened = h.mount();
   await act(async () => {});
-  expect(reopened.result.current.shellErrors).toHaveLength(2);
+  expect(reopened.result.current.shellErrors).toHaveLength(1);
 });
 
 it("waits for workspace admission and ignores late registration, events, and errors after switching", async () => {
@@ -66,7 +64,7 @@ it("waits for workspace admission and ignores late registration, events, and err
   expect(h.register).not.toHaveBeenCalled();
   hook.rerender({ workspaceId: "a", ready: true });
   expect(h.register).toHaveBeenCalledWith({ workspaceId: "a" });
-  act(() => h.store.report("a", notice("run-failed")));
+  act(() => h.store.report("a", notice("no-runner")));
   const old = h.store.register("a");
   hook.rerender({ workspaceId: "b", ready: true });
   await act(async () => { pending.resolve(old); });
@@ -99,4 +97,15 @@ it("does not show registration errors from an abandoned workspace", async () => 
   hook.rerender({ workspaceId: "b", ready: true });
   await act(async () => pending.reject(new Error("Old workspace closed")));
   expect(hook.result.current.shellErrors).toEqual([]);
+});
+
+it("clears forgotten workspace rows in every subscribed window", async () => {
+  const h = setup();
+  h.store.report("a", notice("no-runner"));
+  const first = h.mount();
+  const second = h.mount();
+  await act(async () => {});
+  act(() => h.store.clearWorkspace("a"));
+  expect(first.result.current.shellErrors).toEqual([]);
+  expect(second.result.current.shellErrors).toEqual([]);
 });

@@ -36,6 +36,7 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
   const lines = [
     `# ${thread.title}`,
     `thread: ${formatThreadHandle(thread.id)} · #${thread.group.slug} · ${thread.commentCount} comments · open decisions: ${decisionCount(thread.openDecisionCount)}`,
+    `dispatch: ${JSON.stringify(result.dispatch)}`,
   ];
   for (const message of messages) {
     const metadata = [

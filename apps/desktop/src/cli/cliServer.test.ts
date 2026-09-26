@@ -895,6 +895,7 @@ describe("CLI socket server", () => {
       ...context,
       ...scopedWorkspace,
       store: scopedStore,
+      dispatchStore: createLiveAgentDispatchStore(scopedWorkspace, sessions!).store,
       async fileObjectIdForPath(path) {
         return path === "scoped.md" ? "object_scoped" : null;
       },
@@ -2433,6 +2434,35 @@ describe("CLI socket server", () => {
     });
     expect(agentPost.group.kind).toBe("agent");
     expect(agentPost.title).toBe("Agent task");
+  });
+
+  it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {
+    await seedDispatchThread("thread-dispatch");
+    const show = () => invoke("show", { cwd: workspaceRoot, actor: "agent", target: "th_dispatch", peek: true });
+    const chat = () => invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: "thread-dispatch" });
+    const before = await show();
+    expect(before.dispatch).toEqual({ paused: null, lastRun: null });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: true, reason: "re-dispatch budget exceeded" });
+    expect(await show()).toMatchObject({ dispatch: { paused: "budget", lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: "budget", lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: false });
+    expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected run");
+    expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
+    await dispatchStore.failRun({ runId: claim.run.runId, reason: "runner failed to start", exitCode: 7 });
+    const dispatch = { paused: null, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } };
+    expect(await show()).toMatchObject({ dispatch, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2" });
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!next) throw new Error("Expected next run");
+    await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
+    expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {

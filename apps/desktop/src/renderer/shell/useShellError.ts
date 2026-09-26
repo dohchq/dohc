@@ -7,7 +7,6 @@ import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectW
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
   | "chat-no-runner"
-  | "chat-run-failed"
   | "chat-budget-paused"
   | "singleton-tab-split"
   | "tab-limit"

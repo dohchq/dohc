@@ -5444,7 +5444,7 @@ export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
-  reason: z.enum(["no-runner", "run-failed", "budget-paused"]),
+  reason: z.enum(["no-runner", "budget-paused"]),
   threadId: z.string().min(1),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),

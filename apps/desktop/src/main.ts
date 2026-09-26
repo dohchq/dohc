@@ -1562,6 +1562,7 @@ function registerReservedPhysicalWorkspace(
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
   await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  chatDispatchNotices.clearWorkspace(workspaceId);
   notifyRenderer();
 }
 

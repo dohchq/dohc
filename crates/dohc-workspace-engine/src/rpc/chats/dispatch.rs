@@ -521,6 +521,25 @@ impl EngineService {
         Ok(json!({ "runs": runs, "nextCursor": next_cursor }))
     }
 
+    pub(crate) async fn chats_dispatch_latest_run_for_thread(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let run = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.latestRunForThread",
+            open.actor
+                .chat_dispatch_latest_run_for_thread(open.workspace_id.clone(), params.thread_id),
+        )
+        .await?;
+        Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))
+    }
+
     pub(crate) async fn chats_dispatch_get_run_record(
         &self,
         ctx: &RequestContext,

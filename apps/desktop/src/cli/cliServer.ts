@@ -1,3 +1,4 @@
+import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
   cliRequestSchema,
@@ -850,6 +851,7 @@ async function buildShowResult(
       ...counts,
     },
     messages,
+    dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, loaded.thread.id),
   };
 }
 
@@ -1956,6 +1958,7 @@ async function dispatch(
         return {
           ok: true as const,
           thread: rawChatThread(thread),
+          dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, thread.id),
           messages: messages.map((message) => rawChatMessage(message, decisionByMessage.get(message.id))),
           projection: {
             path: projection.path,

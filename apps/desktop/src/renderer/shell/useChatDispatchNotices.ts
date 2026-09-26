@@ -5,7 +5,6 @@ import type { ShellErrorKind, useShellError } from "./useShellError";
 
 const kinds = {
   "no-runner": "chat-no-runner",
-  "run-failed": "chat-run-failed",
   "budget-paused": "chat-budget-paused",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 

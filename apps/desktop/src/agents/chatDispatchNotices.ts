@@ -11,6 +11,11 @@ export function createChatDispatchNotices(
   }
   return {
     register: snapshot,
+    clearWorkspace(workspaceId: string) {
+      if (!workspaces.delete(workspaceId)) return;
+      revision += 1;
+      publish(snapshot(workspaceId));
+    },
     report(workspaceId: string, notice: Omit<ChatDispatchNotice, "id">) {
       const notices = workspaces.get(workspaceId) ?? new Map<ChatDispatchNotice["reason"], ChatDispatchNotice>();
       notices.set(notice.reason, { ...notice, id: randomUUID() });
