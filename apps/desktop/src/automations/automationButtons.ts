@@ -3,7 +3,7 @@ import type { Automation, AutomationsFileParseResult } from "@dohc/workspace-con
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { shareViewTakesLocalWrites } from "../workspaces/shareWriteGate";
-import { operationsOf, RECORD_TRIGGERS_ONLY } from "./automationPlan";
+import { collectionAutomationId, definitionHash, operationsOf, RECORD_TRIGGERS_ONLY, unsupportedReason } from "./automationPlan";
 
 // Button fields (item 8): which automation a button runs, and who may press
 // it on this computer. Main decides both; a renderer only shows the answer.
@@ -16,7 +16,6 @@ export type AutomationButtonState =
   | { kind: "disabled"; reason: string };
 
 export const NO_AUTOMATION = "No automation uses this button.";
-export const OWNER_ONLY = "Only the owner can use this button.";
 export const RUNNING_FOR_RECORD = "Running for this record.";
 
 export function noAccessReason(collectionName: string): string {
@@ -69,22 +68,52 @@ export function resolveButton(
 }
 
 /**
- * Who may press a document Collection's buttons on this computer. A
- * workspace that is not a share view takes hand edits, so it takes presses.
- * A share view takes neither here: its automations need the owner's list of
- * who can edit, which only the owner can read. An Edit grant on the
- * Collection's folder or a folder above it is "owner-only", so the button
- * says who can use it. Edit on one record's file is not enough.
+ * Who may press a document Collection's buttons from this computer, and
+ * where the press runs. A workspace that is not a share view takes hand
+ * edits, so it takes presses and runs them here. A share view cannot run
+ * them: its automations need the owner's list of who can edit, which only
+ * the owner can read. With Edit on main over the Collection's folder or a
+ * folder above it, its presses are "relayed" to the computer that runs the
+ * owner's schedules (ADR 0012); the relay checks the same rule. Edit on one
+ * record's file, a version share, or a lower level is not enough.
  */
-export function documentButtonAccess(shareView: unknown, collectionPath: string): "press" | "owner-only" | "no-access" {
+export function documentButtonAccess(shareView: unknown, collectionPath: string): "press" | "relayed" | "no-access" {
   if (!shareViewIsPresent(shareView)) return "press";
   const marker = isRecord(shareView) ? shareView : {};
   const grant = recordedShareSelector(marker.grantedSelector);
   if (!grant || !shareViewTakesLocalWrites({ access: grant.access, ended: marker.ended === true })) return "no-access";
-  const covers = grant.paths.length === 0
-    ? grant.versionId !== null
-    : grant.paths.some((path) => collectionPath === path || collectionPath.startsWith(`${path}/`));
-  return covers ? "owner-only" : "no-access";
+  if (grant.versionId !== null || grant.paths.length === 0) return "no-access";
+  const covers = grant.paths.some((path) => collectionPath === path || collectionPath.startsWith(`${path}/`));
+  return covers ? "relayed" : "no-access";
+}
+
+/**
+ * What a button in a shared view shows. The recipient's computer reads the
+ * Collection's automations.yaml, but cannot check reach, so a button is
+ * ready once one switched-on automation it can run uses it. The owner's
+ * computer checks the rest when it runs the press.
+ */
+export function relayedButtonState(file: AutomationsFileParseResult | null, collectionPath: string, field: string, collectionName: string): AutomationButtonState {
+  const target = relayedButtonTarget(file, collectionPath, field, collectionName);
+  return "state" in target ? target.state : { kind: "ready", automationId: target.automationId };
+}
+
+/**
+ * The automation a shared view's press asks the owner's computer to run,
+ * with the definition the recipient sees, so it runs only if that still
+ * holds. Or the state that stops it.
+ */
+export function relayedButtonTarget(
+  file: AutomationsFileParseResult | null,
+  collectionPath: string,
+  field: string,
+  collectionName: string,
+): { automationId: string; definitionHash: string } | { state: Exclude<AutomationButtonState, { kind: "ready" }> } {
+  const resolved = resolveButton(file, field, (table) => table === null, collectionName);
+  if (resolved.kind === "state") return { state: resolved.state };
+  const unsupported = unsupportedReason(resolved.automation);
+  if (unsupported !== null) return { state: { kind: "disabled", reason: unsupported } };
+  return { automationId: collectionAutomationId(collectionPath, resolved.automation.id), definitionHash: definitionHash(resolved.automation) };
 }
 
 /**

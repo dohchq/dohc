@@ -514,6 +514,32 @@ async function world(options: {
 }
 
 const TASKS = "collection:Tasks#bump";
+
+// The definition hash the executor lists for one automation, as a presser's window sees it.
+// The host module's holds as the executor sees them: a handover waits on each.
+function fakeHostHold() {
+  let admits = true;
+  let holds = 0;
+  return {
+    held: () => holds,
+    refuse: () => { admits = false; },
+    take: (): (() => void) | null => {
+      if (!admits) return null;
+      holds += 1;
+      let released = false;
+      return () => { if (!released) { released = true; holds -= 1; } };
+    },
+  };
+}
+
+async function hashOf(executor: CollectionAutomations, collection: string, id: string): Promise<string> {
+  const listed = await executor.automationsIn(collection);
+  const found = listed.status === "read"
+    ? listed.automations.find((entry) => entry.valid && entry.automation.id === id)
+    : undefined;
+  if (!found?.valid) throw new Error(`No automation ${id} in ${collection}.`);
+  return found.definitionHash;
+}
 const BUMP = [
   "  - id: bump",
   "    name: Bump",
@@ -835,6 +861,167 @@ describe("Collection automations", () => {
     w.executor.rosterChanged();
     await w.settledClaim(w.claims.get(first.claimId)!);
     expect(w.fieldsOf(invoice)).toEqual({ Paid: true });
+  });
+
+  it("runs a relayed press as the verified user's, and refuses one whose automation left or no longer runs the button", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    await w.executor.open();
+    const paid = await hashOf(w.executor, "Tasks", "paid");
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: "0000000000000000", recordId: invoice.id, pressId: "relay-0", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("Mark paid changed after it was pressed. Press it again.");
+    const relayed = await w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    expect(relayed.field).toBe("Mark paid");
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(w.fieldsOf(invoice)).toEqual({ "Paid by": "user-ana" });
+
+    // The relay cannot tell which Collection a record is in, so the host checks.
+    const elsewhere = w.addRecord("Log", "entry", {});
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: elsewhere.id, pressId: "relay-outside", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This record is no longer in Tasks.");
+    expect([...w.claims.values()].filter((claim) => claim.recordId === elsewhere.id)).toEqual([]);
+
+    await w.writeAutomations("Tasks", "  - id: other\n    name: Other\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n");
+    const idle = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > idle);
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This button no longer runs an automation in its Collection.");
+
+    // The pressed automation is off, and another now runs the button.
+    await w.writeAutomations("Tasks", "  - id: paid\n    name: Paid\n    enabled: false\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n  - id: other\n    name: Other\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n");
+    const again = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > again);
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: await hashOf(w.executor, "Tasks", "paid"), recordId: invoice.id, pressId: "relay-3", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("Mark paid now runs another automation. Press it again.");
+  });
+
+  it("refuses to run a relayed press after its automation changed, even once claimed, and finds its claim again", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    // Who can edit is unknown, so the claim waits before it runs.
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    await w.executor.open();
+    const paid = await hashOf(w.executor, "Tasks", "paid");
+    const input = { automationId: "collection:Tasks#paid", definitionHash: paid, pressId: "relay-1" };
+    expect(await w.executor.relayedClaim(input)).toBeNull();
+    const relayed = await w.executor.pressRelayed({ ...input, recordId: invoice.id, pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    expect(await w.executor.relayedClaim(input)).toEqual({ claimId: relayed.pressed.claimId, settled: null });
+    // The steps change under the same id before the claim runs.
+    await w.writeAutomations("Tasks", "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Refunded: true}}]\n");
+    const idle = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > idle);
+    w.setRoster(OWNER);
+    w.executor.rosterChanged();
+    const claim = await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(claim).toMatchObject({ state: "failed", error: "Mark paid changed after it was pressed. Press it again." });
+    expect(w.fieldsOf(invoice)).toEqual({});
+    expect(await w.executor.relayedClaim(input)).toMatchObject({ settled: { outcome: "failed" } });
+  });
+
+  it("holds the host while a relayed press's run writes, and runs nothing the host no longer admits", async () => {
+    const hold = fakeHostHold();
+    const writes: number[] = [];
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      withRecordWrites: async () => { writes.push(hold.held()); },
+    });
+    const executor = w.makeExecutor({ holdForHost: hold.take });
+    await executor.open();
+    const paid = await hashOf(executor, "Tasks", "paid");
+    // The owner's own press holds nothing.
+    const own = w.addRecord("Tasks", "own", {});
+    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined);
+    if (pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(pressed.claimId)!);
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(writes).toEqual([0, 1]);
+    expect(hold.held()).toBe(0);
+    // A handover began: the press settles failed and writes nothing.
+    hold.refuse();
+    const late = w.addRecord("Tasks", "late", {});
+    const refused = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: late.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined);
+    if (refused.pressed.busy) throw new Error("Expected a claim");
+    expect(await w.settledClaim(w.claims.get(refused.pressed.claimId)!))
+      .toMatchObject({ state: "failed", error: "This workspace's automations moved to another computer before this press ran." });
+    expect(w.fieldsOf(late)).toEqual({});
+    expect(writes).toEqual([0, 1]);
+    await executor.dispose();
+  });
+
+  it("holds nothing while a relayed press's claim waits, and a restarted executor holds the host for it", async () => {
+    const hold = fakeHostHold();
+    const writes: number[] = [];
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      withRecordWrites: async () => { writes.push(hold.held()); },
+    });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    // Who can edit is unknown, so the claim waits before it runs.
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    const first = w.makeExecutor({ holdForHost: hold.take });
+    await first.open();
+    const paid = await hashOf(first, "Tasks", "paid");
+    const relayed = await first.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toMatchObject([{ waiting: { claimId: relayed.pressed.claimId } }]);
+    expect(hold.held()).toBe(0);
+    await first.dispose();
+    // After a restart the claim runs before the relayed press loop looks it
+    // up, so the executor holds the host for it by itself.
+    w.setRoster(OWNER);
+    const restarted = w.makeExecutor({ holdForHost: hold.take });
+    await restarted.open();
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(w.fieldsOf(invoice)).toEqual({ Paid: true });
+    expect(writes).toEqual([1]);
+    expect(hold.held()).toBe(0);
+    await restarted.dispose();
+  });
+
+  it("keeps a relayed press's hold after its deadline until its write really stops", async () => {
+    const hold = fakeHostHold();
+    let passDeadline = () => {};
+    let finishWrite = () => {};
+    let markAborted = () => {};
+    const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      deadline: (abort) => { passDeadline = abort; return () => {}; },
+      // The write outlives the abort, as one still in flight when the workspace closes does.
+      withRecordWrites: (signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          finishWrite = () => reject(new Error("The write stopped."));
+          markAborted();
+        }, { once: true });
+        passDeadline();
+      }),
+    });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    const executor = w.makeExecutor({ holdForHost: hold.take });
+    await executor.open();
+    const paid = await hashOf(executor, "Tasks", "paid");
+    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await aborted;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(hold.held()).toBe(1);
+    finishWrite();
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(hold.held()).toBe(0);
   });
 
   it("names why a button cannot run, and refuses a press on it", async () => {

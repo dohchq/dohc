@@ -214,6 +214,7 @@ import { skippedRunsNotice } from "./automations/skippedRunsNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
+import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { readChatDirectory } from "./automations/automationChat";
@@ -1327,6 +1328,9 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   collectionAutomations: CollectionAutomations;
   /** This attachment's local dataset host, opened on first use and closed after the executor at disposal. */
   datasetHost: DatasetHostSlot;
+  // Takes Button presses from shared views while this computer runs the
+  // workspace's schedules.
+  relayedPresses: RelayedPressHost;
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
@@ -1396,6 +1400,7 @@ function createDesktopWorkspaceAuthorityState(
     activity: new WorkspaceActivityState(),
     collectionAutomations,
     datasetHost,
+    relayedPresses: createRelayedPressHostFor(binding.workspaceId),
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
@@ -1480,6 +1485,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     automationScheduler.remove(binding.workspaceId);
     automationHosts.close(binding.workspaceId);
     pressWindows.forget(binding.workspaceId);
+    state.relayedPresses.stop();
     const results = await Promise.allSettled([
       // The executor hands its held dataset claims back before the host closes.
       state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
@@ -2091,6 +2097,8 @@ function engineForWorkspace(
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       automationHosts.relayAnswered(workspace.workspaceId);
+      // The relay answers again, so this computer may be the host again.
+      if (recovered) withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, (lease) => lease.state.relayedPresses)?.start();
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );
@@ -3341,6 +3349,7 @@ async function openWorkspaceActivityForOperation(
   if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
     automationHosts.open(canonicalWorkspace.workspaceId);
     void operation.state.collectionAutomations.open();
+    operation.state.relayedPresses.start();
   }
   return result;
 }
@@ -3755,6 +3764,61 @@ async function schedulesCanRun(workspaceId: string): Promise<boolean> {
 // is set, and the scheduler checks its due times again.
 const WM_TIMECHANGE = 0x001e;
 
+// This computer's side of shared-view Button presses for one workspace: the
+// owner's relay session, and presses run through the workspace's executor.
+// A failure reaches the person who pressed as a notice.
+function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
+  return createRelayedPressHost({
+    workspaceId,
+    installId: localReactorFallbackId(),
+    // The one automation host module decides where automations run; this
+    // loop only asks it.
+    host: {
+      runsHere: () => automationHosts.runsHere(workspaceId),
+      stillRuns: () => automationHosts.stillRuns(workspaceId),
+      hold: () => automationHosts.hold(workspaceId),
+      generation: () => {
+        const host = findWorkspace(workspaceId)?.automationHost;
+        return automationHosts.stillRuns(workspaceId) && host ? host.generation : null;
+      },
+    },
+    relay: async () => {
+      await warmCredentialCache();
+      const credentials = cachedCredentials;
+      const entry = findWorkspace(workspaceId);
+      if (!credentials?.relayUrl || !entry?.remote || shareViewIsPresent(entry.shareView)) return null;
+      if (credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl)) return null;
+      return { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch };
+    },
+    heldClaim: async (press) => {
+      const executor = collectionAutomationsOf(workspaceId);
+      if (!executor) throw new Error("This workspace was closed.");
+      return await executor.relayedClaim({ automationId: press.automationId, definitionHash: press.definitionHash, pressId: press.hostPressId });
+    },
+    press: async (input, watch) => {
+      const executor = collectionAutomationsOf(workspaceId);
+      if (!executor) throw new Error("This workspace was closed.");
+      return await executor.pressRelayed(input, (claimId) => watch(claimId));
+    },
+    notifyFailure: async ({ press, field, outcome, error }) => {
+      const button = (field ?? "A button").slice(0, 80);
+      const collectionPath = press.automationId.slice("collection:".length, press.automationId.lastIndexOf("#"));
+      await noticeStore().postNotice({
+        workspaceId,
+        noticeId: `automation-press:${press.hostPressId}`,
+        kind: "automation-failed",
+        title: outcome === "busy" ? `${button} did not run` : `${button} did not finish`,
+        body: (outcome === "busy"
+          ? "It was already running on this record for someone else. Press it again when that run finishes."
+          : error ?? "The automation failed.").slice(0, 500),
+        target: { path: collectionPath, record: press.recordId, automation: press.automationId },
+        recipientUserId: press.pressedBy,
+      });
+    },
+    onError: (context, error) => console.warn(`[desktop] Relayed Button presses in ${workspaceId}: ${context}:`, error),
+  });
+}
+
 // An open workspace's Collection automations. Runs write through the same
 // seam as every other collection write, with the capture the workspace
 // already opened, and end at the run's own signal or the operation's.
@@ -3836,8 +3900,15 @@ function createCollectionAutomationsFor(
     runsSchedules: () => schedulesCanRun(workspaceId),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
-    onPressSettled: (event) => pressWindows.settled(workspaceId, event),
-    onPressWaiting: (event) => pressWindows.waiting(workspaceId, event),
+    onPressSettled: (event) => {
+      pressWindows.settled(workspaceId, event);
+      withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.relayedPresses)?.runSettled(event);
+    },
+    onPressWaiting: (event) => {
+      pressWindows.waiting(workspaceId, event);
+    },
+    // A relayed press's run holds off a handover until its writes stop.
+    holdForHost: () => automationHosts.hold(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {
@@ -5402,6 +5473,22 @@ function registerIpcHandlers(): void {
       return described.dataset;
     },
     pressedBy: pressingPerson,
+    // A shared view's press goes to the relay it came from, for this
+    // person's own grant; the relay checks the grant again.
+    relayPress: async (operation, input) => {
+      await warmCredentialCache();
+      const credentials = cachedCredentials;
+      const marker = operation.workspace.shareView;
+      const shareId = isRecordValue(marker) && typeof marker.shareId === "string" ? marker.shareId : null;
+      const shareRelayUrl = isRecordValue(marker) && typeof marker.relayUrl === "string" ? marker.relayUrl : null;
+      if (!credentials?.relayUrl) throw new Error("Sign in to your server first.");
+      if (shareId === null) throw new Error("This shared view has lost its share. Open it again from the link.");
+      if (shareRelayUrl !== null && !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)) {
+        throw new Error("Sign in to the cloud server this share came from.");
+      }
+      await automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
+        .press(shareId, input);
+    },
     pressWindows,
   });
 

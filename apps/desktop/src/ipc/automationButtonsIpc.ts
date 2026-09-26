@@ -7,7 +7,8 @@ import {
   datasetButtonRefusal,
   documentButtonAccess,
   noAccessReason,
-  OWNER_ONLY,
+  relayedButtonState,
+  relayedButtonTarget,
   RUNNING_FOR_RECORD,
 } from "../automations/automationButtons";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations, type PressSettled, type PressWaitReason } from "../automations/collectionAutomations";
@@ -120,6 +121,11 @@ export function registerAutomationButtonsIpc<
   describeDataset(sender: Sender, workspaceId: string, datasetId: string): Promise<DatasetDescription>;
   /** The person this computer is signed in as, or its own id when signed out. */
   pressedBy(): Promise<string>;
+  /**
+   * Sends a shared view's press to the relay, which records it for this
+   * person's own grant and carries it to the owner's computer.
+   */
+  relayPress(operation: Operation, input: { pressId: string; automationId: string; definitionHash: string; recordId: string }): Promise<void>;
   pressWindows: PressWindows<Sender>;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation, pressWindows } = dependencies;
@@ -159,22 +165,29 @@ export function registerAutomationButtonsIpc<
     return buttons.map(({ field, table }) => datasetButtonRefusal({ definition: dataset.definition, file: dataset.file, description, field, table }));
   }
 
-  /**
-   * Why this workspace refuses a document Collection's buttons, or null. A
-   * shared view is refused: its automations need the owner's list of who can
-   * edit, which only the owner can read.
-   */
-  function documentRefusal(shareView: unknown, collectionPath: string): string | null {
-    const access = documentButtonAccess(shareView, collectionPath);
-    return access === "press" ? null : access === "owner-only" ? OWNER_ONLY : noAccessReason(nameOf(collectionPath));
+  /** The automations file a shared view holds for a Collection. */
+  async function sharedAutomations(operation: Operation, collectionPath: string): Promise<AutomationsFileParseResult | null> {
+    const read = await dependencies.readText(operation.workspace.rootPath, `${collectionPath}/${AUTOMATIONS_FILE_NAME}`);
+    if (read === null) return null;
+    return read.truncated ? { status: "unreadable", diagnostic: { code: "file-too-large", path: "" } } : parseAutomationsFile(read.text);
   }
 
-  /** A document Collection's buttons, or the one reason this workspace refuses them all. */
+  /**
+   * A document Collection's buttons. This workspace's own run here; a shared
+   * view's are read from its automations.yaml and run on the owner's
+   * computer; anything less than Edit on the Collection's folder refuses all.
+   */
   async function documentButtons(operation: Operation, collectionPath: string): Promise<ListAutomationButtonsResult["buttons"]> {
     const fields = await dependencies.buttonFields(operation, collectionPath);
-    const reason = documentRefusal(operation.workspace.shareView, collectionPath);
-    if (reason !== null) return fields.map((field) => ({ field, state: { kind: "disabled", reason } }));
-    return fields.length === 0 ? [] : await operation.state.collectionAutomations.buttons(collectionPath, fields);
+    if (fields.length === 0) return [];
+    const access = documentButtonAccess(operation.workspace.shareView, collectionPath);
+    if (access === "no-access") {
+      const reason = noAccessReason(nameOf(collectionPath));
+      return fields.map((field) => ({ field, state: { kind: "disabled", reason } }));
+    }
+    if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields);
+    const file = await sharedAutomations(operation, collectionPath);
+    return fields.map((field) => ({ field, state: relayedButtonState(file, collectionPath, field, nameOf(collectionPath)) }));
   }
 
   registerHandler(CHANNELS.listRecordButtons, async (event, payload) => {
@@ -215,9 +228,19 @@ export function registerAutomationButtonsIpc<
     const read = await withRendererWorkspaceOperation(event.sender, workspaceId, stale, async (operation) => {
       const dataset = await readDataset(operation, input.collectionPath);
       if (dataset !== null) return { kind: "dataset" as const, dataset };
-      // Checked before the executor is asked.
-      const reason = documentRefusal(operation.workspace.shareView, input.collectionPath);
-      if (reason !== null) throw new Error(reason);
+      // Checked before the executor or the relay is asked.
+      const access = documentButtonAccess(operation.workspace.shareView, input.collectionPath);
+      if (access === "no-access") throw new Error(noAccessReason(nameOf(input.collectionPath)));
+      if (access === "relayed") {
+        if (!(await dependencies.buttonFields(operation, input.collectionPath)).includes(input.field)) {
+          throw new Error(`${input.field} is not a button in ${nameOf(input.collectionPath)}.`);
+        }
+        const file = await sharedAutomations(operation, input.collectionPath);
+        const target = relayedButtonTarget(file, input.collectionPath, input.field, nameOf(input.collectionPath));
+        if ("state" in target) throw new Error(target.state.reason);
+        await dependencies.relayPress(operation, { pressId: input.pressId, ...target, recordId: input.recordId });
+        return { kind: "relayed" as const };
+      }
       const pressed = await operation.state.collectionAutomations.press(
         { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
         (claimId, waiting) => pressWindows.watch(workspaceId, claimId, event.sender, waiting),
@@ -233,6 +256,7 @@ export function registerAutomationButtonsIpc<
       const [reason] = await datasetRefusals(event.sender, workspaceId, read.dataset, [{ field: input.field, table: input.table }]);
       throw new Error(reason);
     }
+    if (read.kind === "relayed") return { busy: false, relayed: true };
     const { pressed } = read;
     return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
   });

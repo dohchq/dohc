@@ -49,6 +49,7 @@ function fixture(options: {
     }),
   };
   const buttonFields = vi.fn(async () => ["Mark paid"]);
+  const relayPress = vi.fn(async (_operation: unknown, _input: { pressId: string; automationId: string; recordId: string }) => undefined);
   const invoice: CollectionRecord = { id: "rec_invoice12", path: "Invoices/12.md", conflicted: false, values: [] };
   const recordAt = vi.fn(async (_operation: unknown, path: string) => (path === "Invoices/12.md" ? { collectionPath: "Invoices", record: invoice } : null));
   const describeDataset = vi.fn(async (): Promise<DatasetDescription> => {
@@ -74,6 +75,7 @@ function fixture(options: {
       return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
     },
     buttonFields,
+    relayPress,
     recordAt,
     describeDataset,
     pressedBy: async () => "user-main",
@@ -83,9 +85,10 @@ function fixture(options: {
     handlers.get(channel)!({ sender: window }, { workspaceId: WORKSPACE_ID, collectionPath: "Invoices", ...payload });
   const press = (payload: Record<string, unknown> = {}) =>
     call(CHANNELS.pressAutomationButton, { field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, table: null, ...payload });
-  return { call, press, executor, buttonFields, describeDataset, window, pressWindows, invoice };
+  return { call, press, executor, buttonFields, relayPress, describeDataset, window, pressWindows, invoice };
 }
 
+const PAID_FILE = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n";
 const editShare = (paths: string[], access = "edit") => ({
   shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantedSelector: { paths, versionId: null, access },
 });
@@ -99,10 +102,14 @@ describe("listing a Collection's buttons", () => {
     expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"]);
   });
 
-  it("shows a shared view's buttons as the owner's, or as needing Edit, without asking the executor", async () => {
-    const owner = fixture({ shareView: editShare(["Invoices"]) });
+  it("reads a shared view's buttons from its automations file, or shows them as needing Edit, without asking the executor", async () => {
+    const owner = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE } });
     await expect(owner.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
-      buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "Only the owner can use this button." } }],
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }],
+    });
+    const none = fixture({ shareView: editShare(["Invoices"]) });
+    await expect(none.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
+      buttons: [{ field: "Mark paid", state: { kind: "no-automation", reason: "No automation uses this button." } }],
     });
     const viewer = fixture({ shareView: editShare(["Invoices"], "view") });
     await expect(viewer.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
@@ -135,10 +142,10 @@ describe("listing an open record's buttons", () => {
     expect(f.buttonFields).not.toHaveBeenCalled();
   });
 
-  it("shows a shared view's record buttons as the owner's", async () => {
-    const f = fixture({ shareView: editShare(["Invoices"]) });
+  it("shows a shared view's record buttons from its automations file", async () => {
+    const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE } });
     await expect(f.call(CHANNELS.listRecordButtons, { path: "Invoices/12.md" })).resolves.toMatchObject({
-      buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "Only the owner can use this button." } }],
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }],
     });
     expect(f.executor.buttons).not.toHaveBeenCalled();
   });
@@ -189,8 +196,24 @@ describe("pressing a button", () => {
   });
 
   it.each([
-    ["an Edit grant on the Collection", editShare(["Invoices"]), "Only the owner can use this button."],
-    ["an Edit grant on a folder above it", editShare(["Billing"]), "Only the owner can use this button."],
+    ["an Edit grant on the Collection", editShare(["Invoices"])],
+    ["an Edit grant on a folder above it", editShare(["Billing"])],
+  ])("sends a press in a shared view with %s to the relay, never to this computer's executor", async (_name, shareView) => {
+    const collectionPath = shareView.grantedSelector.paths[0] === "Billing" ? "Billing/Invoices" : "Invoices";
+    const f = fixture({ shareView, files: { [`${collectionPath}/automations.yaml`]: PAID_FILE } });
+    await expect(f.press({ collectionPath })).resolves.toEqual({ busy: false, relayed: true });
+    expect(f.relayPress).toHaveBeenCalledWith(expect.anything(), { pressId: PRESS_ID, automationId: `collection:${collectionPath}#paid`, definitionHash: expect.stringMatching(/^[0-9a-f]{16}$/), recordId: "Invoices/12.md" });
+    expect(f.executor.press).not.toHaveBeenCalled();
+  });
+
+  it("does not send a shared view's press for a button no automation can run", async () => {
+    const f = fixture({ shareView: editShare(["Invoices"]) });
+    await expect(f.press()).rejects.toThrow("No automation uses this button.");
+    await expect(f.press({ field: "Status" })).rejects.toThrow("Status is not a button in Invoices.");
+    expect(f.relayPress).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["Edit on one record", editShare(["Invoices/12.md"]), "Only people who can edit Invoices can use this button."],
     ["a View grant", editShare(["Invoices"], "view"), "Only people who can edit Invoices can use this button."],
   ])("refuses a press in a shared view with %s, before reading anything else", async (_name, shareView, reason) => {
@@ -198,6 +221,7 @@ describe("pressing a button", () => {
     await expect(f.press({ collectionPath: shareView.grantedSelector.paths[0] === "Billing" ? "Billing/Invoices" : "Invoices" })).rejects.toThrow(reason);
     expect(f.buttonFields).not.toHaveBeenCalled();
     expect(f.executor.press).not.toHaveBeenCalled();
+    expect(f.relayPress).not.toHaveBeenCalled();
   });
 
   it("checks a dataset button against the operations the host describes to this window's person", async () => {
