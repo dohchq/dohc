@@ -265,6 +265,27 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(c.nativeOwner.resyncIfNeeded).toHaveBeenCalledOnce();
   });
 
+  // The resync replaced the lineage and kept the native session, and the
+  // renderer adopted the replacement before the wait ended. The new lineage
+  // happens to carry the registered claim; the owner captured before the
+  // wait is gone, so the registration refuses.
+  it("refuses when the resync replaced the lineage, even once the renderer adopts it", async () => {
+    const c = claimHarness(null);
+    const sender = new FakeSender(7);
+    await c.h.ipc.open(sender, openPayload);
+    const registering = c.h.ipc.existingOwner(claimBinding);
+    await Promise.resolve();
+
+    c.learn("a".repeat(64));
+    c.h.capturedOpen()?.onLineageReplaced?.(new Uint8Array([9]), []);
+    expect(c.h.ipc.acknowledgeLineageReplacement(sender, {sessionId: openPayload.sessionId, lineageGeneration: 2}))
+      .toMatchObject({accepted: true});
+    c.resync.resolve();
+
+    await expect(registering).rejects.toThrow("Owner session changed.");
+    await expect(c.h.ipc.existingOwner(claimBinding)).resolves.toMatchObject({nativeSessionId: "native-existing"});
+  });
+
   it("refuses at once when the editor holds a different claim", async () => {
     const c = claimHarness("b".repeat(64));
     await c.h.ipc.open(new FakeSender(7), openPayload);

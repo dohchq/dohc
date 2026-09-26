@@ -914,16 +914,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   /**
    * Turning sync on claims an open document's history, then tells its session
    * to resync, which is how the session learns the claim. A registration that
-   * arrives in between waits for that resync once. Any other mismatch refuses.
+   * arrives in between waits for that resync once, then checks the same
+   * captured owner again. A replaced lineage or any other change refuses.
    */
   async existingOwner(binding: LiveObjectBinding) {
+    const owner = this.#existingOwner(binding);
     try {
-      return this.#existingOwner(binding);
+      owner.assertCurrent();
     } catch (error) {
       if (!(error instanceof OwnerClaimNotLearned)) throw error;
       await error.resync();
+      owner.assertCurrent();
     }
-    return this.#existingOwner(binding);
+    return owner;
   }
 
   #existingOwner(binding: LiveObjectBinding) {
@@ -949,7 +952,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         if (claim === null) throw new OwnerClaimNotLearned(() => native.resyncIfNeeded());
         if (claim !== binding.lineageClaimId) throw new Error("Existing owner changed.");
       };
-      assertCurrent();
       return {
         nativeSessionId: native.sessionId,
         assertCurrent,

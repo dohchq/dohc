@@ -224,3 +224,57 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }
 });
+
+// An owner lookup can wait for the open document to learn its claim. A second
+// registration that arrives meanwhile must see the first one, not register the
+// same binding again, and a different binding must count the pending one.
+it("admits one registration per binding while an owner lookup waits, and counts it against capacity", async () => {
+  const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
+  const started = deferred(), lookup = deferred(), looking = deferred();
+  const replies = new Map<number,{promise: Promise<void>; resolve(): void}>(), results = new Map<number,Record<string,unknown>>();
+  const decoder = new FrameDecoder(1_048_576,256*1024);
+  const ws = {readyState:1,bufferedAmount:0,send(bytes:Buffer,options:{binary:boolean},done:() => void) {
+    if (options.binary) decoder.push(bytes,frame => {
+      const value = JSON.parse(frame.payload.toString()); results.set(value.id,value); replies.get(value.id)?.resolve();
+    });
+    else if (JSON.parse(bytes.toString()).type === "liveHost.transport") started.resolve();
+    done();
+  }} as unknown as WebSocket;
+  const limits = {maxPayloadBytes:4096,maxPendingBytes:2_000_000} as DeviceControlLimits;
+  const start = {type:"liveHost.start" as const,version:1 as const,relayNamespace:"namespace",authToken:"A".repeat(43),
+    host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
+  const owner = {nativeSessionId:"session",onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
+    finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
+  const ownerFor = vi.fn(async () => {looking.resolve(); await lookup.promise; return owner;});
+  let nextId = 0;
+  const register = vi.fn(async (request:{method:string}) => ({result:request.method === "liveApplication.register" ? {registrationId:++nextId} : {}}));
+  const client = {ready:async () => undefined,sendRequest:register} as unknown as EngineClient;
+  const transport = startExistingOwnerDeviceTransport({config:{client,workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor,
+    maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,maxUploads:3,maxRegistrations:1,aggregateBytes:200_000_000,
+    maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,requestDeadlineMs:30_000},start,ws,limits,stop:vi.fn()});
+  const send = (value:Record<string,unknown>) => new Promise<void>(resolve => setImmediate(() => {
+    transport.receive(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),1_048_576));
+    resolve();
+  }));
+  const request = async (id:number,params:object) => {
+    const response = deferred(); replies.set(id,response);
+    await send({type:"request",id,method:"liveApplication.register",workspace:"handle",params});
+    return response.promise.then(() => results.get(id)!);
+  };
+  try {
+    await started.promise;
+    await send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
+    const binding = {workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
+      currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1};
+    const first = request(1,{binding});
+    await looking.promise;
+    const duplicate = request(2,{binding});
+    const other = await request(3,{binding:{...binding,objectId:"other"}});
+    expect(other).toMatchObject({type:"error"});
+    lookup.resolve();
+    expect(await first).toMatchObject({type:"response",result:{registrationId:1}});
+    expect(await duplicate).toMatchObject({type:"response",result:{registrationId:1}});
+    expect(ownerFor).toHaveBeenCalledOnce();
+    expect(register.mock.calls.filter(([call]) => call.method === "liveApplication.register")).toHaveLength(1);
+  } finally {await transport.close();}
+});
