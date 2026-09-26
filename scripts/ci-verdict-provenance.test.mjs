@@ -351,8 +351,8 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
   const document = load(workflow);
   for (const [job, invocation] of [
-    ["javascript", "xvfb-run -a pnpm verify:pr --base HEAD --job js"],
-    ["rust", "pnpm verify:pr --base HEAD --job rust"],
+    ["javascript", "xvfb-run -a pnpm verify:pr --base HEAD --job js --full"],
+    ["rust", "pnpm verify:pr --base HEAD --job rust --full"],
   ]) {
     assert.equal(document.jobs[job].steps.filter(step => step.run?.trim() === invocation).length, 1);
   }

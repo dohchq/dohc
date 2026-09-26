@@ -111,10 +111,42 @@ test("doctor requires a disk measurement only when a build budget is configured"
         assert.equal(result.checks.find(check=>check.name==='disk').state,expected,JSON.stringify({floor,free}));
         assert.ok(result.checks.filter(check=>check.name!=='disk').every(check=>check.state==='PASS'));
       }
+      cp.execFileSync=command=>{assert.equal(command,'pwsh.exe','unrelated native tool probe');return '7.6.5';};
+      syncBuiltinESMExports();
+      measurement=1;
+      fs.rmSync('node_modules/electron',{recursive:true,force:true});
+      fs.rmSync('node_modules/playwright',{recursive:true,force:true});
+      const selective=doctor({engine:false,desktop:false,browser:false});
+      assert.ok(selective.checks.every(check=>check.state!=='FAIL'));
+      assert.ok(!selective.checks.some(check=>['rustc','cargo','electron','playwright','engine build','desktop build'].includes(check.name)));
     `], { cwd: root, encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("engine-only readiness validates the native artifact without requiring a desktop build", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-engine-only-ready-"));
+  try {
+    createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import cp from 'node:child_process';
+      import {writeFileSync} from 'node:fs';
+      import {syncBuiltinESMExports} from 'node:module';
+      const exec=cp.execFileSync;
+      cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+      syncBuiltinESMExports();
+      const {prepare,assertPrepared,enginePath}=await import('./scripts/verification/build.mjs');
+      await prepare({engineOnly:true});
+      assert.ok(assertPrepared({engineOnly:true}).engine.artifact);
+      assert.throws(()=>assertPrepared(),/does not match/);
+      writeFileSync(enginePath,'changed artifact');
+      assert.throws(()=>assertPrepared({engineOnly:true}),/does not match/);
+    `], {cwd:root,encoding:"utf8",timeout:20_000});
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });
 
 for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
@@ -311,13 +343,30 @@ test("prepared desktop checks staged compiler bytes only on Windows x64", () => 
   }
 });
 
-test("verification prepares the engine after Rust without changing gate scope", async (t) => {
-  for (const [mode, job, fault] of [
+test("verification selects packages and proofs and prepares the engine after Rust", async (t) => {
+  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
-  ]) await t.test([mode, job, fault].filter(Boolean).join(" "), () => {
+    ["pr", null, null, "packages/fixture/src/index.ts"],
+    ["pr", null, null, "packages/mcp/src/index.ts"],
+    ["pr", null, null, "services/workspace-api/src/index.ts"],
+    ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
+    ["pr", "js", null, null],
+  ]) await t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), () => {
+    const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
+    const js = mode === "pr" && job !== "rust";
+    const selected = changed === "packages/fixture/src/index.ts" ? ["@dohc/fixture"]
+      : changed === "packages/mcp/src/index.ts" ? ["@dohc/mcp", "@dohc/share-web"]
+      : changed === "services/workspace-api/src/index.ts" ? ["@dohc/desktop", "@dohc/workspace-api"]
+      : ["@dohc/desktop", "@dohc/fixture", "@dohc/mcp", "@dohc/share-web", "@dohc/unrelated", "@dohc/workspace-api"];
+    const desktop = mode !== "pr" || js && selected.includes("@dohc/desktop");
+    const nativeProof = js && selected.includes("@dohc/share-web");
+    const accounts = js && selected.includes("@dohc/workspace-api");
+    const prepare = desktop || nativeProof;
+    const database = js && (desktop || nativeProof || accounts);
+    const browser = js && (desktop || accounts);
     const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
     const put = (path, contents) => {
       mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -330,21 +379,28 @@ test("verification prepares the engine after Rust without changing gate scope", 
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
-      put("apps/desktop/package.json", "{}");
-      put("packages/fixture/package.json", '{"scripts":{"test":"vitest run"}}');
+      put("apps/desktop/package.json", '{"name":"@dohc/desktop"}');
+      for (const name of ["fixture", "mcp", "share-web", "unrelated", "workspace-api"]) {
+        const path = `${name === "workspace-api" ? "services" : "packages"}/${name}`;
+        put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
+        put(`${path}/src/index.ts`, "export const value = 1;\n");
+      }
+      put("pnpm-workspace.yaml", 'packages: ["apps/*", "packages/*", "services/*"]\n');
       for (const name of ["dohc", "dohc-mcp"]) {
         put(`apps/desktop/resources/cli-bin/${name}`, "fixture launcher");
         chmodSync(join(root, "apps/desktop/resources/cli-bin", name), 0o755);
       }
       put("scripts/verification/doctor.mjs", `
+        import assert from 'node:assert/strict';
         import {readFileSync} from 'node:fs';
-        export function doctor() {
-          if(process.env.FIXTURE_MODE==='pr' && readFileSync('node_modules/installed.txt','utf8')!=='gate-lock')
+        export function doctor(options) {
+          assert.deepEqual(options,${JSON.stringify({engine:rust || prepare,desktop,browser:desktop || accounts})});
+          if(process.env.FIXTURE_MODE==='pr' && readFileSync('node_modules/installed.txt','utf8')!==readFileSync('pnpm-lock.yaml','utf8'))
             throw Error('doctor ran before verifier installation');
           return {checks:[]};
         }
@@ -353,9 +409,18 @@ test("verification prepares the engine after Rust without changing gate scope", 
       put(adapterPath, readFileSync(join(root, adapterPath), "utf8").replace("export async function run(", "async function prepareRun(") + `
         export async function run(command,args,options={}) {
           const {enginePath,assertPrepared,hashFile}=await import('./build.mjs');
+          appendFileSync(join(repoRoot,'.dohc-dev/all-calls.jsonl'),JSON.stringify({command,args})+'\\n');
+          if(command==='cargo' && !${rust || prepare})throw Error('Native tools unavailable for this JavaScript change');
+          if(command==='pnpm' && args[1]==='@dohc/desktop' && args.includes('build') && !${desktop})throw Error('Electron unavailable for this change');
           if(command==='pnpm' && args[1]==='@dohc/app-backend-runtime') {
             assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
             return {stdout:'compiled runtime'};
+          }
+          if(command==='pnpm' && args[1]==='@dohc/sdk') {
+            assert.deepEqual(args,['--filter','@dohc/sdk','build']);
+            mkdirSync(join(repoRoot,'packages/sdk/dist'),{recursive:true});
+            writeFileSync(join(repoRoot,'packages/sdk/dist/built.txt'),'SDK');
+            return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
@@ -378,6 +443,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
             return {stdout:'PASS'};
           }
           if(command==='docker') {
+            if(!${database})throw Error('Docker unavailable for this change');
             if(args[0]==='run'){writeFileSync(join(repoRoot,'.dohc-dev/database-started'),'yes');return {stdout:'a'.repeat(64)};}
             if(args[0]==='inspect')return {stdout:'healthy'};
             if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
@@ -386,26 +452,33 @@ test("verification prepares the engine after Rust without changing gate scope", 
           }
           if(command==='pnpm' && args[0]==='run') {
             assert.ok(['typecheck','test:repo'].includes(args[1]));
+            assert.ok(existsSync(join(repoRoot,'packages/sdk/dist/built.txt')),'SDK must build before global typecheck and repository tests');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
           if(command==='pnpm' && args.includes('list')) {
-            return {stdout:JSON.stringify([{name:'@dohc/fixture',path:join(repoRoot,'packages/fixture')}])};
+            return {stdout:JSON.stringify([
+              {name:'@dohc/desktop',path:join(repoRoot,'apps/desktop')},
+              ...['fixture','mcp','share-web','unrelated','workspace-api'].map(name=>({name:'@dohc/'+name,path:join(repoRoot,name==='workspace-api'?'services':'packages',name)}))
+            ])};
           }
-          if(command==='pnpm' && args[1]==='@dohc/fixture') {
-            assert.deepEqual(args,['--filter','@dohc/fixture','run','test','--maxWorkers=4']);
-            assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
+          if(command==='pnpm' && args[2]==='run' && args[3]==='test') {
+            assert.deepEqual(args,['--filter',args[1],'run','test','--maxWorkers=4']);
+            assert.ok(${JSON.stringify(selected)}.includes(args[1]),'Unselected package executed: '+args[1]);
+            assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
+            if(!${browser})throw Error('Browser tools unavailable for this change');
             assert.deepEqual(args,['exec','playwright','install',...(process.platform==='linux'?['--with-deps']:[]),'chromium']);
             assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
             writeFileSync(join(repoRoot,'.dohc-dev/browser-installed'),'yes');
             return {stdout:''};
           }
           if(command==='pnpm' && args.includes('vitest.self-host-native.config.ts')) {
-            assertPrepared();
+            assert.ok(${nativeProof},'Unselected native proof');
+            assertPrepared({engineOnly:!${desktop}});
             assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_BINARY,enginePath);
             assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_SHA256,hashFile(enginePath));
             assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
@@ -416,9 +489,8 @@ test("verification prepares the engine after Rust without changing gate scope", 
             return {stdout:''};
           }
           if(args[0]==='apps/desktop/scripts/run-playwright.mjs') {
-            assertPrepared();
-            const receipt=JSON.parse(readFileSync(join(repoRoot,'.dohc-dev/verification/build.json'),'utf8'));
-            assert.ok(receipt.engine.artifact);
+            if(!${desktop || accounts})throw Error('Browser tools unavailable for this change');
+            if(${desktop})assertPrepared();
             const pr=process.env.FIXTURE_MODE==='pr';
             if(pr) {
               assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
@@ -428,10 +500,12 @@ test("verification prepares the engine after Rust without changing gate scope", 
               assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
             }
             if(args.includes('services/workspace-api/playwright.config.ts')) {
+              assert.ok(${accounts},'Unselected account proof');
               assert.ok(pr);
               writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
               return {stdout:''};
             }
+            assert.ok(${desktop},'Unselected desktop proof');
             const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding':'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
             const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[])];
@@ -446,8 +520,11 @@ test("verification prepares the engine after Rust without changing gate scope", 
       `);
       git(["add", "."]); git(["commit", "-m", "Verification fixture"]);
       const base = git(["rev-parse", "HEAD"]);
-      put("pnpm-lock.yaml", "gate-lock"); git(["add", "."]); git(["commit", "-m", "Select both gates"]);
-      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : [])]
+      if (changed) {
+        put(changed, changed === "pnpm-lock.yaml" ? "gate-lock" : "export const value = 2;\n");
+        git(["add", "."]); git(["commit", "-m", "Change fixture input"]);
+      }
+      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : [])]
         : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
       const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
@@ -455,7 +532,13 @@ test("verification prepares the engine after Rust without changing gate scope", 
         import {syncBuiltinESMExports} from 'node:module';
         import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
         const exec=cp.execFileSync;
-        cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+        cp.execFileSync=(command,...args)=>{
+          if(command==='rustc') {
+            if(!${rust || prepare})throw Error('Native tools unavailable for this JavaScript change');
+            return Buffer.from('fixture rustc');
+          }
+          return exec(command,...args);
+        };
         syncBuiltinESMExports();
         const {verify}=await import('./scripts/verification/verify.mjs');
         try {
@@ -465,7 +548,8 @@ test("verification prepares the engine after Rust without changing gate scope", 
         }
         catch(error) {console.error(error.message);process.exitCode=1;}
       `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env,
-        NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "" } });
+        NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
+        POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
       if (fault) {
         assert.equal(result.status, 1, result.stderr);
@@ -484,24 +568,35 @@ test("verification prepares the engine after Rust without changing gate scope", 
       } else {
         assert.equal(result.status, 0, result.stderr);
         const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
-        const rust = mode === "pr" && job !== "js";
-        const js = mode === "pr" && job !== "rust";
         assert.deepEqual(report.steps.map(({name})=>name), [
           ...(mode === "pr" ? ["install"] : []),
           "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
-          ...(js ? ["typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
+          ...(js && !desktop ? ["sdk-build"] : []), ...(js ? ["typecheck", "tests"] : []),
+          ...(nativeProof ? ["self-host-native"] : []), ...(browser ? ["browser-install"] : []),
+          ...(accounts ? ["accounts"] : []), ...(desktop ? ["desktop"] : []),
         ]);
         assert.equal(report.verdict, "PASS");
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
         assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));
         assert.ok(report.timings.every(phase => phase.startedAt && phase.finishedAt && phase.seconds >= 0));
-        assert.equal(report.timings.some(phase => phase.name === "prepare"), job !== "rust");
-        assert.equal(report.timings.some(phase => phase.name === "postgres-start"), js);
-        assert.equal(report.timings.some(phase => phase.name === "postgres-stop"), js);
+        assert.equal(report.timings.some(phase => phase.name === "prepare"), prepare);
+        assert.equal(report.timings.some(phase => phase.name === "postgres-start"), database);
+        assert.equal(report.timings.some(phase => phase.name === "postgres-stop"), database);
         assert.equal(report.provenance.status, "PASS");
-        assert.equal(Boolean(report.build), job !== "rust");
-        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
+        assert.equal(Boolean(report.build), prepare);
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), database);
+        assert.deepEqual(report.gates,{rust,js});
+        assert.equal(report.full,full);
+        if (js) {
+          assert.deepEqual(report.javascript.packages,selected);
+          assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop});
+          const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
+          assert.deepEqual(tests.selectedPackages,selected);
+          assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected.filter(name=>name!=="@dohc/desktop"));
+          const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
+          assert.deepEqual(calls.filter(({args})=>args[2]==="run" && args[3]==="test").map(({args})=>args[1]).sort(),tests.packages.map(pkg=>pkg.name).sort());
+        }
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -854,7 +949,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
     ]) {

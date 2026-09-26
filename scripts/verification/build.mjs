@@ -130,11 +130,12 @@ export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   }
 }
 
-export function assertPrepared() {
+export function assertPrepared({ engineOnly = false } = {}) {
   const receipt = readJson(receiptPath);
-  if (!preparedStatus("engine", receipt) || !preparedStatus("desktop", receipt)) {
+  if (!preparedStatus("engine", receipt) || !engineOnly && !preparedStatus("desktop", receipt)) {
     throw new Error("The desktop or engine does not match this checkout. Run pnpm qa:prepare before driving it.");
   }
+  if (engineOnly) return { version: receipt.version, engine: receipt.engine };
   const staged = join(repoRoot, "apps/desktop/target/debug", enginePath.split(/[\\/]/).at(-1));
   if (!engineArtifactMatches(staged, receipt.engine.artifact)) {
     throw new Error("The staged engine differs from the prepared engine. Run pnpm qa:prepare.");
