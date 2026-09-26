@@ -425,13 +425,14 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
-  // Writes one SDK-originated text file with an explicit per-operation
-  // author. This never reads or changes the workspace's ambient agent slot.
-  // Returns the resolved path where the write landed.
+  // Writes one text file with an explicit per-operation author, or none when
+  // the writer did not name itself. This never reads or changes the
+  // workspace's ambient agent slot. Returns the resolved path where the
+  // write landed.
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentWriteAuthor,
+    author: MomentWriteAuthor | null,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
@@ -3144,7 +3145,7 @@ export function createWorkspaceEngineCapture(
             text,
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            author,
+            ...(author ? { author } : {}),
           });
         } catch (error) {
           if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
