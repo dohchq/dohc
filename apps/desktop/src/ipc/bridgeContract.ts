@@ -6426,6 +6426,7 @@ export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
       "session-unavailable",
       "lineage-transition",
       "deleted",
+      "object-changed",
       "read-only",
     ]),
   }),

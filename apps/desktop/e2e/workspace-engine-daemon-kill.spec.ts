@@ -1,12 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   engineDaemonPids,
+  hardKillAppTree,
   hardKillPid,
   waitForFreshEngineDaemon,
 } from "./helpers/daemonKill";
+import { ydocUpdateCount } from "./helpers/engineDb";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -282,6 +284,112 @@ test("an outage longer than the retry window still persists the text at quit", a
     expect(onDisk).toContain(preKill);
     expect(onDisk).toContain(postKill);
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// edges-04. The whole app dies after the engine journaled an edit but before
+// the debounced settle wrote the file. On relaunch the editor shows the edit
+// from the engine's copy, and nothing else reads it: an agent or another app
+// sees the old file. The document must not claim Saved until the file has the
+// text, and dohc must write it without waiting for another keystroke.
+test("a document reopened after an app crash reads Saved only once its file has the text", async () => {
+  test.setTimeout(150_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const docPath = "abuse/crash.md";
+  const file = join(temp.rootPath, docPath);
+  const crashed = "CRASHREC_UNSETTLED_5e1f";
+  const diskText = async () => await readFile(file, "utf8").catch(() => "");
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: docPath, contents: "# Crash\n\nAnchor paragraph.\n" },
+    ]);
+    // The first run never settles an edit on its own, so the kill below
+    // cannot race the write it has to beat.
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" },
+    });
+    const appPid = desktop.app.process().pid;
+    if (appPid === undefined) throw new Error("Electron app has no pid.");
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, docPath);
+    await openEngineDoc(desktop.page, docPath);
+    await desktop.page.getByTestId("markdown-editor").click();
+    await desktop.page.keyboard.press("ControlOrMeta+End");
+
+    // Crash once the engine has journaled the edit.
+    const journaled = ydocUpdateCount(temp.rootPath);
+    await desktop.page.keyboard.insertText(` ${crashed}`);
+    await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);
+    await hardKillAppTree(appPid);
+    await desktop.close();
+    desktop = null;
+    expect(await diskText()).not.toContain(crashed);
+    // Reopen the document by hand after relaunch, so its marks can be watched
+    // from its first frame.
+    await rm(join(temp.rootPath, ".dohc/ui-state.json"), { force: true });
+
+    // The recovery settle waits on this file, so the test decides when the
+    // write may happen.
+    const gate = join(temp.baseDir, "open-settle-gate");
+    await writeFile(gate, "held");
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_YDOC_OPEN_SETTLE_GATE: gate },
+    });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    // Every save mark the document shows, from its first frame. Nothing is
+    // mounted yet, because the restored tab was cleared above.
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as unknown as { __saveMarks: string[] }).__saveMarks = seen;
+      const read = () => {
+        for (const mark of document.querySelectorAll('[data-testid="markdown-save-state"]')) {
+          const state = mark.getAttribute("data-state") ?? "";
+          if (seen.at(-1) !== state) seen.push(state);
+        }
+      };
+      read();
+      new MutationObserver(read).observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["data-state"],
+      });
+    });
+    const saveMarks = () =>
+      page.evaluate(() => (window as unknown as { __saveMarks: string[] }).__saveMarks);
+    expect(await saveMarks()).toEqual([]);
+    await openEngineDoc(page, docPath);
+    await expect(page.getByTestId("markdown-editor")).toContainText(crashed);
+
+    // Held: the document reads Saving… and never Saved, and the file lacks
+    // the text. The gate cannot open by itself, so this is not a race.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saving",
+    );
+    expect(await saveMarks()).toEqual(["saving"]);
+    expect(await diskText()).not.toContain(crashed);
+
+    // Released: the recovery settle writes the file, and only then Saved.
+    await rm(gate);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+    );
+    expect(await diskText()).toContain(crashed);
+    const marks = await saveMarks();
+    expect(marks, "the document read Saved before its file had the text").toEqual([
+      "saving",
+      "saved",
+    ]);
+    expect((await diskText()).match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

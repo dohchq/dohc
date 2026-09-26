@@ -50,6 +50,12 @@ interface Lineage {
   // daemon's exactly-one-update proof (`seed_only_lineage_source`,
   // crates/dohc-engine-collab/src/durable.rs).
   journaledUpdates: number;
+  // How many journaled updates the last settle covered, or `null` —
+  // mirrors `ydoc_docs.settled_update_seq`. An open reports the lineage
+  // unsettled while the two differ. The daemon also requires the version head
+  // to be what that settle wrote; the loopback's captured files do not move
+  // on a settle, so it checks the count alone.
+  settledUpdates: number | null;
   // The captured head sha the lineage's declared seed imported, or `null` —
   // mirrors `ydoc_docs.seed_source_sha256`. With exactly one journaled
   // update, no prior settle, and the captured file still holding this sha,
@@ -193,6 +199,18 @@ function seedNotFirstUpdateRefusal(): Error {
   });
 }
 
+// A journal write whose idempotency key already recorded other content
+// (`CollabError::IdempotencyKeyReused`).
+function idempotencyKeyReuseRefusal(): Error {
+  return Object.assign(new Error("idempotency-key-reuse-mismatch"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "idempotency-key-reuse-mismatch",
+      retry: "no",
+    },
+  });
+}
+
 function optionalBoolean(object: JsonObject, key: string): boolean | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
@@ -290,6 +308,12 @@ export class YdocLoopbackEngine implements EngineTransport {
   private nextMomentId = 1;
   private nextHeadMomentId = 1;
   private nextRecaptureOrder = 2;
+  // The daemon's request ledger for journal writes: a key answers its first
+  // result again, and refuses content it was not first used with.
+  private readonly recordRequests = new Map<
+    string,
+    { payload: string; result: JsonValue }
+  >();
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
@@ -583,7 +607,11 @@ export class YdocLoopbackEngine implements EngineTransport {
         path,
         contentKind,
         lineage: lineage ? "existing" : "absent",
+        unsettled:
+          lineage !== undefined &&
+          lineage.settledUpdates !== lineage.journaledUpdates,
         lineageClaimId: null,
+        lineageOriginatedHere: false,
         head: file ? file.head : "absent",
         ...(seedContent !== undefined && file !== undefined
           ? {
@@ -617,15 +645,27 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
       throw seedNotFirstUpdateRefusal();
     }
+    const payload = `${this.lineageKeyFor(session)}\0${sha256(update)}`;
+    const recorded = this.recordRequests.get(request.idempotencyKey);
+    if (recorded !== undefined) {
+      if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
+      return recorded.result;
+    }
     const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
     const entry = this.journalSessionState(session);
-    if (seed) entry.seedSourceSha = session.openHeadSha;
+    if (seed) {
+      entry.seedSourceSha = session.openHeadSha;
+      // The file holds what the seed imported, as the daemon records it.
+      entry.settledUpdates = entry.journaledUpdates;
+    }
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
-    return { seq: session.updateSeq, lineageClaimId: null };
+    const result = { seq: session.updateSeq, lineageClaimId: null };
+    this.recordRequests.set(request.idempotencyKey, { payload, result });
+    return result;
   }
 
   private settleSession(session: LoopbackSession): {
@@ -664,12 +704,16 @@ export class YdocLoopbackEngine implements EngineTransport {
       capturedFile.head === "present" &&
       sha256(capturedFile.content) === entry.seedSourceSha
     ) {
+      entry.settledUpdates = entry.journaledUpdates;
       return { content: capturedFile.content, sha256: entry.seedSourceSha };
     }
     const content = project(session);
     const digest = sha256(content);
     this.options.materialize?.({ path: session.path, content });
-    if (entry) entry.lastSettledSha = digest;
+    if (entry) {
+      entry.lastSettledSha = digest;
+      entry.settledUpdates = entry.journaledUpdates;
+    }
     return { content, sha256: digest };
   }
 
@@ -802,6 +846,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind: session.contentKind,
       lastSettledSha: null,
       journaledUpdates: 0,
+      settledUpdates: null,
       seedSourceSha: null,
     };
     Y.applyUpdate(entry.doc, Y.encodeStateAsUpdate(session.doc));
@@ -823,6 +868,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     return {
       result: {
         lineageClaimId: null,
+        lineageOriginatedHere: false,
         recoveredPaths: [],
         artifactAssets: [],
       },

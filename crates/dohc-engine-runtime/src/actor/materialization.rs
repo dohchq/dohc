@@ -781,7 +781,8 @@ pub(super) fn replay_pending_materializations(
                         store.write_with(&NoFaults, |transaction| {
                             transaction
                                 .execute(
-                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4 \
+                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, \
+                                     settled_update_seq = NULL, updated_at_ms = ?4 \
                                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                                     params![workspace_id, version_id, object_id, now_ms],
                                 )

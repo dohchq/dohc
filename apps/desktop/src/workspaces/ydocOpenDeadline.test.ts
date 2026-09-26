@@ -98,6 +98,7 @@ function captureWith(
         path: "note.md",
         head: "present" as const,
         lineage: "existing" as const,
+        unsettled: false,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
         applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
@@ -612,6 +613,7 @@ describe("the document open's capture-chain hold", () => {
           path: "note.md",
           head: "absent" as const,
           lineage: "absent" as const,
+          unsettled: false,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
@@ -702,6 +704,7 @@ describe("the document open's capture-chain hold", () => {
             path: "note.md",
             head: absent ? ("absent" as const) : ("present" as const),
             lineage: absent ? ("absent" as const) : ("existing" as const),
+            unsettled: false,
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
@@ -815,6 +818,7 @@ describe("the document open's capture-chain hold", () => {
           path: "note.md",
           head: "absent" as const,
           lineage: "absent" as const,
+          unsettled: false,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
@@ -902,6 +906,7 @@ describe("the document open's capture-chain hold", () => {
             head: "absent" as const,
             path: "note.md",
             lineage: evicted ? ("existing" as const) : ("absent" as const),
+            unsettled: false,
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
@@ -978,6 +983,7 @@ describe("the document open's capture-chain hold", () => {
             head: "absent" as const,
             path: "note.md",
             lineage: evicted ? ("existing" as const) : ("absent" as const),
+            unsettled: false,
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
@@ -1046,6 +1052,7 @@ describe("the document open's capture-chain hold", () => {
           path: "note.md",
           head: "absent" as const,
           lineage: "absent" as const,
+          unsettled: false,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,

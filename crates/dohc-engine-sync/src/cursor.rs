@@ -79,6 +79,7 @@ pub fn commit_relay_cursor(
     workspace_id: &str,
     cursor: &RelayCursor,
     faults: &dyn FaultInjector,
+    leases: &dyn crate::LeaseProbe,
     now_ms: i64,
 ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
@@ -126,10 +127,16 @@ pub fn commit_relay_cursor(
                 crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
+                    leases,
                     now_ms,
                 )?
             } else {
-                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
+                crate::enrolment::backfill_enrolment_window_in_tx(
+                    tx,
+                    workspace_id,
+                    leases,
+                    now_ms,
+                )?
             };
             // Refusals can also be created outside a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
@@ -204,6 +211,7 @@ pub(crate) fn write_pushed_seq(
     origin_id: &str,
     pushed_seq: i64,
     faults: &dyn FaultInjector,
+    leases: &dyn crate::LeaseProbe,
     now_ms: i64,
 ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
@@ -226,7 +234,7 @@ pub(crate) fn write_pushed_seq(
                 // update must not repeat that full-state work.
                 Ok(Vec::new())
             } else {
-                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, leases, now_ms)
             }
         })
 }

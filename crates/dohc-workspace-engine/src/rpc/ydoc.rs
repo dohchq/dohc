@@ -206,7 +206,14 @@ struct YdocOpenResult {
     path: String,
     content_kind: &'static str,
     lineage: &'static str,
+    /// The resumed lineage holds updates its workspace file may not: the client
+    /// settles it before it reports the document saved.
+    unsettled: bool,
     lineage_claim_id: Option<String>,
+    /// Whether this device claimed the lineage from its own unclaimed
+    /// history. A client that opened the lineage unclaimed keeps its document
+    /// under such a claim; any other new claim replaces it.
+    lineage_originated_here: bool,
     /// Whether the ENTERED VERSION has a committed snapshot for this path.
     /// "absent" means the daemon bound an empty doc over a path the version
     /// does not contain — legitimate only while the caller is creating the
@@ -342,6 +349,7 @@ struct YdocResyncResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_draft: Option<OwnerDraftDescriptor>,
     lineage_claim_id: Option<String>,
+    lineage_originated_here: bool,
     recovered_paths: Vec<String>,
     artifact_assets: Vec<ArtifactAssetDescriptorResult>,
 }
@@ -925,7 +933,9 @@ impl EngineService {
             } else {
                 "absent"
             },
+            unsettled: state.unsettled,
             lineage_claim_id: state.lineage_claim_id.clone(),
+            lineage_originated_here: state.lineage_originated_here,
             head: if state.head_blob_sha256.is_some() {
                 "present"
             } else {
@@ -1485,6 +1495,7 @@ impl EngineService {
                 dohc_engine_runtime::actor::YdocResyncState {
                     initial_update: draft.initial_update,
                     lineage_claim_id: Some(draft.descriptor.binding.lineage_claim_id.clone()),
+                    lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
                 },
@@ -1526,6 +1537,7 @@ impl EngineService {
         let result = serde_json::to_value(YdocResyncResult {
             owner_draft,
             lineage_claim_id: state.lineage_claim_id,
+            lineage_originated_here: state.lineage_originated_here,
             recovered_paths: state.recovered_paths,
             artifact_assets: state
                 .artifact_assets

@@ -211,7 +211,7 @@ async function world(options: {
           const bytes = Buffer.from(update).toString("base64");
           if (key !== undefined && journal.has(key)) {
             // The engine's rule: the same key with other bytes is refused.
-            if (journal.get(key) !== bytes) throw new Error("idempotency key reused with different content");
+            if (journal.get(key) !== bytes) throw new Error("idempotency-key-reuse-mismatch");
             armed?.();
             return;
           }
