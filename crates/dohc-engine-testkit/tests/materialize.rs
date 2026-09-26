@@ -1567,26 +1567,35 @@ fn keep_displaced(sc: &Scratch, store: &EngineStore, rel: &str, bytes: &[u8]) ->
     id
 }
 
-/// A save that stopped after it placed the copy, before the hidden name went,
-/// finishes on the next try: the copy that holds the kept bytes is its own, so
-/// no second copy appears and the hidden name goes.
-#[test]
-fn a_kept_copy_placed_before_a_crash_is_finished_not_copied_again() {
-    let sc = Scratch::new("kept-copy-crash");
-    let store = EngineStore::open(&sc.db(), 1).expect("open");
-    let options = MaterializeOptions {
+fn kept_copy_options() -> MaterializeOptions<'static> {
+    MaterializeOptions {
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
         now_ms: 30,
         faults: &NoFaults,
-    };
+    }
+}
+
+/// A save that stopped after it linked the copy, before the hidden name went,
+/// finishes on the next try: the copy is the kept file itself, so no second
+/// copy appears and the hidden name goes.
+#[cfg(unix)]
+#[test]
+fn a_kept_copy_linked_before_a_crash_is_finished_not_copied_again() {
+    let sc = Scratch::new("kept-copy-crash");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
     let id = keep_displaced(&sc, &store, "notes/r.md", b"kept bytes");
     // The link landed; the unlink of the hidden name did not.
-    std::fs::write(sc.target("notes/r (kept copy).md"), b"kept bytes").expect("placed copy");
+    std::fs::hard_link(
+        sc.target("notes/.dohc-write-job.displaced"),
+        sc.target("notes/r (kept copy).md"),
+    )
+    .expect("linked copy");
 
     assert_eq!(
-        save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save"),
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &kept_copy_options())
+            .expect("save"),
         KeptCopySave::Saved("notes/r (kept copy).md".to_owned())
     );
     assert_eq!(
@@ -1594,6 +1603,39 @@ fn a_kept_copy_placed_before_a_crash_is_finished_not_copied_again() {
         Some(&b"kept bytes"[..])
     );
     assert!(!sc.target("notes/r (kept copy 2).md").exists());
+    assert!(!sc.target("notes/.dohc-write-job.displaced").exists());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+/// A different file at the copy's name is never taken for the kept one, even
+/// with the same bytes: an editor can replace it between a comparison and the
+/// unlink. The kept file moves to the next name instead, and the other file
+/// stays as it was.
+#[test]
+fn a_different_file_with_the_same_bytes_is_not_taken_for_the_kept_copy() {
+    let sc = Scratch::new("kept-copy-same-bytes");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    let id = keep_displaced(&sc, &store, "notes/r.md", b"kept bytes");
+    std::fs::write(sc.target("notes/r (kept copy).md"), b"kept bytes").expect("other file");
+
+    assert_eq!(
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &kept_copy_options())
+            .expect("save"),
+        KeptCopySave::Saved("notes/r (kept copy 2).md".to_owned())
+    );
+    assert_eq!(
+        read(&sc, "notes/r (kept copy).md").as_deref(),
+        Some(&b"kept bytes"[..])
+    );
+    assert_eq!(
+        read(&sc, "notes/r (kept copy 2).md").as_deref(),
+        Some(&b"kept bytes"[..])
+    );
     assert!(!sc.target("notes/.dohc-write-job.displaced").exists());
     assert!(
         store

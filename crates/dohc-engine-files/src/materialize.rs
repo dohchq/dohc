@@ -2325,10 +2325,11 @@ pub fn save_kept_displacement(
             return Ok(KeptCopySave::NoValidName);
         }
         let copy = sibling_with_name(&target, &name);
-        // A copy that already holds the kept bytes is this save's own,
-        // placed before a crash or a failed unlink: finish it.
+        // A copy that is the kept file itself, linked before a crash or a
+        // failed unlink, is this save's own: finish it. Anything else at the
+        // name, even with the same bytes, is another file.
         if entry_exists(&copy)? {
-            if !same_file_bytes(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
+            if !is_same_file(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
                 continue;
             }
             std::fs::remove_file(&kept).map_err(|err| MaterializeError::io(&kept, &err))?;
@@ -2402,32 +2403,24 @@ fn move_kept_copy(
     }
 }
 
-/// Whether two regular files hold the same bytes: the same length, then the
-/// same content, read in chunks.
-fn same_file_bytes(left: &Path, right: &Path) -> std::io::Result<bool> {
-    let (left_meta, right_meta) = (
-        std::fs::symlink_metadata(left)?,
-        std::fs::symlink_metadata(right)?,
+/// Whether `copy` names the same file as `kept`: one inode under two names,
+/// which only the link-then-unlink move leaves behind. Read with `lstat`, so a
+/// symlink at `copy` never matches. Windows moves atomically and the fallback
+/// rename leaves no hidden name, so neither needs this, and Windows answers
+/// `false`: the hidden file and its row stay.
+#[cfg(unix)]
+fn is_same_file(kept: &Path, copy: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (kept, copy) = (
+        std::fs::symlink_metadata(kept)?,
+        std::fs::symlink_metadata(copy)?,
     );
-    if !left_meta.is_file() || !right_meta.is_file() || left_meta.len() != right_meta.len() {
-        return Ok(false);
-    }
-    let (mut left, mut right) = (std::fs::File::open(left)?, std::fs::File::open(right)?);
-    let (mut left_buf, mut right_buf) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
-    loop {
-        let read = left.read(&mut left_buf)?;
-        if read == 0 {
-            return Ok(right.read(&mut right_buf[..1])? == 0);
-        }
-        match right.read_exact(&mut right_buf[..read]) {
-            Ok(()) => {}
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(false),
-            Err(err) => return Err(err),
-        }
-        if left_buf[..read] != right_buf[..read] {
-            return Ok(false);
-        }
-    }
+    Ok(copy.is_file() && kept.dev() == copy.dev() && kept.ino() == copy.ino())
+}
+
+#[cfg(not(unix))]
+fn is_same_file(_kept: &Path, _copy: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// `notes (kept copy).md`, then `notes (kept copy 2).md`, within `budget`
