@@ -6,6 +6,7 @@ import {
   type Automation,
   type AutomationDiagnostic,
   type AutomationEntry,
+  type AutomationScheduleTrigger,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
@@ -17,6 +18,7 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
+  type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
@@ -29,6 +31,7 @@ import {
   fieldsNamedBy,
   parseCollectionAutomationId,
   reachStepsOf,
+  scheduleHash,
   subscriptionFor,
   unsupportedReason,
 } from "./automationPlan";
@@ -92,6 +95,9 @@ const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
+// Until the relay records which of the owner's computers runs schedules,
+// only a workspace that says it has never synced runs them.
+const NEVER_SYNCED_SCHEDULES = "Schedules run only in a workspace that has never synced, for now.";
 // After the deadline, a run's writes stop at their next check. A write
 // still running after this long is not settled at all, so nothing can land
 // after the claim settles; the engine's recovery requeues the claim.
@@ -105,6 +111,9 @@ const BUSY_RETRY_MS = 2_000;
 const MAX_SETTLE_ERROR_CHARS = 1000;
 
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
+type AutomationClaimScheduleResult = Awaited<ReturnType<VersionedLiveAdapter["claimAutomationSchedule"]>>;
+type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
+
 export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listCollections(): Promise<CollectionListResult>;
   /** Records under a path, or one Group's messages. */
@@ -118,6 +127,26 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listAutomationFailures(): Promise<{ failures: Array<{ automationId: string; claimId: string }> }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
   releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
+  /** Claims a schedule's due times and moves its mark, in one transaction. */
+  claimAutomationSchedule(input: {
+    automationId: string;
+    scheduleHash: string;
+    run: number[];
+    throughMs: number;
+  }): Promise<AutomationClaimScheduleResult>;
+  listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
+}
+
+/** An enabled schedule this executor can run. */
+export interface ScheduledAutomation {
+  automationId: string;
+  trigger: AutomationScheduleTrigger;
+  scheduleHash: string;
+  /**
+   * When this executor saw the schedule added or switched on, or null when
+   * it was already on as the executor opened. Nothing before it runs.
+   */
+  enabledSince: number | null;
 }
 
 /** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
@@ -179,6 +208,10 @@ export interface CollectionAutomationsOptions {
    * verdict did: the ⚡ field marks re-read.
    */
   onAutomationsChanged(): void;
+  /** The index was read again, so the schedules this executor can run may differ. */
+  onSchedulesChanged?(): void;
+  /** Whether this computer runs the workspace's schedules. Every computer does unless set. */
+  runsSchedules?(): Promise<boolean>;
   onError(context: string, error: unknown): void;
   /**
    * This workspace's dataset host, while it is open; resolves null when it is
@@ -455,6 +488,8 @@ export class CollectionAutomations {
   private busyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
   private readonly nowMs: () => number;
+  // Each enabled schedule's switch-on time, as the index last read them.
+  private enabledSince = new Map<string, number | null>();
 
   constructor(private readonly options: CollectionAutomationsOptions) {
     this.nowMs = options.nowMs ?? Date.now;
@@ -483,6 +518,7 @@ export class CollectionAutomations {
       }
       await this.loadIndex();
       if (!current()) return;
+      this.noteEnabledSchedules(true);
       this.state = "open";
       this.waitingFor.clear();
       await this.reconcile(true);
@@ -492,6 +528,7 @@ export class CollectionAutomations {
         if (!current()) return;
         this.options.onAutomationsChanged();
         this.rosterChanged();
+        this.options.onSchedulesChanged?.();
       },
       (error: unknown) => {
         // A later open tries again.
@@ -547,6 +584,7 @@ export class CollectionAutomations {
         }
       }
       await this.readNamedSchemas();
+      this.noteEnabledSchedules(false);
       await this.reconcile(false);
       // An edited or removed automation's held steps leave the notices.
       this.publishHolds();
@@ -556,6 +594,7 @@ export class CollectionAutomations {
       .then(() => {
         this.options.onAutomationsChanged();
         this.rosterChanged();
+        this.options.onSchedulesChanged?.();
       })
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
@@ -663,6 +702,46 @@ export class CollectionAutomations {
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
 
+  /** The enabled schedules this executor can run, or null until it has opened. */
+  schedules(): ScheduledAutomation[] | null {
+    if (this.state !== "open") return null;
+    const schedules: ScheduledAutomation[] = [];
+    for (const { automationId, automation } of this.everyAutomation()) {
+      if (automation.enabled && automation.when.kind === "schedule") {
+        schedules.push({
+          automationId,
+          trigger: automation.when,
+          scheduleHash: scheduleHash(automation.when),
+          enabledSince: this.enabledSince.get(automationId) ?? null,
+        });
+      }
+    }
+    return schedules;
+  }
+
+  /** Every schedule's mark in this workspace, or null while the engine is not answering. */
+  async scheduleMarks(): Promise<AutomationScheduleMark[] | null> {
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationScheduleMarks());
+    return listed?.marks ?? null;
+  }
+
+  /**
+   * Claims a schedule's due times and moves its mark. Returns the mark after
+   * the step, or null while the engine is not answering. New claims drain
+   * at once, because the engine's announcement can drop.
+   */
+  async claimSchedule(input: {
+    automationId: string;
+    scheduleHash: string;
+    run: number[];
+    throughMs: number;
+  }): Promise<AutomationScheduleMark | null> {
+    const claimed = await this.withLiveEngine((engine) => engine.claimAutomationSchedule(input));
+    if (claimed === null) return null;
+    if (claimed.claims.length > 0) this.notifyClaimed();
+    return claimed.mark;
+  }
+
   /** The automations in one Collection's file, with why each can or cannot run. */
   async automationsIn(collectionPath: string): Promise<CollectionAutomationsFile> {
     await this.ready();
@@ -680,6 +759,7 @@ export class CollectionAutomations {
     const unsupported = (automation: Automation) =>
       unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
+    const runsSchedules = (await this.options.runsSchedules?.()) ?? true;
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -706,7 +786,8 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation) ?? this.groupTriggerProblem(automation),
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation) ?? this.groupTriggerProblem(automation) ??
+          (automation.when.kind === "schedule" && !runsSchedules ? NEVER_SYNCED_SCHEDULES : null),
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
@@ -1437,6 +1518,19 @@ export class CollectionAutomations {
     return true;
   }
 
+  // Records when each schedule was added or switched on, at the index read
+  // that saw it, so a quick switch off and on between steps still counts.
+  private noteEnabledSchedules(opening: boolean): void {
+    const now = this.nowMs();
+    const next = new Map<string, number | null>();
+    for (const { automationId, automation } of this.everyAutomation()) {
+      if (!automation.enabled || automation.when.kind !== "schedule") continue;
+      const known = this.enabledSince.get(automationId);
+      next.set(automationId, known !== undefined ? known : opening ? null : now);
+    }
+    this.enabledSince = next;
+  }
+
   /** Every automation dohc can run, whether or not it is switched on. */
   private everyAutomation(): OwnedAutomation[] {
     const automations: OwnedAutomation[] = [];
@@ -1465,7 +1559,8 @@ export class CollectionAutomations {
         });
         continue;
       }
-      desired.set(automationId, { automationId, path: collectionPath, ...subscriptionFor(trigger) });
+      const subscription = subscriptionFor(trigger);
+      if (subscription !== null) desired.set(automationId, { automationId, path: collectionPath, ...subscription });
     }
     return desired;
   }

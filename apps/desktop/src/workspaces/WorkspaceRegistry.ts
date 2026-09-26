@@ -11,6 +11,7 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import { recordSynced } from "./syncHistory";
 
 // Electron wiring over the pure registry store. The registry lives in
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
@@ -76,6 +77,10 @@ export function setWorkspaceRemote(
   workspaceId: string,
   remote: RemoteIdentity,
 ): void {
+  // The folder keeps the fact too, so a forgotten and reattached copy still
+  // knows it synced. See syncHistory.ts.
+  const workspace = findWorkspace(workspaceId);
+  if (workspace && !workspace.remote) recordSynced(workspace.rootPath);
   store().setRemote(workspaceId, remote);
 }
 
@@ -127,6 +132,8 @@ export function setWorkspaceShareView(
   workspaceId: string,
   shareView: ShareViewIdentity,
 ): void {
+  const workspace = findWorkspace(workspaceId);
+  if (workspace && !workspace.shareView) recordSynced(workspace.rootPath);
   store().setShareView(workspaceId, shareView);
 }
 

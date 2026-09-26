@@ -13,6 +13,8 @@ import {
   localIsoTime,
   parseCollectionAutomationId,
   planRun,
+  scheduleDueAt,
+  scheduleHash,
   subscriptionFor,
   triggerMatches,
   unsupportedReason,
@@ -104,9 +106,10 @@ describe("what the executor can run", () => {
     expect(subscriptionFor({ kind: "field-changed", field: "Status", to: null, table: null })).toEqual({ kinds: ["changed"], fields: ["Status"] });
     expect(subscriptionFor({ kind: "record-changed", fields: null, table: null })).toEqual({ kinds: ["changed"] });
     expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
+    expect(subscriptionFor({ kind: "schedule", every: "day", at: "09:00", timezone: "UTC" })).toBeNull();
   });
 
-  it("names why it cannot run code, schedules, or a Find the query cannot express", () => {
+  it("names why it cannot run code or a Find the query cannot express", () => {
     const withStep = (step: string) => automation(`id: a\nname: A\nwhen: record-added\ndo: [${step}]`);
     expect(unsupportedReason(withStep("{set: {Done: true}}"))).toBeNull();
     expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toBeNull();
@@ -120,8 +123,11 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
     expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/dataset/);
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [{find: 'true', as: all}]")))
-      .toMatch(/record change/);
+    const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
+    expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
+    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/no trigger record/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid}\ndo: [{set: {Paid: true}}]")))
+      .toMatch(/record change or a schedule/);
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -151,6 +157,51 @@ describe("field writes", () => {
       { collection: "Archive", field: "Filed" },
       { collection: null, field: "Nudged" },
     ]);
+  });
+});
+
+describe("schedule claims", () => {
+  const sweep = automation("id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: UTC}\ndo: [{add-record: {Title: '=today()'}}]");
+  const due = Date.UTC(2026, 8, 25, 9);
+  const scheduled = (key: string): AutomationClaim => ({
+    ...claim(),
+    automationId: "collection:Tasks#sweep",
+    trigger: { key },
+    recordId: null,
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+  });
+
+  it("reads the due time from the claim's key", () => {
+    expect(scheduleDueAt(scheduled(`schedule:${due}`))).toBe(due);
+    for (const key of ["press:1", "schedule:", "schedule:01", "schedule:-5", "schedule:99999999999999999"]) {
+      expect(scheduleDueAt(scheduled(key)), key).toBeNull();
+    }
+    expect(scheduleDueAt(claim())).toBeNull();
+  });
+
+  it("matches only a schedule claim, and gives formulas the due time instead of a record", () => {
+    const run = { message: null, chat: null, automation: sweep, claim: scheduled(`schedule:${due}`), record: null, found: new Map() };
+    expect(triggerMatches(run)).toBe(true);
+    expect(triggerMatches({ ...run, claim: claim() })).toBe(false);
+    const request = evaluationRequest(run, due);
+    expect(request.scope).not.toHaveProperty("record");
+    // The due time reads in the schedule's own zone, whatever this computer's is.
+    expect(request.scope.trigger).toEqual({ kind: "schedule", dueAt: "2026-09-25T09:00:00.000+00:00" });
+    for (const [timezone, instant, dueAt] of [
+      ["America/New_York", Date.UTC(2026, 8, 25, 13), "2026-09-25T09:00:00.000-04:00"],
+      ["Asia/Kolkata", Date.UTC(2026, 8, 25, 3, 30), "2026-09-25T09:00:00.000+05:30"],
+    ] as const) {
+      const zoned = automation(`id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: ${timezone}}\ndo: [{add-record: {Title: x}}]`);
+      const zonedRun = { ...run, automation: zoned, claim: scheduled(`schedule:${instant}`) };
+      expect(evaluationRequest(zonedRun, instant).scope.trigger, timezone).toEqual({ kind: "schedule", dueAt });
+    }
+  });
+
+  it("hashes the schedule, so a changed time or zone starts a new mark", () => {
+    const base = { kind: "schedule" as const, every: "day" as const, at: "09:00", timezone: "UTC" };
+    expect(scheduleHash(base)).toBe(scheduleHash({ ...base }));
+    expect(scheduleHash(base)).not.toBe(scheduleHash({ ...base, at: "10:00" }));
+    expect(scheduleHash(base)).not.toBe(scheduleHash({ ...base, timezone: "Europe/London" }));
   });
 });
 

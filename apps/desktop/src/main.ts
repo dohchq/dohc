@@ -193,6 +193,8 @@ import {
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
+import { AutomationScheduler } from "./automations/automationScheduler";
+import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { readChatDirectory } from "./automations/automationChat";
@@ -1012,7 +1014,19 @@ async function remoteForWorkspace(workspace: RegistryEntry) {
     }
     throw new Error("Sign in to the account that synced this workspace.");
   }
+  await recordSyncedIfNeeded(workspace);
   return { credentials, credentialGeneration };
+}
+
+// The registry can know a workspace synced before its own folder does, as
+// for one synced before the folder kept a record. Bring the record up to
+// date, once per run, for a folder that is there.
+const syncRecorded = new Set<string>();
+async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
+  if (syncRecorded.has(workspace.workspaceId)) return;
+  if (!existsSync(join(workspace.rootPath, ".dohc", "manifest.json"))) return;
+  if ((await readSyncHistory(workspace.rootPath)) !== "synced") recordSynced(workspace.rootPath);
+  syncRecorded.add(workspace.workspaceId);
 }
 
 // Relay-share HTTP: grant-side calls go to the SYNC RELAY (not the
@@ -1328,9 +1342,14 @@ function createDesktopWorkspaceAuthorityState(
   });
   const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   const datasetHost: DatasetHostSlot = { pending: null };
+  const collectionAutomations = createCollectionAutomationsFor(binding, datasetHost);
+  automationScheduler.add(binding.workspaceId, collectionAutomations, {
+    runsHere: () => runsSchedulesHere(binding.workspaceId),
+    stillRuns: () => unsyncedHere(binding.workspaceId),
+  });
   return {
     activity: new WorkspaceActivityState(),
-    collectionAutomations: createCollectionAutomationsFor(binding, datasetHost),
+    collectionAutomations,
     datasetHost,
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
@@ -1412,6 +1431,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
+    automationScheduler.remove(binding.workspaceId);
     const results = await Promise.allSettled([
       // The executor hands its held dataset claims back before the host closes.
       state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
@@ -3386,6 +3406,39 @@ async function readWorkspaceTextIfPresent(rootPath: string, relativePath: string
   }
 }
 
+// The one timer for every open workspace's schedules.
+const automationScheduler = new AutomationScheduler({
+  clock: {
+    now: Date.now,
+    monotonic: () => performance.now(),
+    setTimer: (wake, delayMs) => setTimeout(wake, delayMs),
+    clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  },
+  onError: (context, error) => console.warn(`[desktop] Schedules: ${context}:`, error),
+});
+
+// Whether this computer runs a workspace's schedules. Until the relay
+// records which of the owner's computers does, this computer runs them
+// only for a workspace whose own folder says it never synced: this is its
+// only computer. A workspace shared with this person is never theirs to run.
+async function runsSchedulesHere(workspaceId: string): Promise<boolean> {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || !unsyncedHere(workspaceId)) return false;
+  return (await readSyncHistory(entry.rootPath)) === "never-synced";
+}
+
+// Turning sync on or opening a share records it in the folder and the
+// registry in one synchronous call, so this check, made with nothing
+// awaited before a claim, stops a step that started before.
+function unsyncedHere(workspaceId: string): boolean {
+  const entry = findWorkspace(workspaceId);
+  return entry !== null && entry.remote === undefined && entry.shareView === undefined;
+}
+
+// Windows sends every top-level window WM_TIMECHANGE when the system clock
+// is set, and the scheduler checks its due times again.
+const WM_TIMECHANGE = 0x001e;
+
 // An open workspace's Collection automations. Runs write through the same
 // seam as every other collection write, with the capture the workspace
 // already opened, and end at the run's own signal or the operation's.
@@ -3463,6 +3516,8 @@ function createCollectionAutomationsFor(
     runsGroupTriggers: () => findWorkspace(workspaceId)?.remote === undefined,
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
+    onSchedulesChanged: () => automationScheduler.wake(),
+    runsSchedules: () => runsSchedulesHere(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {
@@ -4216,6 +4271,19 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
       // A backoff can outlast a sleep. On wake, try each failing sync now.
       powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
+      for (const workspace of listWorkspaces()) {
+        if (workspace.remote === undefined && workspace.shareView === undefined) continue;
+        void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
+          console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
+      }
+      powerMonitor.on("suspend", () => automationScheduler.suspended());
+      powerMonitor.on("resume", () => automationScheduler.resumed());
+      powerMonitor.on("unlock-screen", () => automationScheduler.wake());
+      if (process.platform === "win32") {
+        app.on("browser-window-created", (_event, window) => {
+          window.hookWindowMessage(WM_TIMECHANGE, () => automationScheduler.wake());
+        });
+      }
       registerIpcHandlers();
       // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
       // Registered before the window so the first load can already fetch.
@@ -4273,6 +4341,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
     beginEngineShutdown: () => {
+      automationScheduler.dispose();
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },

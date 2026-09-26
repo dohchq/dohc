@@ -10,7 +10,7 @@ import {
   type JsonValue,
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { automationTextParts, type Automation } from "@dohc/workspace-contracts/automations";
+import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "../workspaces/collectionRecordEdits";
@@ -84,6 +84,22 @@ export function definitionDigest(automation: Automation): string {
   return createHash("sha256")
     .update(JSON.stringify([automation.when, automation.if, automation.do]))
     .digest("hex");
+}
+
+/**
+ * The schedule a mark counts for. A changed time, day, or time zone is a
+ * new schedule, so its mark starts again at the change.
+ */
+export function scheduleHash(trigger: AutomationScheduleTrigger): string {
+  return createHash("sha256").update(JSON.stringify(trigger)).digest("hex").slice(0, 16);
+}
+
+/** The due time a schedule claim runs for, from its `schedule:<due ms>` key, or null. */
+export function scheduleDueAt(claim: Pick<RunClaim, "trigger">): number | null {
+  const key = claim.trigger && "key" in claim.trigger ? claim.trigger.key : null;
+  const match = key === null ? null : /^schedule:(0|[1-9]\d{0,15})$/u.exec(key);
+  const due = match ? Number(match[1]) : null;
+  return due !== null && Number.isSafeInteger(due) ? due : null;
 }
 
 /** A step with its position among all steps, counted depth first. */
@@ -295,7 +311,10 @@ export function unsupportedReason(automation: Automation): string | null {
  * reads a Find condition the way the Collection's records can be queried.
  */
 export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
-  if (automation.when.kind !== "group-message" && !RECORD_TRIGGERS.has(automation.when.kind)) return RECORD_TRIGGERS_ONLY;
+  const scheduled = automation.when.kind === "schedule";
+  if (!scheduled && automation.when.kind !== "group-message" && !RECORD_TRIGGERS.has(automation.when.kind)) {
+    return "dohc can run automations that start from a record change or a schedule, or from a Group message.";
+  }
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -320,6 +339,12 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
         formulas += 1;
         const problem = findProblem(step.condition);
         if (problem !== null) return problem;
+        if (scheduled) {
+          const query = findQueryOf(step.condition);
+          if (!("problem" in query) && query.match === "field" && query.value.kind === "trigger-field") {
+            return "A scheduled automation has no trigger record, so a Find cannot compare with trigger.record.";
+          }
+        }
         break;
       }
       case "if":
@@ -382,9 +407,11 @@ export function fieldsNamedBy(automation: Automation, collectionPath: string): A
   return named;
 }
 
-/** The engine subscription an automation's trigger needs. */
-export function subscriptionFor(trigger: AutomationTrigger): { kinds: AutomationChangeKind[]; fields?: string[] } {
+/** The engine subscription an automation's trigger needs, or null: a schedule claims when it is due. */
+export function subscriptionFor(trigger: AutomationTrigger): { kinds: AutomationChangeKind[]; fields?: string[] } | null {
   switch (trigger.kind) {
+    case "schedule":
+      return null;
     case "record-added":
       return { kinds: ["added"] };
     case "record-changed":
@@ -418,7 +445,9 @@ export function datasetSubscriptionFor(
       ? `${definition.name} has several tables. Name the one this automation watches.`
       : `${definition.name} has no table named ${trigger.table}.` };
   }
-  const { kinds, fields } = subscriptionFor(trigger);
+  const subscription = subscriptionFor(trigger);
+  if (subscription === null) return { problem: RECORD_TRIGGERS_ONLY };
+  const { kinds, fields } = subscription;
   const fieldIds: string[] = [];
   for (const name of fields ?? []) {
     const field = table.fields.find((candidate) => candidate.name === name);
@@ -553,15 +582,35 @@ export function runRecordOf(record: CollectionRecord): RunRecord {
 
 const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.id });
 
-/** `ms` as ISO 8601 on this computer's clock, with its UTC offset. */
-export function localIsoTime(ms: number): string {
-  const date = new Date(ms);
-  const offset = -date.getTimezoneOffset();
+/**
+ * `ms` as ISO 8601 with its UTC offset: on this computer's clock, or in
+ * `timeZone` when given.
+ */
+export function localIsoTime(ms: number, timeZone?: string): string {
+  const offset = timeZone === undefined ? -new Date(ms).getTimezoneOffset() : zoneOffsetMinutes(ms, timeZone);
   const local = new Date(ms + offset * 60_000).toISOString().slice(0, -1);
   const sign = offset < 0 ? "-" : "+";
   const hours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0");
   const minutes = String(Math.abs(offset) % 60).padStart(2, "0");
   return `${local}${sign}${hours}:${minutes}`;
+}
+
+// The zone's UTC offset at `ms`, in whole minutes.
+function zoneOffsetMinutes(ms: number, timeZone: string): number {
+  const format = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  });
+  const fields = new Map(format.formatToParts(ms).map((part) => [part.type, Number(part.value)]));
+  const field = (type: Intl.DateTimeFormatPartTypes) => fields.get(type) ?? 0;
+  const local = Date.UTC(field("year"), field("month") - 1, field("day"), field("hour"), field("minute"), field("second"));
+  return Math.round((local - Math.floor(ms / 1_000) * 1_000) / 60_000);
 }
 
 type Fact = AutomationClaim["change"]["fields"][number];
@@ -570,6 +619,7 @@ type Fact = AutomationClaim["change"]["fields"][number];
 export interface RunClaim {
   automationId: string;
   claimId: string;
+  trigger?: AutomationClaim["trigger"];
   collectionPath: string;
   change: {
     kind: AutomationClaim["change"]["kind"];
@@ -619,6 +669,8 @@ export function triggerMatches(inputs: RunInputs): boolean {
       return change.kind === "added" || change.kind === "changed";
     case "group-message":
       return change.kind === "message";
+    case "schedule":
+      return change.kind === "schedule" && scheduleDueAt(claim) !== null;
     case "field-changed": {
       if (change.kind !== "changed") return false;
       const fact = change.fields.find((candidate) => candidate.field === trigger.field);
@@ -676,7 +728,7 @@ function recordBefore(record: RunRecord, claim: RunClaim): JsonObject {
   return before;
 }
 
-/** One evaluator request for every formula in the run. `nowMs` is when the change was claimed. */
+/** One evaluator request for every formula in the run. `nowMs` is when the change was claimed, or a schedule's due time. */
 export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationRequest {
   const { automation, claim, record, found } = inputs;
   const formulas: AutomationFormula[] = [];
@@ -757,16 +809,19 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const author = message && typeof message.authorUserId === "string" && typeof message.authorDisplayName === "string"
     ? { id: message.authorUserId, name: message.authorDisplayName }
     : null;
+  const dueAt = scheduleDueAt(claim);
   const scope: AutomationScope = {
     ...(triggerRecord ? { record: triggerRecord } : {}),
     ...(message ? { message } : {}),
     previous: previousValues(claim),
-    trigger: {
-      kind: trigger.kind,
-      change: claim.change.kind,
-      fields: claim.change.fields.map((fact) => fact.field),
-      record: triggerRecord,
-    },
+    trigger: trigger.kind === "schedule" && dueAt !== null
+      ? { kind: "schedule", dueAt: localIsoTime(dueAt, trigger.timezone) }
+      : {
+          kind: trigger.kind,
+          change: claim.change.kind,
+          fields: claim.change.fields.map((fact) => fact.field),
+          record: triggerRecord,
+        },
     // A Group message names its author; record claims do not yet name the person.
     person: author,
     bindings: bound,

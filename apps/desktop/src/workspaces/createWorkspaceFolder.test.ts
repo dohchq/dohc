@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceFolder } from "./createWorkspaceFolder";
+import { readSyncHistory, recordSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 
 let base: string;
@@ -32,7 +33,7 @@ describe("createWorkspaceFolder", () => {
     if (hasManifest) expect(await readFile(manifestPath, "utf8")).toBe(manifest);
   });
 
-  it("creates a fresh workspace with only its manifest", async () => {
+  it("creates a fresh workspace with its manifest and nothing else in the folder", async () => {
     const root = join(base, "personal");
     const created = await createWorkspaceFolder({ rootPath: root, kind: "personal" });
     const manifest = JSON.parse(
@@ -45,6 +46,27 @@ describe("createWorkspaceFolder", () => {
       workspaceId: created.workspaceId,
     });
     expect(await readdir(root)).toEqual([".dohc"]);
+    expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
+  });
+
+  it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
+    const root = join(base, "reattached");
+    await createWorkspaceFolder({ rootPath: root, kind: "personal" });
+    recordSynced(root);
+    // Forgetting drops only the registry entry; attaching the folder again
+    // adopts its manifest and leaves the record.
+    await createWorkspaceFolder({ rootPath: root, kind: "personal" });
+    expect(await readSyncHistory(root)).toBe("synced");
+
+    const joined = join(base, "joined-history");
+    await createWorkspaceFolder({ rootPath: joined, kind: "personal", workspaceId: "ws-synced-elsewhere" });
+    expect(await readSyncHistory(joined), "a join synced").toBe("synced");
+
+    const legacy = join(base, "legacy");
+    await mkdir(join(legacy, ".dohc"), { recursive: true });
+    expect(await readSyncHistory(legacy), "no record is no answer").toBe("unknown");
+    await writeFile(join(legacy, ".dohc", "sync-history.json"), "{\"version\": 2, \"synced\": false}");
+    expect(await readSyncHistory(legacy)).toBe("unknown");
   });
 
   it("adopts an existing workspace instead of overwriting its identity", async () => {

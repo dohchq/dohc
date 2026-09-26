@@ -25,6 +25,7 @@ import {
   planRun,
   reachStepsOf,
   runRecordOf,
+  scheduleDueAt,
   stepKey,
   triggerMatches,
   type PlannedEffect,
@@ -450,9 +451,9 @@ async function plan(
   }
   const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
-  // Formulas read `now` as the time of the change, so every attempt plans
-  // the same values.
-  const request = evaluationRequest(inputs, claim.createdAtMs);
+  // Formulas read `now` as the time of the change, or a schedule's due
+  // time, so every attempt plans the same values.
+  const request = evaluationRequest(inputs, scheduleDueAt(claim) ?? claim.createdAtMs);
   const results = request.formulas.length === 0
     ? []
     : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);

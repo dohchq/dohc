@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import { recordNeverSynced, recordSynced } from "./syncHistory";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -106,6 +107,10 @@ export async function createWorkspaceFolder(input: {
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: "wx" },
   );
+  // A folder that had no manifest was never a dohc workspace. A join names
+  // the synced workspace's id, and its folder records that it synced.
+  if (input.workspaceId === undefined) await recordNeverSynced(input.rootPath);
+  else recordSynced(input.rootPath);
   return {
     workspaceId: manifest.workspaceId,
     rootPath: input.rootPath,
