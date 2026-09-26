@@ -674,6 +674,92 @@ describe("the builder", () => {
     expect(written).toHaveLength(1);
   });
 
+  it.each(["existing", "new"])("keeps a newer %s draft after retrying an older save, then saves it against the acknowledged version", async (kind) => {
+    const { bridge, written } = makeBridge(kind === "new" ? { status: "missing" } : read([summary(stamp)]));
+    bridge.writeCollectionAutomations.mockRejectedValueOnce(new Error("Write unavailable"));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    if (kind === "new") await user.click(await screen.findByRole("button", { name: "New automation" }));
+    else await openBuilder(user);
+    const name = screen.getByRole("textbox", { name: "Name" });
+    await user.clear(name);
+    await user.type(name, "Draft A");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not save automations.yaml.", expect.any(Error), expect.any(Function),
+    ));
+    const tryAgain = onError.mock.calls[0]![2] as () => void;
+    await waitFor(() => expect(name.matches(":disabled")).toBe(false));
+    await user.clear(name);
+    await user.type(name, "Draft B");
+
+    await act(async () => tryAgain());
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.name).toBe("Draft A");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Draft B");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(2));
+    expect(written[1]!.automations[0]!.name).toBe("Draft B");
+    expect(written[1]!.automations).toHaveLength(1);
+    expect(written[1]!.automations[0]!.id).toBe(written[0]!.automations[0]!.id);
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull());
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a different builder open when an earlier save finishes", async () => {
+    const { bridge, written, replaceFile } = makeBridge(read([summary(stamp), summary(nudge)]));
+    let finish!: (result: WriteCollectionAutomationsResult) => void;
+    bridge.writeCollectionAutomations.mockImplementationOnce((payload) => {
+      written.push(payload);
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await openBuilder(user, nudge.name);
+
+    await act(async () => {
+      replaceFile(read(written[0]!.automations.map((automation) => summary(automation))));
+      finish({ status: "written", contentHash: HASH });
+    });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(nudge.name);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("can retry a save after its builder closes without closing another builder", async () => {
+    const { bridge, written } = makeBridge(read([summary(stamp), summary(nudge)]));
+    bridge.writeCollectionAutomations.mockRejectedValueOnce(new Error("Write unavailable"));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const tryAgain = onError.mock.calls[0]![2] as () => void;
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await openBuilder(user, nudge.name);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+
+    await act(async () => tryAgain());
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.name).toBe(`${stamp.name}!`);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(`${nudge.name}!`);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
   it("asks before the page closes the panel over changes, and keeps no draft once they are discarded", async () => {
     makeBridge(read([summary(stamp)]));
     const onClose = vi.fn();

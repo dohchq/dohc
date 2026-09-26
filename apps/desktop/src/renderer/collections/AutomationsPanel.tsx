@@ -578,14 +578,21 @@ export function AutomationsPanel(props: {
    * theirs on purpose. A Try again from the toast checks again against the
    * file as it is then, even after the builder closed.
    */
-  const saveEdited = (automation: Automation, open: Editing | null = editingRef.current, agreed = false) => {
+  const saveEdited = (
+    automation: Automation,
+    open: Editing | null = editingRef.current,
+    agreed = false,
+    submittedDraft = latestDraft.current?.automation,
+  ) => {
     const current = fileRef.current;
     const listed = current === null || current.status === "unavailable" ? undefined : editableOf(current)?.automations;
     if (!open || !listed) return;
     const stillOpen = editingRef.current?.session === open.session;
     const { original } = open;
     const now = original === null ? undefined : listed.find((entry) => entry.id === original.id);
-    const stopLeaving = () => setLeaving(null);
+    const stopLeaving = () => {
+      if (editingRef.current?.session === open.session) setLeaving(null);
+    };
     if (original !== null && now === undefined) {
       stopLeaving();
       if (stillOpen) setEditing({ ...open, original: null });
@@ -605,7 +612,20 @@ export function AutomationsPanel(props: {
         ? [...automations, automation]
         : automations.map((entry) => (entry.id === original.id ? automation : entry)),
       () => {
-        if (!stillOpen) return;
+        const current = editingRef.current;
+        if (current?.session !== open.session) return;
+        // A notice can retry an older draft while this builder has newer edits.
+        // Acknowledge the saved version without closing those edits.
+        if (JSON.stringify(latestDraft.current?.automation) !== JSON.stringify(submittedDraft)) {
+          setEditing({
+            ...current,
+            start: { ...current.start, id: automation.id },
+            original: automation,
+            baseline: automation,
+          });
+          stopLeaving();
+          return;
+        }
         forgetDraft();
         setEditing(null);
         const then = leavingRef.current;
@@ -614,8 +634,8 @@ export function AutomationsPanel(props: {
       },
       agreed,
       stopLeaving,
-      () => saveEdited(automation, open, agreed),
-      () => saveEdited(automation, open, true),
+      () => saveEdited(automation, open, agreed, submittedDraft),
+      () => saveEdited(automation, open, true, submittedDraft),
     );
   };
   // A draft saved or discarded is not kept when the panel goes away.
