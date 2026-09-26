@@ -704,7 +704,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                     path.clone(),
                     ContentKind::Richdoc,
                     Regime::LocalOnly,
-                    doc.frontmatter_set("status", "doing"),
+                    doc.frontmatter_set("status", "doing").expect("set status"),
                     editor.map(|_| AUTOMATION.to_owned()),
                     editor.and_then(automation),
                     created.lineage_claim_id.clone(),
