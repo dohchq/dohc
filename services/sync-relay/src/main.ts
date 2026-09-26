@@ -22,7 +22,8 @@ import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { isAutomationHostPath } from "./automationHostRoutes";
-import { AUTOMATION_HOST_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
+import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
+import { AUTOMATION_HOST_MAX_BODY_BYTES, AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
@@ -421,12 +422,22 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
   );
 }
 
+// Presses from shared views go when their retention ends, whether or not
+// more arrive or any host lists them.
+const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+setInterval(() => {
+  pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
+    console.error("[sync-relay] automation press prune failed:", error);
+  });
+}, AUTOMATION_PRESS_PRUNE_INTERVAL_MS).unref();
+
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     isAutomationHostPath(url.pathname) ? AUTOMATION_HOST_MAX_BODY_BYTES :
+    isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :

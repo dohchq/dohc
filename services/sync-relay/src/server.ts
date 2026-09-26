@@ -36,6 +36,12 @@ import {
   type NoticeRoute,
 } from "./noticeRoutes";
 import {
+  createAutomationPressRateLimiters,
+  createAutomationPressRoutes,
+  parseAutomationPressAction,
+  type AutomationPressRoute,
+} from "./automationPressRoutes";
+import {
   AUTOMATION_HOST_BUCKET_CAPACITY,
   AUTOMATION_HOST_MAX_OWNERS,
   AUTOMATION_HOST_REFILL_PER_SECOND,
@@ -160,6 +166,8 @@ export interface CreateSyncRelayHandlerOptions {
   noticePostRateLimiter?: TokenBucketLimiter;
   // Changes to a workspace's automation host, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
+  // Button presses from shared views, per grant, and the host's answers, per owner.
+  automationPressRateLimiters?: ReturnType<typeof createAutomationPressRateLimiters>;
   linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
@@ -186,6 +194,7 @@ type SyncRelayRoute =
   | { route: "workspaces" }
   | NoticeRoute
   | AutomationHostRoute
+  | AutomationPressRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
@@ -255,6 +264,7 @@ export function createSyncRelayHandler({
     NOTICE_POST_REFILL_PER_SECOND,
     NOTICE_POST_MAX_SENDERS,
   ),
+  automationPressRateLimiters = createAutomationPressRateLimiters(),
   automationHostRateLimiter = new TokenBucketLimiter(
     AUTOMATION_HOST_BUCKET_CAPACITY,
     AUTOMATION_HOST_REFILL_PER_SECOND,
@@ -436,6 +446,9 @@ export function createSyncRelayHandler({
     noticePostRateLimiter,
   );
   const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs, automationHostRateLimiter);
+  const automationPresses = createAutomationPressRoutes({
+    storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
+  });
 
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
@@ -796,6 +809,16 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
+      if (route.route === "automation-presses") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await automationPresses.respondToHost(request, route, actor.userId);
+      }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -857,6 +880,10 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-collection-writes") {
         return await respondToCollectionWrites(request, route, actor.userId);
+      }
+
+      if (route.route === "share-automation-presses") {
+        return await automationPresses.respondToSharePress(request, route.shareId, actor.userId);
       }
 
       if (route.route === "share-presence") {
@@ -1076,6 +1103,9 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 4 && parts[3] === "collection-writes") {
       return { route: "share-collection-writes", shareId };
     }
+    if (parts.length === 4 && parts[3] === "automation-presses") {
+      return { route: "share-automation-presses", shareId };
+    }
     if (parts.length === 6 && parts[3] === "proposals" && parts[5] === "withdraw") {
       return {
         route: "share-proposal-withdraw",
@@ -1097,6 +1127,11 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();
+  }
+  if (parts[2] === "automation-presses" && parts.length <= 4) {
+    const action = parseAutomationPressAction(parts[3]);
+    if (!action) throw notFound();
+    return { route: "automation-presses", workspaceId, action };
   }
   if (isAutomationHostPath(parts)) {
     const action = parseAutomationHostAction(parts[3]);

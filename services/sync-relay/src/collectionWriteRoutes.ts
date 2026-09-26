@@ -3,8 +3,8 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError, RELAY_ERRORS } from "./errors";
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
-import { authorizeShareGrantAction, type AuthorizedShareAction } from "./shareAuthorization";
-import { filterCollectionWriteForShare, type ShareSelector } from "./shareFilter";
+import { namedCollectionEditGrant } from "./collectionEditGrant";
+import { filterCollectionWriteForShare } from "./shareFilter";
 import { CollectionWriteStaleError, type SyncRelayStorage } from "./storage";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
@@ -44,30 +44,6 @@ export function createCollectionWriteRoutes(input: {
 }) {
   const { storage } = input;
 
-  // The caller's own named grant with Edit on files. A grant opened from a
-  // public link is refused until the owner promotes it.
-  const namedEditGrant = (shareId: string, userId: string): AuthorizedShareAction<ShareSelector> => {
-    let denied = false;
-    for (const grant of storage.listActiveShareGrantsForRecipient(shareId, userId)) {
-      const result = authorizeShareGrantAction({
-        storage,
-        grantId: grant.grantId,
-        action: "propose",
-        principal: { kind: "user", userId },
-      });
-      if (!result.ok) {
-        denied ||= result.reason === "denied";
-        continue;
-      }
-      if (result.grant.parentGrantId !== null) {
-        denied = true;
-        continue;
-      }
-      return result as AuthorizedShareAction<ShareSelector>;
-    }
-    throw denied ? relayError("share_read_only") : notFound();
-  };
-
   return async function respondToCollectionWrites(
     request: Request,
     route: CollectionWriteRoute,
@@ -75,7 +51,7 @@ export function createCollectionWriteRoutes(input: {
   ): Promise<Response> {
     if (request.method !== "POST") throw relayError("method_not_allowed");
     await input.claimPendingShares(actorUserId);
-    const authorized = namedEditGrant(route.shareId, actorUserId);
+    const authorized = namedCollectionEditGrant(storage, route.shareId, actorUserId);
     const { share, grant } = authorized;
     // Every admitted request spends a token before its body is read, so a
     // refused request costs its sender the same as a written one.

@@ -11,7 +11,7 @@ import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
 import { proposalBase, proposalMomentPayload, type NamedMomentAuthor } from "../recipientMoments";
 import { COLLECTION_FILE_ORIGIN_PREFIX } from "../relayLogInputs";
-import { authorizeShareGrantAction } from "../shareAuthorization";
+import { currentCollectionEditGrant } from "../collectionEditGrant";
 import {
   COLLECTION_AUTOMATIONS_FILE,
   COLLECTION_SCHEMA_FILE,
@@ -21,7 +21,6 @@ import {
   type ProposedChange,
 } from "../shareFilter";
 import type { StorageContext } from "./context";
-import { readCurrentShareGrant } from "./currentShareGrant";
 import { SyncRelayBlobMissingError } from "./errors";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { SqliteDb } from "./types";
@@ -129,22 +128,8 @@ export function commitCollectionWrite(
   return storage.tx(() => {
     const again = prior();
     if (again) return { receipt: again, created: false };
-    const current = readCurrentShareGrant(storage, {
-      grantId: input.grantId,
-      principal: { kind: "user", userId: input.userId },
-      generation: input.grantGeneration,
-    });
-    if (!current || current.share.shareId !== input.shareId || current.grant.parentGrantId !== null) {
-      throw notFound();
-    }
     // Edit on files, as a proposal needs; the decision then narrows it.
-    const authorized = authorizeShareGrantAction({
-      storage,
-      grantId: input.grantId,
-      action: "propose",
-      principal: { kind: "user", userId: input.userId },
-    });
-    if (!authorized.ok) throw authorized.reason === "denied" ? relayError("share_read_only") : notFound();
+    const authorized = currentCollectionEditGrant(storage, input);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, input.rawChanges, {
       channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
     });
