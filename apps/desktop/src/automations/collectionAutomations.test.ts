@@ -2448,6 +2448,15 @@ describe("Collection automations", () => {
     expect(w.journaled).toEqual([]);
   });
 
+  it("fails a document Collection's claim for an automation that runs a Collection action, before any write", async () => {
+    const w = await world({ automations: { Tasks: "  - id: act\n    name: Act\n    when: record-added\n    do:\n      - set: {Seen: true}\n      - if: 'false'\n        do: [{set: {Seen: false}}]\n        otherwise: [{invoke: tasks.archive}]\n" } });
+    const claim = w.claim("collection:Tasks#act", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: expect.stringMatching(/cannot name a table or a Collection action/) });
+    expect(w.journaled).toEqual([]);
+  });
+
   it("leaves a run to the next drain when a pause lands as its last effect is recorded", async () => {
     const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });

@@ -82,6 +82,11 @@ describe("dataset automation steps", () => {
     expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), generated)).toBeNull();
   });
 
+  it("says it cannot run an action step yet", () => {
+    expect(datasetAutomationProblem(automation("      - invoke: invoices.status\n"), generated))
+      .toBe("dohc cannot run Collection actions from automations yet.");
+  });
+
   it("pins a reversible edit first, then the one with the fewest fields beyond the step's", () => {
     const pinned = pinDatasetOperations(automation(`      - set:
           Status: Done

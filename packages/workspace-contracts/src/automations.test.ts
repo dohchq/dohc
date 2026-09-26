@@ -3,6 +3,8 @@ import {
   AUTOMATION_DIAGNOSTIC_CODES,
   AUTOMATION_FORMULA_NAMES,
   AUTOMATION_RESERVED_NAMES,
+  MAX_ACTION_INPUT_KEY_LENGTH,
+  MAX_ACTION_INPUT_KEYS,
   MAX_AUTOMATION_ID_LENGTH,
   MAX_AUTOMATION_NAME_LENGTH,
   MAX_AUTOMATION_STEPS,
@@ -1098,6 +1100,22 @@ automations:
       - set:
           Sent: true
         operation: invoices.edit
+
+  - id: mark-paid
+    name: Mark paid
+    when:
+      button: Mark paid
+      table: Invoices
+    do:
+      - invoke: invoices.markPaid
+        input:
+          id: '=record.id'
+          paidOn: '=today()'
+          note: Paid from the table
+          tags:
+            - paid
+            - manual
+      - invoke: invoices.recount
 `;
 
 const DATASET_CASES: AutomationCase[] = [
@@ -1142,6 +1160,76 @@ const DATASET_CASES: AutomationCase[] = [
     expected: [{ code: "too-long", path: at("/when/table") }],
   },
   {
+    name: "an invoke step with no action",
+    item: withStep("{invoke: '', input: {id: '=record.id'}}"),
+    expected: [{ code: "empty-value", path: at("/do/0/invoke") }],
+  },
+  {
+    name: "an action named by a formula",
+    item: withStep("{invoke: '=pick()'}"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/invoke") }],
+  },
+  {
+    name: "an action name the dataset host would refuse",
+    item: withStep("{invoke: 1markPaid}"),
+    expected: [{ code: "invalid-operation-name", path: at("/do/0/invoke") }],
+  },
+  {
+    name: "an action name with a part JSON objects reserve",
+    item: withStep("{invoke: invoices.__proto__}"),
+    expected: [{ code: "invalid-operation-name", path: at("/do/0/invoke") }],
+  },
+  {
+    name: "an operation name with a space",
+    item: withStep("{set: {X: 1}, operation: invoices edit}"),
+    expected: [{ code: "invalid-operation-name", path: at("/do/0/operation") }],
+  },
+  {
+    name: "an input key written as a formula",
+    item: withStep("{invoke: invoices.markPaid, input: {'=id': 1}}"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/input/=id") }],
+  },
+  {
+    name: "an operation option on an invoke step, which names its action itself",
+    item: withStep("{invoke: invoices.markPaid, operation: invoices.edit}"),
+    expected: [{ code: "unknown-property", path: at("/do/0/operation") }],
+  },
+  {
+    name: "an input that is not a mapping",
+    item: withStep("{invoke: invoices.markPaid, input: '=record'}"),
+    expected: [{ code: "expected-mapping", path: at("/do/0/input") }],
+  },
+  {
+    name: "an empty input",
+    item: withStep("{invoke: invoices.markPaid, input: {}}"),
+    expected: [{ code: "empty-value", path: at("/do/0/input") }],
+  },
+  {
+    name: "an input key JSON objects reserve",
+    item: withStep("{invoke: invoices.markPaid, input: {__proto__: 1}}"),
+    expected: [{ code: "reserved-input-key", path: at("/do/0/input/__proto__") }],
+  },
+  {
+    name: "an input key past its bound",
+    item: withStep(`{invoke: invoices.markPaid, input: {${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}: 1}}`),
+    expected: [{ code: "too-long", path: at(`/do/0/input/${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}`) }],
+  },
+  {
+    name: "an input key written twice as a number and as text",
+    item: withStep("{invoke: invoices.markPaid, input: {2024: 1, '2024': 2}}"),
+    expected: [{ code: "duplicate-key", path: at("/do/0/input/2024") }],
+  },
+  {
+    name: "an input value that is a mapping",
+    item: withStep("{invoke: invoices.markPaid, input: {id: {nested: 1}}}"),
+    expected: [{ code: "expected-scalar", path: at("/do/0/input/id") }],
+  },
+  {
+    name: "more input keys than an action takes",
+    item: withStep(`{invoke: invoices.markPaid, input: {${Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => `k${index}: 1`).join(", ")}}}`),
+    expected: [{ code: "too-many-inputs", path: at("/do/0/input") }],
+  },
+  {
     name: "a table and a record-added argument",
     item: "id: a\nname: A\nwhen: {record-added: Invoices, table: Invoices}\ndo: [{set: {X: 1}}]",
     expected: [{ code: "expected-empty", path: at("/when/record-added") }],
@@ -1156,7 +1244,7 @@ describe("dataset entries", () => {
   });
 
   it("reads the operation each step invokes and the table each trigger watches", () => {
-    const [close, added, changed, address, removed, overdue, send] = validAutomations(DATASET_KINDS);
+    const [close, added, changed, address, removed, overdue, send, markPaid] = validAutomations(DATASET_KINDS);
     expect(close?.when).toEqual({ kind: "field-changed", field: "Paid", to: { kind: "literal", value: true }, table: "Invoices" });
     expect(close?.do).toEqual([
       { kind: "set", values: [{ field: "Status", value: { kind: "literal", value: "Closed" } }], records: null, operation: "invoices.edit" },
@@ -1182,6 +1270,30 @@ describe("dataset entries", () => {
     expect(removed?.when).toEqual({ kind: "record-removed", table: "Customers" });
     expect(overdue?.when).toEqual({ kind: "starts-matching", condition: "record.Due < today()", table: "Invoices" });
     expect(send?.when).toEqual({ kind: "button", field: "Send", table: "Invoices" });
+    expect(markPaid?.do).toEqual([
+      {
+        kind: "invoke",
+        operation: "invoices.markPaid",
+        input: [
+          { key: "id", value: { kind: "formula", expression: "record.id" } },
+          { key: "paidOn", value: { kind: "formula", expression: "today()" } },
+          { key: "note", value: { kind: "literal", value: "Paid from the table" } },
+          { key: "tags", value: { kind: "literal", value: ["paid", "manual"] } },
+        ],
+      },
+      { kind: "invoke", operation: "invoices.recount", input: [] },
+    ]);
+  });
+
+  it("accepts an action's input at its key bound", () => {
+    const keys = Array.from({ length: MAX_ACTION_INPUT_KEYS }, (_, index) => `k${index}: 1`).join(", ");
+    expect(diagnosticsOf(withStep(`{invoke: invoices.markPaid, input: {${keys}}}`))).toEqual([]);
+  });
+
+  it("refuses to save an action's input past its key bound", () => {
+    const input = Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => ({ key: `k${index}`, value: { kind: "literal" as const, value: 1 } }));
+    expect(refusal([valid({ do: [{ kind: "invoke", operation: "invoices.markPaid", input }] })]))
+      .toEqual([{ code: "too-many-inputs", path: "/automations/0/do/0/input" }]);
   });
 
   it("keeps field names as written, for the executor to resolve against the dataset", () => {
@@ -1189,17 +1301,20 @@ describe("dataset entries", () => {
     expect(automation?.do[0]).toMatchObject({ values: [{ field: "Finished on" }], operation: "tasks.edit" });
   });
 
-  it("accepts an operation and a table at the reference bound", () => {
+  it("accepts a table at the reference bound, and an operation name as long as the dataset host allows", () => {
     const longest = "o".repeat(MAX_REFERENCE_LENGTH);
-    expect(diagnosticsOf(withStep(`{set: {X: 1}, operation: ${longest}}`, `{record-added: null, table: ${longest}}`))).toEqual([]);
+    expect(diagnosticsOf(withStep(`{set: {X: 1}, operation: ${"o".repeat(64)}}`, `{record-added: null, table: ${longest}}`))).toEqual([]);
+    expect(diagnosticsOf(withStep(`{invoke: ${"o".repeat(64)}}`))).toEqual([]);
   });
 
-  it("refuses to save an operation or a table past the reference bound", () => {
+  it("refuses to save a table past the reference bound, or an operation name the dataset host would refuse", () => {
     const tooLong = "o".repeat(MAX_REFERENCE_LENGTH + 1);
     expect(refusal([valid({ when: { kind: "record-added", table: tooLong } })]))
       .toEqual([{ code: "too-long", path: "/automations/0/when/table" }]);
-    expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: tooLong }] })]))
-      .toEqual([{ code: "too-long", path: "/automations/0/do/0/operation" }]);
+    expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: "o".repeat(65) }] })]))
+      .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/operation" }]);
+    expect(refusal([valid({ do: [{ kind: "invoke", operation: "mark paid", input: [] }] })]))
+      .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/invoke" }]);
   });
 
   it.each(DATASET_CASES)("turns off one automation for $name", ({ item, expected }) => {
@@ -1409,7 +1524,7 @@ describe("automations.yaml diagnostics", () => {
   it("has a case for every diagnostic code", () => {
     const covered = new Set<AutomationDiagnosticCode>([
       ...FILE_CASES.map((testCase) => testCase.expected.code),
-      ...[...AUTOMATION_CASES, ...BOUND_CASES].flatMap((testCase) =>
+      ...[...AUTOMATION_CASES, ...BOUND_CASES, ...DATASET_CASES].flatMap((testCase) =>
         testCase.expected.map((diagnostic) => diagnostic.code),
       ),
       // Covered by their own tests above.
