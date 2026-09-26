@@ -598,6 +598,24 @@ describe("setCollectionRecordFields", () => {
 });
 
 describe("createCollectionRecord", () => {
+  it("does not accept matching disk bytes after an authored engine failure", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const recordId = derivedRecordId("failed-create");
+    const failure = new Error("engine write failed");
+    context.capture.writeAuthoredTextFile = async (path, text) => {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, text);
+      throw failure;
+    };
+    await expect(createCollectionRecord(context, {
+      collectionPath: "tasks", name: "failed", recordId, author: AUTOMATION,
+    })).rejects.toBe(failure);
+    expect(engine.listeners.size).toBe(0);
+  });
+
   it("writes the file with a new record id, finishes on the engine's announcement without polling, and seeds fields", async () => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-collection-edits-");
