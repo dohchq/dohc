@@ -1941,6 +1941,74 @@ pub fn claim_automation_schedule_in_tx(
     })
 }
 
+/// The owner chose Run now on a schedule's skipped-run notice. Insert one
+/// pending claim keyed `run-now:<notice id>`, with no record, at depth 0,
+/// like a schedule's due time. The notice's first dismissal on the relay
+/// picks the one computer that runs it; the key keeps a repeat on this
+/// computer from running it twice, so a run-now claim is never pruned.
+/// Answers the claim, and whether this call inserted it.
+pub fn claim_automation_run_now_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    automation_id: &str,
+    notice_id: &str,
+    now_ms: i64,
+) -> Result<AutomationRunNow, DomainError> {
+    let collection_path = button_or_schedule_collection(automation_id)?;
+    let notice_id = normalize_automation_identifier(notice_id, "Notice id is invalid.")?;
+    let key = format!("run-now:{notice_id}");
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT claim_id FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND trigger_key = ?3",
+            params![workspace_id, automation_id, key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if let Some(claim_id) = existing {
+        let claim =
+            claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+                reason: "A run-now claim disappeared inside its own transaction.",
+            })?;
+        return Ok(AutomationRunNow {
+            claim,
+            inserted: false,
+        });
+    }
+    let claimed = ClaimedChange {
+        trigger: AutomationTrigger::Key { key },
+        record_id: None,
+        collection_path,
+        depth: 0,
+        change: AutomationChange {
+            kind: AutomationChangeKind::Schedule,
+            author_origin_id: None,
+            actor_kind: None,
+            on_behalf_of: None,
+        },
+        fields: AutomationFieldFacts::default(),
+        chain_stopped: false,
+    };
+    let claim = insert_claims(conn, workspace_id, &[automation_id], &claimed, now_ms)?
+        .into_iter()
+        .next()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "A run-now claim was neither found nor inserted.",
+        })?;
+    Ok(AutomationRunNow {
+        claim,
+        inserted: true,
+    })
+}
+
+/// A Run now claim, and whether this call inserted it rather than found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationRunNow {
+    pub claim: AutomationClaim,
+    pub inserted: bool,
+}
+
 /// Every schedule mark in the workspace, ordered by automation id.
 pub(crate) fn list_automation_schedule_marks_in_tx(
     conn: &Connection,
@@ -2366,7 +2434,7 @@ pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation
 pub(crate) const PRUNE_AGED_SCHEDULE_KEYS_SQL: &str = "DELETE FROM automation_claims \
      WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
        AND trigger_moment_order IS NULL AND change_kind <> 'message' \
-       AND change_kind = 'schedule' \
+       AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:' \
        AND CAST(substr(trigger_key, length('schedule:') + 1) AS INTEGER) < ( \
            SELECT m.through_ms - ?4 FROM automation_schedule_marks m \
            WHERE m.workspace_id = ?1 AND m.automation_id = ?2) \
@@ -2585,6 +2653,19 @@ pub fn claim_automation_schedule(
 ) -> Result<AutomationScheduleClaimed, DomainError> {
     committed(store.write_with(faults, |tx| {
         claim_automation_schedule_in_tx(tx, workspace_id, schedule, now_ms)
+    })?)
+}
+
+pub fn claim_automation_run_now(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    automation_id: &str,
+    notice_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationRunNow, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        claim_automation_run_now_in_tx(tx, workspace_id, automation_id, notice_id, now_ms)
     })?)
 }
 

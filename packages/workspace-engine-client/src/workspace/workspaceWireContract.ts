@@ -46,6 +46,7 @@ export const WORKSPACE_METHOD = {
   automationsClaimSchedule: "automations.claimSchedule",
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
+  automationsRunNow: "automations.runNow",
 } as const;
 
 /**
@@ -241,6 +242,15 @@ export type AutomationPressParams = WorkspaceJsonObject & {
   nowMs?: number;
 };
 
+/** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
+export type AutomationRunNowParams = WorkspaceJsonObject & {
+  /** The Collection automation to run: "collection:<path>#<id>". */
+  automationId: string;
+  /** The skipped-run notice whose Run now this is. One claim per notice. */
+  noticeId: string;
+  nowMs?: number;
+};
+
 /** Mirrors AutomationClaimScheduleParams in crates/dohc-workspace-engine. */
 export type AutomationClaimScheduleParams = WorkspaceJsonObject & {
   /** The Collection automation the schedule runs: "collection:<path>#<id>". */
@@ -296,6 +306,10 @@ export type AutomationClaimScheduleResult =
 export type AutomationScheduleMarksResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsScheduleMarks];
 
+/** The notice's Run now claim: the one this call made, or the one an earlier call made. */
+export type AutomationRunNowResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsRunNow];
+
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
     | (WorkspaceJsonObject & {
@@ -336,6 +350,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
 type CollectionMethodResultMap = {
@@ -1115,6 +1130,9 @@ const WorkspaceResultSchemas = {
    */
   [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
     applied: Schema.Int,
+  }),
+  [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
+    claim: AutomationClaimSummarySchema,
   }),
 } as const;
 

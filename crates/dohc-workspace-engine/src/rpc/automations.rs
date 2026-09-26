@@ -140,6 +140,14 @@ struct AutomationClaimScheduleParams {
     now_ms: Option<i64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationRunNowParams {
+    automation_id: String,
+    notice_id: String,
+    now_ms: Option<i64>,
+}
+
 fn automation_schedule_mark_json(mark: &AutomationScheduleMark) -> Value {
     json!({
         "automationId": mark.automation_id,
@@ -582,6 +590,41 @@ impl EngineService {
             "claims": claimed.claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
             "mark": automation_schedule_mark_json(&claimed.mark),
         }))
+    }
+
+    /// Run now from a skipped-run notice, once this computer's dismissal was
+    /// the notice's first. Answers the notice's claim: a new one announces
+    /// itself post-commit, and a repeat answers the one it made before.
+    pub(super) async fn automations_run_now(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationRunNowParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let run_now = Self::read_under_ctx(
+            &cancellation,
+            "automations.runNow",
+            open.actor.automation_run_now(
+                open.workspace_id.clone(),
+                params.automation_id,
+                params.notice_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        if run_now.inserted {
+            emit_automation_claimed(
+                &self.events,
+                &open.workspace_id,
+                std::slice::from_ref(&run_now.claim),
+            );
+        }
+        Ok(json!({ "claim": automation_claim_json(&run_now.claim) }))
     }
 
     /// Every schedule's mark: the scheduler reads them at start to tell the

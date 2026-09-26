@@ -217,6 +217,10 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             json!({ "automationId": "collection:x#y", "scheduleHash": "h", "run": [], "throughMs": 1 }),
         ),
         ("automations.scheduleMarks", json!({})),
+        (
+            "automations.runNow",
+            json!({ "automationId": "collection:x#y", "noticeId": "n" }),
+        ),
     ] {
         id += 1;
         let error = transport
@@ -1508,5 +1512,34 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     assert_eq!(
         marks,
         json!({ "marks": [{ "automationId": REPORT, "scheduleHash": "h1", "throughMs": 3_000 }] })
+    );
+
+    let notice = "schedule-skipped:ws:collection:Invoices#weekday-report:2000";
+    let run_now = json!({ "automationId": REPORT, "noticeId": notice, "nowMs": 4_000 });
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.runNow",
+        run_now.clone(),
+    )
+    .await;
+    assert_eq!(
+        first["claim"]["trigger"],
+        json!({ "key": format!("run-now:{notice}") }),
+        "{first}"
+    );
+    assert_eq!(first["claim"]["recordId"], Value::Null);
+    assert_eq!(first["claim"]["change"]["kind"], json!("schedule"));
+    assert_eq!(claimed_events(&mut notices).len(), 1);
+    let again = call(&transport, &handle, &mut id, "automations.runNow", run_now).await;
+    assert_eq!(
+        again,
+        json!({ "claim": first["claim"].clone() }),
+        "a repeat answers the claim it made"
+    );
+    assert!(
+        claimed_events(&mut notices).is_empty(),
+        "and announces nothing"
     );
 }
