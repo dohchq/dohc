@@ -16,6 +16,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  VersionedTextStoreError,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentMetadata,
@@ -3122,9 +3123,6 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
         }
-        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
-          throw new Error(`File already exists: ${path}`);
-        }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
@@ -3137,15 +3135,25 @@ export function createWorkspaceEngineCapture(
           summary: `Updated ${pathBasename(path)}`,
           correlationId: `authored-write-${createId()}`,
         };
-        await engine.writeTextFile({
-          workspaceId,
-          versionId,
-          path,
-          text,
-          metadata,
-          author,
-        });
-        await materialize([{ kind: "write", path, text }], policy);
+        try {
+          await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path,
+            text,
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
+            metadata,
+            author,
+          });
+        } catch (error) {
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
+          }
+          throw error;
+        }
+        if (!writeOptions.createOnly) {
+          await materialize([{ kind: "write", path, text }], policy);
+        }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },

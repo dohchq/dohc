@@ -870,16 +870,19 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       text: string;
+      createOnly?: boolean;
       restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentAuthor;
       momentId?: string;
     }) {
       const { metadata, author, ...writeInput } = input;
+      const requestId = input.createOnly ? randomUUID() : undefined;
       const raw = await runMutation(
         async (adapter) =>
           await adapter.writeTextFile({
             ...writeInput,
+            ...(requestId ? { requestId } : {}),
             ...(author ? { author: adapterAuthor(author) } : {}),
             metadata: adapterMetadata(metadata),
           }),
