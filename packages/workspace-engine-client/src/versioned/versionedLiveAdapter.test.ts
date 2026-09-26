@@ -1881,3 +1881,23 @@ describe("VersionedLiveAdapter", () => {
     ).resolves.toBe(true);
   });
 });
+
+describe("listTextFileMetadata under a folder", () => {
+  const row = (path: string) => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64), byteLength: 1, binarySha256: null,
+    updatedAtMs: 1, latestMomentId: "moment", metadataOrigin: "api", hasYdocMarker: false });
+  it("starts after the folder and stops at the first path past it", async () => {
+    const paths = ["app.txt", "app/a.html", "app/b/c.css", "app/d.js", "app0/x.js", "zeta.md"].sort();
+    const requests: Array<Record<string, unknown>> = [];
+    const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request: Request): Promise<Response> {
+      const params = request.params as Record<string, unknown>;
+      requests.push(params);
+      const rest = paths.filter(path => path > String(params.afterPath ?? ""));
+      // Two rows a page, so the folder spans a page boundary.
+      const files = rest.slice(0, 2).map(row);
+      return { id: request.id, result: { files, nextAfterPath: rest.length > 2 ? files.at(-1)!.path : null } };
+    } }, WORKSPACE, { workspaceId: WORKSPACE });
+    const files = await adapter.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: "main", under: "app" });
+    expect(files.map(file => file.path)).toEqual(["app/a.html", "app/b/c.css", "app/d.js"]);
+    expect(requests.map(request => request.afterPath)).toEqual(["app/", "app/b/c.css"]);
+  });
+});

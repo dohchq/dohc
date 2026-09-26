@@ -16,8 +16,16 @@ const files = [
   "node.exe", "adapter.mjs", "worker.mjs", "compilerProcessRelay.mjs", "windowsCompilerJob.ps1",
   "node_modules/esbuild/package.json", "node_modules/esbuild/lib/main.js", "node_modules/esbuild/LICENSE.md",
   "node_modules/@esbuild/win32-x64/package.json", "node_modules/@esbuild/win32-x64/esbuild.exe",
-  "licenses/node.txt", "licenses/acorn.txt",
+  "licenses/node.txt", "licenses/acorn.txt", "licenses/parse5.txt", "licenses/entities.txt",
 ];
+
+async function packageRoot(resolve, name) {
+  for (let directory = dirname(resolve(name)); directory !== dirname(directory); directory = dirname(directory)) {
+    const manifest = await readFile(join(directory, "package.json"), "utf8").then(JSON.parse, () => null);
+    if (manifest?.name === name) return directory;
+  }
+  throw new Error(`App compiler cannot find ${name}.`);
+}
 
 export async function requireAppCompiler(root = join(desktopRoot, "resources/app-compiler"), platform = process.platform, arch = process.arch) {
   if (platform !== "win32") return;
@@ -78,6 +86,8 @@ export async function stageAppCompiler(options = {}) {
   const platformRoot = dirname(esbuildRequire.resolve("@esbuild/win32-x64/package.json"));
   if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1 Windows x64.");
   const acornRoot = dirname(require.resolve("acorn/package.json"));
+  const parse5Root = await packageRoot(require.resolve, "parse5");
+  const entitiesRoot = await packageRoot(createRequire(join(parse5Root, "package.json")).resolve, "entities");
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
   try {
@@ -88,6 +98,8 @@ export async function stageAppCompiler(options = {}) {
     for (const file of ["compilerProcessRelay.mjs", "windowsCompilerJob.ps1"]) await cp(join(sourceRoot, "src/workspaces", file), join(staging, file));
     await cp(join(sourceRoot, "scripts/compiler-node-LICENSE.txt"), join(staging, "licenses/node.txt"));
     await cp(join(acornRoot, "LICENSE"), join(staging, "licenses/acorn.txt"));
+    await cp(join(parse5Root, "LICENSE"), join(staging, "licenses/parse5.txt"));
+    await cp(join(entitiesRoot, "LICENSE"), join(staging, "licenses/entities.txt"));
     for (const [source, output] of [["closedAppCompilerProcess.ts", "adapter.mjs"], ["closedAppCompilerWorker.ts", "worker.mjs"]]) {
       await build({ entryPoints: [join(sourceRoot, "src/workspaces", source)], outfile: join(staging, output),
         bundle: true, platform: "node", target: "node24", format: "esm", external: ["esbuild"], logLevel: "silent" });
