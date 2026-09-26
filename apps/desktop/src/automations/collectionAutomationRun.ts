@@ -38,9 +38,11 @@ import {
   AutomationChatSessionWait,
   chatNeedsOf,
   type AutomationChatMessage,
+  type AutomationNotice,
   type ChatDirectory,
   type ChatNeeds,
 } from "./automationChat";
+import { NoticeNotSentError } from "../notices/noticeStore";
 import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 
 // One run of one claim: check reach, read, evaluate, save the plan, then
@@ -51,7 +53,7 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 
 export const DEADLINE_ERROR = "The automation did not finish within 5 minutes.";
 export const DEFINITION_CHANGED_ERROR =
-  "This automation changed after this run began. Try again to run the new version from the start. It may repeat changes, posts, and direct messages the earlier run already made.";
+  "This automation changed after this run began. Try again to run the new version from the start. It may repeat changes, posts, direct messages, and notices the earlier run already made.";
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
@@ -77,6 +79,11 @@ export interface CollectionAutomationRunDependencies {
   store: AutomationRunStore;
   nowMs(): number;
   chat: AutomationChatDependencies;
+  /**
+   * Sends one notice from this workspace, ending at `signal` before it
+   * sends; throws NoticeNotSentError when it did not reach its person.
+   */
+  postNotice(notice: AutomationNotice, signal: AbortSignal): Promise<void>;
   /**
    * Keeps a verdict for each person a formula named, as for any step, and
    * says which of them wait for a current editor to allow them.
@@ -109,10 +116,10 @@ export interface AutomationChatDependencies {
   write(signal: AbortSignal, message: AutomationChatMessage): Promise<unknown>;
 }
 
-/** Whether any step posts or sends a direct message. */
+/** Whether any step posts, sends a direct message, or notifies someone. */
 export function sendsMessages(automation: Automation): boolean {
   const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
-    step.kind === "post" || step.kind === "direct-message" ||
+    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" ||
     (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
   return walk(automation.do);
 }
@@ -304,18 +311,27 @@ export async function runCollectionAutomation(
     // way continues with these values instead of evaluating again.
     await store.save(run);
   }
-  // Every message is checked again under this roster before anything is
-  // sent. A person only a formula named has no verdict from the file, so
-  // they keep one here: one an editor's leaving allowed waits for Allow.
+  // Every message and notice is checked again under this roster before
+  // anything is sent. A person only a formula named has no verdict from the
+  // file, so they keep one here: one an editor's leaving allowed waits for
+  // Allow.
   const planned = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
-  const messages = planned.flatMap(({ ordinal, effect }) => effect.kind === "message"
-    ? [{ ordinal, effect, step: { kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } } satisfies ReachStep }]
-    : []);
+  const messages = planned.flatMap(({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
+    if (effect.kind === "message") {
+      return [{ ordinal, effect, step: { kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } } }];
+    }
+    if (effect.kind === "notice") {
+      return [{ ordinal, effect, step: { kind: "notify", person: { userId: effect.notice.recipientUserId, name: effect.name } } }];
+    }
+    return [];
+  });
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps: messages.map(({ step }) => step) });
   const recipients: RecipientReach[] = [];
   for (const [index, { ordinal, effect }] of messages.entries()) {
     if (effect.kind === "message" && effect.byFormula && effect.to.kind === "direct-message") {
       recipients.push({ step: ordinal, userId: effect.to.userId, name: effect.name, action: "post", reach: verdicts[index]! });
+    } else if (effect.kind === "notice" && effect.byFormula) {
+      recipients.push({ step: ordinal, userId: effect.notice.recipientUserId, name: effect.name, action: "notify", reach: verdicts[index]! });
     }
   }
   // Kept before anything fails, so a stop is remembered for the next run.
@@ -462,7 +478,7 @@ async function applyPlan(
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
     // Only a dataset Collection's run plans dataset effects.
-    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message") return failed(UNREADABLE_RUN_ERROR);
+    if (effect.kind !== "set" && effect.kind !== "add" && effect.kind !== "message" && effect.kind !== "notice") return failed(UNREADABLE_RUN_ERROR);
     // After a stop, records may have changed while the run waited, so every
     // effect checks each field before it writes. Only the first effect the
     // run had not recorded may have landed before the stop.
@@ -531,6 +547,9 @@ function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
     if (effect.kind === "message") {
       return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: effect.name }] };
     }
+    if (effect.kind === "notice") {
+      return { ordinal: step.ordinal, writes: [{ kind: "notice" as const, noticeId: effect.notice.noticeId, name: effect.name }] };
+    }
     if (effect.kind === "add") {
       const path = `${effect.collectionPath}/${effect.name}.md`;
       return { ordinal: step.ordinal, writes: [
@@ -581,6 +600,18 @@ async function applyEffect(
       body: effect.body,
     });
     return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
+  }
+  if (effect.kind === "notice") {
+    // Each person's notice is its own effect, recorded once it is sent, so a
+    // retry resumes with the people not yet notified. The outbox and the
+    // relay drop a repeat of the same id.
+    try {
+      await dependencies.postNotice(effect.notice, signal);
+    } catch (error) {
+      if (error instanceof NoticeNotSentError) throw new Error(`dohc could not notify ${effect.name}. ${error.message}`);
+      throw error;
+    }
+    return [{ kind: "notice", noticeId: effect.notice.noticeId, name: effect.name }];
   }
   const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (edit: CollectionRecordEditContext, path: string, recordId: string, fields: readonly PlannedField[]) =>

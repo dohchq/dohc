@@ -15,7 +15,14 @@ import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contract
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "../workspaces/collectionRecordEdits";
 import type { ReachCollection, ReachStep } from "./automationReach";
-import { automationMessageId, automationThreadId, type ChatDirectory } from "./automationChat";
+import {
+  automationMessageId,
+  automationNoticeId,
+  automationThreadId,
+  cutText,
+  type AutomationNotice,
+  type ChatDirectory,
+} from "./automationChat";
 
 // What one run of a Collection automation does, worked out before anything
 // is written. The executor reads the trigger record and every Find, asks the
@@ -294,12 +301,12 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
     (automation.when.kind === "starts-matching" ? 2 : 0);
   for (const { step } of everyStep(steps)) {
     switch (step.kind) {
-      case "notify":
       case "wake-agent":
-        return "dohc cannot send notices or wake agents from automations yet.";
+        return "dohc cannot wake agents from automations yet.";
       case "post":
         formulas += 1;
         break;
+      case "notify":
       case "direct-message":
         formulas += 1 + step.to.filter(isFormula).length;
         break;
@@ -464,6 +471,11 @@ export function reachStepsOf(
       for (const person of step.to) {
         if (!isFormula(person) && typeof person.value === "string") reach.push(directMessageReach(chat, person.value));
       }
+    } else if (step.kind === "notify") {
+      for (const person of step.to) {
+        if (isFormula(person) || typeof person.value !== "string") continue;
+        reach.push({ kind: "notify", person: { userId: person.value, name: chat?.person(person.value) ?? "that person" } });
+      }
     }
   }
   return reach;
@@ -541,6 +553,8 @@ type Fact = AutomationClaim["change"]["fields"][number];
 
 /** What planning reads from a claim: the Collection it is in, and what changed. */
 export interface RunClaim {
+  automationId: string;
+  claimId: string;
   collectionPath: string;
   change: {
     kind: AutomationClaim["change"]["kind"];
@@ -690,10 +704,10 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
         addSteps(entry.otherwise, [...when, { index, truthy: false }]);
         continue;
       }
-      if (step.kind === "post" || step.kind === "direct-message") {
+      if (step.kind === "post" || step.kind === "direct-message" || step.kind === "notify") {
         slots.push({ kind: "text", ordinal });
         formulas.push({ kind: "text", parts: automationTextParts(step.text) ?? [{ kind: "text", text: step.text }], ...guarded(when) });
-        if (step.kind === "direct-message") {
+        if (step.kind !== "post") {
           step.to.forEach((person, index) => {
             if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression, when);
           });
@@ -767,6 +781,14 @@ export type PlannedEffect =
       body: string;
       /** A formula named the person, so their reach is checked once the plan names them. */
       byFormula?: boolean;
+    }
+  | {
+      kind: "notice";
+      notice: AutomationNotice;
+      /** The person, as reach and run history name them. */
+      name: string;
+      /** A formula named the person, so their reach is checked once the plan names them. */
+      byFormula?: boolean;
     };
 
 export interface PlannedStep {
@@ -799,6 +821,36 @@ function slotSubject(slot: Slot): string {
     default:
       return `The formula for "${slot.field}" in step ${slot.ordinal + 1}`;
   }
+}
+
+// A notice's title and body, as the relay bounds them.
+const NOTICE_TITLE_MAX_CHARS = 120;
+const NOTICE_BODY_MAX_CHARS = 500;
+// A notice body keeps tabs and line feeds and no other control character.
+const NOTICE_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/gu;
+
+function noticeText(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(NOTICE_CONTROL_CHARS, "").trim();
+}
+
+/** The people a step names, once each, or why one is not a person. */
+function peopleOf(
+  to: readonly AutomationValue[],
+  ordinal: number,
+  answers: ReadonlyMap<string, JsonValue>,
+): Map<string, boolean> | string {
+  // Each person, and whether only a formula named them.
+  const people = new Map<string, boolean>();
+  for (const [index, person] of to.entries()) {
+    const value = isFormula(person) ? (answers.get(`person:${ordinal}:${index}`) ?? null) : person.value;
+    for (const userId of Array.isArray(value) ? value : [value]) {
+      if (typeof userId !== "string" || userId.length === 0) {
+        return `Step ${ordinal + 1} names a person that is not a person's id.`;
+      }
+      people.set(userId, (people.get(userId) ?? true) && isFormula(person));
+    }
+  }
+  return people;
 }
 
 // A chat message's largest body, as the engine bounds it.
@@ -920,6 +972,40 @@ export function planRun(
         if (problem !== null) return problem;
         continue;
       }
+      if (step.kind === "notify") {
+        const text = answers.get(`text:${ordinal}`) ?? null;
+        if (typeof text !== "string") return `The message in step ${ordinal + 1} is not text.`;
+        if (chat === null) return "dohc could not read who this workspace is shared with.";
+        const people = peopleOf(step.to, ordinal, answers);
+        if (typeof people === "string") return people;
+        const seed = stepKey(key.claimId, key.hash, ordinal);
+        const effects: PlannedEffect[] = [];
+        for (const [userId, byFormula] of people) {
+          const recipient = chat.noticeRecipient(userId);
+          if ("problem" in recipient) return recipient.problem;
+          effects.push({
+            kind: "notice",
+            name: recipient.name,
+            ...(byFormula ? { byFormula } : {}),
+            notice: {
+              noticeId: automationNoticeId(seed, userId),
+              kind: "automation-notify",
+              title: cutText(automation.name.trim(), NOTICE_TITLE_MAX_CHARS),
+              body: cutText(noticeText(text), NOTICE_BODY_MAX_CHARS),
+              target: {
+                // A notice for someone else names a path both can read.
+                path: record?.path ?? claim.collectionPath,
+                ...(record ? { record: record.id } : {}),
+                automation: claim.automationId,
+                run: claim.claimId,
+              },
+              recipientUserId: userId,
+            },
+          });
+        }
+        planned.push({ ordinal, effects });
+        continue;
+      }
       if (step.kind === "post" || step.kind === "direct-message") {
         const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
         if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
@@ -941,17 +1027,8 @@ export function planRun(
             body,
           });
         } else {
-          // Each person, and whether only a formula named them.
-          const people = new Map<string, boolean>();
-          for (const [index, person] of step.to.entries()) {
-            const value = isFormula(person) ? (answers.get(`person:${ordinal}:${index}`) ?? null) : person.value;
-            for (const userId of Array.isArray(value) ? value : [value]) {
-              if (typeof userId !== "string" || userId.length === 0) {
-                return `Step ${ordinal + 1} names a person that is not a person's id.`;
-              }
-              people.set(userId, (people.get(userId) ?? true) && isFormula(person));
-            }
-          }
+          const people = peopleOf(step.to, ordinal, answers);
+          if (typeof people === "string") return people;
           for (const [userId, byFormula] of people) {
             const target = chat.directMessage(userId);
             if ("problem" in target) return target.problem;

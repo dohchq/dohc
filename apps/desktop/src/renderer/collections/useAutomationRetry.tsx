@@ -14,7 +14,7 @@ export const START_OVER_SENTENCE =
   "This automation changed since it failed. Running it again starts from the beginning and can repeat changes it already made.";
 export const PROGRESS_GONE_SENTENCE =
   "dohc no longer has this run's progress. Running it again starts from the beginning and can repeat changes it already made.";
-export const REPEATS_MESSAGES_SENTENCE = "Posts and direct messages it already sent may be sent again.";
+export const REPEATS_MESSAGES_SENTENCE = "Posts, direct messages, and notices it already sent may be sent again.";
 
 type Target = { automationId: string; claimId: string };
 

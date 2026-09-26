@@ -489,6 +489,23 @@ describe("notices on one person's computers", () => {
   });
 });
 
+describe("a notice whose sender stopped", () => {
+  it("sends nothing and keeps nothing once its signal ends", async () => {
+    const server = await relay();
+    const signedIn = await computer(account(server, "owner"));
+    const stopped = AbortSignal.abort();
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:1", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:2", recipientUserId: "ana", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await signedIn.store.sync();
+    expect((await signedIn.store.list()).notices).toEqual([]);
+    const ana = await computer(account(server, "ana"));
+    await ana.store.sync();
+    expect((await ana.store.list()).notices).toEqual([]);
+  });
+});
+
 describe("notices that stay on this computer", () => {
   it("keeps notices local with nobody signed in or for a workspace the account does not sync", async () => {
     const server = await relay();

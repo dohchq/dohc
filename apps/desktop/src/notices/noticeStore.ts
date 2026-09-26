@@ -61,6 +61,8 @@ export interface PostNoticeInput {
   // Another person's relay user id. Absent, or your own id, sends the
   // notice to yourself.
   recipientUserId?: string;
+  // Ends the post before it sends or queues, as when an automation run stops.
+  signal?: AbortSignal;
 }
 
 // A notice for another person that did not reach them. The message says why.
@@ -580,7 +582,7 @@ export function createNoticeStore(deps: {
     // A session that changes while the notice is placed is read again.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await postOnce(input.recipientUserId, content);
+        return await postOnce(input.recipientUserId, content, input.signal);
       } catch (error) {
         if (!(error instanceof SessionChanged)) throw error;
         if (attempt === 3) throw new NoticeNotSentError("Your server session changed. Try again.");
@@ -588,7 +590,7 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function postOnce(recipientUserId: string | undefined, content: NoticeContent): Promise<void> {
+  async function postOnce(recipientUserId: string | undefined, content: NoticeContent, signal?: AbortSignal): Promise<void> {
     const session = await deps.session();
     const reach = session?.reachFor(content.workspaceId) ?? null;
     const request = (recipient: string, to: NoticeReach): PostNoticeRequest => ({
@@ -607,7 +609,7 @@ export function createNoticeStore(deps: {
           "Notices reach other people through a server. Sync this workspace with an up-to-date server first.",
         );
       }
-      return await postToAnotherPerson(session, request(recipientUserId, reach));
+      return await postToAnotherPerson(session, request(recipientUserId, reach), signal);
     }
     const createdAtMs = nowMs();
     const queued = await locked(async () => {
@@ -615,6 +617,7 @@ export function createNoticeStore(deps: {
       const file = session && reach ? await loadAccount(session.account) : null;
       // Checked after the loads, just before either list changes.
       if (session && !session.isCurrent()) throw new SessionChanged();
+      signal?.throwIfAborted();
       // A notice kept on this computer stays here.
       if (local.rows.some((row) => row.noticeId === content.noticeId)) return false;
       if (session && reach && file && !file.routesMissing) {
@@ -654,10 +657,11 @@ export function createNoticeStore(deps: {
 
   // Sent at once rather than queued, so the caller learns whether the
   // relay accepted it.
-  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest): Promise<void> {
+  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest, signal?: AbortSignal): Promise<void> {
     if (await locked(async () => (await loadAccount(session.account)).routesMissing)) {
       throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
     }
+    signal?.throwIfAborted();
     try {
       await relay(session, "/sync/notices", request);
     } catch (error) {

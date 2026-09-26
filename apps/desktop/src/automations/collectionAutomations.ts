@@ -163,6 +163,8 @@ export interface CollectionAutomationsOptions {
   store: AutomationRunStore;
   /** Where automations post and send direct messages, and the writer they use. */
   chat: AutomationChatDependencies;
+  /** Sends one notice from this workspace. */
+  postNotice: CollectionAutomationRunDependencies["postNotice"];
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
   onFailuresChanged(): void;
   /**
@@ -1052,7 +1054,7 @@ export class CollectionAutomations {
         // Either version may have sent messages that a new run sends again.
         const earlier = runs.current ?? runs.changedSince;
         const repeatsMessages = sendsMessages(automation) ||
-          (earlier?.applied.some((effect) => effect.writes.some((write) => write.kind === "message")) ?? false);
+          (earlier?.applied.some((effect) => effect.writes.some((write) => (write.kind === "message" || write.kind === "notice"))) ?? false);
         return { status: progressGone ? "progress-gone" : "definition-changed", repeatsMessages };
       }
       this.waitingFor.delete(input.claimId);
@@ -1935,6 +1937,7 @@ export class CollectionAutomations {
       nowMs: this.nowMs,
       chat: this.options.chat,
       recipientVerdicts: (input) => this.recipientVerdicts(input),
+      postNotice: this.options.postNotice,
     };
   }
 
@@ -2003,6 +2006,8 @@ export class CollectionAutomations {
 function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
   return reach.kind === "post"
     ? { target: reach.group.name, action: "post" as const }
+    : reach.kind === "notify"
+      ? { target: reach.person.name, action: "notify" }
     : "collection" in reach
       ? { target: reach.collection.name, action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" as const : "change" as const }
       : null;

@@ -89,6 +89,19 @@ const EffectSchema = z.union([
     body: z.string(),
     byFormula: z.boolean().optional(),
   }),
+  z.object({
+    kind: z.literal("notice"),
+    name: z.string(),
+    notice: z.object({
+      noticeId: z.string(),
+      kind: z.literal("automation-notify"),
+      title: z.string(),
+      body: z.string(),
+      target: z.object({ path: z.string(), record: z.string().optional(), automation: z.string(), run: z.string() }),
+      recipientUserId: z.string(),
+    }),
+    byFormula: z.boolean().optional(),
+  }),
 ]);
 const WriteSchema = z.union([
   z.object({
@@ -132,6 +145,8 @@ const WriteSchema = z.union([
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
   // A post or direct message the automation wrote, and where it went.
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
+  // A notice the automation sent, and to whom.
+  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }),
 ]);
 // A dataset edit refused because its record changed, sent again: the record's
 // new version, the fields still to write, and what the re-read kept.
