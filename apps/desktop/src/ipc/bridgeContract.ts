@@ -4676,13 +4676,16 @@ export type WriteCollectionAutomationsResult =
 // Main decides which automation a button runs and who may press it. A window
 // makes a UUID for each press and sends it again after a lost reply. The
 // person a press acts for is main's own signed-in person, never a value a
-// window sends.
-export const ListAutomationButtonsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  collectionPath: PATH_STRING,
-});
+// window sends. A document Collection is named by its folder, and a dataset
+// Collection by its id.
+export const ListAutomationButtonsPayload = z.union([
+  z.strictObject({ workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING }),
+  z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() }),
+]);
 export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
-export type ListAutomationButtonsResult = { buttons: CollectionAutomationButton[] };
+/** A Button field, with its dataset table's name; null in a document Collection. */
+export type ListedAutomationButton = CollectionAutomationButton & { table: string | null };
+export type ListAutomationButtonsResult = { buttons: ListedAutomationButton[] };
 
 // The record an open file is, and its Collection's buttons. Null when the
 // file is not a record in a Collection.
@@ -4695,16 +4698,17 @@ export type ListRecordButtonsResult =
   | { record: null }
   | { record: CollectionRecord; collectionPath: string; buttons: CollectionAutomationButton[] };
 
-export const PressAutomationButtonPayload = z.object({
+const PressedButton = {
   workspaceId: WORKSPACE_ID,
-  collectionPath: PATH_STRING,
   field: z.string().min(1).max(256),
   // A document record's id, or a dataset record's primary key as JSON.
   recordId: z.string().min(1).max(1024),
   pressId: z.uuid(),
-  // A dataset table's name. A document Collection has one table and sends null.
-  table: z.string().min(1).max(256).nullable(),
-});
+};
+export const PressAutomationButtonPayload = z.union([
+  z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
+  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+]);
 export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
 export type PressAutomationButtonResult =
   // `settled` is set when a press sent again finds its run already ended;

@@ -141,6 +141,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let indexed: DatasetDefinition | null = null;
   // Whether saved rules still resolve, as before an approved change that drops them.
   let rulesResolve = true;
+  // Why the host takes no press, as after the dataset moved to a server; the runtime tests fence a real journal.
+  let unpressable: string | null = null;
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   // What the pressing window hears.
@@ -186,7 +188,9 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
       const current = override === null ? host.automations : { ...host.automations,
         datasets: () => ({ definitions: [override], failures: [] as Array<{ datasetId: string; error: unknown }> }),
         revision: (datasetId: string) => ({ ...host.automations.revision(datasetId), definition: override }) };
-      const automations = rulesResolve ? current : { ...current, resolves: () => false };
+      const resolving = rulesResolve ? current : { ...current, resolves: () => false };
+      const moved = unpressable;
+      const automations = moved === null ? resolving : { ...resolving, assertPressable: () => { throw new Error(moved); } };
       const result = await work(automations);
       wake();
       return result;
@@ -201,6 +205,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
     changeRules: (next: DatasetDefinition) => { indexed = next; executor!.datasetsChanged(); },
     dropRules: () => { rulesResolve = false; },
+    moveToServer: () => { unpressable = "This Collection moved to a server, so its buttons can't run here."; },
   };
 }
 
@@ -624,22 +629,20 @@ ${step}`;
   const pressId = (number: number) => `4f2d3c1a-9b8e-4c7d-a6f5-${String(number).padStart(12, "0")}`;
   const owner = (f: Awaited<ReturnType<typeof world>>) => f.host.describe(definition.datasetId);
   const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string }, description = owner(f)) =>
-    f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
+    f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
       description, () => undefined);
-  const buttonState = async (f: Awaited<ReturnType<typeof world>>, field: string) =>
-    (await f.executor.datasetButtons("Budget", [{ field, table: null }], owner(f)))[0]!;
 
   it("runs a press on the record as it is now, for the person who pressed, once, and tells the window how it settled", async () => {
     const f = await world();
     await f.writeAutomations(markPaid());
     await f.executor.open();
-    expect(await f.executor.datasetButtons("Budget", [{ field: "Mark paid", table: null }], owner(f)))
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
       .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
     // A button watches nothing; its presses claim.
     expect(f.host.automations.subscriptions()).toEqual([]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const watched: string[] = [];
-    const pressed = await f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER },
+    const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER },
       owner(f), (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("The press ran.");
     expect(pressed.settled).toBeNull();
@@ -671,12 +674,30 @@ ${step}`;
     // A description of another dataset grants nothing here.
     for (const description of [only(LIST), only(LIST, EDIT), only(STATUS_ONLY), { ...described, datasetId: id(99) }]) {
       await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
-      expect(await f.executor.datasetButtons("Budget", [{ field: "Mark paid", table: null }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
+      expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
     }
-    await expect(f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER },
-      described, () => undefined)).rejects.toThrow("This record is not in Budget.");
+    await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER },
+      described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
     // A record the table does not hold gets no claim.
-    await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Budget.");
+    await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    await f.executor.dispose();
+  });
+
+  it("says why a button whose automation names an operation the rules lack cannot run, as the panel does, not that the owner cannot edit", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid("      - set:\n          Status: Refunded\n        operation: invoices.refund\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    const reason = "Budget has no approved operation named invoices.refund.";
+    const summary = await f.executor.automationsIn("Budget");
+    expect(summary.status === "read" && summary.automations[0]?.valid && summary.automations[0].cannotRun).toBe(reason);
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f))).toEqual([{ kind: "disabled", reason }]);
+    await expect(press(f, { recordId: invoice, pressId: pressId(11) })).rejects.toThrow(reason);
+    // Someone who cannot edit the table still learns only that.
+    const reader = { ...owner(f), operations: owner(f).operations.filter((operation) => operation.operationId === LIST) };
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], reader))
+      .toEqual([{ kind: "disabled", reason: "Only people who can edit Invoices can use this button." }]);
     expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
     await f.executor.dispose();
   });
@@ -712,7 +733,8 @@ ${step}`;
     await f.writeAutomations(markPaid(undefined, "Settle"));
     f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
     f.changeRules(renamed);
-    await f.until(async () => (await buttonState(f, "Settle")).kind === "ready");
+    // A wait that asks the host would wake itself, so it watches the index.
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes("Settle"));
     expect(await press(f, { recordId: invoice, pressId: pressId(8) })).toEqual({ busy: false, claimId: first.claimId, settled: { outcome: "done", error: null } });
     await expect(press(f, { recordId: invoice, pressId: pressId(8), field: "Settle" })).rejects.toThrow("already names another press");
     await f.executor.dispose();
@@ -737,6 +759,20 @@ ${step}`;
     await f.until(() => f.settled.length === 1);
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "failed", error: "Mark paid changed after it was pressed. Press it again." }]);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("lists a dataset that moved to a server with its buttons off, saying why, and refuses a press the same way", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    f.moveToServer();
+    const moved = "This Collection moved to a server, so its buttons can't run here.";
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+      .toEqual([{ kind: "disabled", reason: moved }]);
+    await expect(press(f, { recordId: invoice, pressId: pressId(10) })).rejects.toThrow(moved);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
     await f.executor.dispose();
   });
 

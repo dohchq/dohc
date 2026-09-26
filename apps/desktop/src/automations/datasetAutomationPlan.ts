@@ -247,12 +247,14 @@ function invokedOperations({ triggerRead, steps, rereads }: DatasetSteps): Datas
  * Every approved operation a run of the automation can call, by name, once
  * each: the operations its steps name, and the reads that find its trigger
  * record and check a record again. A person who presses its button must be
- * able to use each of them.
+ * able to use each of them. A name the rules do not approve is not one: the
+ * automation cannot run, and says why.
  */
 export function datasetOperationsOf(automation: Automation, definition: DatasetDefinition): string[] {
   const resolved = resolve(automation, definition, false);
   const reads = "problem" in resolved ? [] : invokedOperations(resolved.steps).map((operation) => operation.name);
-  return [...new Set([...operationsOf(automation), ...reads])];
+  const approved = new Set(definition.operations.map((operation) => operation.name));
+  return [...new Set([...operationsOf(automation), ...reads])].filter((name) => approved.has(name));
 }
 
 /** The table and Button field a button automation's trigger names in the rules, or null. */

@@ -1,4 +1,4 @@
-import { parseDatasetDefinition, type DatasetDefinition, type DatasetDescription } from "@dohc/security-contract/dataset";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
@@ -9,11 +9,10 @@ import {
   relayedButtonState,
   relayedButtonTarget,
   RUNNING_FOR_RECORD,
-  sharedDatasetButtonRefusal,
-  type AutomationButtonState,
+  sharedDatasetButtonState,
 } from "../automations/automationButtons";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { AUTOMATIONS_FILE_NAME, type CollectionAutomations, type PressSettled, type PressWaitReason } from "../automations/collectionAutomations";
+import { AUTOMATIONS_FILE_NAME, type CollectionAutomationButton, type CollectionAutomations, type PressSettled, type PressWaitReason } from "../automations/collectionAutomations";
 import {
   ListAutomationButtonsPayload,
   ListRecordButtonsPayload,
@@ -86,20 +85,9 @@ export type PressWindows<Sender extends PressWindow> = ReturnType<typeof createP
 
 type TextFile = { text: string; truncated: boolean; contentHash: string | null };
 
-/** A dataset Collection as the button check reads it. */
-interface DatasetButtons {
-  definition: DatasetDefinition;
-  file: AutomationsFileParseResult | null;
-  /** Each Button field, with its table's name when the dataset has several tables. */
-  buttons: Array<{ field: string; table: string | null }>;
-  /** A shared view's dataset, which is on a server. */
-  shared: boolean;
-}
-
-/** Each Button field in a dataset, with its table named when the dataset has several. */
-function datasetButtonsOf(definition: DatasetDefinition): DatasetButtons["buttons"] {
-  return definition.tables.flatMap((table) => table.fields.flatMap((field) =>
-    field.type === "button" ? [{ field: field.name, table: definition.tables.length === 1 ? null : table.name }] : []));
+/** Each Button field of the tables the host describes to this person, with its table. */
+function describedButtons(description: DatasetDescription): Array<{ field: string; table: string }> {
+  return description.tables.flatMap((table) => table.fields.flatMap((field) => field.type === "button" ? [{ field: field.name, table: table.name }] : []));
 }
 
 export function registerAutomationButtonsIpc<
@@ -142,25 +130,6 @@ export function registerAutomationButtonsIpc<
     }
   }
 
-  /** A dataset Collection's descriptor and automations, or null for a document Collection. */
-  async function readDataset(operation: Operation, collectionPath: string): Promise<DatasetButtons | null> {
-    const { rootPath } = operation.workspace;
-    const descriptor = await dependencies.readText(rootPath, `${collectionPath}/dataset.json`);
-    if (descriptor === null) return null;
-    if (descriptor.truncated) throw new Error(`dohc cannot read dataset.json in ${nameOf(collectionPath)}.`);
-    const automations = await dependencies.readText(rootPath, `${collectionPath}/${AUTOMATIONS_FILE_NAME}`);
-    const file: AutomationsFileParseResult | null = automations === null ? null
-      : automations.truncated ? { status: "unreadable", diagnostic: { code: "file-too-large", path: "" } }
-      : parseAutomationsFile(automations.text);
-    const definition = parseDatasetDefinition(JSON.parse(descriptor.text));
-    return { definition, file, buttons: datasetButtonsOf(definition), shared: shareViewIsPresent(operation.workspace.shareView) };
-  }
-
-  /** The dataset as its host describes it to this window's person, so the access a button checks is theirs. */
-  function describe(sender: Sender, workspaceId: string, dataset: DatasetButtons) {
-    return dependencies.describeDataset(sender, workspaceId, dataset.definition.datasetId);
-  }
-
   /** The automations file a shared view holds for a Collection. */
   async function sharedAutomations(operation: Operation, collectionPath: string): Promise<AutomationsFileParseResult | null> {
     const read = await dependencies.readText(operation.workspace.rootPath, `${collectionPath}/${AUTOMATIONS_FILE_NAME}`);
@@ -173,7 +142,7 @@ export function registerAutomationButtonsIpc<
    * view's are read from its automations.yaml and run on the owner's
    * computer; anything less than Edit on the Collection's folder refuses all.
    */
-  async function documentButtons(operation: Operation, collectionPath: string): Promise<ListAutomationButtonsResult["buttons"]> {
+  async function documentButtons(operation: Operation, collectionPath: string): Promise<CollectionAutomationButton[]> {
     const fields = await dependencies.buttonFields(operation, collectionPath);
     if (fields.length === 0) return [];
     const access = documentButtonAccess(operation.workspace.shareView, collectionPath);
@@ -202,33 +171,42 @@ export function registerAutomationButtonsIpc<
   registerHandler(CHANNELS.listAutomationButtons, async (event, payload): Promise<ListAutomationButtonsResult> => {
     assertTrustedSender(event);
     const input = ListAutomationButtonsPayload.parse(payload);
+    if ("datasetId" in input) {
+      // The host describes the dataset to this window's person, so the access each button checks is theirs.
+      const description = await dependencies.describeDataset(event.sender, input.workspaceId, input.datasetId);
+      const buttons = describedButtons(description);
+      if (buttons.length === 0) return { buttons: [] };
+      const states = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) =>
+        shareViewIsPresent(operation.workspace.shareView)
+          ? buttons.map(({ table }) => sharedDatasetButtonState(description, table))
+          : await operation.state.collectionAutomations.datasetButtons(input.datasetId, buttons, description));
+      return { buttons: buttons.map((button, index) => ({ ...button, state: states[index]! })) };
+    }
     assertCollectionPath(input.collectionPath);
-    const read = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) => {
-      const dataset = await readDataset(operation, input.collectionPath);
-      if (dataset !== null) return { kind: "dataset" as const, dataset };
-      return { kind: "document" as const, buttons: await documentButtons(operation, input.collectionPath) };
-    });
-    if (read.kind === "document") return { buttons: read.buttons };
-    const { dataset } = read, { buttons } = dataset;
-    if (buttons.length === 0) return { buttons: [] };
-    const description = await describe(event.sender, input.workspaceId, dataset);
-    // The list and the press ask the same questions, so they say the same thing.
-    const states: AutomationButtonState[] = dataset.shared
-      ? buttons.map(({ field, table }) => ({ kind: "disabled", reason: sharedDatasetButtonRefusal({ definition: dataset.definition, file: dataset.file, description, field, table }) }))
-      : await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) =>
-        operation.state.collectionAutomations.datasetButtons(input.collectionPath, buttons, description));
-    return { buttons: buttons.map(({ field }, index) => ({ field, state: states[index]! })) };
+    const buttons = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) => documentButtons(operation, input.collectionPath));
+    return { buttons: buttons.map((button) => ({ ...button, table: null })) };
   });
 
   registerHandler(CHANNELS.pressAutomationButton, async (event, payload): Promise<PressAutomationButtonResult> => {
     assertTrustedSender(event);
     const input = PressAutomationButtonPayload.parse(payload);
-    assertCollectionPath(input.collectionPath);
     const workspaceId = input.workspaceId;
     const pressedBy = await dependencies.pressedBy();
+    const watch = (claimId: string, waiting: PressWaitReason | null) => pressWindows.watch(workspaceId, claimId, event.sender, waiting);
+    if ("datasetId" in input) {
+      const description = await dependencies.describeDataset(event.sender, workspaceId, input.datasetId);
+      const pressed = await withRendererWorkspaceOperation(event.sender, workspaceId, stale, async (operation) => {
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(sharedDatasetButtonState(description, input.table).reason);
+        }
+        return await operation.state.collectionAutomations.pressDataset(
+          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
+          description, watch);
+      });
+      return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
+    }
+    assertCollectionPath(input.collectionPath);
     const read = await withRendererWorkspaceOperation(event.sender, workspaceId, stale, async (operation) => {
-      const dataset = await readDataset(operation, input.collectionPath);
-      if (dataset !== null) return { kind: "dataset" as const, dataset };
       // Checked before the executor or the relay is asked.
       const access = documentButtonAccess(operation.workspace.shareView, input.collectionPath);
       if (access === "no-access") throw new Error(noAccessReason(nameOf(input.collectionPath)));
@@ -244,7 +222,7 @@ export function registerAutomationButtonsIpc<
       }
       const pressed = await operation.state.collectionAutomations.press(
         { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
-        (claimId, waiting) => pressWindows.watch(workspaceId, claimId, event.sender, waiting),
+        watch,
         async () => {
           if (!(await dependencies.buttonFields(operation, input.collectionPath)).includes(input.field)) {
             throw new Error(`${input.field} is not a button in ${nameOf(input.collectionPath)}.`);
@@ -253,20 +231,6 @@ export function registerAutomationButtonsIpc<
       );
       return { kind: "document" as const, pressed };
     });
-    if (read.kind === "dataset") {
-      const { dataset } = read;
-      const description = await describe(event.sender, workspaceId, dataset);
-      if (dataset.shared) {
-        throw new Error(sharedDatasetButtonRefusal({ definition: dataset.definition, file: dataset.file, description, field: input.field, table: input.table }));
-      }
-      const pressed = await withRendererWorkspaceOperation(event.sender, workspaceId, stale, (operation) =>
-        operation.state.collectionAutomations.pressDataset(
-          { collectionPath: input.collectionPath, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
-          description,
-          (claimId, waiting) => pressWindows.watch(workspaceId, claimId, event.sender, waiting),
-        ));
-      return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
-    }
     if (read.kind === "relayed") return { busy: false, relayed: true };
     const { pressed } = read;
     return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;

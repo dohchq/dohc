@@ -257,7 +257,7 @@ export function CollectionPage({
   // coalescing cadence. The store's token makes the refresh latest-wins.
   // Button fields: what each shows, and presses in flight from this window.
   // Their states follow the Collection's files, automations.yaml included.
-  const buttons = useAutomationButtons({ workspaceId, collectionPath, onError, onNotice });
+  const buttons = useAutomationButtons({ workspaceId, of: { collectionPath }, onError, onNotice });
   useEffect(() => {
     void buttons?.refresh();
   }, [buttons]);
