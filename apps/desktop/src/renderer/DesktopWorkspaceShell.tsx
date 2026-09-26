@@ -2390,12 +2390,17 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  const reportKeptCopyFailure = useCallback(
+    (message: string, retry: () => void) => reportShellFailure({ message, retry }),
+    [reportShellFailure],
+  );
   const refreshKeptCopies = useKeptCopyNotices({
     workspaceId,
     workspaceIsReady: workspaceIsReady && !isShareView,
     show: showKeptCopies,
     showSaved: showKeptCopySaved,
     reportShellError,
+    reportFailure: reportKeptCopyFailure,
     openFile,
   });
   // Read once: the shell remounts for each workspace.

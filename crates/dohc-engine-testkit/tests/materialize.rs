@@ -6,8 +6,8 @@
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
-    StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
+    AtomicReplacer, DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, NoBackoff,
+    ReplaceBackoff, StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
     run_pending_jobs, save_kept_displacement,
 };
 use dohc_engine_storage::{
@@ -1494,7 +1494,7 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
             &options
         )
         .expect("another workspace"),
-        None,
+        KeptCopySave::Gone,
         "a row belongs to its own workspace"
     );
     let saved = save_kept_displacement(
@@ -1506,7 +1506,7 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     )
     .expect("save");
 
-    assert_eq!(saved.as_deref(), Some("a (kept copy 2).md"));
+    assert_eq!(saved, KeptCopySave::Saved("a (kept copy 2).md".to_owned()));
     assert_eq!(read(&sc, "a (kept copy 2).md").as_deref(), Some(OUTSIDE));
     assert_eq!(
         read(&sc, "a (kept copy).md").as_deref(),
@@ -1533,7 +1533,125 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
             &options
         )
         .expect("again"),
-        None
+        KeptCopySave::Gone
+    );
+}
+
+/// Keep `bytes` at a hidden displaced name beside `rel`, with its kept row.
+fn keep_displaced(sc: &Scratch, store: &EngineStore, rel: &str, bytes: &[u8]) -> i64 {
+    let target = sc.target(rel);
+    std::fs::create_dir_all(target.parent().expect("parent")).expect("parents");
+    std::fs::write(target.with_file_name(".dohc-write-job.displaced"), bytes).expect("kept file");
+    let id = store
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: "ws".to_owned(),
+            target_path: rel.to_owned(),
+            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            expected_sha256: hex_sha256(b"before"),
+            content_sha256: Some(hex_sha256(b"ours")),
+            now_ms: 10,
+        })
+        .expect("open displacement");
+    store
+        .resolve_displacement(
+            id,
+            dohc_engine_storage::DisplacementResolution::Keep {
+                displaced_sha256: Some(&hex_sha256(bytes)),
+            },
+            None,
+            11,
+        )
+        .expect("keep");
+    id
+}
+
+/// A save that stopped after it placed the copy, before the hidden name went,
+/// finishes on the next try: the copy that holds the kept bytes is its own, so
+/// no second copy appears and the hidden name goes.
+#[test]
+fn a_kept_copy_placed_before_a_crash_is_finished_not_copied_again() {
+    let sc = Scratch::new("kept-copy-crash");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    let options = MaterializeOptions {
+        policy: DurabilityPolicy::none(),
+        replacer: &StdReplacer,
+        backoff: &NoBackoff,
+        now_ms: 30,
+        faults: &NoFaults,
+    };
+    let id = keep_displaced(&sc, &store, "notes/r.md", b"kept bytes");
+    // The link landed; the unlink of the hidden name did not.
+    std::fs::write(sc.target("notes/r (kept copy).md"), b"kept bytes").expect("placed copy");
+
+    assert_eq!(
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save"),
+        KeptCopySave::Saved("notes/r (kept copy).md".to_owned())
+    );
+    assert_eq!(
+        read(&sc, "notes/r (kept copy).md").as_deref(),
+        Some(&b"kept bytes"[..])
+    );
+    assert!(!sc.target("notes/r (kept copy 2).md").exists());
+    assert!(!sc.target("notes/.dohc-write-job.displaced").exists());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+/// A copy's workspace path stays within the engine's path limit, so capture
+/// records it. Where not one stem byte fits, the kept file and its row stay.
+#[test]
+fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
+    let sc = Scratch::new("kept-copy-path-limit");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    let options = MaterializeOptions {
+        policy: DurabilityPolicy::none(),
+        replacer: &StdReplacer,
+        backoff: &NoBackoff,
+        now_ms: 30,
+        faults: &NoFaults,
+    };
+    let deep = ["d"; 4].map(|letter| letter.repeat(200)).join("/");
+
+    let long = format!("{deep}/{}.md", "x".repeat(207));
+    assert!(long.len() < 1_024);
+    let id = keep_displaced(&sc, &store, &long, b"long");
+    let KeptCopySave::Saved(copy) =
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save")
+    else {
+        panic!("a shorter stem fits");
+    };
+    assert_eq!(copy.len(), 1_024, "{copy}");
+    assert!(copy.ends_with("x (kept copy).md"), "{copy}");
+    assert_eq!(
+        dohc_engine_files::classify_engine_file_path(&copy),
+        dohc_engine_files::PathClassification::Tracked
+    );
+    assert_eq!(read(&sc, &copy).as_deref(), Some(&b"long"[..]));
+
+    let full = format!("{deep}/{}/a", "e".repeat(216));
+    assert_eq!(full.len(), 1_022);
+    let id = keep_displaced(&sc, &store, &full, b"full");
+    assert_eq!(
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save"),
+        KeptCopySave::NoValidName
+    );
+    assert_eq!(
+        std::fs::read(sc.target(&full).with_file_name(".dohc-write-job.displaced")).expect("kept"),
+        b"full"
+    );
+    assert_eq!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .iter()
+            .map(|row| row.displacement_id)
+            .collect::<Vec<_>>(),
+        vec![id]
     );
 }
 

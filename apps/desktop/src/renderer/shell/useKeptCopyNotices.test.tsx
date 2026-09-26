@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { KeptCopy } from "../../ipc/bridgeContract";
-import { keptCopyMessage, useKeptCopyNotices } from "./useKeptCopyNotices";
+import type { KeptCopy, SaveKeptCopyResult } from "../../ipc/bridgeContract";
+import { keptCopyMessage, keptCopyNoNameMessage, useKeptCopyNotices } from "./useKeptCopyNotices";
 import { useShellError } from "./useShellError";
 
 // These wait on async bridge answers; every wait runs until its condition
@@ -20,10 +20,12 @@ function harness(initial: KeptCopy[]) {
   let more = false;
   const bridge = {
     listKeptCopies: vi.fn(async () => ({ keptCopies: kept, more })),
-    saveKeptCopy: vi.fn(async ({ id }: { workspaceId: string; id: number }) => {
+    saveKeptCopy: vi.fn(async ({ id }: { workspaceId: string; id: number }): Promise<SaveKeptCopyResult> => {
       const copy = kept.find((entry) => entry.id === id);
       kept = kept.filter((entry) => entry.id !== id);
-      return { path: copy ? copy.path.replace(/\.md$/u, " (kept copy).md") : null };
+      return copy
+        ? { status: "saved", path: copy.path.replace(/\.md$/u, " (kept copy).md") }
+        : { status: "gone" };
     }),
   };
   vi.stubGlobal("dohcDesktop", bridge);
@@ -36,6 +38,7 @@ function harness(initial: KeptCopy[]) {
       show: errors.showKeptCopies,
       showSaved: errors.showKeptCopySaved,
       reportShellError: errors.reportShellError,
+      reportFailure: (message, retry) => errors.reportShellFailure({ message, retry }),
       openFile,
     });
     return { ...errors, refresh };
@@ -111,7 +114,7 @@ describe("useKeptCopyNotices", () => {
 
   it("says so when the copy was already saved or removed", async () => {
     const h = harness([{ id: 3, path: "a.md", keptAtMs: 1 }]);
-    h.bridge.saveKeptCopy.mockResolvedValueOnce({ path: null });
+    h.bridge.saveKeptCopy.mockResolvedValueOnce({ status: "gone" });
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
     h.keep([]);
 
@@ -144,5 +147,22 @@ describe("useKeptCopyNotices", () => {
     h.keep([]);
     await act(async () => await h.result.current.refresh());
     expect(h.result.current.shellErrors).toEqual([]);
+  });
+
+  it("keeps the row and says why when no name beside the file fits", async () => {
+    const h = harness([{ id: 3, path: "a.md", keptAtMs: 1 }]);
+    h.bridge.saveKeptCopy.mockResolvedValueOnce({ status: "no-valid-name" });
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
+    const row = h.result.current.shellErrors[0]!;
+
+    act(() => h.result.current.runShellErrorAction(row.id));
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(2));
+    const failure = h.result.current.shellErrors[1]!;
+    expect(failure.message).toBe(keptCopyNoNameMessage("a.md"));
+    expect(failure.message).toBe(
+      "dohc could not save the other copy of a.md: no name beside it is short enough. Rename a.md or its folder to something shorter, then try again.",
+    );
+    expect(failure.retry).not.toBeNull();
+    expect(h.result.current.shellErrors[0]!.id).toBe(row.id);
   });
 });

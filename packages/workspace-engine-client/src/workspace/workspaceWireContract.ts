@@ -167,7 +167,11 @@ export type WatcherStatusResult =
 export type KeptCopy = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList]["keptCopies"][number];
 export type KeptCopiesListResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList];
-/** The copy's workspace-relative path, or null when nothing is kept under that id. */
+/**
+ * `saved` with the copy's workspace-relative path; `gone` when nothing is
+ * kept under that id any more; `no-valid-name` when no name beside the file
+ * fits the engine's path limits, so the copy stays kept.
+ */
 export type KeptCopySaveResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesSave];
 
@@ -1070,7 +1074,11 @@ const WorkspaceResultSchemas = {
     ),
     more: Schema.Boolean,
   }),
-  [WORKSPACE_METHOD.keptCopiesSave]: mutableStruct({ path: NullableString }),
+  [WORKSPACE_METHOD.keptCopiesSave]: Schema.Union([
+    mutableStruct({ status: Schema.Literal("saved"), path: Schema.NonEmptyString }),
+    mutableStruct({ status: Schema.Literal("gone") }),
+    mutableStruct({ status: Schema.Literal("no-valid-name") }),
+  ]),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({

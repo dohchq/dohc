@@ -115,9 +115,9 @@ export function workspaceVersionHandlers(dependencies: {
 
     async saveKeptCopy(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      const path = await capture.saveKeptCopy(input.id);
-      if (path !== null) notifyRenderer({ workspaceId: input.workspaceId });
-      return { path };
+      const saved = await capture.saveKeptCopy(input.id);
+      if (saved.status === "saved") notifyRenderer({ workspaceId: input.workspaceId });
+      return saved;
     },
 
     async listWorkspaceVersionConflicts(input) {

@@ -165,7 +165,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_save_kept_copy",
     {
       description:
-        "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`, and return that `path`. The original file does not change. Read both, keep what you need, and delete the copy when you are done. `path` is null when nothing is kept under that id any more.",
+        "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),

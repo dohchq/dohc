@@ -2559,7 +2559,10 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
         json!({ "id": id }),
     )
     .await;
-    assert_eq!(saved, json!({ "path": "notes/a (kept copy).md" }));
+    assert_eq!(
+        saved,
+        json!({ "status": "saved", "path": "notes/a (kept copy).md" })
+    );
     assert_eq!(
         std::fs::read(scratch.path().join("notes/a (kept copy).md")).expect("copy"),
         b"bytes another program wrote"
@@ -2587,6 +2590,6 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
             json!({ "id": id })
         )
         .await,
-        json!({ "path": null })
+        json!({ "status": "gone" })
     );
 }

@@ -47,6 +47,7 @@ import {
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
+  type KeptCopySaveResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -200,7 +201,7 @@ export interface CliDocumentsPort {
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
   list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
-  save(id: number): Promise<string | null>;
+  save(id: number): Promise<KeptCopySaveResult>;
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
@@ -2100,9 +2101,9 @@ async function dispatch(
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
       try {
-        const path = await keptCopies.save(request.args.id);
-        if (path !== null) await notifyWrite(options, context);
-        return { ok: true as const, path };
+        const saved = await keptCopies.save(request.args.id);
+        if (saved.status === "saved") await notifyWrite(options, context);
+        return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }

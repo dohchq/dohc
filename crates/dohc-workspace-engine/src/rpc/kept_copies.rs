@@ -3,6 +3,7 @@ use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use dohc_engine_files::KeptCopySave;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
@@ -57,7 +58,10 @@ impl EngineService {
     }
 
     /// `keptCopies.save`: move one kept copy to `name (kept copy).ext` beside
-    /// its path. `path` is null when nothing is kept under that id any more.
+    /// its path. The answer's `status` is `saved` with the copy's `path`,
+    /// `gone` when nothing is kept under that id any more, or `no-valid-name`
+    /// when no name beside the file fits the engine's path limits and the copy
+    /// stays kept.
     pub(super) async fn kept_copies_save(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -65,7 +69,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: KeptCopiesSaveParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let path = open
+        let saved = open
             .actor
             .save_kept_displacement(
                 open.root.clone(),
@@ -75,6 +79,10 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "path": path }))
+        Ok(match saved {
+            KeptCopySave::Saved(path) => json!({ "status": "saved", "path": path }),
+            KeptCopySave::Gone => json!({ "status": "gone" }),
+            KeptCopySave::NoValidName => json!({ "status": "no-valid-name" }),
+        })
     }
 }

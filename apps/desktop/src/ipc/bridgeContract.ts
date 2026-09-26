@@ -2720,8 +2720,9 @@ export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits at a hidden name beside `path` until
-// saveKeptCopy moves it to a visible copy; `path` in that answer is the
-// copy's, or null when nothing is kept under the id any more.
+// saveKeptCopy moves it to a visible copy. That answer is `saved` with the
+// copy's path, `gone` when nothing is kept under the id any more, or
+// `no-valid-name` when no name beside the file fits, so the copy stays kept.
 export const KeptCopy = z.object({
   id: z.number().int(),
   path: z.string().min(1),
@@ -2737,7 +2738,12 @@ export const SaveKeptCopyPayload = z.object({
   workspaceId: WORKSPACE_ID,
   id: z.number().int(),
 });
-export const SaveKeptCopyResult = z.object({ path: z.string().min(1).nullable() });
+export const SaveKeptCopyResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("saved"), path: z.string().min(1) }),
+  z.object({ status: z.literal("gone") }),
+  z.object({ status: z.literal("no-valid-name") }),
+]);
+export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
 
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {

@@ -58,6 +58,7 @@ import {
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
   type KeptCopy,
+  type KeptCopySaveResult,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
@@ -546,10 +547,9 @@ export interface WorkspaceEngineCapture {
   countOpenConflicts(): Promise<number>;
   // Files dohc moved aside while saving because another program changed them
   // meanwhile. Each waits at a hidden name until saveKeptCopy moves it to a
-  // visible copy beside its file and returns that copy's path, or null when
-  // nothing is kept under the id any more.
+  // visible copy beside its file.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
-  saveKeptCopy(id: number): Promise<string | null>;
+  saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,

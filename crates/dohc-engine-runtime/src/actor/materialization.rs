@@ -7,8 +7,8 @@ use dohc_engine_domain::{
     decode_binary_rollback_job_identity,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one, recover_displacements,
+    DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
+    materialize_one, materialize_secret_delete_one, materialize_secret_one, recover_displacements,
     save_kept_displacement,
 };
 use dohc_engine_storage::{
@@ -61,14 +61,14 @@ impl ActorHandle {
 
     /// Move one kept file to a visible copy beside its path. Runs on the
     /// actor, where materialization and its recovery run, so no replace moves
-    /// the file meanwhile. `None` when nothing is kept under that id.
+    /// the file meanwhile.
     pub async fn save_kept_displacement(
         &self,
         root_dir: PathBuf,
         workspace_id: String,
         displacement_id: i64,
         now_ms: i64,
-    ) -> Result<Option<String>, RuntimeError> {
+    ) -> Result<KeptCopySave, RuntimeError> {
         self.run(move |store, _cache| {
             Ok(save_kept_displacement(
                 store,

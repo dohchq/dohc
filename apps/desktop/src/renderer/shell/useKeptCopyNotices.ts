@@ -8,6 +8,11 @@ export function keptCopyMessage(path: string): string {
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }
 
+/** Why a copy stays kept when no name beside its file fits. */
+export function keptCopyNoNameMessage(path: string): string {
+  return `dohc could not save the other copy of ${path}: no name beside it is short enough. Rename ${path} or its folder to something shorter, then try again.`;
+}
+
 /**
  * Tells the person about every file dohc kept while it saved: one Notices row
  * each, whose Save copy moves the kept file to a visible copy beside its
@@ -21,6 +26,7 @@ export function useKeptCopyNotices(input: {
   show: (copies: readonly KeptCopyNotice[], more: boolean) => void;
   showSaved: (message: string, open: (() => void) | null) => void;
   reportShellError: (fallback: string, error: unknown, retry: (() => void) | null) => void;
+  reportFailure: (message: string, retry: () => void) => void;
   openFile: (path: string) => void;
 }): () => Promise<void> {
   const { workspaceId, workspaceIsReady } = input;
@@ -54,15 +60,27 @@ export function useKeptCopyNotices(input: {
       const epoch = workspace.current();
       void bridge()
         .saveKeptCopy({ workspaceId, id: copy.id })
-        .then(async ({ path }) => {
+        .then(async (saved) => {
           if (!workspace.isCurrent(epoch)) return;
-          // Null: a crash, an agent or another window got there first.
-          latest.current.showSaved(
-            path === null
-              ? `The other copy of ${copy.path} was already saved or removed.`
-              : `Saved the other copy of ${copy.path} as ${path}`,
-            path === null ? null : () => latest.current.openFile(path),
-          );
+          if (saved.status === "saved") {
+            const { path } = saved;
+            latest.current.showSaved(
+              `Saved the other copy of ${copy.path} as ${path}`,
+              () => latest.current.openFile(path),
+            );
+          } else if (saved.status === "gone") {
+            // A crash, an agent or another window got there first.
+            latest.current.showSaved(
+              `The other copy of ${copy.path} was already saved or removed.`,
+              null,
+            );
+          } else {
+            // The copy and its row stay; this says why.
+            latest.current.reportFailure(
+              keptCopyNoNameMessage(copy.path),
+              () => save(copy),
+            );
+          }
           await refresh();
         })
         .catch((error: unknown) => {

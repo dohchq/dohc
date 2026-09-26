@@ -61,7 +61,7 @@ function harness() {
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
     listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
-    saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return "notes (kept copy).md"; }),
+    saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return { status: "saved", path: "notes (kept copy).md" }; }),
   };
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");
@@ -162,11 +162,14 @@ describe("registered workspace version handlers", () => {
   it("lists kept copies and saves one, repainting only when a copy was saved", async () => {
     const h = harness();
     await expect(h.invoke(ops.listKeptCopies.channel, { workspaceId })).resolves.toEqual({ keptCopies: [keptCopy], more: false });
-    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ path: "notes (kept copy).md" });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ status: "saved", path: "notes (kept copy).md" });
     expect(h.operations.saveKeptCopy).toHaveBeenCalledExactlyOnceWith(7);
     expect(h.steps).toEqual(["capture", "kept", "capture", "save kept", "notify"]);
-    h.operations.saveKeptCopy.mockResolvedValue(null);
-    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ path: null });
+    h.operations.saveKeptCopy.mockResolvedValue({ status: "gone" });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ status: "gone" });
+    h.operations.saveKeptCopy.mockResolvedValue({ status: "no-valid-name" });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 }))
+      .resolves.toEqual({ status: "no-valid-name" });
     expect(h.notifyRenderer).toHaveBeenCalledOnce();
   });
 

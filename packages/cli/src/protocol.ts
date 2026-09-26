@@ -801,9 +801,13 @@ const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   }).strict(),
   rawFailureSchema,
 ]);
-// `path` is the copy's, or null when nothing is kept under that id any more.
-const saveKeptCopyResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1).nullable() }).strict(),
+// `saved` with the copy's path; `gone` when nothing is kept under that id any
+// more; `no-valid-name` when no name beside the file fits dohc's path limits,
+// so the copy stays kept.
+const saveKeptCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
+  z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
   rawFailureSchema,
 ]);
 

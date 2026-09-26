@@ -1339,7 +1339,9 @@ describe("CLI socket server", () => {
       async save(id) {
         const found = kept.some((copy) => copy.id === id);
         kept = kept.filter((copy) => copy.id !== id);
-        return found ? "notes/plan (kept copy).md" : null;
+        return found
+          ? { status: "saved", path: "notes/plan (kept copy).md" }
+          : { status: "gone" };
       },
     };
 
@@ -1349,10 +1351,10 @@ describe("CLI socket server", () => {
       more: false,
     });
     await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
-      .resolves.toEqual({ ok: true, path: "notes/plan (kept copy).md" });
+      .resolves.toEqual({ ok: true, status: "saved", path: "notes/plan (kept copy).md" });
     expect(calls.writes).toBe(1);
     await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
-      .resolves.toEqual({ ok: true, path: null });
+      .resolves.toEqual({ ok: true, status: "gone" });
     expect(calls.writes).toBe(1);
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
       .resolves.toEqual({ ok: true, keptCopies: [], more: false });
