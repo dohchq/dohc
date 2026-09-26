@@ -2587,7 +2587,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
                 tx,
                 WORKSPACE_ID,
                 &AutomationSubscription {
-                    automation_id: "plugin:triage".to_owned(),
+                    automation_id: "collection:tasks#triage".to_owned(),
                     prefix: "tasks".to_owned(),
                     kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
                     fields: None,

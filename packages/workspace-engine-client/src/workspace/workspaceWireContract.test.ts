@@ -562,7 +562,7 @@ describe("workspace wire schemas", () => {
 describe("automations wire schemas", () => {
   const summary = {
     claimId: "claim-1",
-    automationId: "plugin:hello-plugin/triage",
+    automationId: "collection:tasks#triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
@@ -708,7 +708,7 @@ describe("automations wire schemas", () => {
 
   it("decodes the failure listing and refuses a row without a generation", () => {
     const failure = {
-      automationId: "plugin:hello-plugin/triage",
+      automationId: "collection:tasks#triage",
       claimId: "claim-1",
       chainStopped: true,
       error: "chain-stopped",
@@ -728,7 +728,7 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
         failures: [
-          { automationId: "plugin:hello-plugin/triage", claimId: "claim-1", error: "x" },
+          { automationId: "collection:tasks#triage", claimId: "claim-1", error: "x" },
         ],
       }),
     ).toThrow(ProtocolShapeError);

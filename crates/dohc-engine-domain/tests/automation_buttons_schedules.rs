@@ -199,19 +199,19 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
         press(&mut store, "press-1", OTHER_INVOICE, 19),
         Err(DomainError::InvalidInput { .. })
     ));
-    let plugin = press_automation(
+    let malformed = press_automation(
         &mut store,
         WS,
         &AutomationPress {
             press_id: "press-6".to_owned(),
-            automation_id: "plugin:triage".to_owned(),
+            automation_id: "collection:triage".to_owned(),
             record_id: INVOICE.to_owned(),
             pressed_by: ADA.to_owned(),
         },
         20,
         &NoFaults,
     );
-    assert!(matches!(plugin, Err(DomainError::InvalidInput { .. })));
+    assert!(matches!(malformed, Err(DomainError::InvalidInput { .. })));
 }
 
 #[test]

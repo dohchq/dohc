@@ -42,12 +42,11 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 /// Bound on the error text a failed settle records.
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
-/// The namespaces an automation id lives in, one per executor: plugin
-/// automations are `plugin:<plugin name>/<automation id>`, Collection
-/// automations `collection:<collection path>#<automation id>`. Each executor
-/// drains its own namespace, so a subscription outside them would claim
-/// work nothing ever runs.
-pub const AUTOMATION_ID_NAMESPACES: [&str; 2] = ["plugin:", "collection:"];
+/// The namespace every automation id lives in: Collection automations are
+/// `collection:<collection path>#<automation id>`. The Collection executor
+/// drains this namespace, so a subscription outside it would claim work
+/// nothing ever runs.
+pub const AUTOMATION_ID_NAMESPACE: &str = "collection:";
 
 /// The most field names one subscription may list. An automation that
 /// watches more fields subscribes to every field.
@@ -548,11 +547,11 @@ pub fn subscribe_automation_in_tx(
 ) -> Result<bool, DomainError> {
     let automation_id =
         normalize_automation_identifier(&subscription.automation_id, "Automation id is invalid.")?;
-    if !AUTOMATION_ID_NAMESPACES.iter().any(|namespace| {
-        automation_id.len() > namespace.len() && automation_id.starts_with(namespace)
-    }) {
+    if automation_id.len() <= AUTOMATION_ID_NAMESPACE.len()
+        || !automation_id.starts_with(AUTOMATION_ID_NAMESPACE)
+    {
         return Err(DomainError::InvalidInput {
-            reason: "Automation id must start with plugin: or collection:.",
+            reason: "Automation id must start with collection:.",
         });
     }
     let prefix = normalize_automation_identifier(
@@ -2132,10 +2131,8 @@ fn claim_field_facts(
 
 /// Flip the oldest pending claim whose automation id starts with the prefix
 /// to running with `attempts + 1`, and return it with its field facts;
-/// `None` when nothing is pending. Each executor drains its own namespace:
-/// the plugin executor `"plugin:"` (ids `plugin:<plugin name>/<automation
-/// id>`), the Collection executor `"collection:"` (ids
-/// `collection:<collection path>#<automation id>`).
+/// `None` when nothing is pending. The Collection executor drains
+/// [`AUTOMATION_ID_NAMESPACE`].
 pub(crate) fn claim_next_pending_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,

@@ -38,7 +38,7 @@ pub mod store;
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
-    AUTOMATION_ID_NAMESPACES, AUTOMATION_PRESS_RETENTION_MS, AUTOMATION_RECLAIM_EXHAUSTED,
+    AUTOMATION_ID_NAMESPACE, AUTOMATION_PRESS_RETENTION_MS, AUTOMATION_RECLAIM_EXHAUSTED,
     AutomationChange, AutomationChangeKind, AutomationClaim, AutomationClaimAttempt,
     AutomationClaimState, AutomationFactValue, AutomationFailure, AutomationFieldFact,
     AutomationFieldFacts, AutomationGroupMessage, AutomationGroupSubscription, AutomationPress,
