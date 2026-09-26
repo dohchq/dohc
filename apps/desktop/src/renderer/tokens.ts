@@ -51,7 +51,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // Find-match highlight (search panel <mark>, pressed search toggles):
     // the editor's selection-blue family, tuned so the OPAQUE mark clears
     // 3:1 against panel/panel-2 and the selected-row fill, with bold
-    // ink text on it at AA (4.38:1) — see the contrast test below. The
+    // ink text on it at AA (4.21:1) — see the contrast test below. The
     // graphite accent stays the only structural accent; this token means
     // exactly one thing: "your match".
     match: "#397be4",
