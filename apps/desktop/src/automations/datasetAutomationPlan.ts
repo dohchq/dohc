@@ -3,7 +3,7 @@ import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
-import { datasetFindOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+import { datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
 import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automationReach";
 
 // How a dataset Collection's automation maps onto the dataset's approved
@@ -44,6 +44,13 @@ export interface DatasetSteps {
 }
 
 const KIND_OF: Record<RecordStep["kind"], Kind> = { set: "edit", "add-record": "create", find: "read" };
+
+/** A dataset's table by name, or its only table for null. */
+export function datasetTableNamed(definition: DatasetDefinition, name: string | null): DatasetTable | undefined {
+  return name === null
+    ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
+    : definition.tables.find((table) => table.name === name);
+}
 
 const listFormat = new Intl.ListFormat("en", { type: "conjunction" });
 
@@ -105,10 +112,8 @@ function resolve(
   pin: boolean,
 ): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
   const trigger = automation.when;
-  if (!("table" in trigger)) return { problem: "dohc can run automations that start from a record change. Other triggers come later." };
-  const table = trigger.table === null
-    ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
-    : definition.tables.find((candidate) => candidate.name === trigger.table);
+  if (!("table" in trigger)) return { problem: "Automations on dataset Collections start only from a record change or a button." };
+  const table = datasetTableNamed(definition, trigger.table);
   if (table === undefined) {
     return { problem: trigger.table === null
       ? `${definition.name} has several tables. Name the one this automation watches.`
@@ -228,14 +233,46 @@ export function datasetStepsOf(automation: Automation, definition: DatasetDefini
   return resolved.steps;
 }
 
+// Each operation a run can call, once each: the trigger record's read, each
+// step's operation, and each read that checks a record again.
+function invokedOperations({ triggerRead, steps, rereads }: DatasetSteps): DatasetOperation[] {
+  const operations = new Map<string, DatasetOperation>();
+  for (const operation of [triggerRead, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
+    if (operation !== null) operations.set(operation.operationId, operation);
+  }
+  return [...operations.values()];
+}
+
+/**
+ * Every approved operation a run of the automation can call, by name, once
+ * each: the operations its steps name, and the reads that find its trigger
+ * record and check a record again. A person who presses its button must be
+ * able to use each of them.
+ */
+export function datasetOperationsOf(automation: Automation, definition: DatasetDefinition): string[] {
+  const resolved = resolve(automation, definition, false);
+  const reads = "problem" in resolved ? [] : invokedOperations(resolved.steps).map((operation) => operation.name);
+  return [...new Set([...operationsOf(automation), ...reads])];
+}
+
+/** The table and Button field a button automation's trigger names in the rules, or null. */
+export function datasetButtonOf(automation: Automation, definition: DatasetDefinition): { tableId: string; fieldId: string } | null {
+  const trigger = automation.when;
+  if (trigger.kind !== "button") return null;
+  const table = datasetTableNamed(definition, trigger.table);
+  const field = table?.fields.find((candidate) => candidate.type === "button" && candidate.name === trigger.field);
+  return table && field ? { tableId: table.tableId, fieldId: field.fieldId } : null;
+}
+
 /**
  * The reach check's view of a dataset automation. First each operation it
  * can call, once each: the trigger record's read, each step's operation, and
  * each read that checks a record again after someone changed it. Then each
  * field of the tables it uses, which its formulas see only while every editor
  * can read it; a field that becomes readable because an editor left waits
- * for a current editor's confirmation, like a step. An automation whose
- * operations do not resolve runs nothing, so it has no steps to check.
+ * for a current editor's confirmation, like a step. A button holds no value,
+ * so formulas never see one. An automation whose operations do not resolve
+ * runs nothing, so it has no steps to check.
  */
 export function datasetReachSteps(
   automation: Automation,
@@ -245,20 +282,16 @@ export function datasetReachSteps(
 ): ReachStep[] {
   const resolved = resolve(automation, definition, false);
   if ("problem" in resolved) return [];
-  const { table, triggerRead, steps, rereads } = resolved.steps;
-  const operations = new Map<string, DatasetOperation>();
-  for (const operation of [triggerRead, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
-    if (operation !== null) operations.set(operation.operationId, operation);
-  }
+  const { table, steps } = resolved.steps;
   const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
   const tables = new Map([[table.tableId, table], ...[...steps.values()].map((step) => [step.table.tableId, step.table] as const)]);
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   return [
-    ...[...operations.values()].map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
-    ...[...tables.values()].flatMap((own) => own.fields.map((field): ReachStep => ({
+    ...invokedOperations(resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
+    ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ? [] : [{
       kind: "dataset-field", collection, grants, field: { fieldId: field.fieldId, name: field.name },
       reads: reads.filter((read) => read.fieldIds.includes(field.fieldId)).map(reach),
-    }))),
+    }])),
   ];
 }
 
@@ -285,7 +318,8 @@ export function pinDatasetOperations(automation: Automation, definition: Dataset
 
 /**
  * A dataset claim as planning reads a change: fields named as the approved
- * rules name them, each side wrapped as the engine wraps a fact.
+ * rules name them, each side wrapped as the engine wraps a fact. A press
+ * changed no field.
  */
 export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable, readable: ReadonlySet<string>): RunClaim {
   const fact = claim.fact;
@@ -293,7 +327,7 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
   const side = (present: boolean, value: JsonValue, truncated: boolean) =>
     !present ? null : truncated ? { truncated: true as const, bytes: 0 } : { value };
   const fields: RunClaim["change"]["fields"][number][] = [];
-  for (const change of fact.fields) {
+  for (const change of fact.kind === "button" ? [] : fact.fields) {
     const field = table.fields.find((candidate) => candidate.fieldId === change.fieldId);
     // A claim carries each watched field; formulas see only the readable ones.
     if (field === undefined || !readable.has(field.fieldId)) continue;

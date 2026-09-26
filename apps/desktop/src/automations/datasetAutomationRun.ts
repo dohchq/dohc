@@ -8,6 +8,7 @@ import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
+  definitionDigest,
   definitionHash,
   evaluationRequest,
   MAX_FOUND_RECORDS,
@@ -17,10 +18,20 @@ import {
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
+import { changedSincePressed } from "./automationButtons";
 import { checkAutomationReach, type ReachCollection, type ReachDatasetGrants, type ReachRoster } from "./automationReach";
 import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type DatasetEffect, type DatasetReplan, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 import { DEADLINE_ERROR, newRun, savedRunOf, type CollectionAutomationRunOutcome } from "./collectionAutomationRun";
-import { datasetEffectKey, datasetReachSteps, datasetRecordKey, datasetRunClaim, datasetStepsOf, type DatasetRecordId, type DatasetSteps } from "./datasetAutomationPlan";
+import {
+  datasetButtonOf,
+  datasetEffectKey,
+  datasetReachSteps,
+  datasetRecordKey,
+  datasetRunClaim,
+  datasetStepsOf,
+  type DatasetRecordId,
+  type DatasetSteps,
+} from "./datasetAutomationPlan";
 
 // One run of one dataset claim, as runCollectionAutomation runs an engine
 // claim: check reach, read through the dataset's approved reads, evaluate
@@ -34,6 +45,13 @@ import { datasetEffectKey, datasetReachSteps, datasetRecordKey, datasetRunClaim,
 // already holds its planned value is done, a field still at its planned
 // before value is sent again under a new key at the new version, and a
 // field someone changed to anything else keeps their change.
+//
+// A button press's run reads its record as it is now, and formulas see the
+// person who pressed. It runs only the automation the press was checked
+// against, from the button that was pressed, in the table it was pressed
+// in. Its steps use the owner caller, as every run here does: this
+// computer's datasets are its person's own, so that authority is the
+// presser's.
 
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
@@ -58,6 +76,14 @@ export interface DatasetAutomationRunDependencies {
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
   nowMs(): number;
+  /** The name a formula's `person` shows for the person who pressed a button. */
+  personName(userId: string): string;
+}
+
+/** The person who pressed the button a claim runs for, or null for a change. */
+export function datasetPresser(claim: Pick<DatasetAutomationClaim, "fact" | "actor">): string | null {
+  const { actor } = claim;
+  return claim.fact?.kind === "button" && (actor.kind === "owner" || actor.kind === "named") ? actor.userId ?? null : null;
 }
 
 export interface DatasetAutomationRunInput {
@@ -162,6 +188,23 @@ export async function readDatasetRecord(
   return row !== undefined && row.id === recordId ? row : null;
 }
 
+/**
+ * Whether a record is in the table of a button's automation now, read as the
+ * owner through the read its runs find their record with.
+ */
+export async function datasetRecordExists(
+  host: Pick<DatasetRunHost, "revision"> & { invokeAsOwner(input: LocalDatasetInvocation): Promise<DatasetInvocationResult> },
+  datasetId: string,
+  automation: Automation,
+  recordId: DatasetRecordId,
+): Promise<boolean> {
+  const approved = host.revision(datasetId);
+  const { triggerRead, table } = datasetStepsOf(automation, approved.definition);
+  if (triggerRead === null) return false;
+  const rules = { datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
+  return (await readDatasetRecord((operationId, input) => host.invokeAsOwner({ ...rules, operationId, input, idempotencyKey: READ_KEY }), triggerRead, table, recordId)) !== null;
+}
+
 export async function runDatasetAutomation(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
@@ -238,6 +281,16 @@ async function plan(
 ): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation, collection, signal } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
+  // A press names its table and button by id, since its record id means
+  // nothing in any other table, and the automation its presser was checked against.
+  const pressed = claim.fact?.kind === "button" ? claim.fact : null;
+  if (pressed !== null) {
+    const button = datasetButtonOf(automation, approved.definition);
+    if (button?.tableId !== pressed.tableId || button.fieldId !== pressed.fieldId || definitionDigest(automation) !== pressed.definitionHash) {
+      const name = approved.definition.tables.flatMap((table) => table.fields).find((field) => field.fieldId === pressed.fieldId)?.name;
+      return stop(failed(changedSincePressed(name ?? "This button")));
+    }
+  }
   const read = await dependencies.withHost(async (host) => {
     if (!host.generated(claim.datasetId)) {
       throw new Error(`${approved.definition.name}'s operations were written or changed outside dohc, so automations cannot use them yet.`);
@@ -284,7 +337,9 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { person: null, message: null, chat: null, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const pressedBy = datasetPresser(claim);
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
+  const inputs: RunInputs = { person, message: null, chat: null, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   const request = evaluationRequest(inputs, claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);

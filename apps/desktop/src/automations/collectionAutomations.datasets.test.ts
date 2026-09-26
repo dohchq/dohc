@@ -15,7 +15,7 @@ import { chatDirectoryOf, type ChatDirectoryChannel } from "./automationChat";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import type { ReachRoster } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, type CollectionAutomationEngine } from "./collectionAutomations";
+import { CollectionAutomations, type CollectionAutomationEngine, type PressSettled, type PressWaitReason } from "./collectionAutomations";
 import { UNDONE_RUN_ERROR } from "./collectionAutomationRun";
 import { DATASET_UNDO_RULES_CHANGED } from "./datasetAutomationUndo";
 
@@ -28,7 +28,7 @@ const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStar
 const OWNER: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [] };
 const UNKNOWN: ReachRoster = { kind: "unknown", problem: { kind: "unchecked", next: "dohc checks again when the server answers." } };
 const AUTOMATION = "collection:Budget#close-paid";
-const TABLE = id(2), PAID = id(4), STATUS = id(5), NOTES = id(6), FINISHED = id(7);
+const TABLE = id(2), PAID = id(4), STATUS = id(5), NOTES = id(6), FINISHED = id(7), MARK_PAID = id(8), REFUND = id(9);
 const LIST = id(10), CREATE = id(11), EDIT = id(12), STATUS_ONLY = id(13);
 const { definition, files } = generateDatasetSources({
   formatVersion: 1, datasetId: id(1), name: "Budget", schemaPath: "Budget/schema.sql", operationsPath: "Budget/operations.js",
@@ -38,6 +38,8 @@ const { definition, files } = generateDatasetSources({
     { fieldId: STATUS, name: "Status", sqlColumn: "status", type: "text", required: true, unique: false, default: "Open" },
     { fieldId: NOTES, name: "Notes", sqlColumn: "notes", type: "text", required: false, unique: false },
     { fieldId: FINISHED, name: "Finished on", sqlColumn: "finished", type: "date", required: false, unique: false },
+    { fieldId: MARK_PAID, name: "Mark paid", type: "button" },
+    { fieldId: REFUND, name: "Refund", type: "button" },
   ] }],
   operations: [
     { operationId: LIST, name: "invoices.list", label: "View", tableId: TABLE, kind: "read", access: "helper", readOnly: true, fieldIds: [PAID, STATUS, NOTES, FINISHED] },
@@ -62,7 +64,7 @@ afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); 
 
 const TEAM: ChatDirectoryChannel = { id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team", runningThreadId: null };
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean } = {}) {
+async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean } = {}) {
   const root = await createTestScratch("dohc-dataset-automations-");
   for (const [path, text] of Object.entries(files)) {
     await mkdir(join(root, dirname(path)), { recursive: true });
@@ -141,11 +143,14 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let rulesResolve = true;
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
+  // What the pressing window hears.
+  const settled: PressSettled[] = [];
+  const waiting: Array<{ claimId: string; reason: PressWaitReason }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
-    personName: (userId) => userId,
-    mayRetryPress: async () => false,
-    onPressSettled: () => undefined,
-    onPressWaiting: () => undefined,
+    personName: (userId) => `Person ${userId}`,
+    mayRetryPress: async () => options.mayRetryPress ?? false,
+    onPressSettled: (event) => { settled.push(event); wake(); },
+    onPressWaiting: (event) => { waiting.push(event); wake(); },
     runsGroupTriggers: async () => options.groups ?? false,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
@@ -189,7 +194,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor,
+    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     setRoster: (next: ReachRoster) => { roster = next; },
@@ -604,5 +609,151 @@ describe("Collection automations on a dataset", () => {
     const { runs } = await createAutomationRunStore(f.root).runsOf(AUTOMATION, claimId);
     expect(runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
+  });
+});
+
+describe("pressing a button on a dataset record", () => {
+  const PRESSER = "user-ana";
+  const BUTTON_AUTOMATION = "collection:Budget#mark-paid";
+  const markPaid = (step = "      - set:\n          Status: '=\"Paid by \" + person.name + \" with \" + trigger.field'\n        operation: invoices.status\n", button = "Mark paid") => `  - id: mark-paid
+    name: Mark paid
+    when:
+      button: ${button}
+    do:
+${step}`;
+  const pressId = (number: number) => `4f2d3c1a-9b8e-4c7d-a6f5-${String(number).padStart(12, "0")}`;
+  const owner = (f: Awaited<ReturnType<typeof world>>) => f.host.describe(definition.datasetId);
+  const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string }, description = owner(f)) =>
+    f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
+      description, () => undefined);
+  const buttonState = async (f: Awaited<ReturnType<typeof world>>, field: string) =>
+    (await f.executor.datasetButtons("Budget", [{ field, table: null }], owner(f)))[0]!;
+
+  it("runs a press on the record as it is now, for the person who pressed, once, and tells the window how it settled", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    expect(await f.executor.datasetButtons("Budget", [{ field: "Mark paid", table: null }], owner(f)))
+      .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
+    // A button watches nothing; its presses claim.
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const watched: string[] = [];
+    const pressed = await f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER },
+      owner(f), (claimId) => watched.push(claimId));
+    if (pressed.busy) throw new Error("The press ran.");
+    expect(pressed.settled).toBeNull();
+    expect(watched).toEqual([pressed.claimId]);
+    await f.until(() => f.settled.length === 1);
+    expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe(`Paid by Person ${PRESSER} with Mark paid`);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([expect.objectContaining({ claimId: pressed.claimId, state: "done", depth: 0,
+      fact: { kind: "button", datasetId: definition.datasetId, tableId: TABLE, recordId: invoice, fieldId: MARK_PAID, definitionHash: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      actor: { kind: "owner", userId: PRESSER } })]);
+    // The press sent again after a lost reply answers how its run ended, and runs nothing more.
+    expect(await press(f, { recordId: invoice, pressId: pressId(1) })).toEqual({ busy: false, claimId: pressed.claimId, settled: { outcome: "done", error: null } });
+    await expect(press(f, { recordId: "another", pressId: pressId(1) })).rejects.toThrow("already names another press");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toHaveLength(1);
+    // History names the automation, which wrote as the owner.
+    expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: BUTTON_AUTOMATION, depth: 1 } });
+    await f.executor.dispose();
+  });
+
+  it("refuses someone the host lets read the table, or not use every operation the button invokes, before claiming anything", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    const described = owner(f);
+    const only = (...operationIds: string[]) => ({ ...described, operations: described.operations.filter((operation) => operationIds.includes(operation.operationId)) });
+    const refusal = "Only people who can edit Invoices can use this button.";
+    // The run also reads the record through invoices.list as the owner, so the presser must be able to.
+    // A description of another dataset grants nothing here.
+    for (const description of [only(LIST), only(LIST, EDIT), only(STATUS_ONLY), { ...described, datasetId: id(99) }]) {
+      await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
+      expect(await f.executor.datasetButtons("Budget", [{ field: "Mark paid", table: null }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
+    }
+    await expect(f.executor.pressDataset({ collectionPath: "Budget", table: null, field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER },
+      described, () => undefined)).rejects.toThrow("This record is not in Budget.");
+    // A record the table does not hold gets no claim.
+    await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Budget.");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION)).toEqual([]);
+    await f.executor.dispose();
+  });
+
+  it("tells the window why a press waits, runs the same person's second press with it, and is busy for anyone else", async () => {
+    const f = await world({ roster: UNKNOWN });
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const first = await press(f, { recordId: invoice, pressId: pressId(4) });
+    if (first.busy) throw new Error("The press ran.");
+    await f.until(() => f.waiting.length > 0);
+    expect(f.waiting[0]).toEqual({ claimId: first.claimId, reason: "roster" });
+    expect(await press(f, { recordId: invoice, pressId: pressId(5) })).toEqual({ busy: false, claimId: first.claimId, settled: null });
+    expect(await press(f, { recordId: invoice, pressId: pressId(6), pressedBy: "user-ben" })).toEqual({ busy: true });
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.settled.length === 1);
+    expect(f.settled).toEqual([{ claimId: first.claimId, outcome: "done", error: null }]);
+    await f.executor.dispose();
+  });
+
+  it("answers a press sent again after its button was renamed, and only as it was first asked", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({});
+    const first = await press(f, { recordId: invoice, pressId: pressId(8) });
+    if (first.busy) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1);
+    const renamed = structuredClone(definition);
+    renamed.tables[0]!.fields.find((field) => field.fieldId === MARK_PAID)!.name = "Settle";
+    await f.writeAutomations(markPaid(undefined, "Settle"));
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    f.changeRules(renamed);
+    await f.until(async () => (await buttonState(f, "Settle")).kind === "ready");
+    expect(await press(f, { recordId: invoice, pressId: pressId(8) })).toEqual({ busy: false, claimId: first.claimId, settled: { outcome: "done", error: null } });
+    await expect(press(f, { recordId: invoice, pressId: pressId(8), field: "Settle" })).rejects.toThrow("already names another press");
+    await f.executor.dispose();
+  });
+
+  it.each([
+    ["runs from another button", "Refund", markPaid(undefined, "Refund")],
+    ["does something else", "Settled", markPaid("      - set:\n          Status: Settled\n        operation: invoices.status\n")],
+  ])("refuses a waiting press once its automation %s, without touching the record", async (_name, marker, edited) => {
+    const f = await world({ roster: UNKNOWN });
+    await f.writeAutomations(markPaid());
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(9) });
+    if (pressed.busy) throw new Error("The press ran.");
+    await f.until(() => f.waiting.length > 0);
+    await f.writeAutomations(edited);
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(marker));
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.settled.length === 1);
+    expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "failed", error: "Mark paid changed after it was pressed. Press it again." }]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    await f.executor.dispose();
+  });
+
+  it("runs a failed press again only for the person who pressed it or the owner", async () => {
+    for (const mayRetryPress of [false, true]) {
+      const f = await world({ mayRetryPress });
+      await f.writeAutomations(markPaid("      - set:\n          Status: '=missing.value'\n        operation: invoices.status\n"));
+      await f.executor.open();
+      const { id: invoice } = await f.create({});
+      const pressed = await press(f, { recordId: invoice, pressId: pressId(7) });
+      if (pressed.busy) throw new Error("The press ran.");
+      await f.until(() => f.settled.length === 1);
+      expect(f.settled[0]).toMatchObject({ claimId: pressed.claimId, outcome: "failed" });
+      expect(await f.executor.retry({ automationId: BUTTON_AUTOMATION, claimId: pressed.claimId, startOver: false })).toEqual(mayRetryPress
+        ? { status: "queued", press: true }
+        : { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." });
+      await f.executor.dispose();
+    }
   });
 });

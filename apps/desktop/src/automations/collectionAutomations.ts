@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -11,8 +12,15 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import type { DatasetAutomationClaim, DatasetAutomationFailure, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import type {
+  DatasetAutomationClaim,
+  DatasetAutomationFailure,
+  DatasetAutomationSubscription,
+  DatasetPressed,
+  DatasetPressInput,
+  DatasetRememberedPress,
+} from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
@@ -20,7 +28,7 @@ import {
   type AutomationClaimSummary,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
-import { namesButton, resolveButton, type AutomationButtonState } from "./automationButtons";
+import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   collectionAutomationId,
@@ -60,8 +68,15 @@ import {
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
-import { datasetAutomationProblem, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
-import { runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import {
+  datasetAutomationProblem,
+  datasetOperationsOf,
+  datasetReachSteps,
+  datasetTableNamed,
+  pinDatasetOperations,
+  type DatasetRecordId,
+} from "./datasetAutomationPlan";
+import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
@@ -80,7 +95,8 @@ import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 // keeps the claim and tries again on its next drain, without running it.
 //
 // A dataset Collection's claims come from its dataset host's ledger instead,
-// where the host claims each commit it makes (ADR 0011). The drain takes
+// where the host claims each commit it makes (ADR 0011), and each press of
+// one of its buttons (pressDataset). The drain takes
 // engine claims first, then dataset claims, one at a time, and treats both
 // the same way; a dataset run's steps go through the dataset's approved
 // operations (datasetAutomationRun.ts). The executor uses the dataset host
@@ -175,6 +191,12 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   /** One of an automation's claims however old, or null. */
   claim(automationId: string, claimId: string): DatasetAutomationClaim | null;
   failures(): DatasetAutomationFailure[];
+  /** Throws why the host cannot take a press of this button, as `press` would. */
+  assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">): void;
+  /** Records a press by `pressedBy` and answers the claim that runs it. */
+  press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed;
+  /** A press the ledger remembers, with its claim, or null. */
+  pressed(pressId: string): DatasetRememberedPress | null;
 }
 
 export interface CollectionAutomationsOptions {
@@ -471,10 +493,6 @@ function boundDefinition(claim: Pick<AutomationClaim, "trigger" | "change">): st
   return /^press:[^.]+\.([0-9a-f]{16})$/u.exec(claim.trigger.key)?.[1] ?? null;
 }
 
-function changedSincePressed(field: string): string {
-  return `${field} changed after it was pressed. Press it again.`;
-}
-
 function collectionNamed(path: string): ReachCollection {
   return { path, name: path.split("/").at(-1) ?? path };
 }
@@ -484,6 +502,22 @@ type OwnedAutomation = { automationId: string; collectionPath: string; automatio
 type SettleInput = { state: "done" } | { state: "failed"; error: string };
 /** A claim this computer holds, from the ledger that made it. */
 type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "dataset"; claim: DatasetAutomationClaim };
+
+/** Whether a held claim runs a button's press, whose window hears how it runs. */
+function isPress(held: HeldClaim): boolean {
+  return held.source === "engine" ? held.claim.change.kind === "button" : held.claim.fact?.kind === "button";
+}
+
+/** A dataset record's primary key from the JSON a window sends, or null when it is not one. */
+function datasetRecordIdOf(text: string): DatasetRecordId | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)) ? value : null;
+}
 /** One automation's run history and the failure its notice offers, whichever ledger holds its claims. */
 type ClaimHistory = {
   claims: Array<Pick<AutomationClaimSummary, "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"> & { error?: string | null }>;
@@ -1000,10 +1034,7 @@ export class CollectionAutomations {
    */
   async pinOperations(collectionPath: string, automations: readonly Automation[]): Promise<Automation[]> {
     await this.ready();
-    if (!this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
-      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
-      await this.enqueue(() => this.indexDatasets(true));
-    }
+    await this.openDataset(collectionPath);
     const dataset = this.datasets.get(collectionPath);
     return dataset === undefined ? [...automations] : automations.map((automation) => pinDatasetOperations(automation, dataset.definition));
   }
@@ -1303,7 +1334,11 @@ export class CollectionAutomations {
     try {
       let pressedBy: string | null | undefined;
       const known = this.datasets.has(parsed.collectionPath)
-        ? await this.withLiveHost((ledger) => ledger.claim(input.automationId, input.claimId) !== null)
+        ? await this.withLiveHost((ledger) => {
+          const claim = ledger.claim(input.automationId, input.claimId);
+          if (claim?.fact?.kind === "button") pressedBy = datasetPresser(claim);
+          return claim !== null;
+        })
         : await this.withLiveEngine(async (engine) => {
           const listedClaim = (await engine.listAutomationClaims({ automationId: input.automationId })).claims.find((claim) => claim.claimId === input.claimId);
           if (listedClaim?.change.kind === "button") pressedBy = listedClaim.change.onBehalfOf;
@@ -1416,12 +1451,134 @@ export class CollectionAutomations {
     this.presses.delete(input.pressId);
     this.presses.set(input.pressId, { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressedBy: input.pressedBy, automationId });
     if (this.presses.size > REMEMBERED_PRESSES) this.presses.delete(this.presses.keys().next().value!);
+    return await this.answerPress(claim, watch);
+  }
+
+  /**
+   * How a press's claim stands: how its run ended, or, while it has not,
+   * the window watches it and the drain wakes, since a ledger's wake-up
+   * event can be dropped.
+   */
+  private async answerPress(
+    claim: Pick<AutomationClaimSummary, "automationId" | "claimId" | "state"> & { error?: string | null },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationPress> {
     if (claim.state === "failed") return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
     if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
     watch(claim.claimId, this.waitingFor.get(claim.claimId) ?? null);
-    // The engine's wake-up event can be dropped, so the press wakes the drain too.
     this.notifyClaimed();
     return { busy: false, claimId: claim.claimId, settled: null };
+  }
+
+  /**
+   * What each Button field shows in a dataset Collection, in order. `table`
+   * is null for a dataset with one table. `description` is the dataset as
+   * its host describes it to the person asking, so the access is theirs.
+   */
+  async datasetButtons(
+    collectionPath: string,
+    buttons: ReadonlyArray<{ field: string; table: string | null }>,
+    description: DatasetDescription,
+  ): Promise<AutomationButtonState[]> {
+    await this.ready();
+    await this.openDataset(collectionPath);
+    const roster = await this.options.cachedRoster();
+    const states: AutomationButtonState[] = [];
+    for (const button of buttons) states.push((await this.datasetButton(collectionPath, button, description, roster)).state);
+    return states;
+  }
+
+  /**
+   * Presses a ready button on one record of a dataset Collection, as
+   * `press` does in a document Collection. `recordId` is the record's
+   * primary key as JSON, and the record must be in the table now. The press
+   * claims in the dataset host's ledger, bound to the automation it was
+   * checked against. The ledger keeps each press 30 days with what it asked
+   * for, so the same press sent again answers its claim whatever changed
+   * since, a renamed button included; only a new press is checked.
+   */
+  async pressDataset(
+    input: { collectionPath: string; table: string | null; field: string; recordId: string; pressId: string; pressedBy: string },
+    description: DatasetDescription,
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationPress> {
+    await this.ready();
+    await this.openDataset(input.collectionPath);
+    if (!this.datasets.has(input.collectionPath)) throw new Error(DATASET_NOT_APPROVED);
+    const recordId = datasetRecordIdOf(input.recordId);
+    if (recordId === null) throw new Error(`This record is not in ${collectionNamed(input.collectionPath).name}.`);
+    const request = createHash("sha256")
+      .update(JSON.stringify(["dohc-dataset-press-v1", input.collectionPath, input.table, input.field, recordId, input.pressedBy])).digest("hex");
+    const known = await this.withLiveHost((ledger) => ({ press: ledger.pressed(input.pressId) }), true);
+    if (known === null) throw new Error("The workspace's dataset host is not open.");
+    if (known.press !== null) {
+      const { claim } = known.press;
+      if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy) throw new Error("This press id already names another press.");
+      return await this.answerPress(claim, watch);
+    }
+    const button = await this.datasetButton(input.collectionPath, input, description, await this.options.cachedRoster());
+    if (!("checked" in button)) throw new Error(button.state.reason);
+    const { datasetId, tableId, fieldId, automation } = button.checked;
+    const pressed = await this.withLiveHost(async (ledger) => {
+      // A dataset that moved to a server says so before anything reads it.
+      ledger.assertPressable(datasetId, { tableId, fieldId });
+      if (!(await datasetRecordExists(ledger, datasetId, automation, recordId))) {
+        throw new Error(`This record is no longer in ${collectionNamed(input.collectionPath).name}.`);
+      }
+      return ledger.press(datasetId, {
+        pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
+        tableId, fieldId, recordId, pressedBy: input.pressedBy,
+      });
+    }, true);
+    if (pressed === null) throw new Error("The workspace's dataset host is not open.");
+    if (pressed.kind === "busy") return { busy: true };
+    return await this.answerPress(pressed.claim, watch);
+  }
+
+  /**
+   * One dataset button's state, and for a ready one, the automation and the
+   * table and field ids it was checked with. Access comes first: the host
+   * must let the person write the button's table and use every operation a
+   * run of its automation calls, the reads the run makes as the owner
+   * included, and a person who cannot learns nothing about the automation.
+   * The rest is as for a document Collection's button.
+   */
+  private async datasetButton(
+    collectionPath: string,
+    button: { field: string; table: string | null },
+    description: DatasetDescription,
+    roster: ReachRoster,
+  ): Promise<
+    | { state: Exclude<AutomationButtonState, { kind: "ready" }> }
+    | { state: Extract<AutomationButtonState, { kind: "ready" }>; checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string } }
+  > {
+    const disabled = (reason: string) => ({ state: { kind: "disabled" as const, reason } });
+    const definition = this.datasets.get(collectionPath)?.definition;
+    if (definition === undefined) return disabled(DATASET_NOT_APPROVED);
+    const table = datasetTableNamed(definition, button.table);
+    // A description of another dataset grants nothing here.
+    if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
+      return disabled(noAccessReason(table?.name ?? button.table ?? definition.name));
+    }
+    const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
+    if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
+    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, button.field,
+      (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
+    if (resolved.kind === "state") return { state: resolved.state };
+    const { automation } = resolved;
+    if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, definition))) return disabled(noAccessReason(table.name));
+    const state = await this.runnableButtonState(collectionPath, automation, roster);
+    return state.kind === "ready"
+      ? { state, checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId } }
+      : { state };
+  }
+
+  /** A dataset Collection the index lacks, whose host may not be open yet: a person is asking about it, so open it. */
+  private async openDataset(collectionPath: string): Promise<void> {
+    if (!this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
+      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
+      await this.enqueue(() => this.indexDatasets(true));
+    }
   }
 
   /**
@@ -1523,18 +1680,24 @@ export class CollectionAutomations {
     field: string,
     roster: ReachRoster,
   ): Promise<AutomationButtonState> {
-    const collection = collectionNamed(collectionPath);
-    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collection.name);
-    if (resolved.kind === "state") return resolved.state;
-    const { automation } = resolved;
+    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(collectionPath).name);
+    return resolved.kind === "state" ? resolved.state : await this.runnableButtonState(collectionPath, resolved.automation, roster);
+  }
+
+  /**
+   * The state of a button whose one automation is resolved: ready unless
+   * dohc cannot run the automation, or a step is stopped or waits for an
+   * editor to allow it. A dataset field formulas cannot see is hidden from
+   * them, and stops nothing.
+   */
+  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster): Promise<AutomationButtonState> {
     const unsupported = this.cannotRun(collectionPath, automation);
     if (unsupported !== null) return { kind: "disabled", reason: unsupported };
     const automationId = collectionAutomationId(collectionPath, automation.id);
     if (roster.kind === "unknown") return { kind: "ready", automationId };
-    for (const reach of checkAutomationReach(roster, {
-      id: automation.id, collection, codeFiles: [], steps: this.reachSteps(collectionPath, automation),
-    })) {
-      if (!reach.allowed) return { kind: "disabled", reason: reach.reason };
+    const steps = this.reachSteps(collectionPath, automation);
+    for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: [], steps }).entries()) {
+      if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason };
     }
     if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }])) {
       return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.` };
@@ -1827,7 +1990,7 @@ export class CollectionAutomations {
     const dataset = this.datasets.get(collectionPath);
     if (dataset === undefined) return unsupportedReason(automation);
     const subscription = datasetSubscriptionFor(automation, dataset.definition);
-    return "problem" in subscription ? subscription.problem : datasetAutomationProblem(automation, dataset);
+    return subscription !== null && "problem" in subscription ? subscription.problem : datasetAutomationProblem(automation, dataset);
   }
 
   /** The Collections each step reaches, for the reach check. */
@@ -1943,8 +2106,9 @@ export class CollectionAutomations {
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const definition = this.datasets.get(collectionPath)?.definition;
       if (definition === undefined || !automation.enabled) continue;
+      // A button claims when pressed, so it watches nothing.
       const watched = datasetSubscriptionFor(automation, definition);
-      if ("problem" in watched) continue;
+      if (watched === null || "problem" in watched) continue;
       desired.set(automationId, { datasetId: definition.datasetId, subscription: { automationId, ...watched, definitionHash: definitionDigest(automation) } });
     }
     return desired;
@@ -2173,7 +2337,7 @@ export class CollectionAutomations {
           release.push(held);
           if (action.waitsFor) {
             this.waitingFor.set(claimId, action.waitsFor);
-            if (held.source === "engine" && held.claim.change.kind === "button") this.options.onPressWaiting({ claimId: claimId, reason: action.waitsFor });
+            if (isPress(held)) this.options.onPressWaiting({ claimId, reason: action.waitsFor });
           }
           continue;
         }
@@ -2224,7 +2388,7 @@ export class CollectionAutomations {
       if (action.kind === "settle" && action.input.state === "failed") this.options.onFailuresChanged();
       if (action.kind === "settle") {
         await action.settled();
-        if (held.source === "engine" && held.claim.change.kind === "button") {
+        if (isPress(held)) {
           this.options.onPressSettled({
             claimId: id,
             outcome: action.outcome,
@@ -2374,6 +2538,7 @@ export class CollectionAutomations {
         evaluator: this.options.evaluator,
         store: this.options.store,
         nowMs: () => this.nowMs(),
+        personName: this.options.personName,
       }, { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next

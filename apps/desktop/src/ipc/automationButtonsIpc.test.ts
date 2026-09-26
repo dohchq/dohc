@@ -47,6 +47,13 @@ function fixture(options: {
       if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
       return pressed;
     }),
+    datasetButtons: vi.fn(async (_path: string, buttons: ReadonlyArray<{ field: string }>, _description: DatasetDescription) =>
+      buttons.map(({ field }) => ({ kind: "ready", automationId: `collection:Invoices#${field}` }))),
+    pressDataset: vi.fn(async (_input: unknown, _description: DatasetDescription, watch: (claimId: string, waiting: "roster" | "held" | "busy" | null) => void) => {
+      const pressed = options.pressed ?? { busy: false as const, claimId: "a".repeat(64), settled: null };
+      if (!pressed.busy && pressed.settled === null) watch(pressed.claimId, options.waiting ?? null);
+      return pressed;
+    }),
   };
   const buttonFields = vi.fn(async () => ["Mark paid"]);
   const relayPress = vi.fn(async (_operation: unknown, _input: { pressId: string; automationId: string; recordId: string }) => undefined);
@@ -224,42 +231,64 @@ describe("pressing a button", () => {
     expect(f.relayPress).not.toHaveBeenCalled();
   });
 
-  it("checks a dataset button against the operations the host describes to this window's person", async () => {
-    const automations = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}, operation: add}]\n";
-    const files = { "Invoices/dataset.json": dataset, "Invoices/automations.yaml": automations };
-    const reader = fixture({ files, described: ["list"] });
-    await expect(reader.press()).rejects.toThrow("Only people who can edit Invoices can use this button.");
-    expect(reader.describeDataset).toHaveBeenCalledWith(reader.window, WORKSPACE_ID, id(1));
-    const editor = fixture({ files, described: ["list", "add"] });
-    await expect(editor.press()).rejects.toThrow("dohc can run automations that start from a record change. Other triggers come later.");
-    expect(editor.executor.press).not.toHaveBeenCalled();
+  const withButtons = (...names: string[]) => {
+    const described = JSON.parse(dataset) as { tables: Array<{ fields: unknown[] }> };
+    described.tables[0]!.fields.push(...names.map((name, index) => ({ fieldId: id(9 + index), name, type: "button" })));
+    return JSON.stringify(described);
+  };
+  const paidAutomation = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}, operation: add}]\n";
+
+  it("presses a dataset button through this computer's executor, for main's person, with the host's description of them", async () => {
+    const files = { "Invoices/dataset.json": withButtons("Mark paid"), "Invoices/automations.yaml": paidAutomation };
+    const f = fixture({ files, described: ["list", "add"] });
+    const claimId = "a".repeat(64);
+    await expect(f.press({ recordId: "12", pressedBy: "user-someone-else" })).resolves.toEqual({ busy: false, claimId, settled: null });
+    expect(f.describeDataset).toHaveBeenCalledWith(f.window, WORKSPACE_ID, id(1));
+    expect(f.executor.pressDataset).toHaveBeenCalledWith(
+      { collectionPath: "Invoices", table: null, field: "Mark paid", recordId: "12", pressId: PRESS_ID, pressedBy: "user-main" },
+      expect.objectContaining({ operations: [expect.objectContaining({ name: "list" }), expect.objectContaining({ name: "add" })] }),
+      expect.any(Function),
+    );
+    // The pressing window hears how the run settles.
+    f.pressWindows.settled(WORKSPACE_ID, { claimId, outcome: "done", error: null });
+    expect(f.window.sent).toEqual([{ channel: CHANNELS.automationRunSettled, payload: { workspaceId: WORKSPACE_ID, claimId, outcome: "done", error: null } }]);
+    expect(f.executor.press).not.toHaveBeenCalled();
+    const busy = fixture({ files, described: ["list", "add"], pressed: { busy: true } });
+    await expect(busy.press({ recordId: "12" })).resolves.toEqual({ busy: true, reason: "Running for this record." });
   });
 
-  it("asks the host to describe a dataset once however many buttons it lists", async () => {
-    const withButtons = JSON.parse(dataset) as { tables: Array<{ fields: unknown[] }> };
-    withButtons.tables[0]!.fields.push({ fieldId: id(9), name: "Mark paid", type: "button" }, { fieldId: id(10), name: "Refund", type: "button" });
-    const f = fixture({ files: { "Invoices/dataset.json": JSON.stringify(withButtons) }, described: ["list"], shareView: editShare(["Invoices"]) });
-    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ field: "Mark paid" }, { field: "Refund" }] });
+  it("lists a dataset's buttons from the executor, with the host's description, once however many buttons", async () => {
+    const f = fixture({ files: { "Invoices/dataset.json": withButtons("Mark paid", "Refund") }, described: ["list"] });
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({ buttons: [
+      { field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#Mark paid" } },
+      { field: "Refund", state: { kind: "ready", automationId: "collection:Invoices#Refund" } },
+    ] });
     expect(f.describeDataset).toHaveBeenCalledTimes(1);
+    expect(f.executor.datasetButtons).toHaveBeenCalledWith("Invoices", [{ field: "Mark paid", table: null }, { field: "Refund", table: null }],
+      expect.objectContaining({ datasetId: id(1) }));
+    // The document rule is not what answers a dataset.
+    expect(f.buttonFields).not.toHaveBeenCalled();
   });
 
-  it("lists a dataset's buttons with the reason a press gets, in a shared view or not", async () => {
-    const withButton = JSON.parse(dataset) as { tables: Array<{ fields: unknown[] }> };
-    withButton.tables[0]!.fields.push({ fieldId: id(9), name: "Mark paid", type: "button" });
-    const files = { "Invoices/dataset.json": JSON.stringify(withButton) };
-    for (const shareView of [undefined, editShare(["Invoices"])]) {
-      const reader = fixture({ files, described: ["list"], shareView });
-      await expect(reader.press()).rejects.toThrow("Only people who can edit Invoices can use this button.");
-      await expect(reader.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
-        buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "Only people who can edit Invoices can use this button." } }],
-      });
-      const editor = fixture({ files, described: ["list", "add"], shareView });
-      await expect(editor.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
-        buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "No automation uses this button." } }],
-      });
-      await expect(editor.press()).rejects.toThrow("No automation uses this button.");
-      // The document rule for shared views is not what answers a dataset.
-      expect(reader.buttonFields).not.toHaveBeenCalled();
+  it("refuses a shared view's dataset button, past access, without asking this computer's executor", async () => {
+    const files = { "Invoices/dataset.json": withButtons("Mark paid"), "Invoices/automations.yaml": paidAutomation };
+    const shareView = editShare(["Invoices"]);
+    const reader = fixture({ files, described: ["list"], shareView });
+    await expect(reader.press()).rejects.toThrow("Only people who can edit Invoices can use this button.");
+    await expect(reader.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
+      buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "Only people who can edit Invoices can use this button." } }],
+    });
+    const editor = fixture({ files, described: ["list", "add"], shareView });
+    await expect(editor.press()).rejects.toThrow("dohc can't run buttons on shared dataset Collections yet.");
+    await expect(editor.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({
+      buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "dohc can't run buttons on shared dataset Collections yet." } }],
+    });
+    const unused = fixture({ files: { "Invoices/dataset.json": withButtons("Mark paid") }, described: ["list", "add"], shareView });
+    await expect(unused.press()).rejects.toThrow("No automation uses this button.");
+    for (const f of [reader, editor, unused]) {
+      expect(f.executor.pressDataset).not.toHaveBeenCalled();
+      expect(f.executor.datasetButtons).not.toHaveBeenCalled();
+      expect(f.buttonFields).not.toHaveBeenCalled();
     }
   });
 });
