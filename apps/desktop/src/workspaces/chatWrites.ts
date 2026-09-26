@@ -4,6 +4,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
+import { AutomationChatSessionWait } from "../automations/automationChat";
 import {
   assertSharedChannelMessageIdentity,
   chatRelayAuthorId,
@@ -14,11 +15,20 @@ import {
 // The one main-process path for chat writes, whoever makes them. The renderer
 // always writes as the local person. The CLI, and MCP through it, names its
 // actor, and its messages carry origin "cli" so no device dispatches an agent
-// on them. Identity is never the caller's: it comes from the registry and the
-// signed-in session.
+// on them. The automation executor writes as an automation that ran for the
+// local person, naming the automation and its chain depth. Identity is never
+// the caller's: it comes from the registry and the signed-in session.
+// `agentName` is the name an agent gave for itself, such as an MCP client's
+// handshake name. It is provenance, like a document edit's author; without
+// it the message carries the agent name from the person's settings.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent" };
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string }
+  // `local` marks a message that stays on this computer, such as a wake in
+  // "My agent", so it never waits for a session.
+  | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
+// A person or their agent: only they react.
+export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
@@ -52,6 +62,11 @@ interface ChatMessageInput {
   // Runs between admission and the final check, so a slow file lookup cannot
   // carry a stale grant or session into the write.
   resolveAttachments(): Promise<ChatAttachments>;
+  // The automation executor names its message and the key a retry replays.
+  messageId?: string;
+  idempotencyKey?: string;
+  // Ends the write before its row when a run stops, pauses, or times out.
+  signal?: AbortSignal;
 }
 
 export function createChatWrites(dependencies: {
@@ -70,11 +85,13 @@ export function createChatWrites(dependencies: {
     workspaceId: string, target: ChatRelayIdentityTarget,
   ): Promise<unknown>;
   scanChatDispatch(workspaceId: string): Promise<unknown>;
+  // Tells open windows the workspace's chats changed, for writes they did not make.
+  notifyRenderer(workspaceId: string): void;
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
     localUserDisplayName, agentDisplayName, localReactorFallbackId, projectChatBookmarks,
-    queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
+    queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, notifyRenderer,
   } = dependencies;
 
   // Every received file share is read-only for chat, whatever its cached relay
@@ -152,6 +169,7 @@ export function createChatWrites(dependencies: {
     admission: Admission,
     write: () => Promise<Result>,
     expected: { authorUserId?: string } = admission,
+    signal?: AbortSignal,
   ): Promise<Result> {
     if (admission.channelWireId === undefined && hasJoinedChannels(place.workspaceId)) {
       admission.channelWireId = await lookUpWireId(place, admission.target);
@@ -159,13 +177,26 @@ export function createChatWrites(dependencies: {
     if (check(place, admission.channelWireId, admission.generation) !== expected.authorUserId) {
       throw new Error(SESSION_CHANGED);
     }
+    signal?.throwIfAborted();
     return write();
   }
 
   async function actorFor(writer: ChatWriter) {
+    if (writer.via === "automation") {
+      return {
+        author: { kind: "automation" as const, displayName: writer.name },
+        authorOwnerDisplayName: localUserDisplayName(),
+        automation: { automationId: writer.automationId, chainDepth: writer.depth },
+      };
+    }
+    return await personActorFor(writer);
+  }
+
+  // People and agents; only they react.
+  async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: await agentDisplayName() },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName() },
           authorOwnerDisplayName: localUserDisplayName(),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
@@ -173,12 +204,28 @@ export function createChatWrites(dependencies: {
 
   // Admits the message and does its async work. The caller commits the row.
   async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput) {
+    // Before admission, whose identity checks refuse a signed-out write to
+    // a joined Group: an automation waits for a session there instead.
+    if (input.writer.via === "automation" && !input.writer.local) {
+      await warmCredentials();
+      const workspace = findWorkspace(place.workspaceId);
+      const synced = workspace?.remote !== undefined || (workspace?.sharedChannels?.length ?? 0) > 0;
+      if (synced && currentCredentials() === null) throw new AutomationChatSessionWait();
+    }
     const admission = await admit(place, target);
     const { authorUserId } = admission;
+    // A synced workspace's automation waits for a session: without one its
+    // message would stay on this computer and reach nobody.
+    if (input.writer.via === "automation" && !input.writer.local && authorUserId === undefined &&
+      findWorkspace(place.workspaceId)?.remote !== undefined) {
+      throw new AutomationChatSessionWait();
+    }
     const actor = await actorFor(input.writer);
     const attachments = await input.resolveAttachments();
     return { admission, fields: {
       ...actor,
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
       body: input.body,
@@ -188,7 +235,9 @@ export function createChatWrites(dependencies: {
     } };
   }
 
-  function afterWrite(workspaceId: string, target: ChatRelayIdentityTarget, message: boolean) {
+  function afterWrite(workspaceId: string, target: ChatRelayIdentityTarget, message: boolean, writer?: ChatWriter) {
+    // Nothing on screen asked for an automation's message, so the windows hear of it.
+    if (writer?.via === "automation") notifyRenderer(workspaceId);
     if (message) {
       // A message can mark a live bookmark projection pending, and a person's
       // message can call an agent.
@@ -235,8 +284,8 @@ export function createChatWrites(dependencies: {
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
       ...fields,
-    }));
-    afterWrite(place.workspaceId, target, true);
+    }), admission, input.signal);
+    afterWrite(place.workspaceId, target, true, input.writer);
     return message;
   }
 
@@ -244,6 +293,8 @@ export function createChatWrites(dependencies: {
     channelId: string;
     lane?: ChatThreadLane;
     title?: string;
+    // The thread a new post starts; a Group's chat lane keeps its running one.
+    threadId?: string;
   }) {
     const target = { channelId: input.channelId };
     const { admission, fields } = await prepareMessage(place, target, input);
@@ -252,9 +303,10 @@ export function createChatWrites(dependencies: {
       channelId: input.channelId,
       ...(input.lane ? { lane: input.lane } : {}),
       ...(input.title ? { title: input.title } : {}),
+      ...(input.threadId ? { threadId: input.threadId } : {}),
       ...fields,
-    }));
-    afterWrite(place.workspaceId, target, true);
+    }), admission, input.signal);
+    afterWrite(place.workspaceId, target, true, input.writer);
     return started;
   }
 
@@ -262,7 +314,7 @@ export function createChatWrites(dependencies: {
   // otherwise. A reaction made signed out lives under the local id; once
   // signed in, removing it removes that alias too.
   async function setReaction(place: ChatWritePlace, input: {
-    writer: ChatWriter;
+    writer: PersonWriter;
     threadId: string;
     messageId: string;
     emoji: string;
@@ -275,7 +327,7 @@ export function createChatWrites(dependencies: {
       authorUserId !== undefined && authorUserId !== localAuthorId;
     const admission = await admit(place, target);
     const { authorUserId } = admission;
-    const { author } = await actorFor(input.writer);
+    const { author } = await personActorFor(input.writer);
     const existing = input.state === "toggle" || (input.state === "removed" && aliased(authorUserId))
       ? await store.listReactions({ workspaceId, threadId: input.threadId })
       : [];

@@ -3,8 +3,8 @@ use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
     AutomationGroupSubscription, AutomationPress, AutomationPressed, AutomationRetry,
-    AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle,
-    AutomationSubscription,
+    AutomationRunNow, AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark,
+    AutomationSettle, AutomationSubscription,
 };
 use dohc_engine_storage::FaultInjector;
 use std::sync::Arc;
@@ -204,6 +204,33 @@ impl ActorHandle {
                     store,
                     &workspace_id,
                     &schedule,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn automation_run_now(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        notice_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AutomationRunNow, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::claim_automation_run_now(
+                    store,
+                    &workspace_id,
+                    &automation_id,
+                    &notice_id,
                     now_ms,
                     faults.as_ref(),
                 )

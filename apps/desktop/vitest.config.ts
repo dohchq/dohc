@@ -26,6 +26,7 @@ export default defineConfig({
     // Dropping `./vitest.setup.ts` fails `src/vitestSetup.test.ts` by name,
     // so the suite can no longer go red without naming a test.
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
+    globalSetup: ["./src/testGlobalSetup.ts"],
     maxWorkers: WORKER_CAP,
     // A loaded machine stretches honest work: on a 24-process load the slowest
     // share-code test took 1.73 s and site-runner tests took up to 2.3 s.

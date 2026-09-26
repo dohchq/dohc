@@ -28,7 +28,7 @@ test("Linux verification stops stubborn package groups before removing Postgres"
     assert.equal(result.queuedStarted, false);
     for (const worker of result.workers) assert.deepEqual(worker.env, {
       POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1234/dohc",
-      DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1",
+      DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1",
     });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

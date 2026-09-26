@@ -98,6 +98,17 @@ describe("CollectionHistoryDialog", () => {
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2)); expect(onLoad.mock.calls[1]![0]).toMatchObject({ datasetId, beforeRevision: 2, limit: 50 });
     await waitFor(() => expect(screen.queryByText("3")).toBeNull()); expect(screen.getAllByText("1").length).toBeGreaterThan(0);
   });
+  it("marks each change an automation made with its name, or its id once the name is gone", async () => {
+    const onLoad = vi.fn(async () => ({ datasetId, headRevision: 3, nextBeforeRevision: null, entries: [
+      { ...entry(3), automation: { automationId: "collection:Budget#close-paid", depth: 1, name: "Close paid invoices" } },
+      { ...entry(2), automation: { automationId: "collection:Budget#stamp", depth: 2 } }, entry(1),
+    ] }));
+    render(<CollectionHistoryDialog workspaceId="a" datasetId={datasetId} name="Budget" onLoad={onLoad} onClose={vi.fn()} onError={vi.fn()} />);
+    expect((await screen.findByText("Close paid invoices")).parentElement).toHaveProperty("title", "Automation");
+    expect(screen.getByText("stamp").parentElement).toHaveProperty("title", "Automation");
+    expect(screen.getAllByTitle("Automation")).toHaveLength(2);
+  });
+
   it("discards old workspace replies and offers a scoped retry for current failures", async () => {
     const pending = deferred<DatasetHistoryPage>(), onError = vi.fn();
     const onLoad = vi.fn<CollectionHistoryDialogProps["onLoad"]>().mockImplementationOnce(() => pending.promise).mockRejectedValueOnce(new Error("Offline"));

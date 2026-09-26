@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
   CHATS_METHOD,
@@ -32,9 +32,20 @@ import {
 } from "../workspaces/collectionRecordEdits";
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
+import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
+import { historyPathAdmission, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
+import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+
+// The History author of a document an agent creates: the agent under the
+// name it gave, on behalf of the local owner, or no author without a name.
+function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
+  return origin.actorOriginId === undefined
+    ? null
+    : { kind: "agent", agentId: origin.actorOriginId, onBehalfOf: "local" };
+}
 
 // With no editor open, the file holds the document's settled text.
 async function settledMarkdown(rootPath: string, path: string): Promise<string> {
@@ -53,7 +64,7 @@ interface DesktopCliServerDependencies<State> {
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment" | "listVersions" | "writeAuthoredTextFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
   };
@@ -135,8 +146,8 @@ export function createDesktopCliServer<State>(
     const store = linkedChatStoreFor(workspace);
     const daemon = currentDaemon();
     if (!daemon) throw new Error("The workspace engine is not running.");
-    // The CLI's collection writes ride the same seam plugin SDK edits take,
-    // resolved per write under the physical workspace's authority, so a
+    // The CLI's collection writes ride the desktop's one collection write
+    // seam, resolved per write under the physical workspace's authority, so a
     // retired-and-reattached workspace refuses instead of falling through to
     // its successor. A write ends with the CLI request that asked for it.
     const cliCollectionEdit = <T>(
@@ -210,12 +221,9 @@ export function createDesktopCliServer<State>(
       // Engine-backed collection reads and writes for the CLI/MCP verbs.
       // withEngineAdapter derives the attachment (and share-view session mode)
       // from the registered workspace itself — the renderer collection routes'
-      // authority, reached from main's side. The plugin SDK's owned read port
-      // wraps the same call in receivedShareEngine.workspaceForRegistered; the
-      // CLI resolved this workspace by cwd above, so it already holds the
-      // registered entry that wrapper would look up. Writes go through the
-      // desktop's one collection write seam, the same path plugin SDK edits
-      // take.
+      // authority, reached from main's side. The CLI resolved this workspace
+      // by cwd above, so it already holds the registered entry. Writes go
+      // through the desktop's one collection write seam.
       collections: {
         writes: {
           setFields: (input) =>
@@ -270,14 +278,56 @@ export function createDesktopCliServer<State>(
             change: (state, { keepBlocks }) =>
               documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
+        create: async ({ path, markdown, origin }) => {
+          // Frontmatter would land as body blocks, so it is refused before
+          // anything exists.
+          if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
+          // An empty file written on the capture chain, which refuses a path
+          // that exists and records the agent as the file's author, and then
+          // the text through the new file's live session, like typing into it.
+          await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+            operation.assertCurrent();
+            if (sharedViewOf(workspace.workspaceId)) {
+              throw new Error("A shared view cannot create documents.");
+            }
+            const current = activity.engineCaptureFor(workspace.workspaceId);
+            if (!current) throw new Error("dohc could not start the engine for this workspace, so it cannot create documents. Restart dohc to try again.");
+            const absolute = join(operation.workspace.rootPath, path);
+            try {
+              await current.writeAuthoredTextFile(absolute, "", momentAuthorFor(origin), { createOnly: true });
+            } catch (error) {
+              if (error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+                throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
+              }
+              throw error;
+            }
+          });
+          try {
+            await liveDocuments.editDocument({
+              workspaceId: workspace.workspaceId,
+              path,
+              origin,
+              change: (state, { keepBlocks }) =>
+                documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
+            });
+          } catch (error) {
+            const cause = error instanceof Error ? error.message : String(error);
+            throw new Error(
+              `dohc created ${path}, but could not write its text (${cause}). Edit the document to add it.`,
+              { cause: error },
+            );
+          }
+          return { path };
+        },
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
-      listMoments: async ({ limit }) => {
-        const page = await capture.listMoments({ limit });
+      listMoments: async ({ limit, objectId }) => {
+        const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
+        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
-              !moment.protected && Boolean(moment.objectId),
+              !moment.protected && Boolean(moment.objectId) && admitted(moment.path),
           )
           .map((moment) => ({
             id: moment.id,
@@ -298,7 +348,13 @@ export function createDesktopCliServer<State>(
       },
       readMoment: async (momentId) => {
         const detail = await capture.readMoment(momentId);
-        return detail && !detail.protected ? detail.moment : null;
+        if (!detail || detail.protected) return null;
+        const { moment } = detail;
+        // History reads come from the active version, as the list does.
+        if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
+        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
+        const paths = [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])];
+        return paths.every(admitted) ? moment : null;
       },
     };
   }

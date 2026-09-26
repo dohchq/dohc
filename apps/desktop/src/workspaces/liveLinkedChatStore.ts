@@ -21,6 +21,8 @@ const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 
 export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
   ensureOpen(): Promise<void>;
+  /** One message, whole: a Group automation reads a body its claim carried truncated. */
+  getMessage(input: { workspaceId: string; messageId: string }): Promise<{ body: string }>;
 }
 
 export interface DesktopLinkedChatStoreOptions {
@@ -195,6 +197,8 @@ export function createLiveLinkedChatStore(
       await invoke(async (adapter) => await adapter.sendMessage(input)),
     listMessages: async (input) =>
       await invokeRead(async (adapter) => await adapter.listMessages(input)),
+    getMessage: async (input) =>
+      await invokeRead(async (adapter) => await adapter.getMessage(input)),
     getThreadRevision: async (input) =>
       await invokeRead(
         async (adapter) => await adapter.getThreadRevision(input),

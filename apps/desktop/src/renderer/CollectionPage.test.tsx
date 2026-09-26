@@ -11,11 +11,17 @@ import {
 } from "@dohc/workspace-contracts";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
 import type {
+  AutomationRunSettledEvent,
+  AutomationRunWaitingEvent,
   GetCollectionResult,
+  PressAutomationButtonPayload,
+  PressAutomationButtonResult,
   QueryCollectionRecordsResult,
   WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
-import { CollectionPage, DRAIN_RECORD_LIMIT } from "./CollectionPage";
+import type { AutomationButtonState } from "../automations/automationButtons";
+import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
+import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import {
   beginCollectionWriteOperation,
   CollectionFieldWriteHost,
@@ -101,6 +107,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetAutomationButtonsForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   docMock.current = null;
@@ -148,9 +155,15 @@ function makeBridge(
     groups?: CollectionRecordGroup[];
     /** Records served for queries against other collection paths. */
     related?: Record<string, CollectionRecord[]>;
+    /** What main says each Button field does. */
+    buttons?: Array<{ field: string; state: AutomationButtonState }>;
+    /** Main's answer to a press. */
+    press?: (payload: PressAutomationButtonPayload) => Promise<PressAutomationButtonResult>;
   },
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  const settledCallbacks = new Set<(event: AutomationRunSettledEvent) => void>();
+  const waitingCallbacks = new Set<(event: AutomationRunWaitingEvent) => void>();
   // The schema round-trips through the stub the way it does through the
   // engine: reads serve the last written text's parse, writes conflict on a
   // stale expected identity.
@@ -161,6 +174,29 @@ function makeBridge(
     emitWorkspaceActivity: (event: WorkspaceActivityEvent) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
+    emitRunSettled: (event: AutomationRunSettledEvent) => {
+      for (const callback of [...settledCallbacks]) callback(event);
+    },
+    emitRunWaiting: (event: AutomationRunWaitingEvent) => {
+      for (const callback of [...waitingCallbacks]) callback(event);
+    },
+    listAutomationButtons: vi.fn(async () => ({ buttons: extra?.buttons ?? [] })),
+    pressAutomationButton: vi.fn(
+      extra?.press ?? (async (): Promise<PressAutomationButtonResult> => ({ busy: false, claimId: "atc_press", settled: null })),
+    ),
+    retryCollectionAutomation: vi.fn(async () => ({ status: "queued" as const, press: true })),
+    onAutomationRunSettled: vi.fn((callback: (event: AutomationRunSettledEvent) => void) => {
+      settledCallbacks.add(callback);
+      return () => {
+        settledCallbacks.delete(callback);
+      };
+    }),
+    onAutomationRunWaiting: vi.fn((callback: (event: AutomationRunWaitingEvent) => void) => {
+      waitingCallbacks.add(callback);
+      return () => {
+        waitingCallbacks.delete(callback);
+      };
+    }),
     getCollection: vi.fn(
       async (): Promise<GetCollectionResult> => ({
         path: "tasks",
@@ -227,6 +263,7 @@ function makeBridge(
 // The props a page gets from the shell besides its collection and view.
 const SHELL_PROPS = {
   onOpenFile: () => undefined,
+  onOpenScheduleSettings: () => undefined,
   onError: () => undefined,
   onNotice: () => undefined,
   automationFocus: null,
@@ -241,6 +278,9 @@ function pageWithHost(
   view?: {
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
+    onError?: CollectionPageProps["onError"];
+    onNotice?: CollectionPageProps["onNotice"];
+    onChooseButtonAutomation?: CollectionPageProps["onChooseButtonAutomation"];
   },
 ) {
   return (
@@ -253,6 +293,9 @@ function pageWithHost(
         onNewRecord={onNewRecord}
         onOpenRecord={onOpenRecord}
         {...SHELL_PROPS}
+        onError={view?.onError ?? SHELL_PROPS.onError}
+        onNotice={view?.onNotice ?? SHELL_PROPS.onNotice}
+        onChooseButtonAutomation={view?.onChooseButtonAutomation}
       />
       <CollectionFieldWriteHost />
     </>
@@ -1102,7 +1145,7 @@ describe("collection authoring", () => {
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
   });
 
-  it("lists a button field but never offers it as a new field type or a board group", async () => {
+  it("lists a button field, offers Button as a new field, and never as a board group", async () => {
     const bridge = makeBridge([selectRecord()], {
       ...SELECT_SCHEMA,
       fields: [...SELECT_SCHEMA.fields, { name: "Mark paid", type: "button" }],
@@ -1113,9 +1156,9 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByTestId("collection-fields-button"));
     const fields = screen.getByTestId("collection-fields-dialog");
     expect(within(fields).getByText("Mark paid")).toBeDefined();
-    expect(within(fields).getByText("Button")).toBeDefined();
+    expect(within(fields).getAllByText("Button").length).toBeGreaterThan(0);
     const types = within(screen.getByLabelText<HTMLSelectElement>("Field type")).getAllByRole("option");
-    expect(types.map((option) => option.getAttribute("value"))).not.toContain("button");
+    expect(types.map((option) => option.getAttribute("value"))).toContain("button");
     fireEvent.keyDown(document, { key: "Escape" });
 
     fireEvent.click(screen.getByTestId("collection-views-button"));
@@ -1810,5 +1853,284 @@ describe("CollectionRecordFieldWrite", () => {
     expect(frontmatterWriteValue(10n)).toBe(10);
     expect(frontmatterWriteValue(2n ** 63n)).toBe("9223372036854775808");
     expect(frontmatterWriteValue(["a", 3n])).toEqual(["a", 3]);
+  });
+});
+
+describe("Button fields", () => {
+  const BUTTON_SCHEMA: CollectionSchema = {
+    ...SCHEMA,
+    fields: [...SCHEMA.fields, { name: "Mark paid", type: "button" }, { name: "Archive", type: "button" }],
+  };
+  const READY: AutomationButtonState = { kind: "ready", automationId: "collection:tasks#paid" };
+  const buttonsWith = (extra: Parameters<typeof makeBridge>[2] = {}) =>
+    makeBridge([record("rec-1", "Invoice 12")], BUTTON_SCHEMA, {
+      buttons: [
+        { field: "Mark paid", state: READY },
+        { field: "Archive", state: { kind: "no-automation", reason: "No automation uses this button." } },
+      ],
+      ...extra,
+    });
+
+  it("presses a button for its record, stays busy until the run settles, and shows the result", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn();
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(screen.getByRole("button", { name: "Mark paid for Invoice 12" })).toBe(button);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
+    const pressed = bridge.pressAutomationButton.mock.calls[0]![0];
+    expect(pressed).toMatchObject({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", table: null });
+    expect(pressed.pressId).toMatch(/^[0-9a-f-]{36}$/);
+    act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "roster" }));
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("Waiting to check who can edit this Collection.");
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+    expect(button.getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("says why a button cannot run, and does not press it", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Archive for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    const words = document.getElementById(button.getAttribute("aria-describedby")!)!;
+    expect(words.textContent).toBe("No automation uses this button.");
+    expect(words.hidden).toBe(true);
+    fireEvent.focus(button);
+    expect(words.hidden).toBe(false);
+    fireEvent.keyDown(button, { key: "Escape" });
+    expect(words.hidden).toBe(true);
+    fireEvent.click(button);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+  });
+
+  it("presses once for a held Enter key", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    const repeat = new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true });
+    button.dispatchEvent(repeat);
+    expect(repeat.defaultPrevented).toBe(true);
+    const first = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    button.dispatchEvent(first);
+    expect(first.defaultPrevented).toBe(false);
+  });
+
+  it("reports a failed run with Try again, which runs the same claim again", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onError = vi.fn();
+    render(pageWithHost(undefined, undefined, { onError }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    await act(async () => undefined);
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "Total is not a number." }));
+    expect(onError).toHaveBeenCalledWith("Mark paid did not finish.", new Error("Total is not a number."), expect.any(Function));
+    act(() => (onError.mock.calls[0]![2] as () => void)());
+    await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
+      workspaceId: "ws-1", automationId: "collection:tasks#paid", claimId: "atc_press", startOver: false,
+    }));
+    expect(button.getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("settles a run whose end arrived before the press answer", async () => {
+    let answer: (result: PressAutomationButtonResult) => void = () => undefined;
+    const bridge = buttonsWith({ press: () => new Promise((resolve) => { answer = resolve; }) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn();
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "skipped", error: null }));
+    await act(async () => answer({ busy: false, claimId: "atc_press", settled: null }));
+    expect(onNotice).toHaveBeenCalledWith("Mark paid made no changes to Invoice 12");
+    expect(button.getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("says when the button already runs for someone else, and keeps it pressable", async () => {
+    const bridge = buttonsWith({ press: async () => ({ busy: true, reason: "Running for this record." }) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("Running for this record.");
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("frees a shared view's button once the owner's computer has the press", async () => {
+    const bridge = buttonsWith({ press: async () => ({ busy: false, relayed: true }) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn();
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Sent Mark paid for Invoice 12"));
+    expect(button.getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("still reports a run that ends after its Collection closed, through the surface that showed it", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn();
+    const page = render(pageWithHost(undefined, undefined, { onNotice }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    await act(async () => undefined);
+    page.unmount();
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+  });
+
+  it("shows why a run waits even when the wait arrives before the press answer", async () => {
+    let answer: (result: PressAutomationButtonResult) => void = () => undefined;
+    const bridge = buttonsWith({ press: () => new Promise((resolve) => { answer = resolve; }) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "held" }));
+    await act(async () => answer({ busy: false, claimId: "atc_press", settled: null }));
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)
+      .toBe("Waiting for someone who can edit this Collection to allow a step.");
+  });
+
+  it("puts a button's words in the page body, outside the row that moves by transform", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Archive for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
+    const words = document.getElementById(button.getAttribute("aria-describedby")!)!;
+    expect(words.parentElement).toBe(document.body);
+    expect(button.closest("[role=row]")?.contains(words)).toBe(false);
+  });
+
+  it("drops a closed workspace's runs, so neither their end nor a Try again reports", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn(), onError = vi.fn();
+    const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    await act(async () => undefined);
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "No." }));
+    const retry = onError.mock.calls[0]![2] as () => void;
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(2));
+    await act(async () => undefined);
+    page.unmount();
+    disposeAutomationButtons("ws-1");
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    retry();
+    expect(onNotice).not.toHaveBeenCalled();
+    expect(bridge.retryCollectionAutomation).not.toHaveBeenCalled();
+  });
+
+  it("runs Try again through the live store after the old one was dropped, and reports its end", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn(), onError = vi.fn();
+    const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    await act(async () => undefined);
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "No." }));
+    const retry = onError.mock.calls[0]![2] as () => void;
+    page.unmount();
+    // Other Collections push this idle one out of the window.
+    const dropped = automationButtonsFor("ws-1", "tasks");
+    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", `other-${index}`);
+    expect(automationButtonsFor("ws-1", "tasks")).not.toBe(dropped);
+    await act(async () => retry());
+    await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalled());
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+  });
+
+  it("retries a press that did not start through the live store after its store was dropped, and a dropped store presses nothing", async () => {
+    let fail = true;
+    const bridge = buttonsWith({ press: async () => {
+      if (fail) throw new Error("The workspace engine is not running.");
+      return { busy: false, claimId: "atc_press", settled: null };
+    } });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn(), onError = vi.fn();
+    const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Mark paid did not start.", expect.any(Error), expect.any(Function)));
+    const retry = onError.mock.calls[0]![2] as () => void;
+    page.unmount();
+    const dropped = automationButtonsFor("ws-1", "tasks");
+    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", `other-${index}`);
+    await dropped.press("Mark paid", { id: "rec-1", label: "Invoice 12" });
+    expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1);
+    fail = false;
+    await act(async () => retry());
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(2));
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+  });
+
+  it("changes only the pressed button's view", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const buttons = automationButtonsFor("ws-1", "tasks");
+    await buttons.refresh();
+    const other = buttons.view("Archive", "rec-1");
+    const pressed = buttons.view("Mark paid", "rec-1");
+    const pressing = buttons.press("Mark paid", { id: "rec-1", label: "Invoice 12" });
+    expect(buttons.view("Archive", "rec-1")).toBe(other);
+    expect(buttons.view("Mark paid", "rec-1")).not.toBe(pressed);
+    await pressing;
+  });
+
+  it("offers Button in Fields, and Choose what it does for a button nothing uses", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const choose = vi.fn();
+    render(pageWithHost(undefined, undefined, { onChooseButtonAutomation: choose }));
+    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    expect(within(dialog).getByRole("option", { name: "Button" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Choose what Mark paid does" })).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Choose what Archive does" }));
+    expect(choose).toHaveBeenCalledWith("Archive");
+  });
+
+  it("offers no builder when the shell has none", async () => {
+    const bridge = buttonsWith();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalled());
+    expect(within(dialog).queryByText("Choose what it does")).toBeNull();
   });
 });

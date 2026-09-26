@@ -46,6 +46,8 @@ export function createWorkspaceEngineIpc<
   localAgentDisplayName(): string;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
+  /** A person the owner shared with, as History names their direct write. */
+  namedAuthorLabel(workspaceId: string, author: Parameters<EngineMomentAuthorNames["named"]>[0]): string;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
@@ -70,7 +72,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, automationAuthor, namedAuthorLabel,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -151,6 +153,7 @@ export function createWorkspaceEngineIpc<
       return {
         agent: (author) => author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
+        named: (author) => namedAuthorLabel(workspaceId, author),
       };
     }
 

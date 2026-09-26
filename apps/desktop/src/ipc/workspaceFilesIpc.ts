@@ -534,9 +534,9 @@ export function createWorkspaceFilesIpc<
       );
     });
 
-    // Plugin SDK reads use the combined helper to make the main-process
-    // workspace authorization boundary explicit. Older workspace handlers keep
-    // the equivalent assertTrustedSender + requireWorkspace steps separate.
+    // This read uses the combined helper to make the main-process workspace
+    // authorization boundary explicit. Older workspace handlers keep the
+    // equivalent assertTrustedSender + requireWorkspace steps separate.
     registerHandler(CHANNELS.readWorkspaceText, async (event, payload) => {
       const input = ReadWorkspaceTextPayload.parse(payload);
       assertTrustedSender(event);

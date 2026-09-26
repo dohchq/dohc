@@ -588,7 +588,7 @@ const demoBridge = {
     return {
       settings: {
         version: 1 as const,
-        agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+        agents: { mcpAutoStart: false },
         sites: { defaultPreviewMode: "auto" as const },
         privacy: { confirmExternalLinks: true },
         files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },

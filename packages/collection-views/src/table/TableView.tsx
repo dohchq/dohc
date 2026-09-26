@@ -7,6 +7,7 @@ import type {
   CollectionRecord,
   CollectionSchema,
   CollectionValue,
+  FieldDefinition,
 } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
@@ -80,6 +81,12 @@ export interface TableViewProps {
   personLabel?: (userId: string) => string | null;
   /** Marks by field name. Built once by the host, so rows never pay for them. */
   fieldMarks?: ReadonlyMap<string, TableFieldMark>;
+  /**
+   * Draws a Button field's cell for one record. The host owns what a press
+   * does and how the button looks while it runs. Absent, the cell shows
+   * the field's name.
+   */
+  renderButton?: (field: FieldDefinition, record: CollectionRecord) => ReactNode;
   /**
    * Called when the virtualizer renders within NEAR_END_ROWS of the last
    * loaded record. Hosts respond by loading the next page; extra calls are
@@ -166,6 +173,7 @@ export function TableView({
   relationExecutor,
   personLabel,
   fieldMarks,
+  renderButton,
   onNearEnd,
 }: TableViewProps) {
   const fields = useMemo(
@@ -192,7 +200,7 @@ export function TableView({
             (record) => record.values.find((entry) => entry.field === field.name),
             {
               id: field.name,
-              cell: (context) => (
+              cell: (context) => field.type === "button" && renderButton ? renderButton(field, context.row.original) : (
                 <FieldCell
                   field={field}
                   indexed={context.getValue()}
@@ -223,7 +231,7 @@ export function TableView({
           );
         }),
       ),
-    [fields, onCellChange, editingDisabled, personLabel, relationExecutor],
+    [fields, onCellChange, editingDisabled, personLabel, relationExecutor, renderButton],
   );
 
   const table = useTable({

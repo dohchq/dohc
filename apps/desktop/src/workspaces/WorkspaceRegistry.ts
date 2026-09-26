@@ -2,6 +2,7 @@ import { app } from "electron";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing } from "../automations/shareRoster";
 import {
   createRegistryStore,
@@ -11,6 +12,7 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import { recordSynced } from "./syncHistory";
 
 // Electron wiring over the pure registry store. The registry lives in
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
@@ -76,6 +78,10 @@ export function setWorkspaceRemote(
   workspaceId: string,
   remote: RemoteIdentity,
 ): void {
+  // The folder keeps the fact too, so a forgotten and reattached copy still
+  // knows it synced. See syncHistory.ts.
+  const workspace = findWorkspace(workspaceId);
+  if (workspace && !workspace.remote) recordSynced(workspace.rootPath);
   store().setRemote(workspaceId, remote);
 }
 
@@ -108,6 +114,12 @@ export function acknowledgeWorkspaceAutomationFailure(
   store().acknowledgeAutomationFailure(workspaceId, automationId, generation);
 }
 
+// The relay's latest answer for which computer runs the workspace's
+// schedules. See registryStore.setAutomationHost.
+export function setWorkspaceAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+  store().setAutomationHost(workspaceId, host);
+}
+
 // A new listing of the workspace's grants. See registryStore.setShareRoster.
 export function setWorkspaceShareRoster(
   workspaceId: string,
@@ -127,6 +139,8 @@ export function setWorkspaceShareView(
   workspaceId: string,
   shareView: ShareViewIdentity,
 ): void {
+  const workspace = findWorkspace(workspaceId);
+  if (workspace && !workspace.shareView) recordSynced(workspace.rootPath);
   store().setShareView(workspaceId, shareView);
 }
 

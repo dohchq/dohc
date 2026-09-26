@@ -1,6 +1,6 @@
 // Pure engine-history -> IPC record mappers, extracted from main.ts so the
 // per-side content-kind rules are unit-testable (WS-G1 review fix). main
-// injects how agent and automation authors read; nothing here touches
+// injects how agent, named, and automation authors read; nothing here touches
 // Electron or process state.
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
@@ -27,6 +27,7 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
 export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   automation(automationId: string): { name: string; collection: string } | null;
+  named(author: Extract<MomentAuthor, {kind: "named"}>): string;
 }
 
 export async function listEngineMomentsForIpc(
@@ -74,6 +75,9 @@ function engineMomentBaseForIpc(
       : {}),
     ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
     ...automationAuthorOf(moment.author, names),
+    ...(moment.author?.kind === "named"
+      ? { namedAuthor: { userId: moment.author.userId, label: names.named(moment.author) } }
+      : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),

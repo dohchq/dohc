@@ -1,6 +1,7 @@
 import { DatabaseSync, constants } from "node:sqlite";
 import { authorize, insertsImplicitRowid, sqlTokens } from "./guest.js";
-import { reject } from "./persistent-protocol.js";
+import { databaseBytes, reject, unbudgeted } from "./persistent-protocol.js";
+import type { CpuBudgets } from "./persistent-protocol.js";
 import type { RuntimeLimits } from "./protocol.js";
 
 export const datasetSchema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name != 'dohc_applied' ORDER BY type,name";
@@ -31,13 +32,17 @@ export function assertReplayableSchema(schemaSql:string):void {
   if (/\bAUTOINCREMENT\b/i.test(code)) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
 }
 
-export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false):void {
-  assertReplayableSchema(schemaSql);
+// The app's schema text and SQL run under the app's CPU budget. The integrity
+// and foreign-key checks run the app's indexes, generated columns, and CHECK
+// constraints over every row, so they run under the dataset check budget.
+export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false,
+  {appCode,datasetCheck}:CpuBudgets=unbudgeted):void {
+  appCode(()=>assertReplayableSchema(schemaSql));
   const expected=new DatabaseSync(":memory:",options);
   try {
     expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA ignore_check_constraints=ON; PRAGMA max_page_count=${Math.floor(limits.databaseBytes/4096)}`);
     authorize(expected,{tables},{initializing:true});
-    expected.exec(schemaSql);expected.setAuthorizer(null);
+    appCode(()=>expected.exec(schemaSql));expected.setAuthorizer(null);
     if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
     const schema=expected.prepare(datasetSchema).all();
     const declaredTables=schema.filter(row=>row.type==="table");
@@ -58,7 +63,8 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
   // Trusted host checkpoints contain previously accepted predicates, including time-dependent CHECKs.
   db.exec(validateNewPredicates ? "PRAGMA ignore_check_constraints=OFF" : "PRAGMA ignore_check_constraints=ON");
   try {
-    if (db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check!=="ok" || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_checkpoint","Checkpoint integrity check failed.");
+    const intact=datasetCheck(databaseBytes(db),()=>db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check==="ok" && db.prepare("PRAGMA foreign_key_check").iterate().next().done);
+    if (!intact) reject("invalid_checkpoint","Checkpoint integrity check failed.");
   } finally {db.exec("PRAGMA ignore_check_constraints=OFF");}
 }
 

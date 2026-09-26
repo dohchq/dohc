@@ -66,7 +66,18 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
 });
 
-for (const cancel of [false, true]) test(cancel ? "cancellation rejects queued packages before launching their commands" : "workspace runner completes prerequisites and repository tests before package readers", () => {
+for (const {name, cancel = false, selectedPackages} of [
+  {name:"workspace runner completes prerequisites and repository tests before package readers"},
+  {name:"cancellation rejects queued packages before launching their commands",cancel:true},
+  {name:"selected packages run without unrelated desktop or runtime tests",selectedPackages:["@dohc/new-package"]},
+  {name:"selected desktop tests retain their final script tests",selectedPackages:["@dohc/desktop"]},
+  {name:"an explicit empty selection still runs repository checks",selectedPackages:[]},
+  {name:"a selected package without tests still runs repository checks",selectedPackages:["@dohc/no-tests"]},
+  {name:"a selected package missing from inventory fails before any package runs",selectedPackages:["@dohc/missing"]},
+]) test(name, () => {
+  const missing = selectedPackages?.includes("@dohc/missing");
+  const expectedPackages = (selectedPackages ?? ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"])
+    .filter(name => name !== "@dohc/no-tests");
   const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
@@ -78,6 +89,7 @@ for (const cancel of [false, true]) test(cancel ? "cancellation rejects queued p
     put("apps/desktop/package.json", JSON.stringify({scripts:{test:"unused", "test:unit":"vitest run", "test:scripts":"scripts"}}));
     put("packages/app-backend-runtime/package.json", JSON.stringify({scripts:{test:"unused", "test:prepared":"vitest run"}}));
     put("packages/new-package/package.json", JSON.stringify({scripts:{test:"vitest run"}}));
+    put("packages/no-tests/package.json", "{}");
     put("scripts/verification/process.mjs", `
       import assert from 'node:assert/strict';
       import {appendFileSync,writeFileSync,existsSync} from 'node:fs';
@@ -88,38 +100,49 @@ for (const cancel of [false, true]) test(cancel ? "cancellation rejects queued p
       export async function run(command,args) {
         appendFileSync('commands.jsonl',JSON.stringify(args)+'\\n');
         if(args.includes('build')){completed.add(args[1]);return {stdout:''};}
-        assert.ok(completed.has('@dohc/sdk') && completed.has('@dohc/app-backend-runtime'));
+        assert.ok(completed.has('@dohc/app-backend-runtime'));
         if(args[1]==='test:repo'){writeFileSync('repository-complete','yes');return {stdout:''};}
         assert.ok(existsSync('repository-complete'));
         if(args.includes('list'))return {stdout:JSON.stringify([
           {name:'dohc',path:process.platform==='win32'?repoRoot.toUpperCase():repoRoot}, {name:'@dohc/desktop',path:resolve('apps/desktop')},
           {name:'@dohc/app-backend-runtime',path:resolve('packages/app-backend-runtime')},
-          {name:'@dohc/new-package',path:resolve('packages/new-package')}
+          {name:'@dohc/new-package',path:resolve('packages/new-package')},
+          {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
         if(args.includes('test:unit') && process.env.FIXTURE_CANCEL==='1') {
           process.emit('SIGINT');
           throw Error('fixture command interrupted');
         }
-        if(args.includes('test:scripts'))assert.ok(completed.has('test:@dohc/new-package') && completed.has('test:@dohc/app-backend-runtime') && completed.has('test:@dohc/desktop'));
+        if(args.includes('test:scripts'))assert.ok(${JSON.stringify(expectedPackages)}.every(name=>completed.has('test:'+name)));
         else completed.add('test:'+args[1]);
         return {stdout:''};
       }
     `);
-    const result = spawnSync(process.execPath, ["scripts/verification/js-tests.mjs", "--output", "evidence"], {
+    const args = selectedPackages === undefined ? ["scripts/verification/js-tests.mjs", "--output", "evidence"] : ["--input-type=module", "-e", `
+      import {testWorkspace} from './scripts/verification/js-tests.mjs';
+      try {await testWorkspace({output:'evidence',selectedPackages:${JSON.stringify(selectedPackages)}});}
+      catch(error){console.error(error.message);process.exitCode=1;}
+    `];
+    const result = spawnSync(process.execPath, args, {
       cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0"},
     });
     assert.equal(result.error, undefined);
-    assert.equal(result.status, cancel ? 130 : 0, result.stderr);
+    assert.equal(result.status, cancel ? 130 : missing ? 1 : 0, result.stderr);
     const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
-    assert.equal(report.verdict, cancel ? "FAIL" : "PASS");
-    assert.equal(report.packages.length, 3);
+    assert.equal(report.verdict, cancel || missing ? "FAIL" : "PASS");
+    const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
+    if (missing) {
+      assert.match(report.error,/selected workspace package is missing/);
+      assert.equal(commands.some(args=>args[2]==="run"),false);
+    } else assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
     if (cancel) {
       assert.match(report.error, /interrupted/);
-      const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
       assert.equal(commands.some(args => args.includes("test:scripts") || args.includes("test:prepared") || args.includes("test")), false);
       assert.equal(report.steps.at(-1).verdict, "FAIL");
-    } else {
-      assert.equal(report.steps.at(-1).name, "desktop-scripts");
+    } else if (!missing) {
+      if (selectedPackages !== undefined) assert.deepEqual(report.selectedPackages,selectedPackages);
+      assert.deepEqual(commands.filter(args=>args[2]==="run" && args[3]!=="test:scripts").map(args=>args[1]).sort(),expectedPackages.toSorted());
+      assert.equal(commands.some(args=>args.includes("test:scripts")),expectedPackages.includes("@dohc/desktop"));
       assert.ok(report.steps.every(step => step.verdict === "PASS"));
     }
     assert.ok(report.steps.every(step => step.seconds >= 0 && step.finishedAt));

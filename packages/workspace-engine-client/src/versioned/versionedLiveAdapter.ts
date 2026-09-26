@@ -17,6 +17,8 @@ import {
   type AutomationClaimNextResult,
   type AutomationClaimScheduleParams,
   type AutomationClaimScheduleResult,
+  type AutomationRunNowParams,
+  type AutomationRunNowResult,
   type AutomationClaimSummary,
   type AutomationFailuresResult,
   type AutomationListClaimsParams,
@@ -1236,6 +1238,15 @@ export class VersionedLiveAdapter {
     input: AutomationClaimScheduleParams,
   ): Promise<AutomationClaimScheduleResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimSchedule, input);
+  }
+
+  /**
+   * Run now from a skipped-run notice, after this computer's dismissal was
+   * the notice's first. A new claim announces itself with
+   * `automation.claimed`; a repeat answers the claim made before.
+   */
+  async runAutomationNow(input: AutomationRunNowParams): Promise<AutomationRunNowResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRunNow, input);
   }
 
   /** Every schedule's mark, for the scheduler's start. */

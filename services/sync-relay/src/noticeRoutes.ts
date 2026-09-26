@@ -13,6 +13,7 @@ import {
   type NoticeKind,
   type NoticeMark,
   type PostableNoticeKind,
+  type NoticeMarksResponse,
   type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
 import { accountDisplayName } from "./discussionRoutes";
@@ -82,12 +83,15 @@ export function createNoticeRoutes(
       return jsonResponse({ ok: true }, 200);
     }
     if (route.route === "notice-marks" && request.method === "POST") {
-      storage.markNotices({
+      const body = await readJsonObject(request);
+      if (body.installId !== undefined && !isNoticeLine(body.installId, 256)) throw badRequest("installId is invalid");
+      const dismissed = storage.markNotices({
         recipientUserId: userId,
-        marks: parseMarks((await readJsonObject(request)).marks),
+        marks: parseMarks(body.marks),
+        ...(typeof body.installId === "string" ? { installId: body.installId } : {}),
         nowMs: nowMs(),
       });
-      return jsonResponse({ ok: true }, 200);
+      return jsonResponse({ ok: true, dismissed } satisfies NoticeMarksResponse, 200);
     }
     throw relayError("method_not_allowed");
   };

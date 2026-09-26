@@ -3,7 +3,7 @@ export interface WorkspaceFileListingScope {
   recursive?: boolean;
 }
 
-// Match the SDK's literal, case-sensitive workspace paths, including an exact
+// Match literal, case-sensitive workspace paths, including an exact
 // file path. The scope narrows a listing; it never grants read authority.
 export function matchesFileListingScope(
   path: string,

@@ -1,4 +1,6 @@
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
+import { RecordButtonsRow } from "./collections/RecordButtonsRow";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -279,6 +281,10 @@ export function MarkdownView(props: {
   // continuously means the inspector already holds the answer. The setter bails
   // out when the value is unchanged, so this costs a comparison per render.
   onPendingDraftChange?: (pending: boolean) => void;
+  // A record's Button fields report here: a failed run with Try again, a
+  // finished one as a fading notice. Absent, the record view shows no buttons.
+  onButtonError?: ReportButtonError;
+  onButtonNotice?: (message: string) => void;
   // The engine open, opened by the inspector and passed down. It deliberately
   // does not live here: this component is unmounted by the inspector's own
   // loading/error branch, and a version switch that removes the file makes the
@@ -859,6 +865,9 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  const recordButtons = props.onButtonError && props.onButtonNotice ? (
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} />
+  ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
     // discarded — the store outlives this view and the refusal screen renders
@@ -2045,6 +2054,7 @@ export function MarkdownView(props: {
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
+            {recordButtons}
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
                 <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
@@ -2268,6 +2278,7 @@ export function MarkdownView(props: {
               readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
+            {recordButtons}
             {!readOnly ? (
               <Suspense fallback={<PropertiesFallback />}>
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
@@ -2355,6 +2366,7 @@ export function MarkdownView(props: {
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly || opening}
             />
+            {recordButtons}
             {!readOnly && !opening ? (
               <Suspense fallback={<PropertiesFallback />}>
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />

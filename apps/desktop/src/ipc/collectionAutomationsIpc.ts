@@ -66,6 +66,8 @@ export function registerCollectionAutomationsIpc<
   showItemInFolder(path: string): void;
   /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
+  /** The window that runs a failed press again hears how the run settles. */
+  watchPress(workspaceId: string, claimId: string, sender: Sender): void;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
@@ -96,12 +98,13 @@ export function registerCollectionAutomationsIpc<
   });
 
   // Try again. The executor wakes its drain and the failure notices after
-  // the engine queues the claim.
+  // the engine queues the claim. Only the person who pressed a button, or
+  // the workspace's owner, runs a press again.
   registerHandler(CHANNELS.retryCollectionAutomation, async (event, payload) => {
     assertTrustedSender(event);
     const input = RetryCollectionAutomationPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<RetryCollectionAutomationResult> =>
-      await operation.state.collectionAutomations.retry(input));
+      await operation.state.collectionAutomations.retry(input, (claimId) => dependencies.watchPress(input.workspaceId, claimId, event.sender)));
   });
 
   // Undo for a finished run, as the person who clicked it. Records the run
@@ -238,7 +241,8 @@ export function registerCollectionAutomationsIpc<
       try {
         // The writer reads its own text back, so a shape the file contract
         // would not produce is refused rather than written.
-        written = writeAutomationsFile(input.automations.map((automation) => ({ status: "valid", automation })));
+        const pinned = await operation.state.collectionAutomations.pinOperations(input.collectionPath, input.automations);
+        written = writeAutomationsFile(pinned.map((automation) => ({ status: "valid", automation })));
       } catch {
         return { status: "refused", diagnostics: [{ code: "changed-on-reread", path: "/automations" }] };
       }

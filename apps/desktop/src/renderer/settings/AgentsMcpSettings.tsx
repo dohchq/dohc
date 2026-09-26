@@ -1,9 +1,8 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, Copy, RefreshCw } from "lucide-react";
+import { Bot, Check, Copy } from "lucide-react";
 import type {
-  AgentPanelSnapshotResult,
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
@@ -72,9 +71,6 @@ export function AgentsMcpSettings(props: {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [drivers, setDrivers] = useState<AgentPanelSnapshotResult["drivers"] | null>(null);
-  const [probeError, setProbeError] = useState(false);
-  const [probing, setProbing] = useState(false);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
   const requestVersionRef = useRequestSequence();
@@ -115,19 +111,6 @@ export function AgentsMcpSettings(props: {
     });
   }, [isCurrentRequest, refresh]);
 
-  const probeDrivers = useCallback(async (version: number) => {
-    setProbing(true);
-    setProbeError(false);
-    try {
-      const panel = await bridge().probeAgentDrivers({ workspaceId });
-      if (isCurrentRequest(version)) setDrivers(panel.drivers);
-    } catch {
-      if (isCurrentRequest(version)) setProbeError(true);
-    } finally {
-      if (isCurrentRequest(version)) setProbing(false);
-    }
-  }, [isCurrentRequest, workspaceId]);
-
   useEffect(() => {
     const version = requestVersionRef.next();
     setStatus(null);
@@ -135,21 +118,17 @@ export function AgentsMcpSettings(props: {
     setCopied(false);
     setCopyError(null);
     setLoadError(null);
-    setDrivers(null);
-    setProbeError(false);
-    setProbing(false);
     setBusy(false);
     void refresh(version).catch(() => {
       if (isCurrentRequest(version)) {
         setLoadError("Could not load MCP settings.");
       }
     });
-    void probeDrivers(version);
     return () => {
       requestVersionRef.next();
       clearCopyResetTimer();
     };
-  }, [clearCopyResetTimer, isCurrentRequest, probeDrivers, refresh, workspaceId]);
+  }, [clearCopyResetTimer, isCurrentRequest, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
@@ -251,65 +230,13 @@ export function AgentsMcpSettings(props: {
           </div>
         </div>
 
-        <div className="grid gap-4 px-4 py-3 md:grid-cols-2">
-          <div>
-            <p className="m-0 mb-1.5 text-[11px] font-medium text-ink">1. Your name</p>
-            <PreferredNameControl
-              value={preferredName}
-              onChange={onPreferredNameChange}
-              testIdPrefix="agent-preferred-name"
-            />
-          </div>
-          <div>
-            <div className="mb-1.5 flex items-center gap-2">
-              <p className="m-0 text-[11px] font-medium text-ink">2. Local tools</p>
-              <button
-                type="button"
-                data-testid="agent-probe-refresh"
-                aria-label="Check local agents again"
-                title="Check again"
-                disabled={probing}
-                onClick={() => void probeDrivers(requestVersionRef.current())}
-                className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-bg hover:text-ink disabled:opacity-50"
-              >
-                <RefreshCw size={12} aria-hidden className={probing ? "animate-spin" : undefined} />
-              </button>
-            </div>
-            {drivers === null && !probeError ? (
-              <p data-testid="agent-probes-loading" className="m-0 text-[11px] text-subtle">
-                Checking local agents…
-              </p>
-            ) : probeError ? (
-              <p data-testid="agent-probes-error" className="m-0 text-[11px] text-danger">
-                Could not check local agents. You can still configure either connection below.
-              </p>
-            ) : (
-              <ul data-testid="agent-probe-list" className="m-0 grid list-none gap-1 p-0">
-                {drivers?.map((driver) => (
-                  <li
-                    key={driver.id}
-                    data-testid="agent-probe-row"
-                    data-installed={driver.installed ? "true" : "false"}
-                    className="flex items-center gap-2 rounded-md border border-line bg-bg px-2.5 py-1.5"
-                  >
-                    <span className={`size-1.5 rounded-full ${driver.installed ? "bg-success" : "bg-line"}`} />
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
-                      {driver.displayName}
-                    </span>
-                    <span className="text-[10px] text-subtle">
-                      {driver.installed
-                        ? driver.auth.status === "authenticated"
-                          ? "Installed · signed in"
-                          : driver.auth.status === "unauthenticated"
-                            ? "Installed · not signed in"
-                            : "Installed · sign-in not verified"
-                        : "Not found"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+        <div className="px-4 py-3">
+          <p className="m-0 mb-1.5 text-[11px] font-medium text-ink">Your name</p>
+          <PreferredNameControl
+            value={preferredName}
+            onChange={onPreferredNameChange}
+            testIdPrefix="agent-preferred-name"
+          />
         </div>
 
         <div className="grid border-t border-line md:grid-cols-2">

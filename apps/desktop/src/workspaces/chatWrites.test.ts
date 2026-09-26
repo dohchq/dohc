@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
-import { createChatWrites, type ChatWriter, type ChatWriteStore } from "./chatWrites";
+import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
+import { AutomationChatSessionWait } from "../automations/automationChat";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
 import { deferred, type Deferred } from "../testing/deferred";
 
-const PERSON: ChatWriter = { via: "renderer" };
-const AGENT: ChatWriter = { via: "cli", actor: "agent" };
+const PERSON: PersonWriter = { via: "renderer" };
+const AGENT: PersonWriter = { via: "cli", actor: "agent" };
 const signedIn = (userId: string): CloudCredentials => ({
   serverUrl: "https://cloud.test", relayUrl: "https://relay.test", userId,
   email: `${userId}@test.invalid`, token: `token-${userId}`,
@@ -93,6 +94,7 @@ function fixture() {
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
     scanChatDispatch: vi.fn(async () => undefined),
+    notifyRenderer: vi.fn(),
   };
   const writes = createChatWrites({
     findWorkspace: () => row,
@@ -170,6 +172,69 @@ describe("chat writes", () => {
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
     expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { channelId: "channel" });
+  });
+
+  it("writes an automation's post under its own name, its person, its ids, and its chain depth", async () => {
+    const test = fixture();
+    const automation: ChatWriter = { via: "automation", automationId: "collection:Tasks#tell", name: "Tell the trip", depth: 2 };
+    await test.writes.startThread(test.place, {
+      writer: automation, channelId: "channel", lane: "posts", threadId: "thread-auto-1", body: "Done",
+      messageId: "message-auto-1", idempotencyKey: "atc_1/h/0/post", resolveAttachments: async () => [],
+    });
+    expect(test.store.startChannelThread).toHaveBeenCalledWith({
+      workspaceId: "workspace", channelId: "channel", lane: "posts", threadId: "thread-auto-1", body: "Done",
+      messageId: "message-auto-1", idempotencyKey: "atc_1/h/0/post",
+      author: { kind: "automation", displayName: "Tell the trip" }, authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#tell", chainDepth: 2 }, authorUserId: "user-1",
+    });
+    // Nothing on screen asked for it, so the windows hear of it.
+    expect(test.effects.notifyRenderer).toHaveBeenCalledWith("workspace");
+  });
+
+  it("stops an automation's message at its signal, just before the row", async () => {
+    const test = fixture();
+    const stop = new AbortController();
+    const hold = test.holdAt("attachments");
+    const writing = test.writes.startThread(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+      channelId: "channel", body: "Done", signal: stop.signal, resolveAttachments: test.attachments,
+    });
+    await hold.entered.promise;
+    stop.abort();
+    hold.held.resolve();
+    await expect(writing).rejects.toMatchObject({ name: "AbortError" });
+    expect(test.store.startChannelThread).not.toHaveBeenCalled();
+  });
+
+  it("makes an automation wait for a session before a joined Group's identity check refuses it", async () => {
+    const test = fixture();
+    test.row.sharedChannels = [joined];
+    test.setCredentials(null);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+      threadId: "thread", body: "Done", resolveAttachments: async () => [],
+    })).rejects.toBeInstanceOf(AutomationChatSessionWait);
+    expect(test.store.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("writes an automation's wake in My agent without waiting for a session", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await test.writes.sendMessage(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#ask", name: "Ask", depth: 1, local: true },
+      threadId: "thread", body: "Plan", resolveAttachments: async () => [],
+    });
+    expect(test.store.sendMessage.mock.calls[0]![0]).not.toHaveProperty("authorUserId");
+  });
+
+  it("makes an automation wait for a session in a synced workspace instead of posting where nobody sees", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await expect(test.writes.sendMessage(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+      threadId: "thread", body: "Done", resolveAttachments: async () => [],
+    })).rejects.toBeInstanceOf(AutomationChatSessionWait);
+    expect(test.store.sendMessage).not.toHaveBeenCalled();
   });
 
   it("omits the relay author for a signed-out message outside a joined channel", async () => {

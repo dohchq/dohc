@@ -15,7 +15,6 @@ import {
   ChatHeader,
   joinedChannelLabel,
   ComposerNotice,
-  AddressedToMe,
   type ShareReadFailure,
 } from "./ChatsControls";
 import {
@@ -79,7 +78,6 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import type { AgentNotification } from "./agentNotifications";
 import {
   ChatMessageList,
   type ChatMessageListHandle,
@@ -458,8 +456,6 @@ export function ChatsView(props: {
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
   workspaceFiles?: readonly WorkspaceFileEntry[];
-  // "Addressed to me" inbox: agent asks / requests waiting on the user.
-  addressedToMe?: readonly AgentNotification[];
   // Main-derived settings/status summary. The Agents section reads it to
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
@@ -4639,7 +4635,6 @@ export function ChatsView(props: {
       onKeyDownCapture={onKeyDownCapture}
     >
       <div className={`min-h-0 flex-1 overflow-y-auto ${pageColumn}`}>
-        <AddressedToMe notifications={props.addressedToMe ?? []} />
         <nav aria-label="Chat" className="flex flex-col pb-3">
           <NavRow
             testId="chats-feed-link"

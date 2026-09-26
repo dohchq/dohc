@@ -70,6 +70,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -115,10 +116,16 @@ function liveDocumentMutationRefusal(
   if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
     return null;
   }
-  return new Error(
+  return new LiveDocumentMutationError(
     `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
   );
+}
+
+// A move, delete, or restore the engine refuses because the file is a shared
+// live document.
+export class LiveDocumentMutationError extends Error {
+  override name = "LiveDocumentMutationError";
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -375,7 +382,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // and a save-state bookkeeper that counts at hand-over instead vouches for
   // edits still sitting in the queue.
   // `options.actorOriginId` is the author the engine records this update
-  // under (an agent's id from the SDK/MCP write seam), and
+  // under (an agent's id from the CLI/MCP write seam), and
   // `options.attribution` is the declared provenance recorded beside it
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
   // call; a dead-generation revive or recovery replay re-journals canonical
@@ -436,13 +443,14 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
-  // Writes one SDK-originated text file with an explicit per-operation
-  // author. This never reads or changes the workspace's ambient agent slot.
-  // Returns the resolved path where the write landed.
+  // Writes one text file with an explicit per-operation author, or none when
+  // the writer did not name itself. This never reads or changes the
+  // workspace's ambient agent slot. Returns the resolved path where the
+  // write landed.
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentWriteAuthor,
+    author: MomentWriteAuthor | null,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
@@ -567,18 +575,33 @@ export interface WorkspaceEngineCapture {
   // timeline the UI paints always includes the batch whose onRecorded
   // notification triggered the refresh (read-your-writes; the chain never
   // rejects, so this can only wait, not fail).
+  // With objectId, the page holds only that file's moments in the active
+  // version, across its renames.
   listMoments(input?: {
     limit?: number;
     beforeMomentOrder?: number;
+    objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
+  // The ids of a file's moments in the active version after `momentId`,
+  // newest first, deletes and renames included. Record-only sync rows never
+  // touched the file, so they are passed over.
+  listObjectMomentsAfter(objectId: string, momentId: string): Promise<string[]>;
   // Engine restore (PR 0M-5): returns the file to its state before the given
   // moment. Runs on the capture chain; records a forward "Restored <file>"
   // moment (history is never rewritten) and materializes the result to disk
   // with expected-event registration so the watcher's observation of our own
   // write is not re-captured. Undo = call again with the returned
   // restoredMomentId.
-  restoreFileToBeforeMoment(momentId: string): Promise<WorkspaceEngineRestoreResult>;
+  // `expectedHeadMomentId` restores only while the file's newest moment,
+  // after its disk state is captured, is still that one; otherwise it throws
+  // RestoreHeadChangedError and changes nothing. `aloneInFolder` removes a
+  // file the moment created only while nothing else is in its folder;
+  // otherwise it throws RestoreFolderInUseError.
+  restoreFileToBeforeMoment(
+    momentId: string,
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
+  ): Promise<WorkspaceEngineRestoreResult>;
   undoAcceptedAppResponse(input: AppResponseUndoSelection): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
@@ -984,6 +1007,23 @@ function pathBasename(path: string): string {
 // diagnostic ("unsupported filename for this platform") instead of a silent
 // console line. The file stays safe in engine state; only this host's disk
 // cannot represent the name.
+// A guarded restore that would remove a file found something else in its
+// folder, so it removed nothing.
+export class RestoreFolderInUseError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} shares its folder with other files.`);
+    this.name = "RestoreFolderInUseError";
+  }
+}
+
+// A guarded restore found the file changed since its caller checked it.
+export class RestoreHeadChangedError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} changed since dohc checked it.`);
+    this.name = "RestoreHeadChangedError";
+  }
+}
+
 export class UnsupportedWorkspacePathError extends Error {
   readonly code = "unsupported-name" as const;
   constructor(readonly workspacePath: string) {
@@ -2949,7 +2989,14 @@ export function createWorkspaceEngineCapture(
       });
       return true;
     }
-    if (current && current.contentKind !== "binary" && current.text === disk.text) return false;
+    // A binary head of the same bytes, stored before its path was read as
+    // text, is unchanged too: a change of kind alone is not a change.
+    if (
+      current &&
+      (current.contentKind === "binary" ? current.sha256 === disk.sha256 : current.text === disk.text)
+    ) {
+      return false;
+    }
     // The mirror transition: a binary-tracked path whose content is UTF-8
     // text again continues as the same object with an honest moment.
     const becameText = current?.contentKind === "binary";
@@ -3367,7 +3414,7 @@ export function createWorkspaceEngineCapture(
     writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
       return enqueueResult("write authored text", async () => {
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const observedBytes = Buffer.byteLength(text, "utf8");
         if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
@@ -3395,7 +3442,7 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
+          throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
@@ -3412,7 +3459,7 @@ export function createWorkspaceEngineCapture(
             text,
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            author,
+            ...(author ? { author } : {}),
           });
         } catch (error) {
           if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
@@ -5358,6 +5405,25 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
+      if (input.objectId !== undefined) {
+        const activeVersionId = await activeVersionIdOf(engine);
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: input.objectId,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.beforeMomentOrder !== undefined
+            ? { beforeMomentOrder: input.beforeMomentOrder }
+            : {}),
+        });
+        return {
+          moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
+          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+          latestMomentOrder: page.latestMomentOrder,
+          activeVersionId,
+          protectedTruncated: false,
+        };
+      }
       const history = await engine.listHistoryPage({
         workspaceId,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
@@ -5424,7 +5490,31 @@ export function createWorkspaceEngineCapture(
       return null;
     },
 
-    restoreFileToBeforeMoment(momentId) {
+    async listObjectMomentsAfter(objectId, momentId) {
+      await chain;
+      const engine = await engineStore();
+      await engine.flushCapture?.();
+      const versionId = await activeVersionIdOf(engine);
+      const after: string[] = [];
+      let beforeMomentOrder: number | undefined;
+      for (;;) {
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId,
+          objectId,
+          limit: 100,
+          ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+        });
+        for (const moment of page.moments) {
+          if (moment.id === momentId) return after;
+          if (!moment.syncRecordOnly) after.push(moment.id);
+        }
+        if (page.nextBeforeMomentOrder === null) return after;
+        beforeMomentOrder = page.nextBeforeMomentOrder;
+      }
+    },
+
+    restoreFileToBeforeMoment(momentId, options = {}) {
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
@@ -5440,6 +5530,7 @@ export function createWorkspaceEngineCapture(
           if (!secretMoment) {
             throw new Error("This history moment is no longer available.");
           }
+          if (options.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
           if (secretMoment.versionId !== activeVersionId) {
             throw new Error(
               "This moment belongs to a different version. Switch to that version to restore it.",
@@ -5579,12 +5670,19 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
           });
+          if (
+            options.expectedHeadMomentId !== undefined &&
+            (current?.objectId !== moment.objectId || current.latestMomentId !== options.expectedHeadMomentId)
+          ) {
+            throw new RestoreHeadChangedError(path);
+          }
           if (target) {
+            // Equal bytes are the pre-moment state, whatever their kinds.
             if (
               current &&
-              (target.contentKind === "binary"
-                ? current.contentKind === "binary" && current.sha256 === target.sha256
-                : current.contentKind !== "binary" && current.text === target.text)
+              (target.contentKind === "binary" || current.contentKind === "binary"
+                ? current.sha256 !== undefined && current.sha256 === target.sha256
+                : current.text === target.text)
             ) {
               // Already in the pre-moment state. Returning the same moment id
               // keeps undo a no-op (undoing an idempotent restore restores the
@@ -5627,6 +5725,12 @@ export function createWorkspaceEngineCapture(
           // The moment created the file: restoring to before it removes it.
           if (!current) {
             return { restored: "deleted" as const, restoredMomentId: momentId, path };
+          }
+          if (options.aloneInFolder) {
+            // Checked here, in the queue, so nothing queued before it can add
+            // a file between the check and the delete.
+            const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
+            if (siblings.some((name) => name !== basename(path))) throw new RestoreFolderInUseError(path);
           }
           const result = await engine.deleteTextFile({
             workspaceId,

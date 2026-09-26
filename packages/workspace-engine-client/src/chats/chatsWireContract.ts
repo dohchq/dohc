@@ -22,6 +22,7 @@ export const CHATS_METHOD = {
   threadRevision: "chats.threads.revision",
   messageSend: "chats.messages.send",
   messagesList: "chats.messages.list",
+  messageGet: "chats.messages.get",
   readStateGet: "chats.readState.get",
   readStateMarkThreadRead: "chats.readState.markThreadRead",
   readStateListUnreadFileThreads: "chats.readState.listUnreadFileThreads",
@@ -370,6 +371,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.threadRevision]: ChatThreadParams;
   [CHATS_METHOD.messageSend]: ChatMessageSendParams;
   [CHATS_METHOD.messagesList]: ChatMessagesListParams;
+  [CHATS_METHOD.messageGet]: ChatsJsonObject & { messageId: string };
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
   [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThreadsParams;
@@ -770,6 +772,7 @@ const ChatsResultSchemas = {
     messages: Schema.mutable(Schema.Array(ChatMessageSchema)),
     nextAfterMessageOrder: NullableNonnegativeInt,
   }),
+  [CHATS_METHOD.messageGet]: mutableStruct({ message: ChatMessageSchema }),
   [CHATS_METHOD.readStateGet]: ChatThreadReadStateSchema,
   [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadStateSchema,
   [CHATS_METHOD.readStateListUnreadFileThreads]: Schema.mutable(

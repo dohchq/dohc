@@ -11,6 +11,7 @@
     "./app-responses": "./src/appResponses.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
+    "./args": "./src/args.ts",
     "./client": "./src/client.ts",
     "./errors": "./src/errors.ts",
     "./protocol": "./src/protocol.ts",

@@ -92,9 +92,6 @@ importers:
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../../packages/live-session-contract
-      '@dohc/sdk':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../../packages/security-contract
@@ -608,6 +605,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@dohc/app-browser':
+        specifier: workspace:*
+        version: link:../app-browser
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
@@ -616,18 +616,6 @@ importers:
         version: 4.23.11
       typescript:
         specifier: ^7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: ^4.1.11
-        version: 4.1.11(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0))
-
-  packages/sdk:
-    devDependencies:
-      '@types/node':
-        specifier: ^24.13.3
-        version: 24.13.3
-      typescript:
-        specifier: 7.0.2
         version: 7.0.2
       vitest:
         specifier: ^4.1.11

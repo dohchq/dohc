@@ -52,7 +52,7 @@ function transactions(db: DatabaseSync) {
 const tasks = (count: number) => Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",");
 // Everything the ledger retains for the dataset, as it charged it.
 function retained(db: DatabaseSync): number {
-  return ["claims", "revisions"].reduce((sum, table) =>
+  return ["claims", "revisions", "failure_generations"].reduce((sum, table) =>
     sum + Number(db.prepare(`SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_automation_${table}`).get()!.bytes), 0);
 }
 
@@ -325,6 +325,59 @@ it("raises the run on Try again and keeps the claim's facts", () => {
   expect(() => f.claims.retry(again)).toThrow("already finished");
 });
 
+it("hands a started claim back without counting its attempt, and refuses an attempt that is no longer current", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  const started = f.claims.next(scope.workspaceId)!;
+  f.claims.release(started);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a")).toMatchObject([{ claimId: started.claimId, state: "pending", attempts: 0, run: 1 }]);
+  expect(() => f.claims.release(started)).toThrow("no longer current");
+  const again = f.claims.next(scope.workspaceId)!;
+  expect(again).toMatchObject({ claimId: started.claimId, attempts: 1 });
+  f.reopen();
+  expect(() => f.claims.release(again)).toThrow("no longer current");
+});
+
+it("lists an automation's runs newest first, and offers the failure it settled last", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  f.commit("INSERT INTO tasks VALUES('b','Open','')");
+  const [first, second] = drain(f.claims);
+  f.claims.settle(second!, { state: "failed", error: "Second." });
+  f.tick(1);
+  f.claims.settle(first!, { state: "failed", error: "First." });
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
+  expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId,
+    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual([]);
+});
+
+it("counts each automation's failures in a generation that trimming and Try again never lower, charged until the dataset goes", () => {
+  const f = ledger();
+  const automationId = "collection:tasks#a";
+  f.claims.subscribe(scope, subscription(automationId, ["added"]));
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  const [first] = drain(f.claims);
+  f.claims.settle(first!, { state: "failed", error: "No." });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 1 }]);
+  // Try again and fail again: one more.
+  f.claims.retry({ workspaceId: scope.workspaceId, claimId: first!.claimId });
+  f.claims.settle(f.claims.next(scope.workspaceId)!, { state: "failed", error: "Still no." });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 2, error: "Still no." }]);
+  // A chain stop fails before it starts, and counts too.
+  f.commit("INSERT INTO tasks VALUES('b','Open','')", { kind: "automation", automationId: "collection:tasks#other", depth: 4 });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 3, neverStarted: true }]);
+  // The count's row is charged to the dataset like its claims.
+  expect(f.charged).toBe(retained(f.db));
+  expect(Number(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_failure_generations").get()!.count)).toBe(1);
+  // Deleting the dataset forgets its counts with its claims.
+  f.claims.forget(scope);
+  expect(f.claims.failures(scope.workspaceId)).toEqual([]);
+  expect(retained(f.db)).toBe(0);
+});
+
 it("carries small values whole and names fields whose values are too large", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added"]));
@@ -375,14 +428,20 @@ it("keeps subscriptions current, and forgets a deleted dataset", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["changed", "added"], [STATUS]));
-  expect(f.claims.subscriptions(scope)).toEqual([subscription("collection:tasks#a", ["added", "changed"], [STATUS])]);
+  f.claims.subscribe({ ...scope, datasetId: id(99) }, subscription("collection:other#b", ["removed"]));
+  expect(f.claims.subscriptions(scope.workspaceId)).toEqual([
+    { datasetId: scope.datasetId, ...subscription("collection:tasks#a", ["added", "changed"], [STATUS]) },
+    { datasetId: id(99), ...subscription("collection:other#b", ["removed"]) },
+  ]);
+  expect(f.claims.subscriptions("elsewhere")).toEqual([]);
   expect(() => f.claims.subscribe(scope, subscription("collection:tasks#b", []))).toThrow("change kinds");
   expect(() => f.claims.subscribe(scope, { ...subscription("collection:tasks#b", ["added"]), definitionHash: "edited" })).toThrow("definition hash");
   f.commit("INSERT INTO tasks VALUES('a','Open','')", { kind: "automation", automationId: "collection:tasks#b", depth: 1 });
   f.db.exec("BEGIN IMMEDIATE"); f.claims.forget(scope); f.db.exec("COMMIT");
   for (const table of ["subscriptions", "claims", "revisions"]) {
-    expect(f.db.prepare(`SELECT count(*) AS count FROM dohc_dataset_automation_${table}`).get()).toEqual({ count: 0 });
+    expect(f.db.prepare(`SELECT count(*) AS count FROM dohc_dataset_automation_${table} WHERE dataset_id=?`).get(scope.datasetId)).toEqual({ count: 0 });
   }
+  expect(f.claims.subscriptions(scope.workspaceId)).toEqual([{ datasetId: id(99), ...subscription("collection:other#b", ["removed"]) }]);
 });
 
 // The whole host, with a real worker: the actor comes from the context, and
@@ -482,6 +541,9 @@ it("takes an automation's identity from its context, and grants it no owner admi
   expect(drain(f.claims).map(claim => [claim.automationId, claim.depth, claim.actor])).toEqual([
     ["collection:signups#b", 2, { kind: "automation", automationId: "collection:signups#a", depth: 2 }],
   ]);
+  // History names the automation behind its change, and only that change.
+  await f.invoke("owner", CREATE, "by-hand");
+  expect(f.host.history("owner", scope).entries.map(entry => entry.automation ?? null)).toEqual([null, { automationId: "collection:signups#a", depth: 2 }]);
   await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("not permitted");
   await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("not permitted");
   expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("not permitted");

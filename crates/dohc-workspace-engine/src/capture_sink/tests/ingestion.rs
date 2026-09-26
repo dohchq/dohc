@@ -224,6 +224,29 @@ fn non_text_media_never_lands_in_the_plaintext_store() {
 }
 
 #[test]
+fn collection_yaml_files_land_in_the_plaintext_store() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let files = [
+        ("trip/collection.yaml", "name: Trip\n"),
+        ("trip/automations.yaml", "version: 1\nautomations: []\n"),
+    ];
+    for (path, text) in files {
+        write_file(scratch.path(), path, text.as_bytes());
+        // The scanner's media type for `.yaml`.
+        ingest_as(&mut sink, path, "application/octet-stream").expect("capture");
+    }
+
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+    for (path, text) in files {
+        assert_eq!(snapshot(&db, path).expect("text head").text, text, "{path}");
+        assert!(binary_head(&db, path).is_none(), "{path}");
+    }
+}
+
+#[test]
 fn reconcile_settles_deferred_and_raced_paths_without_degrading() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();

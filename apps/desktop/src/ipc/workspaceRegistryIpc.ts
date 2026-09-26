@@ -240,7 +240,6 @@ export function registerOpenWorkspaceIpcHandler<
   Operation extends {
     workspace: Workspace;
     assertCurrent(): void;
-    state: { pluginRuntimes: { ensure(workspace: Workspace): Promise<unknown> } };
   },
 >(dependencies: {
   registerHandler(
@@ -266,7 +265,6 @@ export function registerOpenWorkspaceIpcHandler<
     status: SyncStatusResult,
   ): Promise<SyncStatusResult>;
   openWorkspaceActivity(operation: Operation): Promise<SyncStatusResult>;
-  sharedViewOf(workspaceId: string): unknown;
 }): void {
   const {
     registerHandler,
@@ -277,7 +275,6 @@ export function registerOpenWorkspaceIpcHandler<
     markWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity,
-    sharedViewOf,
   } = dependencies;
   registerHandler(CHANNELS.openWorkspace, async (event, payload) => {
     assertTrustedSender(event);
@@ -311,23 +308,6 @@ export function registerOpenWorkspaceIpcHandler<
           `[desktop] could not stamp the last open of ${workspace.workspaceId}:`,
           error,
         );
-      }
-      if (!sharedViewOf(workspace.workspaceId)) {
-        // A plugin-pipeline start failure must not fail the whole handler —
-        // the workspace itself already opened. listPlugins and friends
-        // separately convert a failed plugin runtime warmup into a structured
-        // pluginIpcError; this is best-effort warmup, and the renderer's file
-        // tree must not wait on it (fire-and-forget, like the dispatch scan in
-        // openWorkspaceActivityWith).
-        void withPhysicalWorkspaceOperation(workspace.workspaceId, (warmup) => {
-          if (warmup.workspace.attachmentId !== workspace.attachmentId) return;
-          return warmup.state.pluginRuntimes.ensure(warmup.workspace);
-        }).catch((error: unknown) => {
-          console.error(
-            `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
-            error,
-          );
-        });
       }
       return status;
     });

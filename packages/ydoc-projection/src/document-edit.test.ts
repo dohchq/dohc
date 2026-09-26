@@ -4,12 +4,14 @@ import * as Y from 'yjs'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
   DOCUMENT_OPEN_REFUSAL,
+  FRONTMATTER_REFUSAL,
+  documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
   type DocumentEdit,
 } from './document-edit.js'
-import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from './import-export.js'
+import { getDohcProseMirrorSchema, markdownToYDoc, startsWithFrontmatter, yDocToMarkdown } from './import-export.js'
 
 const open = { keepBlocks: true }
 const closed = { keepBlocks: false }
@@ -126,6 +128,33 @@ describe('documentEditUpdate', () => {
     expect(markdownOf(doc)).toContain('Edited.')
     expect(touched).toEqual([])
     expect(list.getAttribute('start')).toBeUndefined()
+  })
+})
+
+describe('documentCreateUpdate', () => {
+  test('writes the first text into a document with no blocks', () => {
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, documentCreateUpdate(state(doc), '# Kyoto\n\n- Day one\n- Day two', open)!)
+    expect(markdownOf(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+  })
+
+  test.each([
+    '---\ntitle: Trip\n---\n\nBody.',
+    '---\n{}\n---\n\nBody.',
+    '---\n\n---\n',
+    '---\n---\n',
+  ])('refuses frontmatter, which would land as body blocks: %j', (markdown) => {
+    expect(startsWithFrontmatter(markdown)).toBe(true)
+    expect(() => documentCreateUpdate(state(new Y.Doc()), markdown, open)).toThrow(FRONTMATTER_REFUSAL)
+  })
+
+  test.each([
+    'Intro.\n\n---\n\nMore.',
+    '---\nA line between two rules.\n---\n\nMore.',
+  ])('takes rules the reader does not read as frontmatter as body text: %j', (markdown) => {
+    expect(startsWithFrontmatter(markdown)).toBe(false)
+    expect(() => documentCreateUpdate(state(new Y.Doc()), markdown, open)).not.toThrow()
   })
 })
 

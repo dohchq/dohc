@@ -99,6 +99,8 @@ import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as collectionWriteStorage from "./storage/collectionWrites";
+import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
+import * as automationPressStorage from "./storage/automationPresses";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -530,8 +532,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.readNoticeChanges(this, input);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): void {
-    noticeStorage.markNotices(this, input);
+  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+    return noticeStorage.markNotices(this, input);
   }
 
   noticeShareReceived(input: noticeStorage.NoticeShareReceivedInput): void {
@@ -564,6 +566,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
+  }
+
+  readOwnerCollectionWrites(input: ownerCollectionWriteStorage.OwnerCollectionWritesInput) {
+    return ownerCollectionWriteStorage.readOwnerCollectionWrites(this, input);
+  }
+
+  recordAutomationPress(input: automationPressStorage.RecordAutomationPressInput) {
+    return automationPressStorage.recordAutomationPress(this, input);
+  }
+
+  listAutomationPresses(input: automationPressStorage.HostScope & { nowMs: number }) {
+    return automationPressStorage.listAutomationPresses(this, input);
+  }
+
+  automationPressWait(input: automationPressStorage.HostScope & { nowMs: number }) {
+    return automationPressStorage.automationPressWait(this, input);
+  }
+
+  pruneExpiredAutomationPresses(nowMs: number) {
+    return this.tx(() => automationPressStorage.pruneExpired(this, nowMs));
+  }
+
+  acceptAutomationPresses(input: Parameters<typeof automationPressStorage.acceptAutomationPresses>[1]) {
+    return automationPressStorage.acceptAutomationPresses(this, input);
+  }
+
+  settleAutomationPress(input: Parameters<typeof automationPressStorage.settleAutomationPress>[1]) {
+    return automationPressStorage.settleAutomationPress(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {

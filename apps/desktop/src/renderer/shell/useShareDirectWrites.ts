@@ -2,16 +2,15 @@ import { useEffect, useRef } from "react";
 import type { DirectWriteRow, PushShareDirectWritesResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
-// Share views whose relay answered that it takes no direct writes, with its
-// notice shown. Main stops asking until the app restarts, and the notice
-// shows once.
-const unavailableShown = new Set<string>();
-
 export type DirectWriteNoticeKind =
   | "direct-write-stale"
   | "direct-write-refused"
   | "direct-write-failed"
   | "direct-write-unavailable";
+
+// How a shared-view refresh left the view: refreshed (or not a shared view),
+// found the share ended, or failed, was damaged, or was overtaken.
+export type ShareViewRefresh = "current" | "ended" | "stale";
 
 export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
@@ -34,7 +33,7 @@ export function useShareDirectWrites(input: {
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
   ownerName: string;
-  refreshShareView(): Promise<unknown>;
+  refreshShareView(): Promise<ShareViewRefresh>;
   sendShareChanges(): Promise<void>;
   showNotice(notice: DirectWriteNotice): void;
 }): void {
@@ -65,13 +64,23 @@ export function useShareDirectWrites(input: {
       const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
       const sendAsProposal = { label: "Send as proposal", run: () => void sendShareChanges() };
       if (result.status === "unavailable") {
-        if (unavailableShown.has(workspaceId)) return;
-        unavailableShown.add(workspaceId);
-        showNotice({
-          kind: "direct-write-unavailable",
-          message: `${ownerName}'s server doesn't take Collection changes directly. Send your changes for ${ownerName} to review.`,
-          retry: null,
-          send: { label: "Send changes", run: () => void sendShareChanges() },
+        // Any 404 on the way to the relay reads as unavailable, so only the
+        // view's own refresh can say the share ended. It then shows it ended.
+        void refreshShareView().catch((): ShareViewRefresh => "stale").then((refresh) => {
+          if (latest.current.workspaceId !== workspaceId) return;
+          latest.current.showNotice(refresh === "ended"
+            ? {
+                kind: "direct-write-unavailable",
+                message: `Your access to this share ended, so your Collection changes didn't reach ${ownerName}. Ask ${ownerName} to share it again.`,
+                retry: null,
+                send: null,
+              }
+            : {
+                kind: "direct-write-failed",
+                message: `dohc could not send your Collection changes to ${ownerName}.`,
+                retry: () => void push(),
+                send: null,
+              });
         });
         return;
       }

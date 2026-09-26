@@ -562,7 +562,7 @@ describe("workspace wire schemas", () => {
 describe("automations wire schemas", () => {
   const summary = {
     claimId: "claim-1",
-    automationId: "plugin:hello-plugin/triage",
+    automationId: "collection:tasks#triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
@@ -618,6 +618,24 @@ describe("automations wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
     ).toEqual(claim);
+  });
+
+  it("decodes a Group message claim, whose message has no record and may carry its body truncated", () => {
+    const message = {
+      ...claim,
+      trigger: { key: "message:m1" },
+      recordId: null,
+      change: {
+        ...claim.change,
+        kind: "message",
+        fields: [],
+        message: {
+          id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
+          authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: { truncated: true, bytes: 70_000 },
+        },
+      },
+    };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, message)).toEqual(message);
   });
 
   it("decodes null from a drained claimNext", () => {
@@ -690,7 +708,7 @@ describe("automations wire schemas", () => {
 
   it("decodes the failure listing and refuses a row without a generation", () => {
     const failure = {
-      automationId: "plugin:hello-plugin/triage",
+      automationId: "collection:tasks#triage",
       claimId: "claim-1",
       chainStopped: true,
       error: "chain-stopped",
@@ -710,7 +728,7 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
         failures: [
-          { automationId: "plugin:hello-plugin/triage", claimId: "claim-1", error: "x" },
+          { automationId: "collection:tasks#triage", claimId: "claim-1", error: "x" },
         ],
       }),
     ).toThrow(ProtocolShapeError);
@@ -804,6 +822,10 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
     ).toThrow(ProtocolShapeError);
+    const runNow = { ...due, trigger: { key: "run-now:schedule-skipped:ws:collection:Invoices#weekday-report:2000" } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: runNow })).toEqual({ claim: runNow });
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: null })).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, {})).toThrow(ProtocolShapeError);
   });
 
   it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
