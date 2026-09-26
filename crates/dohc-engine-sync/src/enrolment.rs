@@ -1402,7 +1402,8 @@ mod tests {
         let replacement = result
             .lineage_replacement
             .expect("remote base replaces the offline lineage");
-        assert_eq!(replacement.recovered_paths.len(), 1);
+        assert!(replacement.recovered_paths.is_empty());
+        assert_eq!(result.conflicts_opened, 1);
 
         let (claim_status, base_sha, local_updates): (String, String, i64) = local
             .read_with(|conn| {
@@ -1443,9 +1444,8 @@ mod tests {
         let recovered_text: String = local
             .read_with(|conn| {
                 conn.query_row(
-                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256
-                     WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
-                    [&replacement.recovered_paths[0]],
+                    "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.current_blob_sha256 WHERE c.status='open'",
+                    [],
                     |row| row.get(0),
                 )
             })

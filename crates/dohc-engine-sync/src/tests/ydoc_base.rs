@@ -145,7 +145,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
 }
 
 #[test]
-fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
+fn lower_relay_base_recovers_a_third_copy_as_one_ordinary_sibling() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
@@ -226,6 +226,22 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
             dohc_engine_collab::ReplicationApplyOutcome::Applied { .. }
         ))
     ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            let sha = dohc_engine_storage::hex_sha256(b"external edit");
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,13,'external edit')",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='object-arbitrated'",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("a third copy from an external editor");
     let recovery_projection = dohc_engine_storage::hex_sha256(b"losing draft plus edit");
     let occupied_first_recovery = format!(
         "notes/arbitrated (recovered {} {recovery_projection}).md",
@@ -368,13 +384,13 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
             ))
         })
         .expect("arbitrated state");
-    assert_eq!(state.0, "relay winner");
+    assert_eq!(state.0, "external edit");
     assert_eq!(state.1, "losing draft plus edit");
     assert_eq!(state.2, winner_claim);
     assert_eq!(state.3, "unrelated occupant");
     assert_eq!(
         (state.4, state.5, state.6, state.7, state.8, state.9),
-        (1, 1, 0, 1, 1, 0),
+        (1, 1, 1, 1, 1, 0),
         "the losing delta is preserved in the sibling and purged from the winner"
     );
 
@@ -525,7 +541,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
 }
 
 #[test]
-fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
+fn different_scene_seeds_open_a_version_conflict() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
@@ -600,6 +616,9 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
         })
         .expect("settle the losing scene projection");
 
+    let moments_before: i64 = engine
+        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+        .unwrap();
     let winner = dohc_engine_collab::Ydoc::wire();
     winner
         .apply(
@@ -647,79 +666,53 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
         .lineage_replacement
         .expect("scene replacement result");
     assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
-    assert_eq!(replacement.recovered_paths.len(), 1);
-    let recovered_path = &replacement.recovered_paths[0];
-    assert!(recovered_path.contains(&loser_claim[..8]));
-    assert!(recovered_path.ends_with(".excalidraw"));
-
-    let (original, recovered, decision_kind, recovered_content_kind, recovery_ydocs): (
-        String,
-        String,
-        String,
-        String,
-        i64,
-    ) = engine
+    assert!(replacement.recovered_paths.is_empty());
+    assert_eq!(result.conflicts_opened, 1);
+    assert_eq!(result.reason, Some("ydoc-base-conflict"));
+    let (current, incoming_text, head, recoveries): (String, String, String, i64) = engine
         .read_with(|conn| {
-            let original = conn.query_row(
-                "SELECT blob.text FROM snapshots snapshot
-                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
-                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
-                   AND snapshot.path=?1",
-                [path],
-                |row| row.get(0),
-            )?;
-            let recovered = conn.query_row(
-                "SELECT blob.text FROM snapshots snapshot
-                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
-                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
-                   AND snapshot.path=?1",
-                [recovered_path],
-                |row| row.get(0),
-            )?;
-            let (decision_kind, recovery_object_id) = conn.query_row(
-                "SELECT incoming_content_kind,recovery_object_id
-                   FROM ydoc_recovery_decisions
-                  WHERE workspace_id='ws' AND origin_id='winner' AND origin_seq=0",
+            conn.query_row(
+                "SELECT c.text,i.text,h.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
+            FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+            JOIN blobs i ON i.sha256=f.incoming_blob_sha256
+            JOIN snapshots s ON s.object_id=f.current_object_id
+            JOIN blobs h ON h.sha256=s.blob_sha256 WHERE f.status='open'",
                 [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?;
-            let recovered_content_kind = conn.query_row(
-                "SELECT content_kind FROM snapshots
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&recovery_object_id],
-                |row| row.get(0),
-            )?;
-            let recovery_ydocs = conn.query_row(
-                "SELECT COUNT(*) FROM ydoc_docs
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&recovery_object_id],
-                |row| row.get(0),
-            )?;
-            Ok::<_, rusqlite::Error>((
-                original,
-                recovered,
-                decision_kind,
-                recovered_content_kind,
-                recovery_ydocs,
-            ))
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
         })
-        .expect("scene recovery state");
-    let original: serde_json::Value =
-        serde_json::from_str(&original).expect("winning scene remains portable JSON");
-    let recovered: serde_json::Value =
-        serde_json::from_str(&recovered).expect("recovered scene remains portable JSON");
-    assert_eq!(original["elements"][0]["id"], "winning-rectangle");
-    assert_eq!(recovered["elements"][0]["id"], "losing-rectangle");
-    assert_eq!(decision_kind, "scene");
-    assert_eq!(recovered_content_kind, "text");
+        .expect("visible scene conflict");
+    assert_eq!(head, current);
+    assert_eq!(recoveries, 0);
     assert_eq!(
-        recovery_ydocs, 0,
-        "the recovered scene is an ordinary sibling"
+        serde_json::from_str::<serde_json::Value>(&current).unwrap()["elements"][0]["id"],
+        "losing-rectangle"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&incoming_text).unwrap()["elements"][0]["id"],
+        "winning-rectangle"
+    );
+    let moments_after: i64 = engine
+        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(
+        moments_after, moments_before,
+        "a settled local scene needs no new history entry"
+    );
+    assert_ne!(loser_claim, winner_claim);
+    resolve_seed_conflict(&mut engine, &key, true);
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .text,
+        current
     );
 }
 
 #[test]
-fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
+fn distinct_lineages_conflict_even_when_their_current_text_matches() {
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -793,31 +786,21 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
     assert!(outcome_refusals.is_empty());
     assert!(outcome_sharing_declined.is_empty());
     let replacement = result.lineage_replacement.expect("replacement result");
-    assert_eq!(replacement.recovered_paths.len(), 1);
-    let recovered_text: String = engine
+    assert!(replacement.recovered_paths.is_empty());
+    assert_eq!(result.conflicts_opened, 1);
+    let (current, incoming_text): (String, String) = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT blob.text FROM snapshots snapshot
-                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
-                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
-                   AND snapshot.path=?1",
-                [&replacement.recovered_paths[0]],
-                |row| row.get(0),
+                "SELECT c.text,i.text FROM conflicts f
+            JOIN blobs c ON c.sha256=f.current_blob_sha256
+            JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
         })
-        .expect("recovered text");
-    assert_eq!(recovered_text, "same text");
-    assert_eq!(
-        crate::ydoc_apply::redelivered_materialization_changes(&engine, &incoming)
-            .expect("redelivered recovery materialization"),
-        [MomentMaterializationChange {
-            version_id: "main".to_owned(),
-            path: replacement.recovered_paths[0].clone(),
-            operation: "write",
-            content_kind: "text",
-        }],
-        "a converged primary projection must not hide its recovery sibling's disk write"
-    );
+        .unwrap();
+    assert_eq!(current, "same text");
+    assert_eq!(incoming_text, current);
 }
 
 #[test]
@@ -843,7 +826,7 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
         &mut engine,
         "object-disk-occupant-recovery",
         "notes/disk-occupant.md",
-        "losing local draft",
+        "external editor draft",
     );
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-disk-occupant-recovery")
         .expect("doc key");
@@ -3979,10 +3962,9 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
 }
 
 #[test]
-fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
-    // A local-only lineage has no relay identity. The pulled base becomes the
-    // active lineage, and the durable local content becomes an ordinary
-    // recovery sibling. The two independent CRDT histories never merge.
+fn a_pulled_base_preserves_local_only_rows_in_a_conflict() {
+    // A local-only lineage has no relay identity. Preserve its content in
+    // the conflict before installing the incoming causal lineage.
     let (_scratch, _path, mut engine) = open_store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -4074,7 +4056,8 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     let replacement = result
         .lineage_replacement
         .expect("local-only lineage replacement");
-    assert_eq!(replacement.recovered_paths.len(), 1);
+    assert!(replacement.recovered_paths.is_empty());
+    assert_eq!(result.conflicts_opened, 1);
 
     let head_text: String = engine
         .read_with(|conn| {
@@ -4090,19 +4073,18 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
             .map_err(SyncError::corrupt)
         })
         .expect("promoted head");
-    assert_eq!(head_text, "base-part");
+    assert_eq!(head_text, "local-part ");
     let recovered_text: String = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
-                [&replacement.recovered_paths[0]],
+                "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 WHERE c.status='open'",
+                [],
                 |row| row.get(0),
             )
             .map_err(SyncError::corrupt)
         })
         .expect("recovered local content");
-    assert_eq!(recovered_text, "local-part ");
+    assert_eq!(recovered_text, "base-part");
     let seed_source: Option<String> = engine
         .read_with(|conn| {
             conn.query_row(
@@ -4200,4 +4182,240 @@ fn divergent_base_waits_for_the_existing_base_relay_position() {
         .expect("marker");
     assert_eq!(marker.lineage_claim_id, Some(local_claim));
     assert_eq!(marker.base_relay_seq, None);
+}
+
+#[test]
+fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    for deferred in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .unwrap();
+        let path = "notes/seed-conflict.md";
+        seed_text_head(&mut engine, "seed-conflict", path, "local seed");
+        let key = DocKey::new("ws", "main", "seed-conflict").unwrap();
+        let local = Ydoc::wire();
+        local.richdoc_append_paragraph("local seed");
+        let base = local.encode_full_state();
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            ContentKind::Richdoc,
+            &base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+            &NoFaults,
+            1_100,
+        )
+        .unwrap();
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET seed_source_sha256=?1 WHERE object_id='seed-conflict'",
+                    [dohc_engine_storage::hex_sha256(b"local seed")],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let edit = local.richdoc_append_paragraph("unsaved local edit");
+        dohc_engine_collab::apply_remote_update(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &key,
+            &dohc_engine_collab::RemoteUpdate {
+                origin_id: "local".into(),
+                origin_seq: 1,
+                bytes: edit,
+            },
+            None,
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .unwrap();
+        let remote = Ydoc::wire();
+        remote.richdoc_append_paragraph("remote seed");
+        let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+        let mut base_op = envelope(
+            "remote",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": key.object_id, "path": path,
+                "contentKind": "richdoc", "updateBlobSha256": claim,
+                "lineageClaimId": claim, "isBaseState": true,
+            }),
+        );
+        base_op.relay_seq = Some(10);
+        let leases: &dyn LeaseProbe = if deferred { &AlwaysLive } else { &NoLiveLeases };
+        let outcome = apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &base_op,
+            &NoFaults,
+            leases,
+        )
+        .unwrap();
+        let ApplyDisposition::Applied(result) = outcome.primary else {
+            panic!("base did not apply")
+        };
+        if deferred {
+            assert!(result.deferred);
+            let drained = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .unwrap();
+            assert!(drained.lineage_replacements[0].recovered_paths.is_empty());
+        } else {
+            assert_eq!(result.conflicts_opened, 1);
+            assert!(
+                result
+                    .lineage_replacement
+                    .unwrap()
+                    .recovered_paths
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            crate::ydoc_apply::redelivered_conflicts_opened(&engine, &base_op).unwrap(),
+            1
+        );
+        assert!(
+            crate::ydoc_apply::redelivered_materialization_changes(&engine, &base_op)
+                .unwrap()
+                .iter()
+                .any(|change| change.path == path)
+        );
+        let sides = |engine: &EngineStore| {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT c.text,i.text,h.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
+                FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+                JOIN blobs i ON i.sha256=f.incoming_blob_sha256
+                JOIN snapshots s ON s.object_id=f.current_object_id
+                JOIN blobs h ON h.sha256=s.blob_sha256 WHERE f.status='open'",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, i64>(3)?,
+                            ))
+                        },
+                    )
+                })
+                .unwrap()
+        };
+        let (current, incoming, head, recoveries) = sides(&engine);
+        assert!(current.contains("local seed") && current.contains("unsaved local edit"));
+        assert_eq!(head, current);
+        assert!(incoming.contains("remote seed"));
+        assert_eq!(recoveries, 0);
+        let delta = remote.richdoc_append_paragraph("remote edit");
+        let sha = engine.put_binary_blob(&delta).unwrap();
+        let mut delta_op = envelope(
+            "remote",
+            1,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": key.object_id, "path": path,
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": claim, "isBaseState": false,
+            }),
+        );
+        delta_op.relay_seq = Some(11);
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &delta_op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        let after = sides(&engine);
+        assert_eq!(after.0, current);
+        assert!(after.1.contains("remote seed") && after.1.contains("remote edit"));
+        assert_eq!(after.2, current);
+        let replay = apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &base_op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+        assert_eq!(sides(&engine), after);
+        resolve_seed_conflict(&mut engine, &key, deferred);
+        let chosen = VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chosen.text, if deferred { after.0 } else { after.1 });
+    }
+}
+
+fn resolve_seed_conflict(
+    engine: &mut EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    keep_current: bool,
+) {
+    use dohc_engine_domain::{ResolveConflictKind, ResolveTextConflict};
+    let conflict_id = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT conflict_id FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let input = ResolveTextConflict {
+        workspace_id: key.workspace_id.clone(),
+        conflict_id,
+        resolution: if keep_current {
+            ResolveConflictKind::KeepCurrent
+        } else {
+            ResolveConflictKind::ApplyIncoming
+        },
+        object_id: key.object_id.clone(),
+        write_moment_id: "resolved-seed".into(),
+        delete_moment_id: "resolved-seed-delete".into(),
+        metadata_origin: "sync".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 10_000,
+        request_id: None,
+        conflict_answer_budget_bytes: usize::MAX,
+    };
+    let map_error = |error| {
+        dohc_engine_domain::DomainError::Storage(dohc_engine_storage::StorageError::corrupt_public(
+            error,
+        ))
+    };
+    let result = VersionedTextStore::new(engine)
+        .resolve_text_conflict_with(
+            &input,
+            &NoFaults,
+            |tx, conflict, _| {
+                crate::prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                    .map_err(map_error)
+            },
+            |tx, result, prepared| {
+                crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map_err(map_error)
+            },
+        )
+        .expect("either version-conflict choice must resolve");
+    assert_eq!(
+        result.conflict.status,
+        dohc_engine_domain::ConflictStatus::Resolved
+    );
 }

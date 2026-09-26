@@ -2283,7 +2283,7 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
 }
 
 #[test]
-fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
+fn a_deferred_base_preserves_local_only_rows_in_a_conflict() {
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -2389,7 +2389,7 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         .lineage_replacements
         .first()
         .expect("local-only lineage replacement");
-    assert_eq!(replacement.recovered_paths.len(), 1);
+    assert!(replacement.recovered_paths.is_empty());
     let (head, recovered, update_rows, seed_source): (String, String, i64, Option<String>) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -2401,9 +2401,8 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
                     |row| row.get(0),
                 )?,
                 conn.query_row(
-                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-                         WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
-                    [&replacement.recovered_paths[0]],
+                    "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 WHERE c.status='open'",
+                    [],
                     |row| row.get(0),
                 )?,
                 conn.query_row(
@@ -2423,8 +2422,8 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
             ))
         })
         .expect("deferred replacement state");
-    assert_eq!(head, "base-part");
-    assert_eq!(recovered, "local-part ");
+    assert_eq!(head, "local-part ");
+    assert_eq!(recovered, "base-part");
     assert_eq!(
         update_rows, 0,
         "the local lineage must not remain in the winner"

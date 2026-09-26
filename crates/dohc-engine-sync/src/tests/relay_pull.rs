@@ -2004,21 +2004,21 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 }
 
 #[test]
-fn join_pull_recovers_offline_edits_after_the_operation_limit() {
-    assert_join_pull_recovers_offline_edits(false, false);
+fn join_pull_conflicts_offline_edits_after_the_operation_limit() {
+    assert_join_pull_conflicts_offline_edits(false, false);
 }
 
 #[test]
-fn join_pull_recovers_offline_edits_after_the_page_limit() {
-    assert_join_pull_recovers_offline_edits(true, false);
+fn join_pull_conflicts_offline_edits_after_the_page_limit() {
+    assert_join_pull_conflicts_offline_edits(true, false);
 }
 
 #[test]
 fn join_pull_journals_received_document_edits_without_originating_offline_bases() {
-    assert_join_pull_recovers_offline_edits(false, true);
+    assert_join_pull_conflicts_offline_edits(false, true);
 }
 
-fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: bool) {
+fn assert_join_pull_conflicts_offline_edits(sparse: bool, edit_between_batches: bool) {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
@@ -2276,14 +2276,24 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
                 .collect::<Result<Vec<_>, _>>()
         })
         .expect("materialized content");
-    assert_eq!(texts.len(), 2);
-    assert!(texts[0].0.starts_with("joining (recovered "));
-    assert!(texts[0].0.ends_with(".md"));
-    assert_eq!(texts[0].1, "offline edit");
     assert_eq!(
-        texts[1],
-        ("joining.md".to_owned(), "remote edit".to_owned())
+        texts,
+        [("joining.md".to_owned(), "offline edit".to_owned())]
     );
+    let (current, incoming, recoveries): (String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.text,i.text,(SELECT COUNT(*) FROM ydoc_recovery_decisions)
+            FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+            JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE f.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("offline edits are visible in a version conflict");
+    assert_eq!(current, "offline edit");
+    assert_eq!(incoming, "remote edit");
+    assert_eq!(recoveries, 0);
 }
 
 #[test]

@@ -3415,3 +3415,89 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
         "the base reconstructs the document"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_review() {
+    const PATH: &str = "notes/seed-conflict.md";
+    const OBJECT: &str = "seed-conflict";
+    let a_scratch = ScratchDir::new().unwrap();
+    let b_scratch = ScratchDir::new().unwrap();
+    let a = engine_db_path(&a_scratch).unwrap();
+    let b = engine_db_path(&b_scratch).unwrap();
+    for (db, text, moment) in [
+        (&a, "local seed", "local-head"),
+        (&b, "remote seed", "remote-head"),
+    ] {
+        enable_sync(db, WS_TWO_DEVICES);
+        seed_shared_file(db, OBJECT, PATH, moment, text);
+    }
+    let key = open_and_type(&a, PATH, " plus local edit").await;
+    open_and_type(&b, PATH, " plus remote edit").await;
+    let a_ops = local_ydoc_ops(&a);
+    let b_ops = local_ydoc_ops(&b);
+    let remote = relayed(&b, &b_ops, "device-b", &[1, 3]);
+    {
+        let mut store = EngineStore::open(&a, 300).unwrap();
+        settle_head(&mut store, &key, PATH);
+        learn_own_base_position(&mut store, &key, &a_ops[0], 2);
+        deliver(&mut store, &remote, &AlwaysLive);
+        assert_eq!(deferred_rows(&store, &key), 2);
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&a, 400).unwrap().actor;
+    let opened = handle
+        .ydoc_open_state(
+            WS_TWO_DEVICES.to_owned(),
+            500,
+            true,
+            Some(key.clone()),
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        opened,
+        Err(RuntimeError::Domain(
+            dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-conflict-open"
+            }
+        ))
+    ));
+    supervisor.close(&a).unwrap();
+    let mut store = EngineStore::open(&a, 600).unwrap();
+    assert_eq!(
+        deferred_rows(&store, &key),
+        2,
+        "refused opens retain queued events"
+    );
+    let sides: (String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+        "SELECT c.text,i.text FROM conflicts f JOIN blobs c ON c.sha256=f.current_blob_sha256
+         JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE f.status='open'", [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+        })
+        .unwrap();
+    assert_eq!(
+        sides,
+        (
+            "local seed plus local edit".to_owned(),
+            "remote seed plus remote edit".to_owned()
+        )
+    );
+    let drained = drain_deferred_ydoc_for_key(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(
+        drained.conflicts_opened, 1,
+        "the next pull reports the conflict after a refused open"
+    );
+    assert_eq!(deferred_rows(&store, &key), 0);
+}

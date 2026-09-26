@@ -231,6 +231,7 @@ pub struct YdocApplyResult {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct YdocDrainResult {
     pub drained: usize,
+    pub conflicts_opened: i64,
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub lineage_replacements: Vec<YdocLineageReplacement>,
@@ -268,8 +269,8 @@ pub(crate) fn redelivered_materialization_changes(
     );
     let change = store.read_with(|conn| {
         conn.query_row(
-            "SELECT target_path, operation FROM materialization_jobs WHERE job_id=?1",
-            [&job_id],
+            "SELECT target_path, operation FROM materialization_jobs WHERE job_id IN (?1,?2) ORDER BY job_id LIMIT 1",
+            params![job_id, format!("{job_id}-local")],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
@@ -343,10 +344,15 @@ pub(crate) fn redelivered_conflicts_opened(
 /// delta coalesces it and rewrites its incoming anchor — so the recount must
 /// never depend on it.
 fn ydoc_conflict_decision_id(envelope: &ReplicationEnvelope) -> String {
-    let coordinate = format!(
-        "{}\0{}\0{}",
-        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
-    );
+    ydoc_conflict_coordinate_id(
+        &envelope.workspace_id,
+        &envelope.origin_id,
+        envelope.origin_seq,
+    )
+}
+
+fn ydoc_conflict_coordinate_id(workspace_id: &str, origin_id: &str, origin_seq: i64) -> String {
+    let coordinate = format!("{workspace_id}\0{origin_id}\0{origin_seq}");
     format!(
         "sync-ydoc-conflict:{}",
         dohc_engine_storage::hex_sha256(coordinate.as_bytes())
@@ -358,15 +364,33 @@ fn record_ydoc_conflicts_opened(
     envelope: &ReplicationEnvelope,
     conflicts_opened: i64,
 ) -> Result<(), SyncError> {
+    record_ydoc_conflict_count(
+        tx,
+        &envelope.workspace_id,
+        &envelope.origin_id,
+        envelope.origin_seq,
+        envelope.recorded_at_ms,
+        conflicts_opened,
+    )
+}
+
+fn record_ydoc_conflict_count(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    recorded_at_ms: i64,
+    conflicts_opened: i64,
+) -> Result<(), SyncError> {
     tx.execute(
         "INSERT INTO engine_requests \
          (request_id,payload_hash,result_seq,committed_at,kind) \
          VALUES (?1,?2,?3,?4,'sync-ydoc-conflict')",
         params![
-            ydoc_conflict_decision_id(envelope),
+            ydoc_conflict_coordinate_id(workspace_id, origin_id, origin_seq),
             conflicts_opened.to_string(),
-            envelope.origin_seq,
-            envelope.recorded_at_ms,
+            origin_seq,
+            recorded_at_ms,
         ],
     )
     .map_err(SyncError::persist)?;
@@ -398,6 +422,10 @@ fn apply_deferred_base(
     let outcome = store.write_with(faults, move |tx| {
         let marker_before =
             dohc_engine_collab::read_marker_in(tx, &key).map_err(map_collab_hard_error)?;
+        let last_settled_sha: Option<String> = tx.query_row(
+            "SELECT COALESCE(last_settled_sha,seed_source_sha256) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+        ).optional().map_err(SyncError::corrupt)?.flatten();
         let local_unpublished = marker_before.as_ref().is_some_and(|marker| {
             marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
                 && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
@@ -489,10 +517,9 @@ fn apply_deferred_base(
         }
         let (winner, losing_claim_id) = match claim {
             dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
-                // A winner/fresh replica cannot recover this incoming loser:
-                // it cannot know whether every dependent delta has arrived.
-                // The peer whose active lineage is replaced owns the one
-                // complete projection and therefore creates the sibling. The
+                // The replaced peer owns the complete losing projection and
+                // opens its conflict. This receiver cannot know whether every
+                // dependent delta has arrived. The
                 // only local result to surface here is a decision this same
                 // coordinate committed before a crash left its queue row.
                 let recorded = crate::ydoc_recovery::recorded_recovery_in_tx(
@@ -544,6 +571,17 @@ fn apply_deferred_base(
         if let (Some(losing_claim_id), Some(markdown)) =
             (losing_claim_id.as_deref(), losing_projection.as_deref())
         {
+            let projection = project_ydoc_with_store(tx, &key, &incoming_doc, winner.content_kind)?;
+            if let Some(conflicts_opened) = conflict_replaced_lineage_in_tx(
+                tx, &key, &payload.path, markdown, last_settled_sha.as_deref(),
+                &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
+            )? {
+                record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, conflicts_opened)?;
+                return Ok(Some(YdocLineageReplacement {
+                    winner_lineage_claim_id: winner_claim_id,
+                    recovered_paths,
+                }));
+            }
             let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
                 tx,
                 &key,
@@ -562,6 +600,15 @@ fn apply_deferred_base(
                 search_policy,
             )?;
             recovered_paths.push(recovery.path);
+            let current = validate_retryable_ydoc_identity(tx, &key, &payload.path)?;
+            if let Some(snapshot) = current.snapshot.as_ref()
+                && snapshot.blob_sha256 != hex_sha256(projection.content.as_bytes())
+                && open_sync_conflict_id(tx, &key)?.is_none()
+            {
+                let opened = open_base_conflict_in_tx(tx, &key, &payload.path, snapshot,
+                    &projection.content, &origin_id, origin_seq, recorded_at_ms)?;
+                record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
+            }
         }
         project_and_write_in_tx(
             tx,
@@ -842,6 +889,7 @@ fn drain_deferred_ydoc(
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut lineage_replacements = Vec::new();
+    let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
@@ -898,6 +946,12 @@ fn drain_deferred_ydoc(
             )? {
                 lineage_replacements.push(replacement);
             }
+            conflicts_opened += store.read_with(|conn| {
+                conn.query_row("SELECT payload_hash FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict'",
+                    [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
+                    |row| row.get::<_, String>(0),
+                ).optional().map_err(SyncError::corrupt)
+            })?.map_or(Ok(0), |count| count.parse::<i64>().map_err(SyncError::corrupt))?;
             drained_coordinates.push((origin_id, origin_seq));
             continue;
         }
@@ -1084,6 +1138,7 @@ fn drain_deferred_ydoc(
     Ok((
         YdocDrainResult {
             drained: drained_coordinates.len(),
+            conflicts_opened,
             refusals,
             sharing_declined,
             lineage_replacements,
@@ -2061,8 +2116,171 @@ fn settle_ydoc_marker_to_text(
     Ok(())
 }
 
-/// Store the projected content as a text blob so a conflict side can
-/// reference it (the conflict UI hydrates sides from `blobs`).
+#[allow(clippy::too_many_arguments)]
+fn open_base_conflict_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    snapshot: &dohc_engine_domain::TextSnapshot,
+    content: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+) -> Result<i64, SyncError> {
+    let projected_sha = hex_sha256(content.as_bytes());
+    put_projection_text_blob(tx, content, &projected_sha)?;
+    let incoming_moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
+    let conflict_id = crate::moment_apply::sync_conflict_id(
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        None,
+        Some((
+            Some(snapshot.latest_moment_id.as_str()),
+            Some(incoming_moment_id.as_str()),
+        )),
+    );
+    let base_side = crate::moment_apply::ConflictSide::absent(path);
+    let current_side = crate::moment_apply::ConflictSide {
+        exists: true,
+        path: snapshot.path.clone(),
+        object_id: Some(snapshot.object_id.clone()),
+        kind: Some(crate::moment_apply::ContentKind::Text),
+        digest: Some(snapshot.blob_sha256.clone()),
+        updated_at_ms: Some(snapshot.updated_at_ms),
+        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
+        metadata: Some(crate::moment_apply::Metadata {
+            origin: snapshot.metadata_origin.clone(),
+            summary: snapshot.metadata_summary.clone(),
+            correlation_id: snapshot.metadata_correlation_id.clone(),
+        }),
+    };
+    let incoming_side = crate::moment_apply::ConflictSide {
+        exists: true,
+        path: path.to_owned(),
+        object_id: Some(key.object_id.clone()),
+        kind: Some(crate::moment_apply::ContentKind::Text),
+        digest: Some(projected_sha),
+        updated_at_ms: Some(now_ms),
+        latest_moment_id: Some(incoming_moment_id.clone()),
+        metadata: Some(crate::moment_apply::Metadata {
+            origin: "sync".to_owned(),
+            summary: None,
+            correlation_id: None,
+        }),
+    };
+    let conflicts_opened = crate::moment_apply::open_or_coalesce(
+        tx,
+        &key.workspace_id,
+        crate::moment_apply::OpenConflict {
+            version_id: &key.version_id,
+            anchor: crate::moment_apply::CoalesceAnchor::SameObject {
+                diverging_object_id: &key.object_id,
+                incoming_branch_base: None,
+            },
+            conflict_id: &conflict_id,
+            path: &snapshot.path,
+            base: &base_side,
+            current: &current_side,
+            incoming: &incoming_side,
+            recorded_at_ms: now_ms,
+        },
+    )?;
+    Ok(conflicts_opened)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conflict_replaced_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    local_content: &str,
+    last_settled_sha: Option<&str>,
+    incoming_content: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<Option<i64>, SyncError> {
+    if open_sync_conflict_id(tx, key)?.is_some() {
+        return Ok(None);
+    }
+    let current = validate_retryable_ydoc_identity(tx, key, path)?;
+    let local_sha = hex_sha256(local_content.as_bytes());
+    if current.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.blob_sha256 != local_sha && Some(snapshot.blob_sha256.as_str()) != last_settled_sha
+    }) {
+        // The external head, local draft and incoming lineage need three copies.
+        return Ok(None);
+    }
+    if let Some(snapshot) = current
+        .snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.blob_sha256 == local_sha)
+    {
+        return open_base_conflict_in_tx(
+            tx,
+            key,
+            path,
+            snapshot,
+            incoming_content,
+            origin_id,
+            origin_seq,
+            now_ms,
+        )
+        .map(Some);
+    }
+    let preimage = current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
+    let result = write_projected_text_in_tx(
+        tx,
+        &WriteText {
+            workspace_id: key.workspace_id.clone(),
+            version_id: key.version_id.clone(),
+            object_id: key.object_id.clone(),
+            path: path.to_owned(),
+            text: local_content.to_owned(),
+            moment_id: format!(
+                "{}-local",
+                ydoc_apply_moment_id(key, path, origin_id, origin_seq)
+            ),
+            metadata_origin: "ydoc".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms,
+            request_id: None,
+        },
+    )
+    .map_err(map_domain_hard_error)?;
+    enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
+    upsert_file_search_index(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        path,
+        Some(local_content),
+        search_policy,
+    )?;
+    open_base_conflict_in_tx(
+        tx,
+        key,
+        path,
+        &result.snapshot,
+        incoming_content,
+        origin_id,
+        origin_seq,
+        now_ms,
+    )
+    .map(Some)
+}
+
+/// Store projected content for the conflict UI to hydrate from `blobs`.
 fn put_projection_text_blob(
     tx: &rusqlite::Transaction<'_>,
     content: &str,
@@ -2772,7 +2990,7 @@ pub fn apply_ydoc_envelope(
         let claim_bytes = bytes.clone();
         // Never union two independent lineages. The relay winner is installed
         // as its own CRDT. A losing local projection is captured below before
-        // any of its rows are purged and becomes an ordinary sibling file.
+        // any of its rows are purged and is preserved for conflict review.
         let incoming_doc = dohc_engine_collab::Ydoc::wire();
         if incoming_doc.apply(&claim_bytes).is_err() {
             return refuse_ydoc(
@@ -2872,7 +3090,7 @@ pub fn apply_ydoc_envelope(
                 .map_err(map_collab_hard_error)?;
             let losing_last_settled_sha: Option<String> = tx
                 .query_row(
-                    "SELECT last_settled_sha FROM ydoc_docs \
+                    "SELECT COALESCE(last_settled_sha,seed_source_sha256) FROM ydoc_docs \
                      WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                     params![
                         claim_key.workspace_id,
@@ -2969,13 +3187,9 @@ pub fn apply_ydoc_envelope(
             })?;
             let (winner, losing_claim_id, replaced) = match claim {
                 dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
-                    // Loser-only recovery is intentional. This replica has no
-                    // completeness boundary for the incoming lineage's later
-                    // deltas, so synthesizing a sibling here could preserve a
-                    // truncated draft. ACK this base; its deltas are routed by
-                    // claim and dropped without entering the winner. The peer
-                    // whose active lineage is replaced has the complete local
-                    // projection and creates the ordinary recovery sibling.
+                    // Only the replaced peer has its complete local projection.
+                    // It opens the conflict; the winner must not invent a side
+                    // from an incomplete incoming base.
                     let _ = winner;
                     return Ok(YdocApplyResult {
                         deferred: false,
@@ -3010,6 +3224,31 @@ pub fn apply_ydoc_envelope(
             if let (Some(losing_claim_id), Some(markdown)) =
                 (losing_claim_id.as_deref(), losing_projection.as_deref())
             {
+                let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
+                if let Some(conflicts_opened) = conflict_replaced_lineage_in_tx(
+                    tx,
+                    &claim_key,
+                    &base_path,
+                    markdown,
+                    losing_last_settled_sha.as_deref(),
+                    &projection.content,
+                    &op.origin_id,
+                    op.origin_seq,
+                    op.recorded_at_ms,
+                    search_policy.as_ref(),
+                )? {
+                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
+                    return Ok(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-base-conflict"),
+                        conflicts_opened,
+                        lineage_replacement: Some(YdocLineageReplacement {
+                            winner_lineage_claim_id,
+                            recovered_paths,
+                        }),
+                        record_facts: Vec::new(),
+                    });
+                }
                 let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
                     tx,
                     &claim_key,
@@ -3106,64 +3345,15 @@ pub fn apply_ydoc_envelope(
                 let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
-                    put_projection_text_blob(tx, &projection.content, &projected_sha)?;
-                    let incoming_moment_id =
-                        ydoc_apply_moment_id(&claim_key, &base_path, &op.origin_id, op.origin_seq);
-                    let conflict_id = crate::moment_apply::sync_conflict_id(
-                        &claim_key.workspace_id,
-                        &claim_key.version_id,
-                        &claim_key.object_id,
-                        None,
-                        Some((
-                            Some(snapshot.latest_moment_id.as_str()),
-                            Some(incoming_moment_id.as_str()),
-                        )),
-                    );
-                    let base_side = crate::moment_apply::ConflictSide::absent(&base_path);
-                    let current_side = crate::moment_apply::ConflictSide {
-                        exists: true,
-                        path: snapshot.path.clone(),
-                        object_id: Some(snapshot.object_id.clone()),
-                        kind: Some(crate::moment_apply::ContentKind::Text),
-                        digest: Some(snapshot.blob_sha256.clone()),
-                        updated_at_ms: Some(snapshot.updated_at_ms),
-                        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
-                        metadata: Some(crate::moment_apply::Metadata {
-                            origin: snapshot.metadata_origin.clone(),
-                            summary: snapshot.metadata_summary.clone(),
-                            correlation_id: snapshot.metadata_correlation_id.clone(),
-                        }),
-                    };
-                    let incoming_side = crate::moment_apply::ConflictSide {
-                        exists: true,
-                        path: base_path.clone(),
-                        object_id: Some(claim_key.object_id.clone()),
-                        kind: Some(crate::moment_apply::ContentKind::Text),
-                        digest: Some(projected_sha),
-                        updated_at_ms: Some(op.recorded_at_ms),
-                        latest_moment_id: Some(incoming_moment_id.clone()),
-                        metadata: Some(crate::moment_apply::Metadata {
-                            origin: "sync".to_owned(),
-                            summary: None,
-                            correlation_id: None,
-                        }),
-                    };
-                    let conflicts_opened = crate::moment_apply::open_or_coalesce(
+                    let conflicts_opened = open_base_conflict_in_tx(
                         tx,
-                        &claim_key.workspace_id,
-                        crate::moment_apply::OpenConflict {
-                            version_id: &claim_key.version_id,
-                            anchor: crate::moment_apply::CoalesceAnchor::SameObject {
-                                diverging_object_id: &claim_key.object_id,
-                                incoming_branch_base: None,
-                            },
-                            conflict_id: &conflict_id,
-                            path: &snapshot.path,
-                            base: &base_side,
-                            current: &current_side,
-                            incoming: &incoming_side,
-                            recorded_at_ms: op.recorded_at_ms,
-                        },
+                        &claim_key,
+                        &base_path,
+                        snapshot,
+                        &projection.content,
+                        &op.origin_id,
+                        op.origin_seq,
+                        op.recorded_at_ms,
                     )?;
                     // Immutable per-envelope record of what this coordinate
                     // opened: a later delta coalesces the conflict and
@@ -3233,7 +3423,11 @@ pub fn apply_ydoc_envelope(
         {
             let drain = drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
             let mut outcome = merge_drained(
-                merge_lineage_replacements(outcome, drain.lineage_replacements),
+                merge_lineage_replacements(
+                    outcome,
+                    drain.lineage_replacements,
+                    drain.conflicts_opened,
+                ),
                 drain.record_facts,
             );
             outcome.sharing_declined.extend(drain.sharing_declined);
@@ -3348,7 +3542,11 @@ pub fn apply_ydoc_envelope(
             })?;
             // The drain above ran before this apply, so its facts lead.
             let mut outcome = merge_drained_first(
-                merge_lineage_replacements(outcome, drain.lineage_replacements),
+                merge_lineage_replacements(
+                    outcome,
+                    drain.lineage_replacements,
+                    drain.conflicts_opened,
+                ),
                 drain.record_facts,
             );
             outcome.sharing_declined.extend(drain.sharing_declined);
@@ -3501,6 +3699,7 @@ pub fn apply_ydoc_envelope(
         merge_lineage_replacements(
             map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
             drain.lineage_replacements,
+            drain.conflicts_opened,
         ),
         drain.record_facts,
     );
@@ -3747,17 +3946,20 @@ mod merge_drained_tests {
 fn merge_lineage_replacements(
     mut outcome: ApplyOutcome<YdocApplyResult>,
     replacements: Vec<YdocLineageReplacement>,
+    conflicts_opened: i64,
 ) -> ApplyOutcome<YdocApplyResult> {
-    let Some(replacement) = collapse_lineage_replacements(replacements) else {
+    let replacement = collapse_lineage_replacements(replacements);
+    if replacement.is_none() && conflicts_opened == 0 {
         return outcome;
-    };
+    }
     outcome.primary = match outcome.primary {
         ApplyDisposition::Applied(mut result) => {
+            result.conflicts_opened += conflicts_opened;
             result.lineage_replacement = collapse_lineage_replacements(
                 result
                     .lineage_replacement
                     .into_iter()
-                    .chain([replacement])
+                    .chain(replacement)
                     .collect(),
             );
             ApplyDisposition::Applied(result)
@@ -3765,8 +3967,8 @@ fn merge_lineage_replacements(
         ApplyDisposition::Skipped => ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-deferred-lineage-replaced"),
-            conflicts_opened: 0,
-            lineage_replacement: Some(replacement),
+            conflicts_opened,
+            lineage_replacement: replacement,
             record_facts: Vec::new(),
         }),
         hard @ (ApplyDisposition::Refused(_) | ApplyDisposition::Crashed { .. }) => hard,
