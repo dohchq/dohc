@@ -345,7 +345,14 @@ fn workspace_push_keeps_blocked_origin_position_and_continues_other_origins() {
         .unwrap();
     let client = RelaySyncClient::new(FakeRelay::default());
     let result = client
-        .push_workspace(&mut store, "ws", &NoFaults, 12, 1_000_000)
+        .push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            12,
+            1_000_000,
+        )
         .unwrap();
     let SyncPassOutcome::Complete {
         owner_admission_pending,
@@ -408,7 +415,14 @@ fn workspace_push_reports_and_resumes_an_accepted_prefix_limited_by_proof_budget
     let client = RelaySyncClient::new(FakeRelay::default());
     for (pass, expected_more) in [(0, true), (1, false)] {
         let outcome = client
-            .push_workspace(&mut store, "ws", &NoFaults, 12 + pass, checkpoint.len() * 2)
+            .push_workspace(
+                &mut store,
+                "ws",
+                &NoFaults,
+                &crate::NoLiveLeases,
+                12 + pass,
+                checkpoint.len() * 2,
+            )
             .unwrap();
         let SyncPassOutcome::Complete {
             pushed,

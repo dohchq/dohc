@@ -1,11 +1,11 @@
-import { afterAll, afterEach } from "vitest";
+import { afterAll, afterEach, inject } from "vitest";
 import {
   cleanupSuiteTestScratch,
   cleanupTestScratch,
   prepareTestScratch,
 } from "./workspaces/testTemp";
 
-await prepareTestScratch();
+await prepareTestScratch({ sweep: !inject("testScratchSwept") });
 
 afterEach(async () => {
   await cleanupTestScratch();
