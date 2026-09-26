@@ -5,23 +5,35 @@ import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-a
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
+import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
-import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   definitionDigest,
   definitionHash,
   evaluationRequest,
+  formulaPeople,
   MAX_FOUND_RECORDS,
   planRun,
   triggerMatches,
+  type PlannedEffect,
   type PlannedStep,
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
 import { changedSincePressed } from "./automationButtons";
+import { AutomationChatSessionWait, chatNeedsOf, type ChatDirectory } from "./automationChat";
 import { checkAutomationReach, type ReachCollection, type ReachDatasetGrants, type ReachRoster } from "./automationReach";
-import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type DatasetEffect, type DatasetReplan, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
-import { DEADLINE_ERROR, newRun, savedRunOf, type CollectionAutomationRunOutcome } from "./collectionAutomationRun";
+import { RUN_PLAN_BUDGET_BYTES, type DatasetEffect, type DatasetReplan, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
+import {
+  applyChatEffect,
+  checkPlannedMessages,
+  DEADLINE_ERROR,
+  newRun,
+  savedRunOf,
+  sendsMessages,
+  type CollectionAutomationRunDependencies,
+  type CollectionAutomationRunOutcome,
+} from "./collectionAutomationRun";
 import {
   datasetButtonOf,
   datasetEffectKey,
@@ -36,7 +48,8 @@ import {
 // One run of one dataset claim, as runCollectionAutomation runs an engine
 // claim: check reach, read through the dataset's approved reads, evaluate
 // once, save the plan, then apply each effect through an approved edit or
-// create, saving each as it lands.
+// create, saving each as it lands. Posts, direct messages, wakes, and
+// notices go out exactly as a document Collection's do.
 //
 // Each effect has its own idempotency key, so a resumed effect that already
 // landed replays its receipt instead of landing twice. An edit carries the
@@ -70,14 +83,12 @@ export interface DatasetRunHost {
   dataGrants(datasetId: string): ReachDatasetGrants;
 }
 
-export interface DatasetAutomationRunDependencies {
+export interface DatasetAutomationRunDependencies extends Pick<
+  CollectionAutomationRunDependencies,
+  "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts"
+> {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;
-  evaluator: AutomationFormulaEvaluator;
-  store: AutomationRunStore;
-  nowMs(): number;
-  /** The name a formula's `person` shows for the person who pressed a button. */
-  personName(userId: string): string;
 }
 
 /** The person who pressed the button a claim runs for, or null for a change. */
@@ -213,18 +224,29 @@ export async function runDatasetAutomation(
   const saved = await savedRunOf(dependencies.store, claim, automation);
   if ("outcome" in saved) return saved.outcome;
 
+  // Where the automation's messages go, found once for the reach check and
+  // the plan.
+  let chat: ChatDirectory | null = null;
+  if (sendsMessages(automation)) {
+    chat = await dependencies.chat.directory(roster, chatNeedsOf([automation]));
+    if (chat === null) return { kind: "wait", reason: "engine" };
+  }
   // Reach (ADR 0012) against the rules and data grants now, before anything
-  // is read: each operation the automation can call stops the run when an
-  // editor lacks it, and each field its formulas may see is hidden when an
-  // editor cannot read it. The run plans and reads again under the rules
-  // this checked, so an approval landing meanwhile cannot bring in a read
-  // reach never saw.
+  // is read: each chat and operation the automation can reach stops the run
+  // when an editor cannot, and each field its formulas may see is hidden
+  // when an editor cannot read it. The run plans and reads again under the
+  // rules this checked, so an approval landing meanwhile cannot bring in a
+  // read reach never saw.
   const checked = await dependencies.withHost((host) => {
     const approved = host.revision(claim.datasetId);
-    return { approved, steps: datasetReachSteps(automation, collection, approved.definition, host.dataGrants(claim.datasetId)) };
+    return { approved, steps: datasetReachSteps(automation, collection, approved.definition, host.dataGrants(claim.datasetId), chat) };
   });
   if (checked === null) return { kind: "wait", reason: "engine" };
   const { approved, steps } = checked;
+  // An automation that resolves under these rules has a field to check at
+  // least, since every table has its primary key. None means it no longer
+  // resolves, so reach cannot vouch for a saved step such as a wake.
+  if (steps.length === 0) return failed(RULES_CHANGED_ERROR);
   const readable = new Set<string>();
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
   for (const [index, verdict] of verdicts.entries()) {
@@ -245,7 +267,7 @@ export async function runDatasetAutomation(
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
-      planned = await plan(dependencies, input, keySeed, readable, approved);
+      planned = await plan(dependencies, input, keySeed, readable, approved, chat);
     } catch (error) {
       return input.stopped.aborted ? stopped : failed(errorText(error));
     }
@@ -259,7 +281,9 @@ export async function runDatasetAutomation(
     }
     await dependencies.store.save(run);
   }
-  const outcome = await applyPlan(dependencies, input, run, approved.definition);
+  const messages = await checkPlannedMessages(dependencies, { automationId: claim.automationId, automation, collection, roster }, run, chat);
+  if ("outcome" in messages) return messages.outcome;
+  const outcome = await applyPlan(dependencies, input, run, approved.definition, messages.chat);
   if (outcome.kind === "wait") return outcome;
   if (outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.error, run: claim.run };
@@ -278,6 +302,7 @@ async function plan(
   keySeed: string,
   readable: ReadonlySet<string>,
   approved: DatasetRevision,
+  chat: ChatDirectory | null,
 ): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation, collection, signal } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
@@ -339,52 +364,70 @@ async function plan(
   if (read.removed) return stop({ kind: "skipped" });
   const pressedBy = datasetPresser(claim);
   const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
-  const inputs: RunInputs = { person, message: null, chat: null, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const inputs: RunInputs = { person, message: null, chat, automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   const request = evaluationRequest(inputs, claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
+  // Only the conversations of the people the formulas named are read.
+  const named = formulaPeople(request, results);
+  if (named.length > 0) {
+    const needs = chatNeedsOf([automation]);
+    for (const userId of named) needs.people.add(userId);
+    inputs.chat = await dependencies.chat.directory(input.roster, needs);
+    if (inputs.chat === null) return stop({ kind: "wait", reason: "engine" });
+  }
   const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: keySeed });
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
-  return { kind: "plan", steps: datasetEffects(planned.steps, read.steps, read.rules, read.versions) };
+  return { kind: "plan", steps: datasetEffects(planned.steps, read.steps, read.rules, read.versions, collection.path) };
 }
 
-/** The document-shaped plan as effects through the steps' operations. */
+/**
+ * A notice about a dataset record: it names the Collection, since the
+ * record has no file, and the record by its id when that id fits a notice.
+ */
+function datasetNotice(effect: Extract<PlannedEffect, { kind: "notice" }>, collectionPath: string): Extract<PlannedEffect, { kind: "notice" }> {
+  const { record, ...target } = effect.notice.target;
+  const named = record !== undefined && isNoticeLine(record, NOTICE_TARGET_FIELD_MAX_CHARS) ? { record } : {};
+  return { ...effect, notice: { ...effect.notice, target: { ...target, path: collectionPath, ...named } } };
+}
+
+/** The document-shaped plan as effects through the steps' operations, and the messages and notices as planned. */
 function datasetEffects(
   planned: readonly PlannedStep[],
   steps: DatasetSteps,
   rules: Rules,
   versions: ReadonlyMap<string, { id: DatasetRecordId; version: number }>,
+  collectionPath: string,
 ): StoredStep[] {
-  return planned.map(({ ordinal, effects }) => {
-    const { operation, table } = steps.steps.get(ordinal)!;
-    const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
-    return {
-      ordinal,
-      effects: effects.map((effect): DatasetEffect => {
-        if (effect.kind === "add") {
-          return {
-            kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
-            values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
-          };
-        }
-        if (effect.kind !== "set") throw new Error("This Collection's automations cannot send chat messages. Remove chat steps from the automation.");
-        let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
-        if ("addedBy" in effect.target) {
-          target = { addedBy: effect.target.addedBy };
-        } else {
-          const known = versions.get(effect.target.path);
-          if (known === undefined) throw new Error("dohc lost track of a record this run read.");
-          target = { recordId: known.id, version: known.version };
-        }
+  return planned.map(({ ordinal, effects }) => ({
+    ordinal,
+    effects: effects.map((effect): StoredStep["effects"][number] => {
+      if (effect.kind === "message" || effect.kind === "wake") return effect;
+      if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
+      const { operation, table } = steps.steps.get(ordinal)!;
+      const fieldId = (name: string) => table.fields.find((field) => field.name === name)!.fieldId;
+      if (effect.kind === "add") {
         return {
-          kind: "dataset-edit", rules, operationId: operation.operationId, tableId: table.tableId, target,
-          fields: effect.fields.map(({ field, before, after }) => ({ fieldId: fieldId(field), field, before, after })),
+          kind: "dataset-create", rules, operationId: operation.operationId, tableId: table.tableId,
+          values: effect.fields.map(({ field, value }) => ({ fieldId: fieldId(field), field, value })),
         };
-      }),
-    };
-  });
+      }
+      let target: Extract<DatasetEffect, { kind: "dataset-edit" }>["target"];
+      if ("addedBy" in effect.target) {
+        target = { addedBy: effect.target.addedBy };
+      } else {
+        const known = versions.get(effect.target.path);
+        if (known === undefined) throw new Error("dohc lost track of a record this run read.");
+        target = { recordId: known.id, version: known.version };
+      }
+      return {
+        kind: "dataset-edit", rules, operationId: operation.operationId, tableId: table.tableId, target,
+        fields: effect.fields.map(({ field, before, after }) => ({ fieldId: fieldId(field), field, before, after })),
+      };
+    }),
+  }));
 }
 
 async function applyPlan(
@@ -392,22 +435,29 @@ async function applyPlan(
   input: DatasetAutomationRunInput,
   run: StoredRun,
   definition: DatasetDefinition,
+  chat: ChatDirectory | null,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, signal, automation } = input;
   const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
   const firstUnrecorded = run.applied.length;
   const outcome = await dependencies.withHost(async (host): Promise<CollectionAutomationRunOutcome> => {
-    const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1 });
+    // Records and messages the run writes declare the next depth of the chain.
+    const depth = claim.depth + 1;
+    const context = host.context({ automationId: claim.automationId, claimId: claim.claimId, depth });
     for (let index = firstUnrecorded; index < effects.length; index += 1) {
       if (input.stopped.aborted) return stopped;
       if (signal.aborted) return failed(DEADLINE_ERROR, true);
       const { ordinal, effect } = effects[index]!;
-      if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
+      if (effect.kind === "set" || effect.kind === "add") return failed("This automation's saved steps do not match this Collection. Ask the owner to check the automation.");
       let writes: RunWrite[];
       try {
-        writes = await applyEffect({ dependencies, host, context, run, index, ordinal, signal, definition }, effect, automation);
+        writes = effect.kind === "dataset-edit" || effect.kind === "dataset-create"
+          ? await applyEffect({ dependencies, host, context, run, index, ordinal, signal, definition }, effect, automation)
+          : await applyChatEffect(dependencies, { run, signal, automationName: automation.name, depth, chat }, effect);
       } catch (error) {
         if (input.stopped.aborted) return stopped;
+        // A synced workspace with no session waits for one: a post written now would reach nobody.
+        if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
         return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
       }
       const applied = { ordinal, writes };

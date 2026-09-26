@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
+import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
-import { datasetAutomationProblem, datasetEffectKey, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
+import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetEffectKey, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const TABLE = id(2), STATUS = id(4), NOTES = id(5), FINISHED = id(6);
@@ -39,19 +40,28 @@ describe("dataset automation steps", () => {
       .toEqual({ problem: "This Collection's automations cannot start from Group messages. Choose a record change as the trigger." });
   });
 
+  // Each chat step alone, then inside an If, then in its otherwise branch.
+  const everywhere = (chat: Automation["do"], base: Automation["do"]) => [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
+    [{ kind: "if" as const, if: "false", do: base, otherwise: chat }]];
+
   it.each([
     "post: Done\n        group: Team",
     "direct-message: Done\n        to: [user_ana]",
     "notify: Done\n        to: [user_ana]",
-    "wake-agent: Review this\n        person: user_ana",
-  ])("refuses chat steps on datasets, including nested branches: %s", (step) => {
+  ])("runs chat steps on datasets, in branches too: %s", (step) => {
     const chat = automation("      - " + step + "\n").do;
     const base = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
-    for (const steps of [chat, [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
-      [{ kind: "if" as const, if: "false", do: base.do, otherwise: chat }]]) {
-      expect(datasetAutomationProblem({ ...base, do: steps }, generated))
-        .toBe("This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.");
+    for (const steps of everywhere(chat, base.do)) expect(datasetAutomationProblem({ ...base, do: steps }, generated)).toBeNull();
+  });
+
+  it("wakes an agent only from a button, since a commit does not say whether a person or an agent made it", () => {
+    const wake = automation("      - wake-agent: Review this\n        person: user_ana\n").do;
+    const changed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n");
+    for (const steps of everywhere(wake, changed.do)) {
+      expect(datasetAutomationProblem({ ...changed, do: steps }, generated)).toBe(DATASET_WAKE_NEEDS_BUTTON);
     }
+    const pressed = automation("      - set:\n          Status: Done\n        operation: invoices.edit\n", "button: Ask");
+    for (const steps of everywhere(wake, pressed.do)) expect(datasetAutomationProblem({ ...pressed, do: steps }, generated)).toBeNull();
   });
 
   it("says which approved operation a step lacks, in the words the step card shows", () => {
@@ -117,9 +127,35 @@ describe("dataset automation steps", () => {
         records: added
         operation: invoices.edit
 `, "record-removed: null");
-    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] });
+    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] }, null);
     // No trigger record to read: the create, the edit, and the read that checks the added record again.
     expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.create", "invoices.edit", "invoices.list"]);
     expect(steps.flatMap((step) => step.kind === "dataset-field" ? [step.field.name] : [])).toEqual(["ID", "Status", "Notes", "Finished on"]);
+  });
+
+  it("checks the chats an automation reaches first, as a document Collection's, branches included", () => {
+    const roster = { kind: "owner" as const, ownerUserId: "user-owner", grants: [] };
+    const chat = chatDirectoryOf([{ id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team-wire", runningThreadId: null }], roster);
+    const telling = automation(`      - set:
+          Status: Done
+        operation: invoices.edit
+      - if: record.Notes == ""
+        do:
+          - post: Done
+            group: Team
+        otherwise:
+          - notify: Done
+            to: [user-owner, '="user-" + record.Notes']
+      - wake-agent: Look
+        person: user-owner
+`, "button: Ask");
+    const steps = datasetReachSteps(telling, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] }, chat);
+    // A person a formula names is checked once the formula has run.
+    expect(steps.slice(0, 3)).toEqual([
+      { kind: "post", group: { channelWireId: "team-wire", name: "Team" } },
+      { kind: "notify", person: { userId: "user-owner", name: "you" } },
+      { kind: "personal", person: { userId: "user-owner", name: "you" } },
+    ]);
+    expect(steps.slice(3).every((step) => step.kind === "dataset-operation" || step.kind === "dataset-field")).toBe(true);
   });
 });

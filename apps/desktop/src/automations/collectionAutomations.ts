@@ -2021,7 +2021,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(collectionPath);
     const dataset = this.datasets.get(collectionPath);
     return dataset !== undefined
-      ? datasetReachSteps(automation, collection, dataset.definition, dataset.grants)
+      ? datasetReachSteps(automation, collection, dataset.definition, dataset.grants, this.chat)
       : reachStepsOf(automation, collection, collectionNamed, this.chat);
   }
 
@@ -2556,13 +2556,8 @@ export class CollectionAutomations {
     const collection = collectionNamed(id.collectionPath);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
       ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
-      : runDatasetAutomation({
-        withHost: (work) => this.withLiveHost(work),
-        evaluator: this.options.evaluator,
-        store: this.options.store,
-        nowMs: () => this.nowMs(),
-        personName: this.options.personName,
-      }, { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
+      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work) },
+        { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.

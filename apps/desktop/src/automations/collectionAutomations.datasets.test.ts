@@ -11,12 +11,13 @@ import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createTestScratch } from "../workspaces/testTemp";
-import { chatDirectoryOf, type ChatDirectoryChannel } from "./automationChat";
+import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "./automationChat";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import type { ReachRoster } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, type CollectionAutomationEngine, type PressSettled, type PressWaitReason } from "./collectionAutomations";
 import { UNDONE_RUN_ERROR } from "./collectionAutomationRun";
+import { DATASET_WAKE_NEEDS_BUTTON } from "./datasetAutomationPlan";
 import { DATASET_UNDO_RULES_CHANGED } from "./datasetAutomationUndo";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
@@ -148,6 +149,9 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   // What the pressing window hears.
   const settled: PressSettled[] = [];
   const waiting: Array<{ claimId: string; reason: PressWaitReason }> = [];
+  // What automations post and notify.
+  const messages: AutomationChatMessage[] = [];
+  const notices: AutomationNotice[] = [];
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -156,10 +160,10 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     runsGroupTriggers: async () => options.groups ?? false,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
-    postNotice: async () => { throw new Error("Dataset automations cannot notify people."); },
+    postNotice: async (notice) => { notices.push(notice); wake(); },
     chat: {
-      directory: async () => options.groups ? chatDirectoryOf([TEAM], { kind: "owner", ownerUserId: "user-owner", grants: [] }) : null,
-      write: async () => { throw new Error("Dataset automations cannot send chat messages."); },
+      directory: async (current) => chatDirectoryOf([TEAM], current),
+      write: async (_signal, message) => { messages.push(message); wake(); },
     },
     withEngine: async (work) => await work(engine),
     withRecordWrites: async () => { throw new Error("Dataset runs write through their own operations."); },
@@ -198,7 +202,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting,
+    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     setRoster: (next: ReachRoster) => { roster = next; },
@@ -438,21 +442,54 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   }, 60_000);
 
-  it("refuses a claimed run of a hand-written automation with a chat step, with the plain sentence", async () => {
-    const f = await world({ roster: UNKNOWN });
+  it("posts in a Group after its edit, as the automation, with the record's fields in its text", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid("      - set:\n          Status: Closed\n        operation: invoices.status\n      - post: 'Closed {record.Notes}'\n        group: Team\n"));
     await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: null, reach: { kind: "checked" } }] });
+    const { id: invoice } = await f.create({ [NOTES]: "rent" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
+    expect(f.messages).toEqual([expect.objectContaining({
+      target: { kind: "group", channelId: "team", lane: "posts" }, body: "Closed rent",
+      automation: { automationId: AUTOMATION, name: "Close paid invoices", depth: 1 },
+    })]);
+    const [run] = await f.executor.runs(AUTOMATION);
+    expect(run!.writes).toEqual([expect.objectContaining({ kind: "dataset-edit" }), { kind: "message", messageId: f.messages[0]!.messageId, name: "Team" }]);
+    await f.executor.dispose();
+  });
+
+  it("stops a post an editor could not make, before it changes anything, and the ⚡ panel says why", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    // Ana may use every operation the run calls, and cannot post in Team.
+    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
+        JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
+    } finally {
+      store.close();
+    }
+    await f.writeAutomations(closePaid("      - set:\n          Status: Closed\n        operation: invoices.status\n      - post: Closed\n        group: Team\n"));
+    await f.executor.open();
+    const reason = "ana@dohc.test cannot post in Team.";
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: null, reach: { kind: "checked", steps: expect.arrayContaining([{ verdict: "stopped", reason }]) } }] });
     const { id: invoice } = await f.create({});
     await f.edit(invoice, { [PAID]: true });
-    await f.until(() => f.claims()[0]?.state === "pending");
-    await f.writeAutomations(closePaid("      - set:\n          Status: Closed\n        operation: invoices.status\n      - post: Paid\n        group: Team\n"));
-    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
-    const sentence = "This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.";
-    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(sentence));
-    f.setRoster(OWNER);
-    f.executor.rosterChanged();
     await f.until(() => f.claims()[0]?.state === "failed");
-    expect(f.claims()[0]).toMatchObject({ error: sentence });
+    expect(f.claims()[0]).toMatchObject({ error: reason });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    expect(f.messages).toEqual([]);
+    await f.executor.dispose();
+  });
+
+  it("says in the ⚡ panel that only a button can wake your agent", async () => {
+    const f = await world();
+    await f.writeAutomations(closePaid("      - wake-agent: Look at this invoice\n        person: user-owner\n"));
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: DATASET_WAKE_NEEDS_BUTTON }] });
+    expect(f.host.automations.subscriptions()).toEqual([]);
     await f.executor.dispose();
   });
 
