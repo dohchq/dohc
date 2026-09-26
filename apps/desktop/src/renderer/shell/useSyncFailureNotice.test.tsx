@@ -102,7 +102,7 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toEqual([]);
     // The row carries the newest failure, so its copied detail is current.
     expect(view.rows()).toHaveLength(1);
-    expect(view.rows()[0]!.detail).toBe("RelayUnreachableError: attempt 3");
+    expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
   it("keeps a dismissed failure dismissed when the shell remounts, until it ends", () => {
@@ -132,7 +132,7 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toHaveLength(1);
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
     expect(view.toasts()).toHaveLength(1);
-    expect(view.toasts()[0]!.detail).toBe("RelayUnreachableError: attempt 3");
+    expect(view.toasts()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
   // #1233 review: a reconnect retry changed the cause without counting an
@@ -149,7 +149,7 @@ describe("useSyncFailureNotice", () => {
     });
     expect(view.rows()).toHaveLength(1);
     expect(view.rows()[0]!.message).toBe("dohc could not reach the server.");
-    expect(view.rows()[0]!.detail).toBe("RelayUnreachableError: reconnect");
+    expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: reconnect"]]);
     expect(view.toasts()).toEqual([]);
   });
 

@@ -3,7 +3,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -81,9 +81,9 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
-import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
@@ -809,6 +809,7 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportShellFailure,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -818,7 +819,6 @@ export function DesktopWorkspaceShell(props: {
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
-    showShellError,
     showSettingsFileNotice,
     showSuccessNotice,
     showDirectWriteNotice,
@@ -826,12 +826,19 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  // For surfaces that report a failure as one sentence. One stable identity:
+  // ChatsView keys its polls and subscriptions off onError, so a fresh arrow
+  // per shell render tore them down and re-armed them every render.
+  const reportFailureMessage = useCallback(
+    (message: string) => reportShellFailure({ message }),
+    [reportShellFailure],
+  );
   const onWorkspaceSettingsRead = useSettingsFileNotices({
     workspaceId,
     workspaceIsReady,
     userSettings: props.userSettings,
     show: showSettingsFileNotice,
-    reportError: showShellError,
+    reportError: reportFailureMessage,
   });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
@@ -1495,7 +1502,6 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, reportShellError],
   );
 
-  const { shellNotice, showShellNotice, dismissShellNotice } = useShellNotice();
 
   const { onManageWorkspaces } = props;
   const manageWorkspaces = useCallback(() => {
@@ -2168,6 +2174,9 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Set once refreshShareView exists below; a failed import's Try again
+  // calls it.
+  const refreshShareViewRef = useRef<() => Promise<boolean>>(async () => true);
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2176,6 +2185,24 @@ export function DesktopWorkspaceShell(props: {
   // where, and how many sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (droppedPaths?: string[], targetDir?: string) => {
+      // Try again on a failed import refreshes the shared view first, since
+      // some files may have landed, then asks for files for the same folder.
+      // Try again already removed the row, so a refresh that leaves the view
+      // stale (damaged, failed, or overtaken by another refresh) says why
+      // nothing opened.
+      const retry = () => {
+        void refreshShareViewRef.current().then((current) => {
+          if (current) {
+            void importFiles(undefined, targetDir);
+            return;
+          }
+          reportShellFailure({
+            message:
+              "dohc did not start the import. Refresh the shared view before you import the files that are still missing.",
+            kind: "import-files",
+          });
+        });
+      };
       let outcome: ImportWorkspaceFilesResult;
       try {
         outcome = await bridge().importWorkspaceFiles({
@@ -2184,16 +2211,42 @@ export function DesktopWorkspaceShell(props: {
           ...(targetDir ? { targetDir } : {}),
         });
       } catch (error) {
-        reportShellError("Could not import files.", error);
+        reportShellError("Could not import files.", error, retry, "import-files");
         return;
       }
       const count = outcome.imported.length;
+      const skippedSuffix =
+        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      // The first copy failed, so nothing landed.
+      if (outcome.stop && !outcome.interrupted) {
+        reportShellFailure({
+          message: fitImportMessage(`Could not import files${skippedSuffix}. `, importStopSentence(outcome.stop), ""),
+          details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
+          retry,
+          kind: "import-files",
+        });
+        return;
+      }
       if (outcome.interrupted) {
-        showShellNotice(
-          count === 0
-            ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-            : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
-        );
+        // Importing the same files again would land second copies under
+        // collision names, so name what already landed.
+        reportShellFailure({
+          message:
+            count === 0
+              ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
+              : fitImportMessage(
+                  `Imported ${namedPaths(outcome.imported)} before the import stopped.`,
+                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : "",
+                  " Import only the files that are still missing.",
+                ),
+          // The message names at most two files; the report names them all.
+          details: [
+            ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
+            ...importedPathDetails(outcome.imported),
+          ],
+          retry,
+          kind: "import-files",
+        });
         try {
           await refreshFiles();
         } catch (error) {
@@ -2205,23 +2258,26 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
-      const skippedSuffix =
-        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
-      showShellNotice(
-        count === 0
-          ? `Nothing imported${skippedSuffix}.`
-          : `Imported ${count} ${count === 1 ? "file" : "files"}${
-              targetDir ? ` into ${targetDir}` : ""
-            }${skippedSuffix}.`,
+      // Every file was skipped for its name or kind; the same files would be
+      // skipped again, so there is nothing to try again.
+      if (count === 0) {
+        reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
+        return;
+      }
+      showSuccessNotice(
+        `Imported ${count} ${count === 1 ? "file" : "files"}${
+          targetDir ? ` into ${targetDir}` : ""
+        }${skippedSuffix}.`,
+        undefined,
+        "import-files",
       );
-      if (count === 0) return;
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3026,7 +3082,7 @@ export function DesktopWorkspaceShell(props: {
     onExplorerPathsChanged,
     refreshFiles,
     reportShellError,
-    showShellNotice,
+    showSuccessNotice,
   );
 
   // Reveal-then-create: the inline editbox lives in the explorer view, so
@@ -4053,8 +4109,11 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
   );
 
-  const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewDamaged) return;
+  // Resolves true when the view is current: refreshed, or not a shared
+  // view at all. A failed, superseded, or ended refresh resolves false.
+  const refreshShareView = useCallback(async (): Promise<boolean> => {
+    if (!shareView) return true;
+    if (shareViewDamaged) return false;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -4073,20 +4132,21 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return;
+      if (token !== shareRefreshToken.current) return false;
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return;
+        if (token !== shareRefreshToken.current) return false;
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
         );
-        return;
+        return false;
       }
       if (outcome.collisionRecordQuarantined) {
-        showShellNotice(
-          "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-        );
+        reportShellFailure({
+          message:
+            "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+        });
       }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
@@ -4097,11 +4157,10 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
-      if (outcome.status === "ended") {
-        return;
-      }
+      return outcome.status !== "ended";
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);
+      return false;
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
@@ -4114,6 +4173,7 @@ export function DesktopWorkspaceShell(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
+  refreshShareViewRef.current = refreshShareView;
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
     if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
@@ -4455,7 +4515,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={showShellError}
+        onError={reportFailureMessage}
         onNewCollection={setNewCollectionFolder}
       />
     </>
@@ -4473,12 +4533,6 @@ export function DesktopWorkspaceShell(props: {
         })),
     [props.workspaces],
   );
-  // Stable per-field identities (D2#5): ChatsView keys real work off these —
-  // its refresh callbacks depend on onError, so a fresh arrow per shell render
-  // tore down and re-armed its polls and activity subscription every render.
-  const onChatsError = useCallback((message: string) => {
-    showShellError(message);
-  }, [showShellError]);
   const openAgentSettings = useCallback(
     () => openSettings("agents"),
     [openSettings],
@@ -4501,7 +4555,7 @@ export function DesktopWorkspaceShell(props: {
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4536,7 +4590,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4611,7 +4665,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         details: errorDetails([
           [error.tone === "success" ? "Notice" : "Error", error.message],
-          ["Detail", error.detail],
+          ...(error.details ?? []),
           ...reportFacts(),
         ]),
         atMs: error.atMs,
@@ -4759,22 +4813,6 @@ export function DesktopWorkspaceShell(props: {
           onToggle: () => mutateWb(toggleChats),
         }}
       />
-      {shellNotice ? (
-        <div
-          data-testid="shell-notice"
-          className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
-        >
-          <span className="min-w-0 flex-1 truncate">{shellNotice}</span>
-          <button
-            type="button"
-            aria-label="Dismiss notice"
-            onClick={dismissShellNotice}
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
       {shareView ? (
         <div
           data-testid="shared-view-banner"
@@ -5203,7 +5241,7 @@ export function DesktopWorkspaceShell(props: {
                   beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => showShellError(message)}
+                  onError={reportFailureMessage}
                   {...(shareView
                     ? {}
                     : {
@@ -5780,7 +5818,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={onChatsError}
+                    onError={reportFailureMessage}
                   />
                 </Suspense>
               ) : (
@@ -6242,7 +6280,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
-            onError={showShellError}
+            onError={reportFailureMessage}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

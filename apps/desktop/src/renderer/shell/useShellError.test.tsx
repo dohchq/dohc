@@ -86,7 +86,7 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
     expect(result.current.shellErrors[0]).toMatchObject({
       kind: "cloud-sync",
-      detail: "Error: refused",
+      details: [["Detail", "Error: refused"]],
       seen: true,
     });
     act(() =>
@@ -112,11 +112,26 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("keeps a raw cause for Copy details out of the message", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() =>
+      result.current.reportShellFailure({
+        message: "Could not import files. The disk is full.",
+        details: [["Cause", "ENOSPC: no space left on device, copyfile 'a.md'"]],
+      }),
+    );
+    expect(result.current.shellErrors[0]).toMatchObject({
+      message: "Could not import files. The disk is full.",
+      details: [["Cause", "ENOSPC: no space left on device, copyfile 'a.md'"]],
+      retry: null,
+    });
+  });
+
   it("keeps a hidden row until it is dismissed, and clears on a workspace switch", () => {
     const { result, rerender } = renderHook(({ id }) => useShellError(id), {
       initialProps: { id: "ws-a" },
     });
-    act(() => result.current.showShellError("Saved copy is stale."));
+    act(() => result.current.reportShellFailure({ message: "Saved copy is stale." }));
     const id = result.current.shellErrors[0]!.id;
 
     act(() => result.current.hideShellError(id));
@@ -126,7 +141,7 @@ describe("useShellError", () => {
     act(() => result.current.dismissShellError(id));
     expect(result.current.shellErrors).toEqual([]);
 
-    act(() => result.current.showShellError("Saved copy is stale."));
+    act(() => result.current.reportShellFailure({ message: "Saved copy is stale." }));
     rerender({ id: "ws-b" });
     expect(result.current.shellErrors).toEqual([]);
   });
