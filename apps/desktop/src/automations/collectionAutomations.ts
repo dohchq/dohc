@@ -702,6 +702,26 @@ export class CollectionAutomations {
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
 
+  /**
+   * The end of a background run: claims this computer holds go back, and a
+   * later open starts again. Its schedules are unknown until then.
+   */
+  async close(): Promise<void> {
+    if (this.state !== "open") return;
+    this.generation += 1;
+    this.stopRuns();
+    await Promise.allSettled([this.draining]);
+    await this.payOwed(false);
+    if (this.state === "open") this.state = "closed";
+    this.opened = null;
+    await Promise.allSettled([this.chain, this.verdictChain]);
+  }
+
+  /** Resolves once no drain is running or queued. */
+  async idle(): Promise<void> {
+    while (this.draining) await this.draining;
+  }
+
   /** The enabled schedules this executor can run, or null until it has opened. */
   schedules(): ScheduledAutomation[] | null {
     if (this.state !== "open") return null;

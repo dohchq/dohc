@@ -62,6 +62,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     reportCliFailure(error: unknown): void;
     dispatch: { start(): void; stop(): Promise<void> };
     refreshTray(): Promise<boolean>;
+    /** dohc stays in the tray: close workspaces nothing uses any more. */
+    releaseIdleWorkspaces(): Promise<void>;
     reportTrayFailure(error: unknown): void;
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
@@ -227,6 +229,15 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
   return {
     isQuitting: () => quitting,
+    /**
+     * A reason to run without windows changed, as when the last schedule
+     * was switched off. With no window and no reason left, dohc quits, as
+     * closing the last window would have.
+     */
+    async backgroundReasonsChanged(): Promise<void> {
+      const keep = await services.refreshTray();
+      if (!keep && !quitting && runtime.platform !== "darwin" && !windows.hasAny()) app.quit();
+    },
     start(): Promise<void> {
       if (!app.requestSingleInstanceLock()) {
         app.quit();
@@ -288,6 +299,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         void services.refreshTray()
           .then((enabled) => {
             if (!enabled && !quitting) app.quit();
+            // A failed close leaves the workspace open; it never quits dohc.
+            else if (enabled && !quitting) return services.releaseIdleWorkspaces().catch(() => undefined);
           })
           .catch(() => {
             if (!quitting) app.quit();

@@ -196,7 +196,9 @@ import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { AutomationScheduler } from "./automations/automationScheduler";
 import { computerLabel, createAutomationHosts } from "./automations/automationHost";
+import { createScheduleRecords } from "./automations/scheduleRecords";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
+import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { readChatDirectory } from "./automations/automationChat";
@@ -1305,6 +1307,8 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   dispatchAgentRunId: string | null;
   dispatchSync: Promise<boolean> | null;
   retainedActivity: boolean;
+  // Background work (a dispatch run, a schedule run) using the activity now.
+  backgroundHolds: number;
   activityOpening: Promise<SyncStatusResult> | null;
   activityClosing: Promise<void> | null;
   pendingCliRunMessageLinks: Set<string>;
@@ -1380,6 +1384,7 @@ function createDesktopWorkspaceAuthorityState(
     dispatchAgentRunId: null,
     dispatchSync: null,
     retainedActivity: false,
+    backgroundHolds: 0,
     activityOpening: null,
     activityClosing: null,
     pendingCliRunMessageLinks: new Set(),
@@ -2957,13 +2962,11 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 
 async function closeDispatchRunActivity(
   workspace: Pick<CreatedWorkspace, "workspaceId"> & { attachmentId?: symbol },
-  options: { notifyRenderer?: boolean } = {},
+  options: { notifyRenderer?: boolean; unlessInUse?: boolean } = {},
 ): Promise<void> {
   return withWorkspaceAttachmentAsync(
     workspace,
     async (lease) => {
-      const existing = lease.state.activityClosing;
-      if (existing) return await existing;
       const current = canonicalWorkspaceFor(lease);
       const relayCloseTarget = current.remote
         ? workspaceSessionTargetForPhysicalWorkspace(
@@ -2971,8 +2974,12 @@ async function closeDispatchRunActivity(
             current,
           )
         : null;
-      const closing = closeWorkspaceActivityAndRelay({
+      const automations = lease.state.collectionAutomations;
+      const joined = lease.state.activityClosing !== null;
+      const closing = closeActivity(lease.state, () => closeWorkspaceActivityAndRelay({
         closeActivity: async () => {
+          await automations.close();
+          automationHosts.close(current.workspaceId);
           await activity.close(current.workspaceId, {
             expectedRootPath: current.rootPath,
             preserveStatus: true,
@@ -2989,41 +2996,37 @@ async function closeDispatchRunActivity(
             `[desktop] relay workspace close failed for ${current.workspaceId}:`,
             error,
           ),
-      });
-      lease.state.activityClosing = closing;
-      try {
-        await closing;
-        lease.assertCurrent();
-      } finally {
-        if (lease.state.activityClosing === closing) {
-          lease.state.activityClosing = null;
-        }
-      }
+      }), options);
+      if (closing === null) return;
+      await closing;
+      if (!joined) lease.assertCurrent();
     },
   );
 }
 
 // The release closes a TRANSIENT open (background dispatch, runner self-test)
-// and leaves a workspace that was already open, or that a renderer/CLI
-// retained during the run, alone. Decided from the post-run state, not from
-// the open itself: a retention can land while the run is in flight.
+// once nothing owns the workspace: no window or CLI retains it and no other
+// background run holds it. Decided from who owns it at release, not from
+// whether it was open before: ownership can change while the run is in
+// flight.
 async function acquireDispatchRunActivity(
   workspace: CreatedWorkspace & { attachmentId?: symbol },
 ): Promise<() => Promise<void>> {
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
-    const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
-    await ensureWorkspaceActivityOpen(current);
+    holdBackground(lease.state);
+    try {
+      await ensureWorkspaceActivityOpen(current);
+    } catch (error) {
+      releaseBackground(lease.state);
+      throw error;
+    }
     let released = false;
     return async () => {
       if (released) return;
       released = true;
-      if (alreadyOpen) return;
-      const retained =
-        withWorkspaceAttachment(current, (held) => held.state.retainedActivity) ??
-        false;
-      if (retained) return;
-      await closeDispatchRunActivity(current);
+      withWorkspaceAttachment(current, (held) => releaseBackground(held.state));
+      await closeDispatchRunActivity(current, { unlessInUse: true });
     };
   });
 }
@@ -3421,7 +3424,79 @@ const automationScheduler = new AutomationScheduler({
     clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
   },
   onError: (context, error) => console.warn(`[desktop] Schedules: ${context}:`, error),
+  onRecord: (workspaceId, record) => {
+    void scheduleRecords.save(workspaceId, record).catch((error: unknown) =>
+      console.warn(`[desktop] Schedules: keep the record of workspace "${workspaceId}":`, error));
+    void appLifecycle.backgroundReasonsChanged().catch((error: unknown) => console.error("[desktop] dispatch tray:", error));
+  },
+  openInBackground: (workspaceId) => runSchedulesInBackground(workspaceId),
 });
+
+// What each workspace's schedules need when no window has it open.
+const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
+
+// At start, every workspace this computer ran schedules for waits for its
+// next due time, open or not.
+async function watchRecordedSchedules(): Promise<void> {
+  for (const { workspaceId, record } of await scheduleRecords.readAll()) {
+    const workspace = findWorkspace(workspaceId);
+    if (workspace === null || workspace.shareView !== undefined) await scheduleRecords.save(workspaceId, null);
+    else automationScheduler.watch(workspaceId, record);
+  }
+  await refreshDispatchTray();
+}
+
+// A schedule of a workspace no window has open is due. Open it the way
+// background dispatch does, let the scheduler claim and the executor run,
+// then close what this opened.
+async function runSchedulesInBackground(workspaceId: string): Promise<void> {
+  const registered = findWorkspace(workspaceId);
+  if (registered === null || registered.shareView !== undefined) {
+    automationScheduler.remove(workspaceId);
+    await scheduleRecords.save(workspaceId, null);
+    return;
+  }
+  await desktopEngine.startup;
+  const release = await acquireDispatchRunActivity(registered);
+  try {
+    const automations = withWorkspaceAttachment(registered, (held) => held.state.collectionAutomations);
+    if (automations && activity.engineCaptureFor(workspaceId)) {
+      automationHosts.open(workspaceId);
+      await automations.open();
+      await automationScheduler.idle();
+      await automations.idle();
+    }
+  } finally {
+    // A window or the CLI that opened the workspace meanwhile keeps it open.
+    await release();
+  }
+}
+
+// The last window closed and dohc stays in the tray for its schedules: a
+// workspace no window, CLI call, or background run holds closes, and its
+// schedules wait in their records.
+async function releaseIdleWorkspaces(): Promise<void> {
+  // Agent dispatch watches the open workspaces, and kept them open before
+  // schedules could keep dohc running.
+  if (dispatchKeepsRunning()) return;
+  for (const workspaceId of activity.listOpenWorkspaceIds()) {
+    const workspace = findWorkspace(workspaceId);
+    if (!workspace) continue;
+    // The windows left, so their hold goes, even while a background run
+    // still holds the workspace: that run's release closes it.
+    const left = withWorkspaceAttachment(workspace, (held) => {
+      if (rendererWorkspaceSessions.isAttachmentOpen(held.binding.attachmentId)) return false;
+      leaveForeground(held.state);
+      return true;
+    });
+    if (left) {
+      await closeDispatchRunActivity(workspace, { unlessInUse: true }).catch((error: unknown) =>
+        console.warn(`[desktop] Could not close idle workspace "${workspaceId}":`, error));
+    }
+  }
+}
+
+
 
 const AUTOMATION_HOST_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -3831,13 +3906,14 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTray<
+const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning } = createDesktopTray<
   ReturnType<typeof nativeImage.createFromPath>,
   ReturnType<typeof Menu.buildFromTemplate>
 >({
   app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
+  runningSchedules: () => automationScheduler.runningSchedules(),
   get appLifecycle(): { isQuitting(): boolean } { return appLifecycle; },
 });
 
@@ -4331,6 +4407,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
           console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
       }
+      void watchRecordedSchedules().catch((error: unknown) =>
+        console.warn("[desktop] Schedules: read the recorded schedules:", error));
       powerMonitor.on("suspend", () => automationScheduler.suspended());
       powerMonitor.on("resume", () => automationScheduler.resumed());
       powerMonitor.on("unlock-screen", () => automationScheduler.wake());
@@ -4365,6 +4443,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reportCliFailure: (error) => console.error("[desktop] CLI server failed to start:", error),
     dispatch: chatDispatchService,
     refreshTray: refreshDispatchTray,
+    releaseIdleWorkspaces,
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },

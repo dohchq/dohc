@@ -85,6 +85,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         stop: vi.fn(async () => { log.push("dispatch-stop"); }),
       },
       refreshTray: vi.fn(async () => { log.push("tray"); return false; }),
+      releaseIdleWorkspaces: vi.fn(async () => { log.push("release idle"); }),
       reportTrayFailure: vi.fn(),
       warmCredentials: vi.fn(async () => { log.push("credentials"); }),
       reconcileCloud: vi.fn(() => { log.push("cloud"); }),
@@ -508,6 +509,28 @@ describe("desktop shutdown", () => {
     f.app.emit("window-all-closed");
     await vi.advanceTimersByTimeAsync(0);
     expect(f.app.quit).toHaveBeenCalledTimes(enabled ? 0 : 1);
+    expect(f.dependencies.services.releaseIdleWorkspaces, "staying closes the workspaces nothing uses").toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+
+  it("quits once the last reason to run without windows goes, and not while a window is open", async () => {
+    let keep = true;
+    const f = fixture((d) => { d.services.refreshTray = async () => keep; });
+    await f.lifecycle.backgroundReasonsChanged();
+    expect(f.app.quit, "a schedule still runs").not.toHaveBeenCalled();
+    keep = false;
+    await f.lifecycle.backgroundReasonsChanged();
+    expect(f.app.quit, "no window and nothing to run").toHaveBeenCalledOnce();
+
+    const withWindow = fixture((d) => { d.services.refreshTray = async () => false; });
+    withWindow.dependencies.windows.create();
+    await withWindow.lifecycle.backgroundReasonsChanged();
+    expect(withWindow.app.quit).not.toHaveBeenCalled();
+    const mac = fixture((d) => {
+      d.runtime = { ...d.runtime, platform: "darwin" };
+      d.services.refreshTray = async () => false;
+    });
+    await mac.lifecycle.backgroundReasonsChanged();
+    expect(mac.app.quit).not.toHaveBeenCalled();
   });
 
   it("quits after a failed tray refresh but leaves macOS window closure alone", async () => {

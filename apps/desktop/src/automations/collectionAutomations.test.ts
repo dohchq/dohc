@@ -565,6 +565,22 @@ describe("Collection automations", () => {
     await w.until(() => !w.subscriptions.has(TASKS));
   });
 
+  it("closes after a background run and opens again", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: hour, timezone: UTC}",
+      "    do: [{add-record: {Title: Swept}}]",
+    ].join("\n") } });
+    await w.executor.open();
+    await w.executor.idle();
+    expect(w.executor.schedules()).toHaveLength(1);
+    await w.executor.close();
+    expect(w.executor.schedules(), "unknown while closed").toBeNull();
+    await w.executor.open();
+    expect(w.executor.schedules()).toHaveLength(1);
+  });
+
   it("times a schedule's switch-on at the index read that sees it", async () => {
     const sweep = (enabled: boolean, title = "Swept") => [
       "  - id: sweep",

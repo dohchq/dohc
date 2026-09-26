@@ -64,12 +64,14 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const buildMenu = vi.fn((template: MenuItemConstructorOptions[]) => template);
   const showWindow = vi.fn(async () => undefined);
   let lifecycle: { isQuitting(): boolean } | undefined;
+  let schedules = 0;
   const owner = createDesktopTray({
     app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
     nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray,
     BrowserWindow: { getAllWindows: () => windows },
     readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
     chatDispatchService: service, showOrCreateMainWindow: showWindow,
+    runningSchedules: () => schedules,
     get appLifecycle() { if (!lifecycle) throw new Error("Lifecycle has not been constructed"); return lifecycle; },
   });
   lifecycle = { isQuitting: () => false };
@@ -78,6 +80,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure,
     asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
     setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
+    setSchedules: (count: number) => { schedules = count; },
     click: (index: number, checked = false) => {
       const item = created.at(-1)?.menu[index];
       if (!item?.click) throw new Error("Missing tray action");
@@ -112,6 +115,31 @@ describe("desktop tray owner", () => {
     expect(h.created).toHaveLength(2);
     expect(h.created[1]).not.toBe(first);
     expect(h.readSettings).toHaveBeenCalledWith(h.stateRoot);
+  });
+
+  it("keeps dohc in the tray while this computer runs schedules, and says how many", async () => {
+    const h = await harness();
+    await h.asset("icon-light.png");
+    await h.configure(false);
+    await expect(h.owner.refreshDispatchTray(), "nothing to keep running").resolves.toBe(false);
+    h.setSchedules(2);
+    await expect(h.owner.refreshDispatchTray()).resolves.toBe(true);
+    const tray = h.created[0]!;
+    expect(tray.setToolTip).toHaveBeenLastCalledWith("dohc");
+    expect(tray.menu.map(({ label, enabled }) => ({ label, enabled }))).toEqual([
+      { label: "Open dohc", enabled: undefined },
+      { label: "Running 2 schedules", enabled: false },
+      { label: undefined, enabled: undefined },
+      { label: "Quit dohc", enabled: undefined },
+    ]);
+    h.setSchedules(1);
+    await h.configure(true);
+    await h.owner.refreshDispatchTray();
+    expect(tray.menu.map(({ label }) => label)).toEqual(["Open dohc", "Running 1 schedule", "Pause agent dispatch", undefined, "Quit dohc"]);
+    h.setSchedules(0);
+    await h.configure(false);
+    await expect(h.owner.refreshDispatchTray()).resolves.toBe(false);
+    expect(tray.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("routes tray actions and keeps the checkbox tied to the real dispatch pause state", async () => {
