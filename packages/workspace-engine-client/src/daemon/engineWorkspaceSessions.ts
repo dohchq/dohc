@@ -61,6 +61,9 @@ export interface EngineDaemonClientSource {
 }
 
 const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
+// Matches the daemon's EARLY_IMPORT_APPLY_DEADLINE. Initial capture is
+// separate from the much shorter budget for recovering a failed transport.
+const INITIAL_CAPTURE_WAIT_MS = 120_000;
 
 function isInitialCaptureSettledEvent(
   event: Event,
@@ -80,8 +83,10 @@ interface SessionEntry {
     promise: Promise<EngineWorkspaceBinding>;
   } | null;
   closing: Promise<void> | null;
+  retiring: boolean;
   activeRuns: number;
   idleWaiters: Set<() => void>;
+  captureWaitCancels: Set<() => void>;
 }
 
 export interface EngineWorkspaceRunOptions {
@@ -92,7 +97,7 @@ export interface EngineWorkspaceRunOptions {
    */
   retryTransportErrors?: boolean;
   /**
-   * Wait for initial capture inside an existing retry budget. Enable only
+   * Wait for initial capture for a bounded caller. Enable only
    * for a read whose initial-capture refusal occurs before any side effect.
    */
   retryInitialCapture?: boolean;
@@ -329,6 +334,7 @@ export class EngineWorkspaceSessions {
   // which is what a caller holding a shared resource across several daemon
   // calls actually needs, and it is the only retry limit this class has.
   private readonly retryBudgets = new AsyncLocalStorage<{
+    signal?: AbortSignal;
     budgetMs: number;
     // The clock starts at the FIRST FAILURE, not at region entry, because the
     // budget bounds recovery and a healthy attempt is not recovery (#564,
@@ -428,7 +434,7 @@ export class EngineWorkspaceSessions {
         : 2;
       let rebindStarted = false;
       let lastError: unknown;
-      let initialCaptureAttempts = 0;
+      let initialCaptureDeadline: number | undefined;
       for (let attempt = 1; attempt <= maxAttempts;) {
         const binding = await this.openForRun(
           workspace,
@@ -457,8 +463,7 @@ export class EngineWorkspaceSessions {
                   entry.binding === binding &&
                   this.source.currentClient() === binding.client;
               } catch {
-                // A retired client is not allowed to wake a retry. The
-                // existing timer remains the fallback for a replacement.
+                // A retired client cannot authorize another read.
               }
               if (current) resolve();
             });
@@ -503,29 +508,34 @@ export class EngineWorkspaceSessions {
             error instanceof DaemonRefusalError &&
             error.disposition === "afterBackoff" &&
             isWorkspaceUpdatingRefusal(error);
-          const retryable =
-            retryAfterReconnect || retryAfterTransport || retryAfterBackoff ||
-            retryAfterInitialCapture;
+          if (retryAfterInitialCapture) {
+            initialCaptureDeadline ??= this.now() + INITIAL_CAPTURE_WAIT_MS;
+            const deadlineReached = await this.waitForInitialCapture(
+              entry,
+              initialCaptureWake,
+              initialCaptureDeadline,
+              error,
+            );
+            if (deadlineReached) initialCaptureDeadline = -Infinity;
+            continue;
+          }
           this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
-          if (!retryable) throw error;
-          if (!retryAfterInitialCapture) rebindStarted = true;
+          if (!retryAfterReconnect && !retryAfterTransport && !retryAfterBackoff) {
+            throw error;
+          }
+          rebindStarted = true;
           lastError = error;
-          // Capture progresses on the existing binding. Its read retries use
-          // the caller's time budget without consuming transport attempts.
           const next = await this.settleAttempt({
             workspaceId: workspace.workspaceId,
-            attempt: retryAfterInitialCapture ? ++initialCaptureAttempts : attempt,
-            lastAttempt: !retryAfterInitialCapture && attempt >= maxAttempts,
-            backoff: retryAfterTransport || retryAfterBackoff || retryAfterInitialCapture,
+            attempt,
+            lastAttempt: attempt >= maxAttempts,
+            backoff: retryAfterTransport || retryAfterBackoff,
             cause: error,
-            initialCaptureWake: retryAfterInitialCapture
-              ? initialCaptureWake
-              : undefined,
           });
           if (next === "stop") throw error;
-          if (!retryAfterInitialCapture) attempt += 1;
+          attempt += 1;
         } finally {
           unsubscribeInitialCapture?.();
         }
@@ -533,6 +543,48 @@ export class EngineWorkspaceSessions {
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
     } finally {
       this.release(entry);
+    }
+  }
+
+  private async waitForInitialCapture(
+    entry: SessionEntry,
+    wake: Promise<void> | undefined,
+    deadline: number,
+    refusal: unknown,
+  ): Promise<boolean> {
+    const started = this.now();
+    if (!wake || this.shuttingDown || entry.retiring || started >= deadline) throw refusal;
+    const budget = this.activeBudget();
+    const signal = budget?.signal;
+    if (signal?.aborted) throw refusal;
+    let cancel!: () => void;
+    let timer!: ReturnType<typeof setTimeout>;
+    const stopped = new Promise<"deadline">((resolve, reject) => {
+      cancel = () => reject(refusal);
+      // Settlement notifications are advisory. At the bound, allow one
+      // final fenced read; another capture refusal cannot start a new wait.
+      timer = setTimeout(() => resolve("deadline"), deadline - started);
+    });
+    this.sleepCancels.add(cancel);
+    entry.captureWaitCancels.add(cancel);
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      const outcome = await Promise.race([wake, stopped]);
+      if (signal?.aborted || this.shuttingDown || entry.retiring ||
+          (outcome !== "deadline" && this.now() >= deadline)) {
+        throw refusal;
+      }
+      return outcome === "deadline";
+    } finally {
+      clearTimeout(timer);
+      this.sleepCancels.delete(cancel);
+      entry.captureWaitCancels.delete(cancel);
+      signal?.removeEventListener("abort", cancel);
+      // Capture is healthy work, not transport recovery. Preserve any
+      // recovery time already spent without charging this wait to it.
+      if (budget !== undefined && budget.failedAtMs !== null) {
+        budget.failedAtMs += this.now() - started;
+      }
     }
   }
 
@@ -557,7 +609,7 @@ export class EngineWorkspaceSessions {
    * internal `run`), and per-async-context so two concurrent tasks never
    * share one.
    */
-  async withRetryBudget<T>(budgetMs: number, task: () => Promise<T>): Promise<T> {
+  async withRetryBudget<T>(budgetMs: number, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (
       !Number.isInteger(budgetMs) ||
       budgetMs <= 0 ||
@@ -577,6 +629,7 @@ export class EngineWorkspaceSessions {
     // by construction, and an opening document is read-only.
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     const budget = {
+      signal,
       budgetMs,
       failedAtMs: null as number | null,
       startedAtMs: this.now(),
@@ -693,7 +746,6 @@ export class EngineWorkspaceSessions {
     // all, and used to skip these gates entirely because of it.
     backoff: boolean;
     cause: unknown;
-    initialCaptureWake?: Promise<void>;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
       this.throwPastRetryDeadline(gate.workspaceId, gate.cause);
@@ -738,7 +790,6 @@ export class EngineWorkspaceSessions {
     await this.interruptibleSleep(
       transportBackoffMs(gate.attempt),
       abandonable,
-      gate.initialCaptureWake,
     );
     // Same scope as before the wait: quit ends a bounded region's retries, and
     // only a bounded region's.
@@ -755,7 +806,6 @@ export class EngineWorkspaceSessions {
   private async interruptibleSleep(
     delayMs: number,
     cancellable: boolean,
-    wake?: Promise<void>,
   ): Promise<void> {
     if (!cancellable) {
       await this.sleep(delayMs);
@@ -774,7 +824,6 @@ export class EngineWorkspaceSessions {
       await Promise.race([
         sleep,
         cancelled,
-        ...(wake === undefined ? [] : [wake]),
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -838,6 +887,7 @@ export class EngineWorkspaceSessions {
         continue;
       }
 
+      entry.retiring = retire;
       const closing = this.closeEntry(entry);
       entry.closing = closing;
       try {
@@ -896,8 +946,10 @@ export class EngineWorkspaceSessions {
         binding: null,
         opening: null,
         closing: null,
+        retiring: false,
         activeRuns: 0,
         idleWaiters: new Set(),
+        captureWaitCancels: new Set(),
       };
       this.entries.set(key, entry);
       this.workspaceEntries.set(workspace.workspaceId, entry);
@@ -946,6 +998,9 @@ export class EngineWorkspaceSessions {
   }
 
   private async closeEntry(entry: SessionEntry): Promise<void> {
+    if (entry.retiring) {
+      for (const cancel of entry.captureWaitCancels) cancel();
+    }
     await this.waitForIdle(entry);
     let binding = entry.binding;
     if (!binding && entry.opening) {
