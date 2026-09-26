@@ -184,7 +184,7 @@ const required = [
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
-  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace" },
+  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace --no-fail-fast" },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   // Test builds enable fault hooks through testkit. Finish with the shipping
   // daemon so desktop preparation sees the default production features.
