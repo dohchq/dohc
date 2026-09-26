@@ -48,6 +48,7 @@ export const WORKSPACE_METHOD = {
   automationsClaimSchedule: "automations.claimSchedule",
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
+  automationsRunNow: "automations.runNow",
 } as const;
 
 /**
@@ -179,8 +180,20 @@ export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
-/** Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine. */
-export type AutomationSubscribeParams = WorkspaceJsonObject & {
+/**
+ * Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine: the
+ * records under a path, or the messages in one Group.
+ */
+export type AutomationSubscribeParams = AutomationRecordsSubscribeParams | AutomationGroupSubscribeParams;
+
+/** A Collection automation's interest in one Group's messages, optionally only those that start with some text. */
+type AutomationGroupSubscribeParams = WorkspaceJsonObject & {
+  automationId: string;
+  groupId: string;
+  startsWith?: string;
+};
+
+type AutomationRecordsSubscribeParams = WorkspaceJsonObject & {
   automationId: string;
   /** Collection path prefix; "." covers the whole workspace. */
   path: string;
@@ -195,18 +208,16 @@ export type AutomationSubscribeParams = WorkspaceJsonObject & {
 };
 
 /** Mirrors AutomationUnsubscribeParams in crates/dohc-workspace-engine. */
-export type AutomationUnsubscribeParams = WorkspaceJsonObject & {
-  automationId: string;
-  path: string;
-};
+export type AutomationUnsubscribeParams =
+  | (WorkspaceJsonObject & { automationId: string; path: string })
+  | (WorkspaceJsonObject & { automationId: string; groupId: string });
 
 export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
   /**
-   * Serve only claims whose automation id starts with this, so each
-   * executor drains its own namespace: the plugin executor "plugin:" (ids
-   * "plugin:<plugin name>/<automation id>"), the Collection executor
-   * "collection:" (ids "collection:<collection path>#<automation id>").
+   * Serve only claims whose automation id starts with this. The Collection
+   * executor drains "collection:" (ids
+   * "collection:<collection path>#<automation id>").
    */
   automationIdPrefix: string;
 };
@@ -245,6 +256,15 @@ export type AutomationPressParams = WorkspaceJsonObject & {
    * it from its own checked identity, never from a renderer.
    */
   pressedBy: string;
+  nowMs?: number;
+};
+
+/** Mirrors AutomationRunNowParams in crates/dohc-workspace-engine. */
+export type AutomationRunNowParams = WorkspaceJsonObject & {
+  /** The Collection automation to run: "collection:<path>#<id>". */
+  automationId: string;
+  /** The skipped-run notice whose Run now this is. One claim per notice. */
+  noticeId: string;
   nowMs?: number;
 };
 
@@ -303,6 +323,10 @@ export type AutomationClaimScheduleResult =
 export type AutomationScheduleMarksResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsScheduleMarks];
 
+/** The notice's Run now claim: the one this call made, or the one an earlier call made. */
+export type AutomationRunNowResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsRunNow];
+
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
     | (WorkspaceJsonObject & {
@@ -345,6 +369,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
 type CollectionMethodResultMap = {
@@ -998,6 +1023,8 @@ const AutomationClaimMessageSchema = mutableStruct({
   authorUserId: Schema.optionalKey(Schema.NonEmptyString),
 });
 
+export type AutomationClaimMessage = typeof AutomationClaimMessageSchema.Type;
+
 const AutomationClaimSchema = mutableStruct({
   ...automationClaimFields,
   change: Schema.Union([
@@ -1143,6 +1170,9 @@ const WorkspaceResultSchemas = {
    */
   [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
     applied: Schema.Int,
+  }),
+  [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
+    claim: AutomationClaimSummarySchema,
   }),
 } as const;
 

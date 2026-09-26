@@ -13,12 +13,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import {
-  localWorkspaceSdkDatabaseEditor,
-  localWorkspaceSdkReads,
-} from "../testing/localWorkspaceSdkReads";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -360,6 +355,29 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(objectId).toBeTruthy();
     expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    await engine.stop();
+  });
+
+  it("lists one file's moments in the active version when given its object id", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    for (const [path, text, objectId] of [
+      ["plan.md", "# Plan\n", "object-plan"],
+      ["other.md", "# Other\n", "object-other"],
+      ["plan.md", "# Plan\n\nShip Friday.\n", "object-plan"],
+    ] as const) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text, objectId });
+    }
+    const engine = capture(root, { rustEngineSessions: mockLiveSessions(loopback, requests) });
+
+    const page = await engine.listMoments({ limit: 10, objectId: "object-plan" });
+    expect(page.moments.map((moment) => [moment.path, moment.objectId, moment.protected])).toEqual([
+      ["plan.md", "object-plan", false],
+      ["plan.md", "object-plan", false],
+    ]);
+    expect(page.activeVersionId).toBe("main");
+    expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
     await engine.stop();
   });
 
@@ -1154,6 +1172,51 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(binaryAttempts).toBe(1);
     expect((await store.readTextFile(target))?.text).toBe("current");
     expect(await readFile(join(root, target.path))).toEqual(disk);
+    await engine.stop();
+  });
+
+  it("does not save a Collection file stored as binary as an edit when its bytes are unchanged", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const current = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from("version: 1\n") });
+    const changed = await store.writeBinaryFile({ ...target, bytes: Buffer.from(current) });
+    await write(root, target.path, current);
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await engine.restoreFileToBeforeMoment(changed.moment.id);
+
+    const summaries = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.map(
+      (moment) => moment.metadata.summary,
+    );
+    expect(summaries).not.toContain("Saved latest edits");
+    expect(await readFile(join(root, target.path), "utf8")).toBe("version: 1\n");
+    await engine.stop();
+  });
+
+  it("restores nothing when the current text has the bytes of the binary state before the moment", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const original = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from(original) });
+    const edited = await store.writeTextFile({ ...target, text: "version: 1\n" });
+    await store.writeTextFile({ ...target, text: original });
+    await write(root, target.path, original);
+    const before = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.length;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await expect(engine.restoreFileToBeforeMoment(edited.moment.id)).resolves.toMatchObject({
+      restoredMomentId: edited.moment.id,
+    });
+
+    expect((await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(before);
+    expect((await store.readTextFile(target))?.contentKind).toBe("text");
     await engine.stop();
   });
 
@@ -2633,53 +2696,22 @@ describe("createDefaultDiskWriter symlink containment", () => {
 });
 
 // Agent-attributed capture: while a dohc-tracked agent run is active the
-// daemon stamps its captures with that author; a plugin write carries its
+// daemon stamps its captures with that author; an authored write carries its
 // own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
 
-  it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
+  it("records an authored write under its own author, not the ambient run", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     await engine.setActiveAgentRun(run);
-    const spawnId = "plugin-spawn-123";
+    const author = { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn-123" } as const;
 
-    await invokePluginSdkHost(
-      {
-        pluginId: "hello-plugin",
-        workspaceRoot: root,
-        reads: localWorkspaceSdkReads(root),
-        editDatabase: localWorkspaceSdkDatabaseEditor(root),
-        spawnId,
-        requestPath: "plugin-process",
-        isWritable: () => true,
-        writeAvailable: async () => true,
-        writeAuthoredText: async (path, text, options) => {
-          expect(options.overwrite).toBe(true);
-          await engine.writeAuthoredTextFile(
-            join(root, path),
-            text,
-            options.author,
-          );
-          return { path };
-        },
-      },
-      "files.write",
-      { path: "plugin-output.txt", text: "Written by plugin\n" },
-    );
+    await engine.writeAuthoredTextFile(join(root, "output.txt"), "Written by an agent\n", author);
 
-    expect(await readFile(join(root, "plugin-output.txt"), "utf8")).toBe(
-      "Written by plugin\n",
-    );
-    expect(await liveMomentAuthors(engine)).toEqual([
-      {
-        kind: "agent",
-        agentId: "plugin:hello-plugin",
-        onBehalfOf: "local",
-        agentRunId: spawnId,
-      },
-    ]);
+    expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
+    expect(await liveMomentAuthors(engine)).toEqual([author]);
     await engine.stop();
   });
 
@@ -2697,7 +2729,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const result = await engine.writeAuthoredTextFile(
       join(root, "alias", "output.txt"),
       "canonical\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
     );
 
     expect(result.resolvedAbsolutePath).toBe(join(canonical, "output.txt"));
@@ -2716,7 +2748,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const target = join(root, "exclusive.txt");
     const author = {
       kind: "agent" as const,
-      agentId: "plugin:test",
+      agentId: "test-agent",
       onBehalfOf: "local",
       agentRunId: "spawn",
     };
@@ -2798,7 +2830,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const blocker = engine.writeAuthoredTextFile(
       join(root, "queue-blocker.txt"),
       "block\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
     );
     await entered.promise;
 
@@ -2806,13 +2838,13 @@ describe("workspaceEngineCapture agent attribution", () => {
     const pending = engine.writeAuthoredTextFile(
       join(root, "cancelled.txt"),
       "must not land\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
       { signal: controller.signal },
     );
     controller.abort();
     release.resolve();
 
-    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await expect(pending).rejects.toThrow("The write was cancelled.");
     await blocker;
     expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
     await engine.stop();
@@ -2823,7 +2855,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const author = {
       kind: "agent" as const,
-      agentId: "plugin:test",
+      agentId: "test-agent",
       onBehalfOf: "local",
       agentRunId: "spawn",
     };

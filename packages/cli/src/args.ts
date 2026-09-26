@@ -57,7 +57,9 @@ type CliCommandBody =
       limit: number;
       regex: boolean;
     }
-  | { verb: "export"; scope: ExportScope; outDir: string };
+  | { verb: "export"; scope: ExportScope; outDir: string }
+  | { verb: "moments"; path?: string; limit: number }
+  | { verb: "moment"; id: string; side: "before" | "after" };
 
 export type ParsedCliCommand = ParsedCliBase & CliCommandBody;
 
@@ -360,6 +362,37 @@ const CHAT_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const HISTORY_VERBS = {
+  list: {
+    summary: "List changes to files, newest first.",
+    operands: "[<path>]",
+    flags: [
+      { name: "--limit", value: "count", text: "List at most this many changes. The default is 50, the most 500." },
+    ],
+    notes: ["With a path, list that file's own changes, across its renames. Each line starts with the change's ID."],
+    parse: (input) => {
+      const [path, ...extra] = input.operands;
+      noExtraArgs(extra, "history list");
+      const limit = lastValue(input, "--limit");
+      const count = limit === undefined ? 50 : integerFlag(limit, "--limit", { allowZero: false });
+      if (count > 500) fail("--limit accepts at most 500");
+      return { verb: "moments", ...(path ? { path } : {}), limit: count };
+    },
+  },
+  show: {
+    summary: "Print a file's text as one change left it.",
+    operands: "<change>",
+    flags: [{ name: "--before", text: "Print the text from before the change instead." }],
+    notes: ["Find the change's ID with history list. With --json, print both sides and the change's details."],
+    parse: (input) => {
+      const [id, ...extra] = input.operands;
+      if (!id) fail("history show requires a change id");
+      noExtraArgs(extra, "history show");
+      return { verb: "moment", id, side: input.flags.has("--before") ? "before" : "after" };
+    },
+  },
+} satisfies Record<string, CliVerbSpec>;
+
 interface JsonVerbHelp {
   summary: string;
   notes?: readonly string[];
@@ -644,6 +677,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: [workspaceNote],
     verbs: APP_VERBS,
   },
+  history: {
+    summary: "Read the changes History records for files.",
+    notes: ["Changes come from the active version of the workspace."],
+    verbs: HISTORY_VERBS,
+  },
 };
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
@@ -653,7 +691,7 @@ export const GLOBAL_FLAGS: readonly CliFlag[] = [
 ];
 
 const VALUE_FLAGS = new Set(
-  Object.values(CHAT_VERBS).flatMap((verb: CliVerbSpec) =>
+  [...Object.values(CHAT_VERBS), ...Object.values(HISTORY_VERBS)].flatMap((verb: CliVerbSpec) =>
     (verb.flags ?? []).filter((flag) => flag.value).map((flag) => flag.name),
   ),
 );

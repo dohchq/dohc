@@ -2,8 +2,6 @@ import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 export function SettingRow(props: {
   title: string;
-  /** Optional: a plugin setting may declare none, and an empty line is worse
-   * than no line. */
   description?: string;
   children: ReactNode;
   modified?: boolean;

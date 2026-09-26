@@ -1,4 +1,5 @@
 import { isSharedWithMePath, stripWindowsAliasSuffix, validateUserMaterializePath } from "@dohc/workspace-core";
+import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 
 // The reach check (ADR 0012). An automation belongs to its Collection, and
@@ -15,6 +16,9 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 
 /** One grant on the roster, as the reach check reads it. */
 export interface RosterGrant {
+  // The share grant's id. A named person's data grants on a shared dataset
+  // are keyed by it with their account.
+  grantId: string;
   // A claimed grant names an account. A pending invite names only an email.
   recipientUserId: string | null;
   recipientEmail: string | null;
@@ -69,11 +73,36 @@ export type ReachStep =
   // Set fields, add records, or change found records in `collection`.
   | { kind: "change-records"; collection: ReachCollection }
   | { kind: "find-records"; collection: ReachCollection }
+  // Find, add, or change records in a dataset through one of its approved
+  // operations. File Edit on a dataset grants no record access: every other
+  // editor must hold a current data grant that lists the operation, and an
+  // operation only the owner can use needs the owner to be the only editor.
+  | { kind: "dataset-operation"; collection: ReachCollection; operation: ReachDatasetOperation; grants: ReachDatasetGrants }
+  // A dataset field an automation's formulas may see: only while every other
+  // editor holds a data grant on a read that shows it. A stopped field is
+  // hidden from formulas; it does not stop the run.
+  | { kind: "dataset-field"; collection: ReachCollection; field: { fieldId: string; name: string }; reads: readonly ReachDatasetOperation[]; grants: ReachDatasetGrants }
   // `channelWireId` is null for a Group that has not synced yet.
   | { kind: "post"; group: { channelWireId: string | null; name: string } }
+  // A Group whose messages start the automation: every editor must be able
+  // to read it, so nobody copies a Group they cannot read into the Collection.
+  | { kind: "read-group"; group: { channelWireId: string | null; name: string } }
   | { kind: "notify"; person: ReachPerson }
   // A personal step, such as waking this person's agent.
   | { kind: "personal"; person: ReachPerson };
+
+/** A dataset operation a step invokes. */
+export interface ReachDatasetOperation {
+  operationId: string;
+  name: string;
+  access: "owner" | "helper" | "link";
+}
+
+/** A dataset's current data grants: the operations each principal may use. */
+export interface ReachDatasetGrants {
+  workspaceId: string;
+  grants: ReadonlyArray<{ principalKey: string; operationIds: readonly string[] }>;
+}
 
 export interface ReachAutomation {
   id: string;
@@ -168,6 +197,15 @@ function reaches(person: Person, path: string, access: "edit" | "view"): boolean
   );
 }
 
+// Whether a person holds a current data grant, through any of their share
+// grants, whose operations pass `lists`. A pending invite has no account,
+// so no grant can be theirs yet.
+function holdsDatasetGrant(person: Person, grants: ReachDatasetGrants, lists: (operationIds: readonly string[]) => boolean): boolean {
+  if (person.userId === null) return false;
+  const keys = new Set(person.grants.map((grant) => datasetPrincipalKey(grants.workspaceId, grant.grantId, person.userId!)));
+  return grants.grants.some((grant) => keys.has(grant.principalKey) && lists(grant.operationIds));
+}
+
 function canPost(person: Person, channelWireId: string | null): boolean {
   return person.grants.some(
     (grant) => grant.channel !== null && grant.channel.wireId === channelWireId && grant.channel.canPost,
@@ -230,6 +268,21 @@ function checkOwnerStep(
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "view"));
       return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
+    case "dataset-operation": {
+      const other = editors[0];
+      if (other === undefined) return ALLOWED;
+      const { operation, collection: target } = step;
+      if (operation.access === "owner") {
+        return stop(`Only you can use ${operation.name} in ${target.name}, and ${nameOf(other)} can also edit these automations.`, nameOf(other));
+      }
+      const blocked = editors.find((person) => !holdsDatasetGrant(person, step.grants, (operationIds) => operationIds.includes(operation.operationId)));
+      return blocked ? stop(`${nameOf(blocked)} has no grant to use ${operation.name} in ${target.name}.`, nameOf(blocked)) : ALLOWED;
+    }
+    case "dataset-field": {
+      const { field, reads, collection: target } = step;
+      const blocked = editors.find((person) => !reads.some((read) => holdsDatasetGrant(person, step.grants, (operationIds) => operationIds.includes(read.operationId))));
+      return blocked ? stop(`${nameOf(blocked)} cannot read ${field.name} in ${target.name}, so formulas do not see it.`, nameOf(blocked)) : ALLOWED;
+    }
     case "post": {
       const blocked = editors.find((person) => !canPost(person, step.group.channelWireId));
       return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
@@ -241,10 +294,17 @@ function checkOwnerStep(
         ? ALLOWED
         : stop(`${person?.email ?? step.person.name} cannot view ${collection.name}.`);
     }
+    case "read-group": {
+      const blocked = editors.find((person) =>
+        !person.grants.some((grant) => grant.channel !== null && grant.channel.wireId === step.group.channelWireId));
+      return blocked ? stop(`${nameOf(blocked)} cannot read ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
+    }
     case "personal": {
-      // With no account known, the owner is this computer's person, and the
-      // executor acts as that person.
-      if (roster.ownerUserId !== null && step.person.userId !== roster.ownerUserId) {
+      // A personal step acts as its person, so it must name this computer's
+      // person. With no account known, dohc cannot tell who the step names,
+      // so it runs for nobody.
+      if (roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
+      if (step.person.userId !== roster.ownerUserId) {
         const person = people.find((candidate) => candidate.userId === step.person.userId);
         return stop(`This step acts as ${person?.email ?? step.person.name}, and you can also edit ${collection.name}.`);
       }
@@ -253,6 +313,27 @@ function checkOwnerStep(
     }
   }
 }
+
+/**
+ * What a step's verdict and its confirmation are keyed by. A document step
+ * is its place in the automation, which only an edit of the automation can
+ * move. A dataset step is its operation's name or its field's id, so a
+ * schema change that adds or removes fields cannot move a hold onto another
+ * field's verdict.
+ */
+export function reachStepId(step: ReachStep, index: number): string {
+  switch (step.kind) {
+    case "dataset-operation":
+      return `operation:${step.operation.name}`;
+    case "dataset-field":
+      return `field:${step.field.fieldId}`;
+    default:
+      return String(index);
+  }
+}
+
+export const PERSONAL_NEEDS_ACCOUNT =
+  "Sign in to your server so dohc knows who you are. A step that acts as you runs only then.";
 
 /** A verdict for each of the automation's steps, in order. */
 export function checkAutomationReach(roster: ReachRoster, automation: ReachAutomation): StepReach[] {
@@ -268,16 +349,22 @@ export function checkAutomationReach(roster: ReachRoster, automation: ReachAutom
   // who cannot edit the Collection's records.
   if (roster.kind === "unknown") return automation.steps.map(() => stop(problemReason(roster.problem, collection)));
   const people = roster.kind === "owner" ? peopleOf(roster) : [];
-  const editors = people.filter((person) => sources.some((path) => canEdit(person, path)));
+  const editors = editorsOf(people, sources);
   return automation.steps.map((step) => {
-    const target = step.kind === "change-records" || step.kind === "find-records" ? step.collection : null;
+    const target = step.kind === "change-records" || step.kind === "find-records" || step.kind === "dataset-operation" || step.kind === "dataset-field" ? step.collection : null;
     const targetProblem = target && pathProblem(target.path, target.name, "target");
     if (targetProblem) return stop(targetProblem);
     if (roster.kind === "owner") return checkOwnerStep(roster, collection, step, people, editors);
+    if (step.kind === "dataset-operation" || step.kind === "dataset-field") return stop(`In a shared view, automations cannot use ${collection.name}'s records.`);
     return target && within(target.path, collection.path)
       ? ALLOWED
       : stop(`In a shared view, automations can use only ${collection.name}.`);
   });
+}
+
+/** The people other than the owner who can edit any of `sources`. */
+function editorsOf(people: readonly Person[], sources: readonly string[]): Person[] {
+  return people.filter((person) => sources.some((path) => canEdit(person, path)));
 }
 
 /**
@@ -297,6 +384,7 @@ export function shareImpactOf(
     grants: [
       ...roster.grants,
       {
+        grantId: known?.grantId ?? "",
         recipientUserId: known?.recipientUserId ?? null,
         recipientEmail: known?.recipientEmail ?? share.recipientEmail,
         files: { paths: share.paths, versionId: share.versionId, access: share.access },

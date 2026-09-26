@@ -1,3 +1,4 @@
+import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, ArrowDown, ArrowUp, Clock, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -331,12 +332,12 @@ function entryOf(step: AutomationStep, verdict: string | null): StepEntry {
 /** Each step's saved verdict as one sentence, or null when it may run. */
 function verdictsOf(automation: Automation, reach: Reach | null): Array<string | null> {
   if (reach === null || reach.kind !== "checked") return automation.do.map(() => null);
-  return reachPlaces(automation.do).map((places) => {
+  return reachPlaces(automation.do, automation.when.kind === "group-message" ? 1 : 0).map((places) => {
     for (const place of places) {
       const verdict = reach.steps[place];
       if (verdict?.verdict === "stopped") return verdict.reason;
       if (verdict?.verdict === "held") {
-        const reached = verdict.action === "find" ? `find records in ${verdict.target}` : `change ${verdict.target}`;
+        const reached = automationReachCopy(verdict);
         return `This step can now ${reached}, and waits for someone who can edit this Collection to allow it.`;
       }
     }

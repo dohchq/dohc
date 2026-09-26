@@ -5295,11 +5295,7 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(
-        scratch.path(),
-        "plugins/p/README.md",
-        b"Plugin readme body.\n",
-    );
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
     let service = Arc::new(EngineService::new());
@@ -5307,7 +5303,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-seed-only", 1).await;
 
     for (id, path, seed_paragraph) in [
-        (10_u64, "plugins/p/README.md", "Plugin readme body."),
+        (10_u64, "notes/p/README.md", "Readme body."),
         (30_u64, "notes/crlf.md", "cr line"),
     ] {
         let absolute = scratch.path().join(path);
@@ -5406,11 +5402,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(
-        scratch.path(),
-        "plugins/p/README.md",
-        b"Plugin readme body.\n",
-    );
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -5421,7 +5413,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         2,
         "ydoc.open",
-        json!({ "versionId": "main", "path": "plugins/p/README.md", "contentKind": "richdoc" }),
+        json!({ "versionId": "main", "path": "notes/p/README.md", "contentKind": "richdoc" }),
     )
     .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
@@ -5429,7 +5421,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let before_moments = moment_count_for_object(&transport, &handle, 3, object_id).await;
 
     let doc = Ydoc::wire();
-    let seed_update = richdoc_update(&doc, "Plugin readme body.");
+    let seed_update = richdoc_update(&doc, "Readme body.");
     let edit_update = richdoc_update(&doc, "Edited paragraph.");
     let recorded = call(
         &transport,
@@ -5458,7 +5450,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     )
     .await;
 
-    let on_disk = std::fs::read_to_string(scratch.path().join("plugins/p/README.md"))
+    let on_disk = std::fs::read_to_string(scratch.path().join("notes/p/README.md"))
         .expect("settled artifact");
     assert!(
         on_disk.contains("Edited paragraph."),

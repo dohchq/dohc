@@ -1,3 +1,4 @@
+import { validateUserReadPath } from "@dohc/workspace-core/paths";
 import { errorMessage } from "./workspaceError";
 import {
   parseFilesPolicy,
@@ -73,6 +74,24 @@ async function readPolicyFile<T>(
 export type EngineSearchPolicyDecision =
   | { kind: "blocked"; message: string }
   | { kind: "search"; fileVisibility: (file: TextFileSnapshot) => SearchVisibility };
+
+// History read through the CLI and the MCP shows a path only while the
+// workspace's current policy tracks it: canonical, inside the workspace, not a
+// secret, and not excluded by files.toml. Retired history stays in the engine
+// but stops being readable here. Like search, a broken policy file hides all.
+export function historyPathAdmission(
+  policy: WorkspaceEnginePolicySnapshot,
+): (path: string) => boolean {
+  if (policy.errors.length > 0) return () => false;
+  return (path) => {
+    const validated = validateUserReadPath(path, { platform: process.platform });
+    return validated.ok && validated.normalized === path && resolveEffectivePolicy({
+      path,
+      filesPolicy: policy.filesPolicy,
+      visibilityPolicy: policy.visibilityPolicy,
+    }).tracked;
+  };
+}
 
 export function resolveEngineSearchPolicy(
   policy: WorkspaceEnginePolicySnapshot,

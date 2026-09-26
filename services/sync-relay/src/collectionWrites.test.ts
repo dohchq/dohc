@@ -1,10 +1,12 @@
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import { MAX_COLLECTION_WRITE_BODY_BYTES, readCollectionWritesConfig } from "./collectionWriteRoutes";
+import { MAX_COLLECTION_WRITE_BODY_BYTES } from "./collectionWriteRoutes";
 import { pathCollisionKey } from "./pathCollisionKey";
-import type { SyncRelayHandler } from "./server";
+import { streamsRequestBody, type SyncRelayHandler } from "./server";
 import {
   filterCollectionWriteForShare,
   MAX_COLLECTION_WRITE_BYTES,
@@ -63,7 +65,7 @@ async function relay(
   options: { overrides?: HandlerOverrides; paths?: string[]; access?: "view" | "comment" | "edit" } = {},
 ): Promise<Relay> {
   const storage = await testStorage();
-  const h = testHandler(storage, { nowMs: () => CLOCK, collectionWritesEnabled: true, ...options.overrides });
+  const h = testHandler(storage, { nowMs: () => CLOCK, ...options.overrides });
   await claimWorkspace(h, OWNER, WORKSPACE);
   const owner = new Owner(h);
   await owner.write("object-schema", `${PACKING}/collection.yaml`, SCHEMA);
@@ -81,11 +83,11 @@ async function relay(
 class Owner {
   private seq = 0;
   readonly moments = new Map<string, string>();
-  private readonly contents = new Map<string, string>();
+  private readonly contents = new Map<string, { text: string; contentKind: "text" | "binary" }>();
 
   constructor(private readonly h: SyncRelayHandler) {}
 
-  async write(objectId: string, path: string, text: string): Promise<string> {
+  async write(objectId: string, path: string, text: string, contentKind: "text" | "binary" = "text"): Promise<string> {
     const blobSha256 = await putBlob(this.h, OWNER, WORKSPACE, text);
     const originSeq = this.seq++;
     const momentId = `owner-moment-${originSeq}`;
@@ -93,13 +95,13 @@ class Owner {
     const before = previous === undefined
       ? { payloadBeforeBlobSha256: null, payloadBeforePath: null, beforePresent: "null" }
       : {
-          payloadBeforeBlobSha256: sha256(previous),
+          payloadBeforeBlobSha256: sha256(previous.text),
           payloadBeforePath: path,
-          payloadBeforeContentKind: "text",
+          payloadBeforeContentKind: previous.contentKind,
           beforePresent: "present",
           beforeObjectId: objectId,
           beforePath: path,
-          beforeBlobSha256: sha256(previous),
+          beforeBlobSha256: sha256(previous.text),
           beforeLatestMomentId: this.moments.get(path),
         };
     const response = await this.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({
@@ -117,7 +119,7 @@ class Owner {
           operation: "write",
           payloadAfterBlobSha256: blobSha256,
           payloadAfterPath: path,
-          payloadAfterContentKind: "text",
+          payloadAfterContentKind: contentKind,
           payloadAfterByteLength: new TextEncoder().encode(text).byteLength,
           metadata: { origin: "user" },
           ...before,
@@ -126,7 +128,7 @@ class Owner {
     })));
     expect(response.status, await response.clone().text()).toBe(200);
     this.moments.set(path, momentId);
-    this.contents.set(path, text);
+    this.contents.set(path, { text, contentKind });
     return momentId;
   }
 
@@ -203,18 +205,6 @@ describe("the fixtures", () => {
 });
 
 describe("direct writes to a Collection's own files", () => {
-  it("are off unless the deployment opts in", async () => {
-    const r = await relay({ overrides: { collectionWritesEnabled: undefined } });
-    await upload(r, SCHEMA_TWO);
-    await expectCode(await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]), 404, "not_found");
-    expect(await r.owner.directMoments()).toEqual([]);
-
-    expect(readCollectionWritesConfig(undefined)).toBe(false);
-    expect(readCollectionWritesConfig("0")).toBe(false);
-    expect(readCollectionWritesConfig("1")).toBe(true);
-    expect(() => readCollectionWritesConfig("yes")).toThrow("DOHC_RELAY_COLLECTION_WRITES must be 0 or 1.");
-  });
-
   it("mints the owner's moment for a schema edit, naming the recipient", async () => {
     const r = await relay();
     await upload(r, SCHEMA_TWO);
@@ -271,6 +261,50 @@ describe("direct writes to a Collection's own files", () => {
     const body = await expectCode(await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, mine)]), 409, "stale");
     expect(body).toMatchObject({ path: `${PACKING}/collection.yaml`, currentBlobSha256: sha256(SCHEMA_TWO) });
     expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("takes an edit of automations the owner stored as binary, and the file becomes text", async () => {
+    const r = await relay();
+    const one = automations(STAMP);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one, "binary");
+    await upload(r, two);
+    const response = await write(r, [edit(`${PACKING}/automations.yaml`, one, two)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+
+    const [moment, ...rest] = await r.owner.directMoments();
+    expect(rest).toEqual([]);
+    expect(moment!.payload).toMatchObject({
+      objectId: "object-automations",
+      operation: "write",
+      payloadBeforeBlobSha256: sha256(one),
+      payloadBeforeContentKind: "binary",
+      payloadAfterBlobSha256: sha256(two),
+      payloadAfterContentKind: "text",
+      beforeLatestMomentId: r.owner.moments.get(`${PACKING}/automations.yaml`),
+    });
+  });
+
+  it("takes edits beside and to a schema the owner stored as binary", async () => {
+    const r = await relay();
+    await r.owner.write("object-schema", `${PACKING}/collection.yaml`, SCHEMA_TWO, "binary");
+    const one = automations(STAMP);
+    const third = `${SCHEMA_TWO}  Notes:\n    type: text\n`;
+    await upload(r, one, third);
+    const created = await write(r, [create(`${PACKING}/automations.yaml`, one)]);
+    expect(created.status, await created.clone().text()).toBe(200);
+    const edited = await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA_TWO, third)], { submitId: "submit-2" });
+    expect(edited.status, await edited.clone().text()).toBe(200);
+
+    const moments = await r.owner.directMoments();
+    expect(moments.map((op) => op.payload.path)).toEqual([
+      `${PACKING}/automations.yaml`,
+      `${PACKING}/collection.yaml`,
+    ]);
+    expect(moments[1]!.payload).toMatchObject({
+      payloadBeforeContentKind: "binary",
+      payloadAfterContentKind: "text",
+    });
   });
 
   it("creates automations.yaml beside a Collection and edits it", async () => {
@@ -572,7 +606,7 @@ describe("round 1 of review", () => {
     db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = 'current-file-collision-keys-v1'").run();
     db.close();
     const reopened = reopenTestStorage(path);
-    const h = testHandler(reopened, { nowMs: () => CLOCK, collectionWritesEnabled: true });
+    const h = testHandler(reopened, { nowMs: () => CLOCK });
     const again: Relay = { ...r, h, storage: reopened };
     await upload(again, SCHEMA);
     await expectCode(await write(again, [create("trip/ideas/collection.yaml", SCHEMA)]), 409, "stale");
@@ -589,6 +623,201 @@ describe("round 1 of review", () => {
     await upload(r, removed);
     await expectCode(await write(r, [edit(`${PACKING}/automations.yaml`, withHidden, removed)]), 403, "share_op_rejected");
     expect(await r.owner.directMoments()).toEqual([]);
+  });
+});
+
+// The relay's own HTTP adapter, as main.ts configures it. The refused uploads
+// below never end, so an answer shows the relay did not wait for the whole
+// body. Each sends no more than the relay reads before it answers: the adapter
+// closes the connection after a refusal, and unread bytes would reset it.
+describe("over the HTTP adapter", () => {
+  async function serve(r: Relay): Promise<{ port: number; close(): Promise<void> }> {
+    const server = serveFetchHandler({
+      handler: r.h,
+      maxBodyBytes: () => 21 * 1024 * 1024,
+      streamBody: streamsRequestBody,
+      oversized: () => new Response(null, { status: 413 }),
+      failure: () => new Response(null, { status: 500 }),
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return {
+      port: (server.address() as AddressInfo).port,
+      close: async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+  }
+
+  function post(
+    port: number,
+    path: string,
+    options: { as: string | null; body: Uint8Array; end: boolean; method?: string; length?: number },
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (options.as !== null) headers.authorization = `Bearer user:${options.as}`;
+      if (options.length !== undefined) headers["content-length"] = String(options.length);
+      const sent = httpRequest({ host: "127.0.0.1", port, path, method: options.method ?? "POST", headers });
+      sent.on("response", (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => { text += chunk; });
+        response.on("end", () => {
+          sent.destroy();
+          resolve({ status: response.statusCode ?? 0, body: text });
+        });
+      });
+      sent.on("error", reject);
+      sent.write(options.body);
+      if (options.end) sent.end();
+    });
+  }
+
+  it("refuses a caller without credentials before reading the body, whatever the method", async () => {
+    const r = await relay();
+    const server = await serve(r);
+    try {
+      for (const method of ["POST", "PUT", "GET", "HEAD"]) {
+        const answer = await post(server.port, `/sync/shares/${r.shareId}/collection-writes`, {
+          as: null,
+          body: new Uint8Array(1024),
+          end: false,
+          method,
+          // Node sends a GET's body only under a stated length.
+          length: 4096,
+        });
+        expect({ method, status: answer.status }).toEqual({ method, status: 401 });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bounds the body at 1 MiB under every spelling of the path", async () => {
+    const r = await relay();
+    const server = await serve(r);
+    try {
+      for (const path of [
+        `/sync/shares/${r.shareId}/collection-writes`,
+        `/sync/shares/${r.shareId}/collection-writes/`,
+        `/sync/shares/${r.shareId}/collection%2Dwrites`,
+      ]) {
+        const answer = await post(server.port, path, {
+          as: RECIPIENT,
+          body: new Uint8Array(MAX_COLLECTION_WRITE_BODY_BYTES + 1).fill(0x20),
+          end: false,
+        });
+        expect({ path, status: answer.status, code: JSON.parse(answer.body).code })
+          .toEqual({ path, status: 413, code: "payload_too_large" });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("writes a streamed body", async () => {
+    const r = await relay();
+    await upload(r, SCHEMA_TWO);
+    const server = await serve(r);
+    try {
+      const answer = await post(server.port, `/sync/shares/${r.shareId}/collection-writes`, {
+        as: RECIPIENT,
+        body: new TextEncoder().encode(JSON.stringify({
+          submitId: "streamed",
+          changes: [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)],
+        })),
+        end: true,
+      });
+      expect(answer.status, answer.body).toBe(200);
+      expect((await r.owner.directMoments()).length).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe("the owner's read of a grant's direct writes", () => {
+  async function ownerRead(r: Relay, grantId: string, query = "", as = OWNER): Promise<Response> {
+    return await r.h(request(as, `/sync/${WORKSPACE}/collection-writes/${grantId}${query}`));
+  }
+
+  it("lists each write's files from the moments it minted, oldest first, after the grant ends", async () => {
+    const r = await relay();
+    const record = "---\nTitle: Tent\n---\n";
+    await upload(r, SCHEMA_TWO, SCHEMA, record);
+    expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)], { submitId: "edit" })).status).toBe(200);
+    expect((await write(r, [
+      create("trip/ideas/a.md", record),
+      create("trip/ideas/collection.yaml", SCHEMA),
+    ], { submitId: "new" })).status).toBe(200);
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: CLOCK }).ok).toBe(true);
+
+    const moments = await r.owner.directMoments();
+    const response = await ownerRead(r, r.grantId);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await json(response)).toEqual({
+      writes: [
+        {
+          submitId: "edit",
+          grantGeneration: 1,
+          committedAtMs: CLOCK,
+          firstOriginSeq: 0,
+          files: [{
+            path: `${PACKING}/collection.yaml`,
+            objectId: "object-schema",
+            momentId: moments[0]!.payload.momentId,
+            created: false,
+          }],
+        },
+        {
+          submitId: "new",
+          grantGeneration: 1,
+          committedAtMs: CLOCK,
+          firstOriginSeq: 1,
+          files: [
+            { path: "trip/ideas/collection.yaml", objectId: moments[1]!.payload.objectId, momentId: moments[1]!.payload.momentId, created: true },
+            { path: "trip/ideas/a.md", objectId: moments[2]!.payload.objectId, momentId: moments[2]!.payload.momentId, created: true },
+          ],
+        },
+      ],
+      nextAfterOriginSeq: null,
+    });
+
+    const first = await json(await ownerRead(r, r.grantId, "?limit=1"));
+    expect(first).toMatchObject({ writes: [{ submitId: "edit" }], nextAfterOriginSeq: 0 });
+    const second = await json(await ownerRead(r, r.grantId, "?limit=1&afterOriginSeq=0"));
+    expect(second).toMatchObject({ writes: [{ submitId: "new" }], nextAfterOriginSeq: null });
+  });
+
+  it("reads the ledger by grant and order, and drops the index an earlier build made", async () => {
+    const r = await relay();
+    const path = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    const db = inspectDatabase(path);
+    db.prepare(`CREATE INDEX idx_sync_relay_collection_writes_grant
+      ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms)`).run();
+    db.close();
+    closeTestStorage(reopenTestStorage(path));
+    const reopened = inspectDatabase(path);
+    const indexes = reopened.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sync_relay_collection_writes' AND sql IS NOT NULL",
+    ).all().map((row) => row.name);
+    reopened.close();
+    expect(indexes).toEqual(["idx_sync_relay_collection_writes_grant_seq"]);
+  });
+
+  it("answers only the workspace's owner, for a grant on one of its shares", async () => {
+    const r = await relay();
+    await expectCode(await ownerRead(r, r.grantId, "", RECIPIENT), 404, "not_found");
+    await expectCode(await ownerRead(r, "grant-elsewhere"), 404, "not_found");
+    await claimWorkspace(r.h, "stranger", "workspace-b");
+    const theirs = await createShare(r.h, "stranger", "workspace-b", { recipientUserId: RECIPIENT, paths: ["x"], access: "edit" });
+    const theirGrant = r.storage.listActiveShareGrantsForRecipient(theirs, RECIPIENT)[0]!.grantId;
+    await expectCode(await ownerRead(r, theirGrant), 404, "not_found");
+    await expectCode(await ownerRead(r, r.grantId, "?limit=0"), 400, "bad_request");
+    await expectCode(await ownerRead(r, r.grantId, "?cursor=1"), 400, "bad_request");
+    expect(await json(await ownerRead(r, r.grantId))).toEqual({ writes: [], nextAfterOriginSeq: null });
   });
 });
 

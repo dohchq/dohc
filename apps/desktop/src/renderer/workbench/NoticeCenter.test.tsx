@@ -8,7 +8,6 @@ import type {
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
-import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 
@@ -62,10 +61,6 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
-      {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
-      {...(props.onDismissAgentNotification
-        ? { onDismissAgentNotification: props.onDismissAgentNotification }
-        : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
@@ -95,6 +90,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onOpenAutomation ? { onOpenAutomation: props.onOpenAutomation } : {})}
       {...(props.automationFailureToast ? { automationFailureToast: props.automationFailureToast } : {})}
       {...(props.onHideAutomationFailureToast ? { onHideAutomationFailureToast: props.onHideAutomationFailureToast } : {})}
+      {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
     />
   );
 }
@@ -122,26 +118,11 @@ function liveDeliveryStatus(
   };
 }
 
-function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
-  return {
-    id: "ws-a::run-1::finished",
-    kind: "finished",
-    workspaceId: "ws-a",
-    workspaceName: "Personal",
-    agentName: "You",
-    runId: "run-1",
-    title: "Your agent finished",
-    body: "Reorganized /notes into three folders.",
-    createdAtMs: 1_700_000_000_000,
-    ...overrides,
-  };
-}
-
 describe("automation failure notices", () => {
   it("names a Collection automation's failure, offers Try again and Open automation, and no Try again for a chain stop", async () => {
     const failed = {
       automationId: "collection:Projects/Tasks#finished-date", claimId: "atc_1", chainStopped: false,
-      name: "Stamp the finish date", error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1,
+      name: "Stamp the finish date", error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     };
     const onRetryAutomationFailure = vi.fn();
     const onOpenAutomation = vi.fn();
@@ -149,7 +130,7 @@ describe("automation failure notices", () => {
       automationFailures: [
         failed,
         { automationId: "collection:Projects/Tasks#nudge", claimId: "atc_2", chainStopped: true, name: null,
-          error: "chain-stopped", updatedAtMs: 6_000, generation: 2 },
+          error: "chain-stopped", updatedAtMs: 6_000, generation: 2, datasetInstance: null },
       ],
       onRetryAutomationFailure,
       onOpenAutomation,
@@ -161,7 +142,6 @@ describe("automation failure notices", () => {
     const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
     expect(stopped.textContent).toContain('"nudge" did not run.');
     expect(within(stopped).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(document.body.textContent).not.toContain("plugin's source");
     expect(document.body.textContent).not.toContain("automations.yaml");
 
     await userEvent.click(within(row).getByRole("button", { name: "Try again" }));
@@ -191,7 +171,7 @@ describe("automation failure notices", () => {
   it("toasts a failure that just arrived with Try again, Open automation, and copy, and keeps its row", async () => {
     const failure = {
       automationId: "collection:Tasks#stamp", claimId: "atc_1", chainStopped: false,
-      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     };
     const user = userEvent.setup();
     const onRetryAutomationFailure = vi.fn();
@@ -219,7 +199,7 @@ describe("automation failure notices", () => {
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
       automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: 0, seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+      step: "0", seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
     };
     const onAllowAutomationHold = vi.fn();
     renderNotices({ automationHolds: [hold], onAllowAutomationHold });
@@ -236,7 +216,7 @@ describe("automation failure notices", () => {
   it("names every automation a share stopped in one notice, and dismisses them together", async () => {
     const stop = (automation: string, name: string, target: string, action: "change" | "find") => ({
       automationId: `collection:Projects/Trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
-      step: 0, seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
+      step: "0", seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
     });
     const onDismissAutomationStops = vi.fn();
     const spend = stop("spend", "Spend", "Budget", "change");
@@ -269,6 +249,38 @@ describe("automation failure notices", () => {
     expect(screen.getAllByTestId("notice-automation-stops")).toHaveLength(1);
     await userEvent.click(within(many).getByRole("button", { name: "Dismiss notice" }));
     expect(onDismissAutomationStops).toHaveBeenLastCalledWith(stops);
+  });
+
+  it("names the Group whose messages a held automation would start from", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
+      step: "0", seq: 7, collection: "Trip", target: "Planning", action: "read", stoppedFor: "bob@dohc.test",
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#task-0");
+    expect(notice.textContent).toContain(
+      "A step in Trip can now start from messages in Planning. It stopped before because bob@dohc.test could not. Allow it to run?",
+    );
+  });
+
+  it("names the Group a held post would post in", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+      step: "1", seq: 5, collection: "Trip", target: "Planning", action: "post", stoppedFor: null,
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-1");
+    expect(notice.textContent).toContain("A step in Trip can post in Planning. Allow it to run?");
+  });
+
+  it("names the person a held notice would go to", async () => {
+    renderNotices({ automationHolds: [{
+      automationId: "collection:Trip#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+      step: "2", seq: 6, collection: "Trip", target: "ana@dohc.test", action: "notify", stoppedFor: null,
+    }] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#tell-2");
+    expect(notice.textContent).toContain("A step in Trip can notify ana@dohc.test. Allow it to run?");
   });
 });
 
@@ -1141,46 +1153,6 @@ describe("notice center", () => {
     ).toBeNull();
   });
 
-  it("surfaces agent notifications with specific copy, newest first", async () => {
-    renderNotices({
-      agentNotifications: [
-        agentNotice({ id: "ws-a::run-1::finished", createdAtMs: 1000 }),
-        agentNotice({
-          id: "ws-a::run-2::asked",
-          kind: "asked",
-          runId: "run-2",
-          title: "Your agent has a question",
-          body: "Which draft should I keep?",
-          createdAtMs: 2000,
-        }),
-      ],
-      onDismissAgentNotification: vi.fn(),
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const center = screen.getByTestId("notice-center");
-    expect(within(center).getByTestId("notice-center-count").textContent).toBe("2");
-    // Newest (the ask) leads; specific copy is shown verbatim.
-    const items = within(center).getAllByRole("listitem");
-    expect(items[0]!.textContent).toContain("Which draft should I keep?");
-    expect(within(center).getByText("Reorganized /notes into three folders.")).toBeTruthy();
-  });
-
-  it("dismisses an agent notification through its dismiss action", async () => {
-    const onDismissAgentNotification = vi.fn();
-    const notice = agentNotice();
-    renderNotices({
-      agentNotifications: [notice],
-      onDismissAgentNotification,
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByTestId(
-        "notice-ws-a::run-1::finished-dismiss",
-      ),
-    );
-    expect(onDismissAgentNotification).toHaveBeenCalledWith("ws-a::run-1::finished");
-  });
-
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
   // what it offers depends on whether anything can be dialled again.
   it("raises a toast and a notice with Copy while live delivery retries", async () => {
@@ -1548,6 +1520,35 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
     openable: true,
   };
 }
+
+describe("skipped-run notices", () => {
+  const skipped = () => sentRow("s", {
+    kind: "schedule-skipped",
+    senderKind: "automation",
+    title: "Weekday report skipped 3 times",
+    target: { automation: "collection:Reports#weekday", path: "Reports/automations.yaml" },
+  });
+
+  it("offers Run now beside Open automation, and says why a run did not start", async () => {
+    const answer = deferred<string | null>();
+    const onRunSentNoticeNow = vi.fn((_notice: NoticeRow) => answer.promise);
+    renderNotices({ sentNotices: [skipped(), sentRow("a")], onOpenSentNotice: vi.fn(async () => null), onRunSentNoticeNow });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-s-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-a-run-now"), "only a skipped schedule runs now").toBeNull();
+
+    await userEvent.click(screen.getByTestId("sent-notice-s-run-now"));
+    const runNow = screen.getByTestId("sent-notice-s-run-now");
+    expect(runNow.textContent).toBe("Starting…");
+    expect(runNow.hasAttribute("disabled")).toBe(true);
+    expect(onRunSentNoticeNow).toHaveBeenCalledWith(expect.objectContaining({ noticeId: "s" }));
+
+    await act(async () => answer.resolve("This already ran from another computer, or from here."));
+    expect(screen.getByTestId("sent-notice-s-run-now").textContent).toBe("Run now");
+    expect(within(screen.getByTestId("sent-notice-s")).getByRole("status").textContent)
+      .toBe("This already ran from another computer, or from here.");
+  });
+});
 
 describe("notices sent to you", () => {
   it("puts this computer's rows first and sent rows after, each under one heading", async () => {
@@ -1921,4 +1922,13 @@ describe("notices sent to you", () => {
       expect(screen.queryByTestId("sent-notice-toast")).toBeNull();
     });
   });
+});
+
+it("names the chat permission that stopped a step", async () => {
+  renderNotices({ automationStops: [{
+    automationId: "collection:Tasks#tell", automationName: "Tell", definitionHash: "0123456789abcdef",
+    step: "0", seq: 1, collection: "Tasks", target: "Trip", action: "post", stoppedFor: "ana@dohc.test",
+  }] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");
 });

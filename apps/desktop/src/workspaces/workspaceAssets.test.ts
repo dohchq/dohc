@@ -17,12 +17,10 @@ import {
   createAtomicTextWriter,
   createOrderedWorkspaceTextAccess,
   createWorkspaceOperationScheduler,
-  createWorkspaceTextExclusive,
   mediaTypeForExtension,
   prepareWorkspaceFileRead,
   readWorkspaceText,
   resolveWorkspaceFile,
-  restoreWorkspaceText,
   withExclusiveWorkspaceOperation,
   type WorkspaceOperationLease,
   writeWorkspaceAsset,
@@ -1100,81 +1098,6 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     });
   });
 
-  it("resumes restore and exclusive-create text writes after a failed exclusive operation", async () => {
-    const root = await makeWorkspace();
-    const mutationError = new Error("move rejected");
-    let releaseExclusive!: () => void;
-    let markExclusiveStarted!: () => void;
-    const exclusiveHeld = new Promise<void>((resolve) => {
-      releaseExclusive = resolve;
-    });
-    const exclusiveStarted = new Promise<void>((resolve) => {
-      markExclusiveStarted = resolve;
-    });
-    const exclusiveResult = withExclusiveWorkspaceOperation(root, async () => {
-      markExclusiveStarted();
-      await exclusiveHeld;
-      throw mutationError;
-    }).catch((error: unknown) => error);
-    await exclusiveStarted;
-
-    const restoring = restoreWorkspaceText(root, "notes/a.md", "restored\n");
-    const creating = createWorkspaceTextExclusive(root, "notes/new.md", "created\n");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# A\n");
-    await expect(readFile(join(root, "notes", "new.md"), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-
-    releaseExclusive();
-    await expect(exclusiveResult).resolves.toBe(mutationError);
-    await Promise.all([restoring, creating]);
-    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("restored\n");
-    expect(await readFile(join(root, "notes", "new.md"), "utf8")).toBe("created\n");
-  });
-
-  it("rejects late restore and exclusive-create writes after a successful folder move", async () => {
-    const root = await makeWorkspace();
-    let releaseMove!: () => void;
-    let markMoveStarted!: () => void;
-    const moveHeld = new Promise<void>((resolve) => {
-      releaseMove = resolve;
-    });
-    const moveStarted = new Promise<void>((resolve) => {
-      markMoveStarted = resolve;
-    });
-    const moving = withExclusiveWorkspaceOperation(root, async () => {
-      markMoveStarted();
-      await moveHeld;
-      await rename(join(root, "notes"), join(root, "moved-notes"));
-    });
-    await moveStarted;
-
-    const restoreResult = restoreWorkspaceText(
-      root,
-      "notes/a.md",
-      "restored\n",
-    ).catch((error: unknown) => error);
-    const createResult = createWorkspaceTextExclusive(
-      root,
-      "notes/new.md",
-      "created\n",
-    ).catch((error: unknown) => error);
-    releaseMove();
-    await moving;
-
-    await expect(restoreResult).resolves.toMatchObject({
-      name: "WorkspaceOperationSupersededError",
-      message: "A file or folder changed before this write started. Try the action again.",
-    });
-    await expect(createResult).resolves.toMatchObject({
-      name: "WorkspaceOperationSupersededError",
-      message: "A file or folder changed before this write started. Try the action again.",
-    });
-    await expect(readdir(join(root, "notes"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readdir(join(root, "moved-notes"))).toEqual(["a.md"]);
-  });
-
   it("rejects a late asset write after a successful folder move without recreating the source", async () => {
     const root = await makeWorkspace();
     let releaseMove!: () => void;
@@ -1335,25 +1258,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
   });
 });
 
-describe("restoreWorkspaceText", () => {
-  it("recreates a missing nested file from a history snapshot", async () => {
-    const root = await makeWorkspace();
-
-    await restoreWorkspaceText(root, "archive/2026/note.md", "# Restored\n");
-
-    expect(await readFile(join(root, "archive", "2026", "note.md"), "utf8")).toBe(
-      "# Restored\n",
-    );
-  });
-
-  it("overwrites an existing file with the exact snapshot text", async () => {
-    const root = await makeWorkspace();
-
-    await restoreWorkspaceText(root, "notes/a.md", "# Before\n");
-
-    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Before\n");
-  });
-
+describe("writeWorkspaceAsset", () => {
   it("deduplicates an identical image attachment without replacing a collision", async () => {
     const root = await makeWorkspace();
     await mkdir(join(root, "assets"), { recursive: true });
@@ -1478,20 +1383,19 @@ describe("restoreWorkspaceText", () => {
     expect(await readFile(join(root, "notes/a.md"), "utf8")).toBe("# A\n");
   });
 
-  it("restores a valid long filename without extending its basename for staging", async () => {
+  it("writes a valid long filename without extending its basename for staging", async () => {
     const root = await makeWorkspace();
-    const filename = `${"a".repeat(240)}.md`;
+    const filename = `${"a".repeat(240)}.png`;
 
-    await restoreWorkspaceText(root, `notes/${filename}`, "restored");
+    await writeWorkspaceAsset(root, `notes/${filename}`, new Uint8Array([1, 2, 3]));
 
-    expect(await readFile(join(root, "notes", filename), "utf8")).toBe("restored");
+    expect(await readFile(join(root, "notes", filename))).toEqual(Buffer.from([1, 2, 3]));
     expect((await readdir(join(root, "notes"))).sort()).toEqual(
       ["a.md", filename].sort(),
     );
   });
 
   it("preserves primary contained-write errors when cleanup also fails", async () => {
-    const renameError = new Error("rename failed");
     const writeError = new Error("exclusive write failed");
     vi.doMock("node:fs/promises", async (importOriginal) => ({
       ...(await importOriginal<typeof import("node:fs/promises")>()),
@@ -1501,9 +1405,6 @@ describe("restoreWorkspaceText", () => {
           throw writeError;
         }),
       })),
-      rename: vi.fn(async () => {
-        throw renameError;
-      }),
       rm: vi.fn(async () => {
         throw new Error("cleanup busy");
       }),
@@ -1514,10 +1415,7 @@ describe("restoreWorkspaceText", () => {
       const root = await makeWorkspace();
 
       await expect(
-        failingWrites.restoreWorkspaceText(root, "notes/a.md", "restored"),
-      ).rejects.toBe(renameError);
-      await expect(
-        failingWrites.createWorkspaceTextExclusive(root, "notes/new.md", "created"),
+        failingWrites.writeWorkspaceAsset(root, "notes/new.png", new Uint8Array([1])),
       ).rejects.toBe(writeError);
     } finally {
       vi.doUnmock("node:fs/promises");
@@ -1525,14 +1423,15 @@ describe("restoreWorkspaceText", () => {
     }
   });
 
-  it("refuses to restore through a symlinked ancestor outside the workspace", async () => {
+  it("refuses to write through a symlinked ancestor outside the workspace", async () => {
     const root = await makeWorkspace();
     const outside = await createTestScratch("dohc-assets-outside-");
     await symlink(outside, join(root, "notes", "outside"));
 
     await expect(
-      restoreWorkspaceText(root, "notes/outside/secret.md", "nope"),
+      writeWorkspaceAsset(root, "notes/outside/secret.png", new Uint8Array([1])),
     ).rejects.toThrow(/escapes the workspace/);
+    expect(await readdir(outside)).toEqual([]);
   });
 });
 

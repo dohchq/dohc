@@ -41,3 +41,14 @@ function isIpv4Loopback(hostname: string): boolean {
     return value >= 0 && value <= 255;
   });
 }
+
+/** An http origin on this computer, with no credentials in it. */
+export function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.username || url.password) return false;
+    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}

@@ -149,6 +149,7 @@ async function harness() {
     requireEngineCapture, localAgentDisplayName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     notifyRenderer: notify,
+    namedAuthorLabel: () => "Someone you shared with",
     retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,

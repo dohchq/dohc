@@ -64,10 +64,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // automation's name and its Collection; everything else keeps its
 // actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor" | "namedAuthor">,
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
   if (moment.automationAuthor) return `${moment.automationAuthor.name} in ${moment.automationAuthor.collection}`;
+  if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
     : engineOriginLabel(moment.origin);
@@ -76,7 +77,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor" | "namedAuthor">;
   testId: string;
   id?: string;
 }) {

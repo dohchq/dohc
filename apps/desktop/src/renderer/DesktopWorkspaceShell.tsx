@@ -1,5 +1,6 @@
 import { AgentSettingsContext } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
+import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -43,8 +44,8 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { readError } from "../ipc/errorWords";
-import { formatSize } from "../plugins/pluginFormat";
 import {
+  formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "../workspaces/workspaceEngineCaptureLimits";
@@ -99,7 +100,6 @@ import {
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
-import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
 import { CloudLogin } from "./CloudLogin";
@@ -118,7 +118,8 @@ import {
 } from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
-import { useShareDirectWrites } from "./shell/useShareDirectWrites";
+import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
+import { disposeAutomationButtons } from "./collections/useAutomationButtons";
 import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
@@ -134,7 +135,6 @@ import { LiveDocumentsDialog } from "./LiveDocumentsDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
-import { useGuestBlockingUi } from "./guestBlockingUi";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSectionId,
@@ -161,22 +161,12 @@ import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
-import { PluginsView } from "./workbench/PluginsView";
-import {
-  pluginActivityViews,
-  pluginCommandEntries,
-  pluginCommandPaletteId,
-  resolvePluginView,
-} from "./workbench/pluginActivityViews";
-import { usePluginCatalog } from "./workbench/pluginCatalog";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
-import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -225,9 +215,6 @@ import {
   isChatsTabPath,
   isGraphTabPath,
   isHistoryTabPath,
-  isPluginDetailsTabPath,
-  isPluginPanelTabPath,
-  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isSiteTabPath,
   isViewId,
@@ -238,19 +225,11 @@ import {
   openTab,
   resizeEditorGroups,
   moveTabToNewGroup,
-  parsePluginDetailsTabPath,
-  parsePluginPanelTabPath,
-  parsePluginViewId,
-  parsePluginWebAppTabPath,
   appViewId,
-  clearPluginView,
   keepActiveViewAfterRailChange,
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
-  pluginDetailsTabPath,
-  pluginPanelTabPath,
-  pluginWebAppTabPath,
   parseSiteTabPath,
   parseUiState,
   recordRecentFile,
@@ -381,18 +360,6 @@ const LazyAppsView = lazy(() =>
 );
 const LazySitePreviewPage = lazy(() =>
   import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
-);
-const LazyPluginPanelPage = lazy(() =>
-  import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
-);
-
-const LazyPluginWebAppPage = lazy(() =>
-  import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
-);
-const LazyPluginDetailsPage = lazy(() =>
-  import("./PluginDetailsPage").then((mod) => ({
-    default: mod.PluginDetailsPage,
-  })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -683,6 +650,7 @@ export function DesktopWorkspaceShell(props: {
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const collectionLineage = useCollectionWriteLineage(workspaceId);
+  const stopAndRestore = useStopAndRestore(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
@@ -843,6 +811,8 @@ export function DesktopWorkspaceShell(props: {
     (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
+  // The workspace's Button runs report through this shell's toasts, so they go with it.
+  useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
     workspaceId,
     workspaceIsReady,
@@ -953,23 +923,6 @@ export function DesktopWorkspaceShell(props: {
     ],
     [localAgentEnabled, localAgentName],
   );
-  const userMentionCandidates = useMemo(
-    () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
-    [mentionCandidates],
-  );
-  const agentNotifs = useAgentNotifications({
-    workspaceId,
-    workspaceName: workspaceName(props.workspace),
-    agentName: localAgentName,
-    userCandidates: userMentionCandidates,
-  });
-  const addressedToMe = useMemo(
-    () =>
-      agentNotifs.notifications.filter(
-        (notification) => notification.kind === "asked" || notification.kind === "needs-input",
-      ),
-    [agentNotifs.notifications],
-  );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
@@ -982,14 +935,8 @@ export function DesktopWorkspaceShell(props: {
 
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
-  // The plugins list marks the row whose details tab the user is looking at,
-  // the way the explorer marks the open file. Directory, not only id: an
-  // id can collide between two discovered rows.
-  const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
   const {
     tabLabels: knownTabLabels,
-    rememberWebAppTitle,
-    rememberPluginDetailsTitle,
     rememberMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
@@ -1129,37 +1076,6 @@ export function DesktopWorkspaceShell(props: {
     [writeWb],
   );
 
-  // A details tab that followed a rename only tracks that rename in
-  // memory — nothing else ever hears about it. A later tab switch remounts
-  // the page, whose tracking reseeds from this tab's own virtual path,
-  // still naming the original, now-vacated directory. The same remap
-  // onExplorerPathsChanged already applies for a file rename retargets the
-  // tab's own path here too, so a remount reads the directory the plugin
-  // actually renamed to, not the one it left.
-  const retargetPluginDetailsTab = useCallback(
-    (pluginId: string, fromDirectoryName: string, toDirectoryName: string) => {
-      const from = pluginDetailsTabPath(pluginId, fromDirectoryName);
-      const to = pluginDetailsTabPath(pluginId, toDirectoryName);
-      mutateWb((state) => remapWorkbenchPaths(state, (path) => (path === from ? to : path)));
-    },
-    [mutateWb],
-  );
-
-  // Plugin-contributed views (P6). The catalog is the same guarded data layer
-  // the Plugins panel uses, so the rail follows an install, an enable, and an
-  // uninstall without its own listener.
-  const pluginCatalog = usePluginCatalog(
-    workspaceId,
-    captureDecidedFor === workspaceId,
-  );
-  const pluginCatalogLoad = pluginCatalog.load;
-  const railPluginViews = useMemo(
-    () =>
-      pluginCatalogLoad.status === "ready"
-        ? pluginActivityViews(pluginCatalogLoad.plugins)
-        : [],
-    [pluginCatalogLoad],
-  );
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
   const railViews = useMemo(() => sidebarViews(sidebarSettings), [sidebarSettings]);
   const pinnedRoots = useMemo(
@@ -1169,52 +1085,15 @@ export function DesktopWorkspaceShell(props: {
   const pinnedApps = usePinnedApps(workspaceId, pinnedRoots);
   const selectedAppRoot = parseAppViewId(wb.activeView);
   const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
-  // A shared view can never write the workspace (assertWritableWorkspace
-  // refuses on the share's presence alone), so every plugin command
-  // invoked from one is a dead click regardless of which plugin or command
-  // it names — the palette offers none of them here (round-8 finding 2).
-  const pluginCommandItems = useMemo(
-    () =>
-      pluginCatalogLoad.status === "ready" && !props.workspace.shareView
-        ? pluginCommandEntries(pluginCatalogLoad.plugins)
-        : [],
-    [pluginCatalogLoad, props.workspace.shareView],
-  );
-  const selectedPluginView = parsePluginViewId(wb.activeView);
-  const selectedPluginViewState =
-    selectedPluginView === null || pluginCatalogLoad.status !== "ready"
-      ? null
-      : resolvePluginView(pluginCatalogLoad.plugins, selectedPluginView);
-
-  // The panel's header names dohc's own view, or the plugin panel behind a
-  // contributed one — including while its plugin is off, so the header keeps
-  // saying which view the user is looking at.
+  // The panel's header names dohc's own view or the pinned app.
   const sidePanelTitle = isViewId(wb.activeView)
     ? activityViewLabel(wb.activeView)
-    : selectedApp !== null
-      ? selectedApp.label
-      : selectedPluginViewState?.status === "ready" ||
-          selectedPluginViewState?.status === "off"
-        ? selectedPluginViewState.title
-        : "Plugin view";
+    : selectedApp?.label ?? "App";
 
-  // An uninstalled plugin leaves no selection behind. Only a loaded list can
-  // say a plugin is gone — before it lands, the selection stands, so a restart
-  // never loses the view the user left open.
-  useEffect(() => {
-    if (selectedPluginViewState?.status !== "absent") return;
-    mutateWb(clearPluginView);
-  }, [selectedPluginViewState?.status, mutateWb]);
-
-  // Every view on the rail, in its order: dohc's own, plugin views, pinned
-  // apps.
+  // Every view on the rail, in its order: dohc's own, then pinned apps.
   const railOrder = useMemo<readonly ActivityViewId[]>(
-    () => [
-      ...railViews,
-      ...railPluginViews.map((view) => view.viewId),
-      ...pinnedRoots.map(appViewId),
-    ],
-    [pinnedRoots, railPluginViews, railViews],
+    () => [...railViews, ...pinnedRoots.map(appViewId)],
+    [pinnedRoots, railViews],
   );
   const railOrderRef = useRef(railOrder);
   railOrderRef.current = railOrder;
@@ -1274,23 +1153,6 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [reportShellError, setAppPinned, workspaceId],
-  );
-
-  useEffect(
-    () =>
-      bridge().onPluginPanelOpened((event) => {
-        if (event.workspaceId !== workspaceId) return;
-        const targetGroupId = wbRef.current.activeEditorGroup;
-        invalidateDeferredFileOpen(targetGroupId);
-        mutateWb((state) =>
-          openTab(
-            state,
-            pluginPanelTabPath(event.pluginId, event.panelId),
-            targetGroupId,
-          ),
-        );
-      }),
-    [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
   useAsyncResponseEffect(
@@ -2091,12 +1953,6 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
-  // A plugin web app's guest is a main-process view layered over this shell,
-  // so it composites above everything this component paints. While UI that
-  // needs its clicks is up, the guest must be hidden or it keeps them. Every
-  // overlay registers itself — including the ones this shell cannot see,
-  // which is why this is not a list of the shell's own flags.
-  const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -2190,7 +2046,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
-  const refreshShareViewRef = useRef<() => Promise<boolean>>(async () => true);
+  const refreshShareViewRef = useRef<() => Promise<ShareViewRefresh>>(async () => "current");
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2205,8 +2061,8 @@ export function DesktopWorkspaceShell(props: {
       // stale (damaged, failed, or overtaken by another refresh) says why
       // nothing opened.
       const retry = () => {
-        void refreshShareViewRef.current().then((current) => {
-          if (current) {
+        void refreshShareViewRef.current().then((refresh) => {
+          if (refresh === "current") {
             void importFiles(undefined, targetDir);
             return;
           }
@@ -2456,40 +2312,9 @@ export function DesktopWorkspaceShell(props: {
       showTabLimitError,
     ],
   );
-  // Main confirmed the plugin's Open action and asked for the tab. It takes
-  // the same path every other virtual tab takes — including the refusal at
-  // MAX_OPEN_TABS, which the user must read rather than watch nothing happen.
-  useEffect(
-    () =>
-      bridge().onPluginWebAppOpened((event) => {
-        if (event.workspaceId !== workspaceId) return;
-        openVirtualTab(
-          pluginWebAppTabPath(event.pluginId, event.webAppId, event.instanceKey),
-        );
-      }),
-    [openVirtualTab, workspaceId],
-  );
-  // A plugin panel asked for one instance of its own web app. The tab takes
-  // the same path a manifest-id app's tab takes, MAX_OPEN_TABS refusal
-  // included; the instance is what makes it its own tab rather than a
-  // re-activation of the last one.
-  const openPluginWebAppInstanceTab = useCallback(
-    (pluginId: string, webAppId: string, instanceKey: string) => {
-      openVirtualTab(pluginWebAppTabPath(pluginId, webAppId, instanceKey));
-    },
-    [openVirtualTab],
-  );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       openVirtualTab(versionCompareTabPath(versionId));
-    },
-    [openVirtualTab],
-  );
-  // A plugin row opens its details tab the same way every other virtual tab
-  // opens, so the tab limit refuses it out loud rather than doing nothing.
-  const openPluginDetailsTab = useCallback(
-    (pluginId: string, directoryName: string) => {
-      openVirtualTab(pluginDetailsTabPath(pluginId, directoryName));
     },
     [openVirtualTab],
   );
@@ -3907,53 +3732,10 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
       })),
-      // A contributed view is a view like any other, so the palette offers it
-      // the same way. The list follows the rail: a plugin that is gone or off
-      // contributes no command either.
-      ...railPluginViews.map((view) => ({
-        id: `show-${view.viewId}`,
-        label: `View: ${view.title}`,
-        run: () => mutateWb((state) => setView(state, view.viewId)),
-      })),
       ...pinnedApps.map((app) => ({
         id: `show-${appViewId(app.root)}`,
         label: `View: ${app.label}`,
         run: () => mutateWb((state) => setView(state, appViewId(app.root))),
-      })),
-      ...pluginCommandItems.map((entry) => ({
-        id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
-        label: `${entry.pluginTitle}: ${entry.title}`,
-        run: () => {
-          // No staleness guard is needed: DesktopRoot's
-          // key={workspace.workspaceId} remounts this shell on a switch, so
-          // this callback cannot report into the next workspace.
-          void bridge()
-            .invokePluginCommand({
-              workspaceId,
-              pluginId: entry.pluginId,
-              commandId: entry.commandId,
-            })
-            .then((outcome) => {
-              if (outcome.status !== "ok") {
-                // reportShellError shows error.message and drops the
-                // fallback whenever the error carries one — a terse
-                // backend cause ("timeout") would otherwise displace the
-                // command's own name entirely. Composing the full
-                // sentence here, not relying on the fallback, keeps both
-                // regardless of which one reportShellError picks
-                // (round-10 finding 4).
-                const message =
-                  `Could not run plugin command "${entry.title}". ${outcome.message}`;
-                reportShellError(message, new Error(message));
-              }
-            })
-            .catch((error) => {
-              reportShellError(
-                `Could not run plugin command "${entry.title}".`,
-                error,
-              );
-            });
-        },
       })),
       {
         id: "connect-cloud",
@@ -4017,9 +3799,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
-      railPluginViews,
       pinnedApps,
-      pluginCommandItems,
       toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
@@ -4143,11 +3923,9 @@ export function DesktopWorkspaceShell(props: {
     showSuccess: showSuccessNotice,
   });
 
-  // Resolves true when the view is current: refreshed, or not a shared
-  // view at all. A failed, superseded, or ended refresh resolves false.
-  const refreshShareView = useCallback(async (): Promise<boolean> => {
-    if (!shareView) return true;
-    if (shareViewDamaged) return false;
+  const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
+    if (!shareView) return "current";
+    if (shareViewDamaged) return "stale";
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -4166,15 +3944,15 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return false;
+      if (token !== shareRefreshToken.current) return "stale";
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return false;
+        if (token !== shareRefreshToken.current) return "stale";
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
         );
-        return false;
+        return "stale";
       }
       if (outcome.collisionRecordQuarantined) {
         reportShellFailure({
@@ -4191,7 +3969,7 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
-      return outcome.status !== "ended";
+      return outcome.status === "ended" ? "ended" : "current";
     } catch (error) {
       // A store only a newer dohc opens stops the whole workspace, and the
       // stop state already says so. A toast would repeat it.
@@ -4202,10 +3980,10 @@ export function DesktopWorkspaceShell(props: {
         status?.engineStoreRefused != null &&
         engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
       ) {
-        return false;
+        return "stale";
       }
       reportShellError("Couldn't refresh the shared view.", error);
-      return false;
+      return "stale";
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
@@ -4603,7 +4381,6 @@ export function DesktopWorkspaceShell(props: {
     onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
-    addressedToMe,
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -4638,7 +4415,6 @@ export function DesktopWorkspaceShell(props: {
     onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
-    addressedToMe,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     agentSetup,
@@ -5062,10 +4838,8 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div className="flex min-h-0 flex-1">
         <ActivityBar
-          workspaceId={workspaceId}
           views={railViews}
           activeView={wb.activeView}
-          pluginViews={railPluginViews}
           pinnedApps={pinnedApps}
           onPinnedAppMenu={(appRoot) => void showPinnedAppMenu(appRoot)}
           sidebarVisible={wb.sidebarVisible}
@@ -5107,8 +4881,6 @@ export function DesktopWorkspaceShell(props: {
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
                   })}
-              agentNotifications={agentNotifs.notifications}
-              onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
               {...crashReportNotice}
@@ -5211,13 +4983,6 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "history" ? (
               historyTimeline
-            ) : wb.activeView === "plugins" ? (
-              <PluginsView
-                workspaceId={workspaceId}
-                activePluginId={activePluginDetails?.pluginId ?? null}
-                activePluginDirectoryName={activePluginDetails?.directoryName ?? null}
-                onOpenDetails={openPluginDetailsTab}
-              />
             ) : selectedAppRoot !== null ? (
               // The same sealed preview an app's tab runs: a sandboxed frame
               // on a dohc loopback server, with no dohc bridge.
@@ -5236,52 +5001,7 @@ export function DesktopWorkspaceShell(props: {
                   }
                 />
               </Suspense>
-            ) : selectedPluginViewState?.status === "ready" ? (
-              <Suspense fallback={<PanelLoading label="plugin panel" />}>
-                <LazyPluginPanelPage
-                  workspaceId={workspaceId}
-                  pluginId={selectedPluginViewState.pluginId}
-                  panelId={selectedPluginViewState.panelId}
-                  placement="view"
-                  onOpenPath={openPathWithHeading}
-                  onOpenWebApp={openPluginWebAppInstanceTab}
-                />
-              </Suspense>
-            ) : selectedPluginViewState?.status === "off" ? (
-              <div
-                data-testid="plugin-view-off"
-                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
-              >
-                <span className="text-sm text-ink">
-                  {selectedPluginViewState.title} is off
-                </span>
-                <span className="text-xs text-muted">
-                  {selectedPluginViewState.pluginTitle} is turned off.
-                </span>
-                <button
-                  type="button"
-                  data-testid="plugin-view-off-open-plugins"
-                  onClick={() => mutateWb((state) => setView(state, "plugins"))}
-                  className="text-xs text-accent hover:underline"
-                >
-                  Open Plugins
-                </button>
-              </div>
-            ) : selectedPluginView === null ? null : pluginCatalogLoad.status ===
-              "error" ? (
-              // A failed plugin list cannot say whether this view still
-              // exists, and a spinner that never ends would claim it is
-              // still coming.
-              <div
-                data-testid="plugin-view-unknown"
-                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
-              >
-                <span className="text-sm text-ink">Could not load plugins</span>
-                <span className="text-xs text-muted">{pluginCatalogLoad.message}</span>
-              </div>
-            ) : (
-              <PanelLoading label="plugin panel" />
-            )}
+            ) : null}
             </ErrorBoundary>
           </SidePanel>
         ) : null}
@@ -5344,9 +5064,6 @@ export function DesktopWorkspaceShell(props: {
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupCollectionPath = parseCollectionTabPath(tabPath);
               const groupDataCollection = parseTransactionalCollectionTabPath(tabPath);
-              const groupPluginPanel = parsePluginPanelTabPath(tabPath);
-              const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
-              const groupPluginDetails = parsePluginDetailsTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5459,6 +5176,7 @@ export function DesktopWorkspaceShell(props: {
                   onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
+                  onStopAndRestore={stopAndRestore.open}
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (
@@ -5554,87 +5272,6 @@ export function DesktopWorkspaceShell(props: {
                   {chatsOffCopy(syncStatus)}
                 </div>
               )
-            ) : isPluginPanelTabPath(tabPath) ? (
-              groupPluginPanel ? (
-                <Suspense fallback={<PanelLoading label="plugin panel" />}>
-                  <LazyPluginPanelPage
-                    workspaceId={workspaceId}
-                    pluginId={groupPluginPanel.pluginId}
-                    panelId={groupPluginPanel.panelId}
-                    placement="editor"
-                    onOpenPath={openPathWithHeading}
-                    onOpenWebApp={openPluginWebAppInstanceTab}
-                  />
-                </Suspense>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-                  <span className="text-sm text-ink">Could not open plugin panel</span>
-                  <button
-                    type="button"
-                    className="text-xs text-accent hover:underline"
-                    onClick={() => {
-                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
-                    }}
-                  >
-                    Close tab
-                  </button>
-                </div>
-              )
-            ) : isPluginWebAppTabPath(tabPath) ? (
-              groupPluginWebApp ? (
-                <Suspense fallback={<PanelLoading label="plugin app" />}>
-                  <LazyPluginWebAppPage
-                    workspaceId={workspaceId}
-                    pluginId={groupPluginWebApp.pluginId}
-                    webAppId={groupPluginWebApp.webAppId}
-                    instanceKey={groupPluginWebApp.instanceKey}
-                    hiddenByOverlay={overlayOpen}
-                    onTitle={rememberWebAppTitle}
-                  />
-                </Suspense>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-                  <span className="text-sm text-ink">
-                    {PLUGIN_WEB_APP_OPEN_ERROR}
-                  </span>
-                  <button
-                    type="button"
-                    className="text-xs text-accent hover:underline"
-                    onClick={() => {
-                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
-                    }}
-                  >
-                    Close tab
-                  </button>
-                </div>
-              )
-            ) : isPluginDetailsTabPath(tabPath) ? (
-              groupPluginDetails ? (
-                <Suspense fallback={<PanelLoading label="plugin details" />}>
-                  <LazyPluginDetailsPage
-                    workspaceId={workspaceId}
-                    pluginId={groupPluginDetails.pluginId}
-                    directoryName={groupPluginDetails.directoryName}
-                    onTitle={rememberPluginDetailsTitle}
-                    onDirectoryRenamed={retargetPluginDetailsTab}
-                  />
-                </Suspense>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-                  <span className="text-sm text-ink">
-                    dohc could not open the plugin page
-                  </span>
-                  <button
-                    type="button"
-                    className="text-xs text-accent hover:underline"
-                    onClick={() => {
-                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
-                    }}
-                  >
-                    Close tab
-                  </button>
-                </div>
-              )
             ) : isSiteTabPath(tabPath) ? (
               groupSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="app" />}>
@@ -5688,6 +5325,7 @@ export function DesktopWorkspaceShell(props: {
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
                     onOpenFile={(path) => openFile(path)}
+                    onOpenScheduleSettings={() => openSettings("advanced")}
                     onError={collectionReports.onError}
                     onNotice={collectionReports.onNotice}
                     automationFocus={
@@ -5749,6 +5387,8 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
+                onButtonError={reportShellError}
+                onButtonNotice={showSuccessNotice}
                 readOnly={
                   (!!shareView && !shareViewDocumentsWritable) ||
                   isMountedSharePath(tabPath)
@@ -6204,15 +5844,6 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
 
-      {/* A blocked agent run's consent asks (the retired Agent panel's one
-          load-bearing interaction). Floats wherever the user already is —
-          answering resumes the run. */}
-      <AgentPermissionRequests
-        workspaceId={workspaceId}
-        runId={agentNotifs.pendingPermissionsRunId}
-        requests={agentNotifs.pendingPermissions}
-      />
-
       {paletteOpen ? (
         <CommandPalette
           commands={commands}
@@ -6324,6 +5955,24 @@ export function DesktopWorkspaceShell(props: {
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
+        />
+      ) : null}
+      {stopAndRestore.session ? (
+        <StopAndRestoreDialog
+          key={stopAndRestore.session.key}
+          workspaceId={workspaceId}
+          person={stopAndRestore.session.person}
+          start={stopAndRestore.session.start}
+          receipts={stopAndRestore.receipts}
+          onRetry={stopAndRestore.retry}
+          onClose={stopAndRestore.close}
+          onBeforeRestore={beginLineageOperation}
+          onRestored={refreshAfterHistoryRestore}
+          onOpenFile={(path) => {
+            stopAndRestore.close();
+            openFile(path);
+          }}
+          onError={reportShellError}
         />
       ) : null}
       {reviewProposalId ? (

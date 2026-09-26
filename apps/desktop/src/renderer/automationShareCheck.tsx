@@ -1,3 +1,4 @@
+import { automationReachCopy } from "./automationReachCopy";
 import { Zap } from "lucide-react";
 import { useState } from "react";
 import type { AutomationShareImpactResult } from "../ipc/bridgeContract";
@@ -34,7 +35,7 @@ export function automationShareWarning(
 ): string | null {
   if (stops.length === 0) return null;
   const automations = new Map(stops.map((stop) => [stop.automationId, `"${stop.automationName}" in ${stop.collectionPath}`]));
-  const reach = [...new Set(stops.map((stop) => `${stop.action === "find" ? "view" : "edit"} ${stop.target}`))];
+  const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
   const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
   const who = recipientEmail ?? "anyone who opens this link";
   return `This share stops ${what}, because ${who} cannot ${OR.format(reach)}.`;

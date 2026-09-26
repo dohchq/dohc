@@ -34,21 +34,21 @@ afterEach(async () => {
 
 describe("startStaticDirectoryPreview", () => {
   it("serves an arbitrary contained panel directory with the static safeguards", async () => {
-    const pluginRoot = join(root, "plugin");
-    const panelRoot = join(pluginRoot, "panel");
+    const appRoot = join(root, "app");
+    const panelRoot = join(appRoot, "panel");
     await mkdir(join(panelRoot, ".dohc"), { recursive: true });
-    await writeFile(join(panelRoot, "index.html"), "<h1>Plugin panel</h1>");
+    await writeFile(join(panelRoot, "index.html"), "<h1>App panel</h1>");
     await writeFile(join(panelRoot, ".dohc", "secret.txt"), "secret");
 
     const preview = await startStaticDirectoryPreview(panelRoot, {
-      containmentRoot: pluginRoot,
+      containmentRoot: appRoot,
       entry: "index.html",
       entryLabel: "panel entry",
     });
     try {
       const response = await fetch(preview.url);
       expect(response.headers.get("cache-control")).toBe("no-store");
-      await expect(response.text()).resolves.toContain("Plugin panel");
+      await expect(response.text()).resolves.toContain("App panel");
       await expect(
         fetch(new URL("/.dohc/secret.txt", preview.url)).then(
           (result) => result.status,
@@ -209,17 +209,17 @@ describe("startStaticDirectoryPreview", () => {
 
   it("refuses an alias that leaves the served root but stays in containment", async () => {
     // The served root is a subdirectory of the containment root, so the
-    // containment check alone still admits the plugin's sibling files. This
+    // containment check alone still admits the app's sibling files. This
     // is the only guard that narrows a request to the served directory.
-    const pluginRoot = join(root, "plugin");
-    const panelRoot = join(pluginRoot, "panel");
+    const appRoot = join(root, "app");
+    const panelRoot = join(appRoot, "panel");
     await mkdir(panelRoot, { recursive: true });
     await writeFile(join(panelRoot, "index.html"), "<h1>Panel</h1>");
-    await writeFile(join(pluginRoot, "sibling.txt"), "not the panel's to serve");
-    await symlink(pluginRoot, join(panelRoot, "escape"), "dir");
+    await writeFile(join(appRoot, "sibling.txt"), "not the panel's to serve");
+    await symlink(appRoot, join(panelRoot, "escape"), "dir");
 
     const preview = await startStaticDirectoryPreview(panelRoot, {
-      containmentRoot: pluginRoot,
+      containmentRoot: appRoot,
       entry: "index.html",
       entryLabel: "panel entry",
     });
@@ -264,7 +264,7 @@ describe("startStaticDirectoryPreview", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("serves a root whose own directory NAME starts with '..'", async () => {
-    const containment = join(root, "plugin");
+    const containment = join(root, "app");
     const served = join(containment, "..cache");
     await mkdir(served, { recursive: true });
     await writeFile(join(served, "index.html"), "<h1>Dot-dot name</h1>");

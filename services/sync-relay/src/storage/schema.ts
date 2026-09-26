@@ -7,6 +7,7 @@ import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSche
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
+import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1195,6 +1196,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationHostSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
+    initializeAutomationPressSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

@@ -279,9 +279,6 @@ function sitePath(root: string, child: string): string {
 
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
-  if (stripWindowsAliasSuffix(segments[0] ?? "") === "plugins") {
-    return true;
-  }
   return segments.some((segment, index) => {
     const stripped = stripWindowsAliasSuffix(segment);
     const nextStripped =
@@ -401,7 +398,7 @@ function parsePreview(
         path,
         "warning",
         "unsupported-preview-command-mode",
-        "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+        "Configured preview commands run only in dev mode. Static and build previews use the app's entry file or build output.",
       ),
     );
   }

@@ -23,6 +23,14 @@ import type { DatasetCommit } from "./supervisor.js";
 // dying. Try again queues a failed claim again and raises its run. Every claim
 // and History row is charged to the dataset's storage and refunded when
 // trimmed; deleting a dataset refunds everything it retained.
+//
+// Each automation also counts its failures on one instance of a dataset,
+// its host epoch, a generation that only grows: trimming and Try again never
+// lower it. A failure notice the owner dismissed at generation N comes back
+// when the count passes N. A dataset deleted and made again, or restored,
+// has a new epoch, so its count starts over under a new instance and no
+// earlier dismissal applies to it. The count is charged to the dataset once,
+// and deleting the dataset forgets it with its claims.
 
 /** A change at this depth runs no automation. Its claims fail at once and say why. */
 export const DATASET_AUTOMATION_CHAIN_DEPTH = 4;
@@ -94,11 +102,29 @@ export interface DatasetAutomationClaim {
   updatedAtMs: number;
 }
 export type DatasetAutomationClaims = ReturnType<typeof createDatasetAutomationClaims>;
+/** An automation's newest failure, as its notice shows it. */
+export interface DatasetAutomationFailure {
+  automationId: string;
+  claimId: string;
+  /**
+   * The dataset instance the count belongs to: its id and host epoch. It
+   * survives restarts and changes when the dataset is made again.
+   */
+  datasetInstance: string;
+  /** It failed before it started, as a chain stop or a change too large to claim, so Try again cannot run it. */
+  neverStarted: boolean;
+  error: string;
+  updatedAtMs: number;
+  /** How many times the automation's claims have failed. It only grows. */
+  generation: number;
+}
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const KINDS: readonly DatasetChangeKind[] = ["added", "changed", "removed"];
 const COLUMNS = "claim_id,workspace_id,dataset_id,automation_id,host_epoch,revision,fact,actor,depth,state,attempts,run,error,created_at_ms,updated_at_ms";
+// An automation's newest failure is the one it settled last: its failure notice offers that one.
+const NEWEST = "ORDER BY updated_at_ms DESC, rowid DESC";
 
 function text(value: unknown, name: string, maximum = 1024): string {
   if (typeof value !== "string" || !value || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new Error(`Invalid automation ${name}.`);
@@ -231,12 +257,20 @@ export function createDatasetAutomationClaims(options: {
   const read = (workspaceId: string, claimId: string) =>
     db.prepare(`SELECT ${COLUMNS} FROM dohc_dataset_automation_claims WHERE workspace_id=? AND claim_id=?`).get(workspaceId, claimId);
   const refunded = (rows: Array<Record<string, unknown>>) => rows.reduce((sum, row) => sum + Number(row.storage_bytes), 0);
+  // Counts one failure. Returns the bytes a first failure's row retains, for the caller to charge.
+  const countFailure = (scope: DatasetScope, hostEpoch: string, automationId: string): number => {
+    const storageBytes = bytes([scope.workspaceId, scope.datasetId, hostEpoch, automationId]) + ROW_BYTES;
+    const row = db.prepare(`INSERT INTO dohc_dataset_automation_failure_generations VALUES(?,?,?,?,1,?)
+      ON CONFLICT(workspace_id,dataset_id,host_epoch,automation_id) DO UPDATE SET generation=generation+1 RETURNING generation`)
+      .get(scope.workspaceId, scope.datasetId, hostEpoch, automationId, storageBytes);
+    return Number(row?.generation) === 1 ? storageBytes : 0;
+  };
   // An automation keeps its newest settled claims and its newest failure. Returns the bytes removed.
   function trim(scope: DatasetScope, automationId: string): number {
     const owned = "workspace_id=?1 AND dataset_id=?2 AND automation_id=?3";
     return refunded(db.prepare(`DELETE FROM dohc_dataset_automation_claims WHERE ${owned} AND state IN('done','failed')
       AND rowid NOT IN(SELECT rowid FROM dohc_dataset_automation_claims WHERE ${owned} AND state IN('done','failed') ORDER BY rowid DESC LIMIT ?4)
-      AND rowid IS NOT (SELECT max(rowid) FROM dohc_dataset_automation_claims WHERE ${owned} AND state='failed') RETURNING storage_bytes`)
+      AND rowid IS NOT (SELECT rowid FROM dohc_dataset_automation_claims WHERE ${owned} AND state='failed' ${NEWEST} LIMIT 1) RETURNING storage_bytes`)
       .all(scope.workspaceId, scope.datasetId, automationId, DATASET_AUTOMATION_HISTORY));
   }
   tx(() => {
@@ -253,15 +287,24 @@ export function createDatasetAutomationClaims(options: {
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
       UNIQUE(workspace_id,dataset_id,automation_id,host_epoch,revision,table_id,record_id)) STRICT;
     CREATE INDEX IF NOT EXISTS dohc_dataset_automation_claims_state ON dohc_dataset_automation_claims(workspace_id,state);
+    CREATE TABLE IF NOT EXISTS dohc_dataset_automation_failure_generations(
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,host_epoch TEXT NOT NULL,automation_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation>0),storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
+      PRIMARY KEY(workspace_id,dataset_id,host_epoch,automation_id)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL,automation_id TEXT NOT NULL,depth INTEGER NOT NULL,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
       PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`);
     // The reaper. A running claim here belongs to a process that no longer runs.
     const reaped = db.prepare(`UPDATE dohc_dataset_automation_claims SET state=CASE WHEN attempts>=?1 THEN 'failed' ELSE 'pending' END,
-      error=CASE WHEN attempts>=?1 THEN ?2 END,updated_at_ms=?3 WHERE state='running' RETURNING workspace_id,dataset_id,automation_id,state`)
+      error=CASE WHEN attempts>=?1 THEN ?2 END,updated_at_ms=?3 WHERE state='running' RETURNING workspace_id,dataset_id,host_epoch,automation_id,state`)
       .all(DATASET_AUTOMATION_ATTEMPTS, DATASET_AUTOMATION_RECLAIM_EXHAUSTED, now());
     const exhausted = new Map(reaped.filter(row => row.state === "failed").map(row => [JSON.stringify([row.workspace_id, row.dataset_id, row.automation_id]), row]));
+    for (const row of reaped) {
+      if (row.state !== "failed") continue;
+      const scope = { workspaceId: String(row.workspace_id), datasetId: String(row.dataset_id) };
+      account(scope, countFailure(scope, String(row.host_epoch), String(row.automation_id)));
+    }
     for (const row of exhausted.values()) {
       const scope = { workspaceId: String(row.workspace_id), datasetId: String(row.dataset_id) };
       account(scope, -trim(scope, String(row.automation_id)));
@@ -313,7 +356,7 @@ export function createDatasetAutomationClaims(options: {
           const storageBytes = bytes([claimId, ...key, factJson, actorJson]) + ERROR_BYTES + ROW_BYTES;
           statement.run(claimId, ...key, factJson, actorJson, depth, error ? "failed" : "pending", error, at, at, storageBytes);
           delta += storageBytes; made++;
-          if (error) failed.add(automationId);
+          if (error) { failed.add(automationId); delta += countFailure(scope, cursor.hostEpoch, automationId); }
         };
         if (refusal !== undefined) {
           const reached = touched(input.approved.definition, input.changeset);
@@ -352,10 +395,37 @@ export function createDatasetAutomationClaims(options: {
     unsubscribe(scope: DatasetScope, automationId: string): void {
       tx(() => db.prepare("DELETE FROM dohc_dataset_automation_subscriptions WHERE workspace_id=? AND dataset_id=? AND automation_id=?").run(scope.workspaceId, scope.datasetId, automationId));
     },
-    subscriptions(scope: DatasetScope): DatasetAutomationSubscription[] {
-      return tx(() => db.prepare("SELECT * FROM dohc_dataset_automation_subscriptions WHERE workspace_id=? AND dataset_id=? ORDER BY automation_id").all(scope.workspaceId, scope.datasetId))
-        .map(row => ({ automationId: String(row.automation_id), tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)),
+    /** Every subscription in the workspace, with the dataset it watches. */
+    subscriptions(workspaceId: string): Array<DatasetAutomationSubscription & { datasetId: string }> {
+      return tx(() => db.prepare("SELECT * FROM dohc_dataset_automation_subscriptions WHERE workspace_id=? ORDER BY dataset_id,automation_id").all(workspaceId))
+        .map(row => ({ datasetId: String(row.dataset_id), automationId: String(row.automation_id), tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)),
           fieldIds: row.field_ids === null ? null : JSON.parse(String(row.field_ids)), definitionHash: String(row.definition_hash) }));
+    },
+    /** An automation's newest claims in every state, newest first: its run history. */
+    claims(workspaceId: string, automationId: string): DatasetAutomationClaim[] {
+      return tx(() => db.prepare(`SELECT ${COLUMNS} FROM dohc_dataset_automation_claims WHERE workspace_id=? AND automation_id=? ORDER BY rowid DESC LIMIT ?`)
+        .all(workspaceId, automationId, DATASET_AUTOMATION_HISTORY)).map(claim);
+    },
+    /** One of an automation's claims, in any state, however old, or null. */
+    claim(workspaceId: string, automationId: string, claimId: string): DatasetAutomationClaim | null {
+      const row = tx(() => read(workspaceId, claimId));
+      return row && String(row.automation_id) === automationId ? claim(row) : null;
+    },
+    /**
+     * Each automation's newest failed claim, the one its failure notice
+     * offers to try again, with its failure count. A claim that failed
+     * before it started cannot run again.
+     */
+    failures(workspaceId: string): DatasetAutomationFailure[] {
+      return tx(() => db.prepare(`SELECT f.automation_id,f.claim_id,f.dataset_id,f.host_epoch,f.attempts,f.error,f.updated_at_ms,COALESCE(c.generation,1) AS generation FROM (
+          SELECT dataset_id,host_epoch,automation_id,claim_id,attempts,error,updated_at_ms,ROW_NUMBER() OVER (PARTITION BY automation_id ${NEWEST}) AS newest
+          FROM dohc_dataset_automation_claims WHERE workspace_id=?1 AND state='failed') f
+        LEFT JOIN dohc_dataset_automation_failure_generations c
+          ON c.workspace_id=?1 AND c.dataset_id=f.dataset_id AND c.host_epoch=f.host_epoch AND c.automation_id=f.automation_id
+        WHERE f.newest=1 ORDER BY f.automation_id`).all(workspaceId))
+        .map(row => ({ automationId: String(row.automation_id), claimId: String(row.claim_id),
+          datasetInstance: JSON.stringify([String(row.dataset_id), String(row.host_epoch)]), neverStarted: Number(row.attempts) === 0,
+          error: String(row.error ?? ""), updatedAtMs: Number(row.updated_at_ms), generation: Number(row.generation) }));
     },
     /** Start the oldest pending claim in the workspace, or return null. */
     next(workspaceId: string): DatasetAutomationClaim | null {
@@ -375,8 +445,17 @@ export function createDatasetAutomationClaims(options: {
           .run(outcome.state, error, now(), started.workspaceId, started.claimId, started.attempts);
         if (Number(changed.changes) !== 1) throw new Error("This automation run is no longer current.");
         const settled = claim(read(started.workspaceId, started.claimId)!);
-        account(settled, -trim(settled, settled.automationId));
+        const counted = outcome.state === "failed" ? countFailure(settled, settled.hostEpoch, settled.automationId) : 0;
+        account(settled, counted - trim(settled, settled.automationId));
         return settled;
+      });
+    },
+    /** Hands a claim `next` started back to pending, without counting its attempt: it waits for something else. */
+    release(started: Pick<DatasetAutomationClaim, "workspaceId" | "claimId" | "attempts">): void {
+      tx(() => {
+        const changed = db.prepare("UPDATE dohc_dataset_automation_claims SET state='pending',attempts=attempts-1,updated_at_ms=? WHERE workspace_id=? AND claim_id=? AND state='running' AND attempts=?")
+          .run(now(), started.workspaceId, started.claimId, started.attempts);
+        if (Number(changed.changes) !== 1) throw new Error("This automation run is no longer current.");
       });
     },
     /** Try again: a failed claim runs again with the facts it holds, as its next run. */
@@ -398,7 +477,7 @@ export function createDatasetAutomationClaims(options: {
      * transaction. It refunds nothing: the host refunds all the dataset retained.
      */
     forget(scope: DatasetScope): void {
-      for (const table of ["dohc_dataset_automation_subscriptions", "dohc_dataset_automation_claims", "dohc_dataset_automation_revisions"])
+      for (const table of ["dohc_dataset_automation_subscriptions", "dohc_dataset_automation_claims", "dohc_dataset_automation_revisions", "dohc_dataset_automation_failure_generations"])
         db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(scope.workspaceId, scope.datasetId);
     },
   };

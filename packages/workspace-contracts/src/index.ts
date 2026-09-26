@@ -8,5 +8,4 @@ export type {
   KeyEnvelopeDownloadResult,
   KeyEnvelopeUploadResult,
   MomentAuthor,
-  MomentWriteAuthor,
 } from "./engine";

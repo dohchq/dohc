@@ -316,23 +316,14 @@ fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
     }
 }
 
-fn projection_matches(
-    state: &ProjectionTargetState,
-    content: &SnapshotContent,
-    desired_sha256: &str,
-) -> bool {
+/// Equal bytes need no write, whichever kind the snapshot and the disk file
+/// have. A snapshot stored as binary before its path was read as text still
+/// matches the same bytes on disk.
+fn projection_matches(state: &ProjectionTargetState, desired_sha256: &str) -> bool {
     matches!(
-        (state, content),
-        (
-            ProjectionTargetState::Text { sha256 },
-            SnapshotContent::Text { .. }
-        ) if sha256 == desired_sha256
-    ) || matches!(
-        (state, content),
-        (
-            ProjectionTargetState::Binary { sha256 },
-            SnapshotContent::Binary { .. }
-        ) if sha256 == desired_sha256
+        state,
+        ProjectionTargetState::Text { sha256 } | ProjectionTargetState::Binary { sha256 }
+            if sha256 == desired_sha256
     )
 }
 
@@ -452,7 +443,7 @@ fn plan_plaintext_switch(
                 }
                 SnapshotContent::Binary { sha256 } => (sha256.clone(), None),
             };
-            if projection_matches(&state, &snapshot.content, &desired_sha256) {
+            if projection_matches(&state, &desired_sha256) {
                 continue;
             }
             projections.push(planned_projection(
@@ -905,11 +896,11 @@ impl ActorHandle {
                     } else { None }
                 } else if change.content_kind == "binary" {
                     VersionedTextStore::new(store).read_binary(&workspace_id, &active, &change.path)?
-                        .map(|head| { let equal = matches!(&state, ProjectionTargetState::Binary {sha256} if sha256 == &head.sha256);
+                        .map(|head| { let equal = projection_matches(&state, &head.sha256);
                             (head.sha256, None, equal) })
                 } else if change.content_kind == "text" {
                     VersionedTextStore::new(store).read_text(&workspace_id, &active, &change.path)?
-                        .map(|head| { let equal = matches!(&state, ProjectionTargetState::Text {sha256} if sha256 == &head.blob_sha256);
+                        .map(|head| { let equal = projection_matches(&state, &head.blob_sha256);
                             (head.blob_sha256, Some(head.text.into_bytes()), equal) })
                 } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
                 let (operation, sha, inline) = match (change.operation, desired) {

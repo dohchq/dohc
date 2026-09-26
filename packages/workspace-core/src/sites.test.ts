@@ -321,33 +321,15 @@ describe("discoverSites", () => {
     ).toEqual([]);
   });
 
-  it("does not discover sites under plugins folders", () => {
-    expect(
-      discoverSites(["plugins/some-plugin/index.html", "ordinary-site/index.html"]),
-    ).toEqual([
-      {
-        root: "ordinary-site",
-        title: "Ordinary Site",
-        kind: "static",
-        confidence: "high",
-        entry: "index.html",
-        scripts: {},
-        buildOutputs: [],
-        diagnostics: [],
-      },
-    ]);
-  });
-
-  it("keeps a site's internal plugins directory while excluding the root plugin tree", () => {
+  it("discovers a site in a folder named plugins like any other folder", () => {
     expect(
       discoverSites([
-        "customer-portal/plugins/index.html",
-        "customer-portal/plugins/chart.js",
-        "plugins/hello-plugin/panel/index.html",
+        "plugins/index.html",
+        "plugins/chart.js",
       ]),
     ).toEqual([
       {
-        root: "customer-portal/plugins",
+        root: "plugins",
         title: "Plugins",
         kind: "static",
         confidence: "high",

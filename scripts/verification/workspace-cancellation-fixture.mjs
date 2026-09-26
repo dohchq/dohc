@@ -8,16 +8,17 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   // use offline adapters. No database or native build starts in this fixture.
   const put = (path, text) => { mkdirSync(dirname(join(root,path)),{recursive:true}); writeFileSync(join(root,path),text); };
   put('package.json','{"type":"module"}');
-  for(const file of ['verify.mjs','js-tests.mjs','process.mjs','cancellation.mjs','timing.mjs'])
+  for(const file of ['verify.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
   put('apps/desktop/package.json','{}');
+  put('pnpm-workspace.yaml','fixture workspace');
   put('.github/workflows/pr-checks.yml','fixture workflow');
-  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
   put('node_modules/pnpm/package.json',JSON.stringify({main:'package.json',bin:{pnpm:'fixture.mjs'}}));
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
   put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const enginePath='fixture-engine'; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
   put('tools/rust-engine-program/tree-provenance.mjs',"export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  const packages = ['ydoc-projection','a-worker','z-queued'];
+  const packages = ['ydoc-projection','workspace-auth','z-queued'];
   for(const name of packages) put(`packages/${name}/package.json`,JSON.stringify({name:`@dohc/${name}`,scripts:{test:'vitest run'}}));
   put('bin/git',`#!/usr/bin/env node
 const args=process.argv.slice(2);process.stdout.write(args[0]==='status'?'':args[0]==='diff'?'scripts/verification/verify.mjs\\0':'fixture');
@@ -54,7 +55,7 @@ if(args[0]==='run' && args[1]==='test') {
   const name=args[1].split('/')[1];
   process.on('SIGTERM',()=>appendFileSync(join(root,'terms.jsonl'),JSON.stringify({name,pid:process.pid})+'\\n'));
   setInterval(()=>{},1000);
-  writeFileSync(join(root,name+'.worker.json'),JSON.stringify({name,pid:process.pid,env:{POSTGRES_URL:process.env.POSTGRES_URL,DOHC_REQUIRE_POSTGRES:process.env.DOHC_REQUIRE_POSTGRES,DOHC_REQUIRE_ENGINE_E2E:process.env.DOHC_REQUIRE_ENGINE_E2E,DOHC_REQUIRE_PLUGIN_INSTALL_E2E:process.env.DOHC_REQUIRE_PLUGIN_INSTALL_E2E}}));
+  writeFileSync(join(root,name+'.worker.json'),JSON.stringify({name,pid:process.pid,env:{POSTGRES_URL:process.env.POSTGRES_URL,DOHC_REQUIRE_POSTGRES:process.env.DOHC_REQUIRE_POSTGRES,DOHC_REQUIRE_ENGINE_E2E:process.env.DOHC_REQUIRE_ENGINE_E2E}}));
 }
 `);
   put('owner.mjs',`

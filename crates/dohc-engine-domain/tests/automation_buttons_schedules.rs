@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     AutomationClaim, AutomationClaimState, AutomationPress, AutomationPressed,
     AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle,
     AutomationSubscription, AutomationTrigger, ChangeActorKind, DomainError,
-    MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, claim_automation_schedule,
+    MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, claim_automation_run_now, claim_automation_schedule,
     claim_next_pending_automation, list_automation_schedule_marks, press_automation,
     retry_automation_claim, settle_automation_claim, subscribe_automation,
 };
@@ -199,19 +199,19 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
         press(&mut store, "press-1", OTHER_INVOICE, 19),
         Err(DomainError::InvalidInput { .. })
     ));
-    let plugin = press_automation(
+    let malformed = press_automation(
         &mut store,
         WS,
         &AutomationPress {
             press_id: "press-6".to_owned(),
-            automation_id: "plugin:triage".to_owned(),
+            automation_id: "collection:triage".to_owned(),
             record_id: INVOICE.to_owned(),
             pressed_by: ADA.to_owned(),
         },
         20,
         &NoFaults,
     );
-    assert!(matches!(plugin, Err(DomainError::InvalidInput { .. })));
+    assert!(matches!(malformed, Err(DomainError::InvalidInput { .. })));
 }
 
 #[test]
@@ -492,4 +492,82 @@ fn a_record_subscription_cannot_name_buttons_or_schedules() {
             "{kind:?}"
         );
     }
+}
+
+#[test]
+fn run_now_claims_once_per_notice_without_a_record() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    let notice = "schedule-skipped:ws:collection:Invoices#weekday-report:1000";
+
+    let first = claim_automation_run_now(&mut store, WS, REPORT, notice, 5_000, &NoFaults)
+        .expect("run now");
+    assert!(first.inserted);
+    let claim = first.claim;
+    assert_eq!(claim.automation_id, REPORT);
+    assert_eq!(claim.record_id, None);
+    assert_eq!(claim.depth, 0);
+    assert_eq!(claim.change.kind, AutomationChangeKind::Schedule);
+    assert_eq!(
+        claim.trigger,
+        AutomationTrigger::Key {
+            key: format!("run-now:{notice}")
+        }
+    );
+    let again =
+        claim_automation_run_now(&mut store, WS, REPORT, notice, 6_000, &NoFaults).expect("again");
+    assert!(!again.inserted, "the same notice claims once");
+    assert_eq!(again.claim, claim, "a repeat answers the claim it made");
+    assert!(
+        claim_automation_run_now(
+            &mut store,
+            WS,
+            REPORT,
+            &format!("{notice}0"),
+            6_000,
+            &NoFaults
+        )
+        .expect("another notice")
+        .inserted
+    );
+    for (automation, notice) in [("plugin/report", notice), (REPORT, " ")] {
+        assert!(
+            matches!(
+                claim_automation_run_now(&mut store, WS, automation, notice, 7_000, &NoFaults),
+                Err(DomainError::InvalidInput { .. })
+            ),
+            "{automation} {notice:?}"
+        );
+    }
+}
+
+#[test]
+fn a_done_run_now_claim_keeps_its_key_after_schedule_claims_age_out() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    let notice = "schedule-skipped:ws:collection:Invoices#weekday-report:1";
+    schedule(&mut store, "daily", &[], 0).expect("start");
+    let ran = claim_automation_run_now(&mut store, WS, REPORT, notice, 1, &NoFaults)
+        .expect("run now")
+        .claim;
+    run(&mut store, AutomationSettle::Done, 2);
+    schedule(&mut store, "daily", &[40 * DAY_MS], 40 * DAY_MS).expect("run later");
+    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
+        schedule(
+            &mut store,
+            "daily",
+            &[40 * DAY_MS + 1 + step],
+            40 * DAY_MS + 1 + step,
+        )
+        .expect("run");
+        run(&mut store, AutomationSettle::Done, 40 * DAY_MS + step);
+    }
+    assert!(
+        claim_exists(&store, &ran.claim_id),
+        "a run-now key is not a due time"
+    );
+    let again = claim_automation_run_now(&mut store, WS, REPORT, notice, 50 * DAY_MS, &NoFaults)
+        .expect("again");
+    assert!(!again.inserted);
+    assert_eq!(again.claim.claim_id, ran.claim_id);
 }

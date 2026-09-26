@@ -265,12 +265,12 @@ describe("registered share proposal handlers", () => {
     await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: false });
   });
 
-  it("says when the relay does not take direct writes, and stops asking", async () => {
+  it("says when the share is unavailable, and asks the relay again on the next push", async () => {
     const h = await harness(); h.recipient();
     h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
     await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
-    expect(h.pushDirect).toHaveBeenCalledTimes(1);
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "pushed", writes: [] });
+    expect(h.pushDirect).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the answer of a push on open whose window left the view before it finished", async () => {

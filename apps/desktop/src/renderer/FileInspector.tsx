@@ -1,3 +1,4 @@
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
@@ -346,6 +347,9 @@ function TruncatedNotice(props: { workspaceId: string; path: string }) {
 type FileInspectorProps = {
   workspaceId: string;
   path: string;
+  // A record's Button fields report through the shell's toasts and Notices.
+  onButtonError?: ReportButtonError;
+  onButtonNotice?: (message: string) => void;
   fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
@@ -801,6 +805,8 @@ export const FileInspector = memo(function FileInspector(
             registerSourceToggle={props.registerSourceToggle}
             autoFocus={props.autoFocus}
             onPendingDraftChange={setPendingDraft}
+            onButtonError={props.onButtonError}
+            onButtonNotice={props.onButtonNotice}
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}

@@ -570,12 +570,8 @@ export function ProductDemo() {
             affordance means giving the demo a real right-side panel like
             Titlebar's titlebar-chats-sidebar control, which is UI work in its
             own right, not a drive-by on a typecheck fix. */}
-        {/* The demo installs no plugins, so the rail shows dohc's own views
-            and never asks for a plugin's icon. */}
         <ActivityBar
-          workspaceId="demo"
           views={VIEW_IDS}
-          pluginViews={[]}
           activeView={activeActivity === "chats" ? "explorer" : activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}

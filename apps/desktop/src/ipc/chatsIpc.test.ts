@@ -137,6 +137,7 @@ function fixture(kind: ScopeKind = "local") {
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
+    notifyRenderer: () => undefined,
   });
   const sender = { trusted: true };
   const assertTrustedSender = vi.fn((event: Event) => {

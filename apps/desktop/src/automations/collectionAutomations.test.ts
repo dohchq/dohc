@@ -6,18 +6,36 @@ import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { AutomationClaim, ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { AutomationClaim, AutomationClaimMessage, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
-import type { ReachRoster, RosterGrant } from "./automationReach";
+import { AGENT_WAKES_AGENT, definitionHash, localIsoTime, stepKey } from "./automationPlan";
+import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, UNREADABLE_REACH, type CollectionAutomationEngine } from "./collectionAutomations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+import {
+  CollectionAutomations,
+  TIMEOUTS_BEFORE_SWITCH_OFF,
+  UNREADABLE_REACH,
+  type CollectionAutomationEngine,
+  type CollectionAutomationsOptions,
+} from "./collectionAutomations";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+import {
+  AutomationChatSessionWait,
+  automationMessageId,
+  automationNoticeId,
+  automationWakeThreadId,
+  chatDirectoryOf,
+  type AutomationChatMessage,
+  type AutomationNotice,
+  type ChatDirectoryChannel,
+  type ChatNeeds,
+} from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
+import { NoticeNotSentError } from "../notices/noticeStore";
 
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
@@ -29,7 +47,7 @@ const evaluator = sharedEvaluator.forWorkspace("workspace");
 
 const OWNER: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [] };
 const editor = (email: string, paths: string[]): RosterGrant => ({
-  recipientUserId: `user-${email}`, recipientEmail: email,
+  grantId: `grant-${email}`, recipientUserId: `user-${email}`, recipientEmail: email,
   files: { paths, versionId: null, access: "edit" }, channel: null,
 });
 
@@ -39,7 +57,7 @@ interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc 
 // automation off, so each test Collection defines them all.
 const FIELDS = [
   "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
-  "Project", "Finished on", "A", "B", "C", "D", "E", "Details",
+  "Project", "Finished on", "Archived on", "Paid", "Paid by", "Pressed", "Button", "Total", "A", "B", "C", "D", "E", "Details", "Stamped", "Asked by",
 ];
 const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
 
@@ -55,6 +73,14 @@ async function world(options: {
   unanswered?: { settle: boolean };
   /** The engine refuses the next settle this many times: its recovery took the claim back. */
   refused?: { settle: number; stillRunning?: boolean };
+  /** The workspace's chats, for automations that post. */
+  channels?: ChatDirectoryChannel[];
+  /** Whether this computer runs Group-message automations; true unless a test says otherwise. */
+  runsGroupTriggers?: boolean;
+  /** Whole message bodies by id, for claims that carried them truncated. */
+  messageBodies?: Record<string, string>;
+  /** Who may run a failed press again. Everyone, unless a test says otherwise. */
+  mayRetryPress?: (pressedBy: string | null) => Promise<boolean>;
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -67,15 +93,30 @@ async function world(options: {
   for (const [collection, body] of Object.entries(options.automations)) await writeAutomations(collection, body);
 
   const records = new Map<string, FakeRecord>();
+  let claimCount = 0;
   const journal = new Map<string, string>();
   const journaled: Array<{ path: string; field?: string; idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }> = [];
   const authored: Array<{ path: string; author: unknown }> = [];
   const claims = new Map<string, AutomationClaim>();
   const pending: AutomationClaim[] = [];
+  const presses = new Map<string, string>();
+  const pressEvents: unknown[] = [];
   const subscriptions = new Map<string, unknown>();
+  const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
   const waiters = new Set<() => void>();
   const events: string[] = [];
+  // Messages the automations wrote, once per effect as the engine keeps them.
+  const messages: AutomationChatMessage[] = [];
+  let chatWrites = 0;
+  let beforeChatWrite: ((message: AutomationChatMessage) => Promise<void>) | null = null;
+  // What each directory read was asked for.
+  const directoryNeeds: ChatNeeds[] = [];
+  // The run signal each notice was sent under.
+  const noticeSignals: AbortSignal[] = [];
+  // Notices the automations sent, once per id as the outbox keeps them.
+  const notices: AutomationNotice[] = [];
+  let beforeNotice: ((notice: AutomationNotice) => Promise<void>) | null = null;
   let idleDrains = 0;
   // Each count fails that many of the next calls.
   const failures = { authoredWrite: 0, openSession: 0 };
@@ -177,6 +218,74 @@ async function world(options: {
         if (claim.state === "failed" && (!known || claim.updatedAtMs > known.updatedAtMs)) newest.set(claim.automationId, claim);
       }
       return { failures: [...newest.values()].map(({ automationId, claimId }) => ({ automationId, claimId })) };
+    },
+    // The engine's rules: a new or changed schedule only sets its mark, and
+    // each due time claims once.
+    claimAutomationSchedule: async ({ automationId, scheduleHash, run, throughMs }) => {
+      const mark = marks.get(automationId);
+      const inserted: AutomationClaim[] = [];
+      if (mark?.scheduleHash === scheduleHash) {
+        for (const due of run) {
+          if ([...claims.values()].some((known) => known.automationId === automationId && "key" in known.trigger && known.trigger.key === `schedule:${due}`)) continue;
+          claimCount += 1;
+          const created: AutomationClaim = {
+            claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `schedule:${due}` },
+            recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
+            change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+            state: "pending", attempts: 0, run: 1, createdAtMs: due + 1_000, updatedAtMs: 0,
+          };
+          claims.set(created.claimId, created);
+          pending.push(created);
+          inserted.push(created);
+        }
+      }
+      const next = { automationId, scheduleHash, throughMs };
+      marks.set(automationId, next);
+      return { claims: inserted, mark: next };
+    },
+    listAutomationScheduleMarks: async () => ({ marks: [...marks.values()] }),
+    runAutomationNow: async ({ automationId, noticeId }) => {
+      const key = `run-now:${noticeId}`;
+      const known = [...claims.values()].find((claim) => claim.automationId === automationId && "key" in claim.trigger && claim.trigger.key === key);
+      if (known) return { claim: known };
+      claimCount += 1;
+      const created: AutomationClaim = {
+        claimId: `atc_claim${claimCount}`, automationId, trigger: { key },
+        recordId: null, collectionPath: automationId.slice("collection:".length, automationId.lastIndexOf("#")), depth: 0,
+        change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+        state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 12), updatedAtMs: 0,
+      };
+      claims.set(created.claimId, created);
+      pending.push(created);
+      return { claim: created };
+    },
+    // The engine's press rules: a remembered press id answers its claim; the
+    // same person's press joins a pending or running claim; anyone else's is busy.
+    pressAutomation: async ({ pressId, automationId, recordId, pressedBy }) => {
+      const summary = (claim: AutomationClaim) => {
+        const { fields: _fields, fieldsOmitted: _omitted, ...change } = claim.change;
+        return { ...claim, change };
+      };
+      const remembered = presses.get(pressId);
+      if (remembered) return { busy: false, claim: summary(claims.get(remembered)!) };
+      const active = [...claims.values()].find((claim) => claim.automationId === automationId && claim.recordId === recordId &&
+        claim.change.kind === "button" && (claim.state === "pending" || claim.state === "running"));
+      if (active && active.change.onBehalfOf !== pressedBy) return { busy: true, claim: null };
+      const claim = active ?? (() => {
+        claimCount += 1;
+        const record = records.get(recordId)!;
+        const created: AutomationClaim = {
+          claimId: `atc_claim${claimCount}`, automationId, trigger: { key: `press:${pressId}` },
+          recordId, collectionPath: record.collection, depth: 0,
+          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: pressedBy, fields: [], fieldsOmitted: 0 },
+          state: "pending", attempts: 0, run: 1, createdAtMs: Date.UTC(2026, 8, 25, 2, 0), updatedAtMs: 0,
+        };
+        claims.set(created.claimId, created);
+        pending.push(created);
+        return created;
+      })();
+      presses.set(pressId, claim.claimId);
+      return { busy: false, claim: summary(claim) };
     },
     releaseAutomationClaim: async ({ claimId }) => {
       const claim = claims.get(claimId)!;
@@ -282,7 +391,7 @@ async function world(options: {
   const failuresChanged: string[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   // A new executor over the same engine, files, and saved runs, as after a restart.
-  const makeExecutor = () => new CollectionAutomations({
+  const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => new CollectionAutomations({
     withEngine: async (work) => await work(engine),
     withRecordWrites: async (signal, work) => {
       await options.withRecordWrites?.(signal, events);
@@ -309,7 +418,6 @@ async function world(options: {
       return { status: "written" };
     },
     pathExists: (path) => stat(join(root, path)).then(() => true, () => false),
-    cachedRoster: async () => roster,
     roster: async () => {
       rosterCalls += 1;
       const current = roster;
@@ -318,17 +426,41 @@ async function world(options: {
       await hook?.();
       return current;
     },
+    cachedRoster: async () => roster,
     evaluator: options.evaluator ?? evaluator,
     store,
     onFailuresChanged: () => { failuresChanged.push("changed"); wake(); },
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
+    chat: {
+      directory: async (current, needs) => {
+        directoryNeeds.push(needs);
+        return chatDirectoryOf(options.channels ?? [], current);
+      },
+      write: async (_signal, message) => {
+        chatWrites += 1;
+        await beforeChatWrite?.(message);
+        if (!messages.some((written) => written.effectId === message.effectId)) messages.push(message);
+      },
+    },
+    runsGroupTriggers: () => options.runsGroupTriggers ?? true,
+    readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
+    postNotice: async (notice, signal) => {
+      noticeSignals.push(signal);
+      await beforeNotice?.(notice);
+      if (!notices.some((sent) => sent.noticeId === notice.noticeId)) notices.push(notice);
+    },
+    personName: (userId) => (userId === "user-ice" ? "Ice" : userId),
+    mayRetryPress: options.mayRetryPress ?? (async () => true),
+    onPressSettled: (event) => { pressEvents.push({ settled: event }); wake(); },
+    onPressWaiting: (event) => { pressEvents.push({ waiting: event }); wake(); },
     onError: (context, error) => { errors.push({ context, error }); },
+    withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
+    ...extra,
   });
   const executor = makeExecutor();
 
-  let claimCount = 0;
   const claim = (automationId: string, record: FakeRecord, change: Partial<RecordChange> = {}) => {
     claimCount += 1;
     const created: AutomationClaim = {
@@ -351,7 +483,7 @@ async function world(options: {
   };
 
   return {
-    root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
+    root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged, pressEvents,
     holdsChanged: () => holdsChanged,
     automationsChanged: () => automationsChanged,
     rosterCalls: () => rosterCalls,
@@ -371,10 +503,43 @@ async function world(options: {
     effectRecords: () => records_,
     occupy: (id: string) => { occupied.add(id); },
     failOpenAt: (index: number) => { failOpenAt = opens + index; },
+    messages,
+    directoryNeeds,
+    chatWrites: () => chatWrites,
+    beforeChatWrite: (hook: ((message: AutomationChatMessage) => Promise<void>) | null) => { beforeChatWrite = hook; },
+    notices,
+    noticeSignals,
+    beforeNotice: (hook: ((notice: AutomationNotice) => Promise<void>) | null) => { beforeNotice = hook; },
   };
 }
 
 const TASKS = "collection:Tasks#bump";
+
+// The definition hash the executor lists for one automation, as a presser's window sees it.
+// The host module's holds as the executor sees them: a handover waits on each.
+function fakeHostHold() {
+  let admits = true;
+  let holds = 0;
+  return {
+    held: () => holds,
+    refuse: () => { admits = false; },
+    take: (): (() => void) | null => {
+      if (!admits) return null;
+      holds += 1;
+      let released = false;
+      return () => { if (!released) { released = true; holds -= 1; } };
+    },
+  };
+}
+
+async function hashOf(executor: CollectionAutomations, collection: string, id: string): Promise<string> {
+  const listed = await executor.automationsIn(collection);
+  const found = listed.status === "read"
+    ? listed.automations.find((entry) => entry.valid && entry.automation.id === id)
+    : undefined;
+  if (!found?.valid) throw new Error(`No automation ${id} in ${collection}.`);
+  return found.definitionHash;
+}
 const BUMP = [
   "  - id: bump",
   "    name: Bump",
@@ -439,7 +604,7 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
 
     expect(claim.state).toBe("done");
-    // A schedule cannot run yet, so only the record trigger subscribes.
+    // A schedule claims when it is due, so only the record trigger subscribes.
     expect([...w.subscriptions.keys()]).toEqual(["collection:Tasks#stamp"]);
     expect(w.subscriptions.get("collection:Tasks#stamp")).toEqual({
       automationId: "collection:Tasks#stamp", path: "Tasks", kinds: ["changed"], fields: ["Status"],
@@ -458,6 +623,471 @@ describe("Collection automations", () => {
       actorOriginId: "collection:Tasks#stamp",
       attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
     });
+  });
+
+  it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has(TASKS));
+
+    // A collaborator's direct write removes the automation (ADR 0013).
+    await w.writeAutomations("Tasks", "version: 1\nautomations: []\n");
+    w.executor.handlePulledPaths(["Tasks/notes.md"]);
+    // A read queued after the pull sees the index the pull left.
+    const unchanged = await w.executor.automationsIn("Tasks");
+    expect(unchanged.status === "read" && unchanged.automations.length, "a pull that names no definition file reads nothing").toBe(1);
+    expect(w.subscriptions.has(TASKS)).toBe(true);
+
+    w.executor.handlePulledPaths(["Tasks/notes.md", "Tasks/automations.yaml"]);
+    await w.until(() => !w.subscriptions.has(TASKS));
+  });
+
+  it("runs Run now from a skipped-run notice once, with when the skipped runs began", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: day, at: '09:00', timezone: UTC}",
+      "    do: [{add-record: {Title: '=trigger.skipped'}}]",
+    ].join("\n") } });
+    await w.executor.open();
+    const notice = `schedule-skipped:ws:collection:Tasks#sweep:${Date.UTC(2026, 8, 22, 9)}`;
+    expect(await w.executor.runNow("collection:Tasks#sweep", notice)).toBe(true);
+    const claim = [...w.claims.values()].find((candidate) => "key" in candidate.trigger && candidate.trigger.key === `run-now:${notice}`)!;
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(await w.executor.runNow("collection:Tasks#sweep", notice), "a repeat answers the same claim").toBe(true);
+    expect([...w.claims.values()].filter((candidate) => "key" in candidate.trigger && candidate.trigger.key.startsWith("run-now:")))
+      .toHaveLength(1);
+  });
+
+  it("closes after a background run and opens again", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: hour, timezone: UTC}",
+      "    do: [{add-record: {Title: Swept}}]",
+    ].join("\n") } });
+    await w.executor.open();
+    await w.executor.idle();
+    expect(w.executor.schedules()).toHaveLength(1);
+    await w.executor.close();
+    expect(w.executor.schedules(), "unknown while closed").toBeNull();
+    await w.executor.open();
+    expect(w.executor.schedules()).toHaveLength(1);
+  });
+
+  it("times a schedule's switch-on at the index read that sees it", async () => {
+    const sweep = (enabled: boolean, title = "Swept") => [
+      "  - id: sweep",
+      "    name: Sweep",
+      `    enabled: ${enabled}`,
+      "    when: {schedule: hour, timezone: UTC}",
+      `    do: [{add-record: {Title: ${title}}}]`,
+    ].join("\n");
+    const w = await world({ automations: { Tasks: sweep(true) } });
+    let now = 1_000;
+    let read: () => void = () => undefined;
+    const executor = w.makeExecutor({ nowMs: () => now, onSchedulesChanged: () => read() });
+    const reread = async (body: string) => {
+      await w.writeAutomations("Tasks", body);
+      const done = new Promise<void>((resolve) => { read = resolve; });
+      executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      await done;
+    };
+    await executor.open();
+    expect(executor.schedules()?.map((entry) => entry.enabledSince), "on as the executor opened").toEqual([null]);
+
+    // Switched off and on again before any scheduler step looks.
+    await reread(sweep(false));
+    expect(executor.schedules()).toEqual([]);
+    now = 2_000;
+    await reread(sweep(true));
+    now = 3_000;
+    await reread(sweep(true, "Swept again"));
+    expect(executor.schedules()?.map((entry) => entry.enabledSince), "an edit that keeps it on keeps the time").toEqual([2_000]);
+    await executor.dispose();
+  });
+
+  it("runs a schedule's due time on the records a Find returns, with the due time as now", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: sweep",
+      "    name: Sweep",
+      "    when: {schedule: day, at: '09:00', timezone: UTC}",
+      "    do:",
+      "      - find: record.Status == \"Done\"",
+      "        as: done",
+      "      - set: {Archived on: '=today()'}",
+      "        records: done",
+      "  - id: off",
+      "    name: Off",
+      "    enabled: false",
+      "    when: {schedule: hour, timezone: UTC}",
+      "    do: [{add-record: {Title: Never}}]",
+      "  - id: nowhere",
+      "    name: Nowhere",
+      "    when: {schedule: hour, timezone: Mars/Olympus}",
+      "    do: [{add-record: {Title: Never}}]",
+    ].join("\n") } });
+    const done = w.addRecord("Tasks", "done", { Status: "Done" });
+    const open = w.addRecord("Tasks", "open", { Status: "Doing" });
+    expect(w.executor.schedules(), "unknown until the executor opens").toBeNull();
+    await w.executor.open();
+    expect(w.executor.schedules()?.map((entry) => entry.automationId)).toEqual(["collection:Tasks#sweep"]);
+    const [sweep] = w.executor.schedules() ?? [];
+    const due = Date.UTC(2026, 8, 25, 9);
+    expect(await w.executor.claimSchedule({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, run: [], throughMs: due - 1 }))
+      .toEqual({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due - 1 });
+    await w.executor.claimSchedule({ automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, run: [due], throughMs: due });
+    const claim = [...w.claims.values()].find((candidate) => candidate.change.kind === "schedule")!;
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(done)).toEqual({ Status: "Done", "Archived on": "2026-09-25" });
+    expect(w.fieldsOf(open)).toEqual({ Status: "Doing" });
+    expect(await w.executor.scheduleMarks()).toEqual([
+      { automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due },
+    ]);
+    // A workspace that must sync before its schedules run says so.
+    const synced = w.makeExecutor({ runsSchedules: async () => false });
+    await synced.open();
+    const syncedList = await synced.automationsIn("Tasks");
+    expect(syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].cannotRun : null)
+      .toBe("Turn on sync to run this workspace's schedules.");
+    await synced.dispose();
+    // This computer's parser refuses a zone it does not know, so that
+    // schedule is off here with its diagnostic.
+    const listed = await w.executor.automationsIn("Tasks");
+    const nowhere = listed.status === "read" ? listed.automations[2] : null;
+    expect(nowhere).toMatchObject({ valid: false, id: "nowhere", diagnostics: [{ code: "invalid-timezone" }] });
+  });
+
+  it("runs a button's automation on the record for the person who pressed it, with no subscription", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: mark-paid",
+      "    name: Mark paid",
+      "    when: {button: Mark paid}",
+      "    do: [{set: {Paid: true, Paid by: '=person.name', Pressed: '=trigger.pressedAt', Button: '=trigger.field'}}]",
+    ].join("\n") } });
+    const invoice = w.addRecord("Tasks", "invoice", { Status: "Sent" });
+    await w.executor.open();
+    expect([...w.subscriptions.keys()]).toEqual([]);
+    await expect(w.executor.buttons("Tasks", ["Mark paid", "Archive"])).resolves.toEqual([
+      { field: "Mark paid", state: { kind: "ready", automationId: "collection:Tasks#mark-paid" } },
+      { field: "Archive", state: { kind: "no-automation", reason: "No automation uses this button." } },
+    ]);
+    const watched: string[] = [];
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, (claimId) => watched.push(claimId));
+    if (pressed.busy) throw new Error("Expected a claim");
+    expect(pressed.settled).toBeNull();
+    const claim = w.claims.get(pressed.claimId)!;
+    expect(watched).toEqual([claim.claimId]);
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(invoice)).toEqual({
+      Status: "Sent", Paid: true, "Paid by": "Ice", Pressed: localIsoTime(claim.createdAtMs), Button: "Mark paid",
+    });
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toEqual([{ settled: { claimId: claim.claimId, outcome: "done", error: null } }]);
+    // The same press sent again after a lost reply answers the same claim
+    // and how it ended, even after the automation is switched off.
+    await w.writeAutomations("Tasks", [
+      "  - id: mark-paid", "    name: Mark paid", "    enabled: false", "    when: {button: Mark paid}", "    do: [{set: {Paid: true}}]",
+    ].join("\n"));
+    const idle = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > idle);
+    await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toMatchObject([{ state: { kind: "disabled" } }]);
+    const again = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, (claimId) => watched.push(claimId));
+    expect(again).toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
+    // A run that already ended has no settle left to hear.
+    expect(watched).toEqual([claim.claimId]);
+    // The id names this press, so another person, field, or record is refused.
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This press id already names another press.");
+    // After a restart the engine still has the press, so the switched-off
+    // button answers it, and still refuses it to anyone else.
+    const restarted = w.makeExecutor();
+    await restarted.open();
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+      .resolves.toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This press id already names another press.");
+    // A new press on the switched-off button is still refused.
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ice" }, () => undefined))
+      .rejects.toThrow("Mark paid is off. Turn it on in Automations.");
+    await restarted.dispose();
+  });
+
+  it("tells the window a skipped run changed nothing, and answers a resend of it only as ended", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    await w.executor.open();
+    const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" };
+    // The record leaves before the run reads it, so the run changes nothing.
+    w.records.delete(invoice.id);
+    await expect(w.executor.press(input, () => undefined)).rejects.toThrow("This record is no longer in Tasks.");
+    w.records.set(invoice.id, invoice);
+    const pressed = await w.executor.press(input, () => undefined);
+    if (pressed.busy) throw new Error("Expected a claim");
+    w.records.delete(invoice.id);
+    await w.settledClaim(w.claims.get(pressed.claimId)!);
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toEqual([{ settled: { claimId: pressed.claimId, outcome: "skipped", error: null } }]);
+    // A run that saved nothing looks the same as one whose record was
+    // trimmed, so the resend says only that the run ended.
+    await expect(w.executor.press(input, () => undefined))
+      .resolves.toEqual({ busy: false, claimId: pressed.claimId, settled: { outcome: "ended", error: null } });
+  });
+
+  it("answers busy while the button runs on the record for someone else, and joins the same person's run", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    await w.executor.open();
+    const first = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined);
+    if (first.busy) throw new Error("Expected a claim");
+    // Who can edit is unknown, so the run waits and its window hears why.
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toEqual([{ waiting: { claimId: first.claimId, reason: "roster" } }]);
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ana" }, () => undefined))
+      .resolves.toEqual({ busy: true });
+    // A second window of the same person joins the run and learns why it waits.
+    const joined: Array<[string, string | null]> = [];
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-3", pressedBy: "user-ice" },
+      (claimId, waiting) => joined.push([claimId, waiting])))
+      .resolves.toEqual({ busy: false, claimId: first.claimId, settled: null });
+    expect(joined).toEqual([[first.claimId, "roster"]]);
+    w.setRoster(OWNER);
+    w.executor.rosterChanged();
+    await w.settledClaim(w.claims.get(first.claimId)!);
+    expect(w.fieldsOf(invoice)).toEqual({ Paid: true });
+  });
+
+  it("runs a relayed press as the verified user's, and refuses one whose automation left or no longer runs the button", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid by: '=person.id'}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    await w.executor.open();
+    const paid = await hashOf(w.executor, "Tasks", "paid");
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: "0000000000000000", recordId: invoice.id, pressId: "relay-0", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("Mark paid changed after it was pressed. Press it again.");
+    const relayed = await w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    expect(relayed.field).toBe("Mark paid");
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(w.fieldsOf(invoice)).toEqual({ "Paid by": "user-ana" });
+
+    // The relay cannot tell which Collection a record is in, so the host checks.
+    const elsewhere = w.addRecord("Log", "entry", {});
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: elsewhere.id, pressId: "relay-outside", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This record is no longer in Tasks.");
+    expect([...w.claims.values()].filter((claim) => claim.recordId === elsewhere.id)).toEqual([]);
+
+    await w.writeAutomations("Tasks", "  - id: other\n    name: Other\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n");
+    const idle = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > idle);
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("This button no longer runs an automation in its Collection.");
+
+    // The pressed automation is off, and another now runs the button.
+    await w.writeAutomations("Tasks", "  - id: paid\n    name: Paid\n    enabled: false\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n  - id: other\n    name: Other\n    when: {button: Mark paid}\n    do: [{set: {X: 1}}]\n");
+    const again = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > again);
+    await expect(w.executor.pressRelayed(
+      { automationId: "collection:Tasks#paid", definitionHash: await hashOf(w.executor, "Tasks", "paid"), recordId: invoice.id, pressId: "relay-3", pressedBy: "user-ana" }, () => undefined))
+      .rejects.toThrow("Mark paid now runs another automation. Press it again.");
+  });
+
+  it("refuses to run a relayed press after its automation changed, even once claimed, and finds its claim again", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    // Who can edit is unknown, so the claim waits before it runs.
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    await w.executor.open();
+    const paid = await hashOf(w.executor, "Tasks", "paid");
+    const input = { automationId: "collection:Tasks#paid", definitionHash: paid, pressId: "relay-1" };
+    expect(await w.executor.relayedClaim(input)).toBeNull();
+    const relayed = await w.executor.pressRelayed({ ...input, recordId: invoice.id, pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    expect(await w.executor.relayedClaim(input)).toEqual({ claimId: relayed.pressed.claimId, settled: null });
+    // The steps change under the same id before the claim runs.
+    await w.writeAutomations("Tasks", "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Refunded: true}}]\n");
+    const idle = w.idleDrains();
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() > idle);
+    w.setRoster(OWNER);
+    w.executor.rosterChanged();
+    const claim = await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(claim).toMatchObject({ state: "failed", error: "Mark paid changed after it was pressed. Press it again." });
+    expect(w.fieldsOf(invoice)).toEqual({});
+    expect(await w.executor.relayedClaim(input)).toMatchObject({ settled: { outcome: "failed" } });
+  });
+
+  it("holds the host while a relayed press's run writes, and runs nothing the host no longer admits", async () => {
+    const hold = fakeHostHold();
+    const writes: number[] = [];
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      withRecordWrites: async () => { writes.push(hold.held()); },
+    });
+    const executor = w.makeExecutor({ holdForHost: hold.take });
+    await executor.open();
+    const paid = await hashOf(executor, "Tasks", "paid");
+    // The owner's own press holds nothing.
+    const own = w.addRecord("Tasks", "own", {});
+    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined);
+    if (pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(pressed.claimId)!);
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(writes).toEqual([0, 1]);
+    expect(hold.held()).toBe(0);
+    // A handover began: the press settles failed and writes nothing.
+    hold.refuse();
+    const late = w.addRecord("Tasks", "late", {});
+    const refused = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: late.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined);
+    if (refused.pressed.busy) throw new Error("Expected a claim");
+    expect(await w.settledClaim(w.claims.get(refused.pressed.claimId)!))
+      .toMatchObject({ state: "failed", error: "This workspace's automations moved to another computer before this press ran." });
+    expect(w.fieldsOf(late)).toEqual({});
+    expect(writes).toEqual([0, 1]);
+    await executor.dispose();
+  });
+
+  it("holds nothing while a relayed press's claim waits, and a restarted executor holds the host for it", async () => {
+    const hold = fakeHostHold();
+    const writes: number[] = [];
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      withRecordWrites: async () => { writes.push(hold.held()); },
+    });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    // Who can edit is unknown, so the claim waits before it runs.
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    const first = w.makeExecutor({ holdForHost: hold.take });
+    await first.open();
+    const paid = await hashOf(first, "Tasks", "paid");
+    const relayed = await first.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toMatchObject([{ waiting: { claimId: relayed.pressed.claimId } }]);
+    expect(hold.held()).toBe(0);
+    await first.dispose();
+    // After a restart the claim runs before the relayed press loop looks it
+    // up, so the executor holds the host for it by itself.
+    w.setRoster(OWNER);
+    const restarted = w.makeExecutor({ holdForHost: hold.take });
+    await restarted.open();
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(w.fieldsOf(invoice)).toEqual({ Paid: true });
+    expect(writes).toEqual([1]);
+    expect(hold.held()).toBe(0);
+    await restarted.dispose();
+  });
+
+  it("keeps a relayed press's hold after its deadline until its write really stops", async () => {
+    const hold = fakeHostHold();
+    let passDeadline = () => {};
+    let finishWrite = () => {};
+    let markAborted = () => {};
+    const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" },
+      deadline: (abort) => { passDeadline = abort; return () => {}; },
+      // The write outlives the abort, as one still in flight when the workspace closes does.
+      withRecordWrites: (signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          finishWrite = () => reject(new Error("The write stopped."));
+          markAborted();
+        }, { once: true });
+        passDeadline();
+      }),
+    });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    const executor = w.makeExecutor({ holdForHost: hold.take });
+    await executor.open();
+    const paid = await hashOf(executor, "Tasks", "paid");
+    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    if (relayed.pressed.busy) throw new Error("Expected a claim");
+    await aborted;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(hold.held()).toBe(1);
+    finishWrite();
+    await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
+    expect(hold.held()).toBe(0);
+  });
+
+  it("names why a button cannot run, and refuses a press on it", async () => {
+    const w = await world({ collections: ["Tasks", "Other"], automations: { Tasks: [
+      "  - id: one", "    name: One", "    when: {button: Twice}", "    do: [{set: {A: 1}}]",
+      "  - id: two", "    name: Two", "    when: {button: Twice}", "    do: [{set: {B: 1}}]",
+      "  - id: off", "    name: Resend", "    enabled: false", "    when: {button: Resend}", "    do: [{set: {C: 1}}]",
+      "  - id: msg", "    name: Notify", "    when: {button: Notify}", "    do: [{post: hello, group: Team}]",
+      "  - id: far", "    name: Reach", "    when: {button: Reach}", "    do: [{add-record: {Title: x}, collection: Other}]",
+      "  - id: broken", "    name: Broken", "    when: {button: Broken}", "    do: [{nonsense: true}]",
+    ].join("\n") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@example.com", ["Tasks"])] });
+    const task = w.addRecord("Tasks", "one", {});
+    await w.executor.open();
+    const states = await w.executor.buttons("Tasks", ["Twice", "Resend", "Notify", "Reach", "Broken"]);
+    expect(states.map(({ state }) => state)).toEqual([
+      { kind: "disabled", reason: "Two automations use Twice. Keep one." },
+      { kind: "disabled", reason: "Resend is off. Turn it on in Automations." },
+      { kind: "disabled", reason: "ana@example.com cannot post in Team." },
+      { kind: "disabled", reason: "ana@example.com cannot edit Other." },
+      { kind: "disabled", reason: "The automation for Broken has a problem. Fix it in Automations." },
+    ]);
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Resend", recordId: task.id, pressId: "press-1", pressedBy: "user-owner" }, () => undefined))
+      .rejects.toThrow("Resend is off. Turn it on in Automations.");
+    await expect(w.executor.press({ collectionPath: "Other", field: "Twice", recordId: task.id, pressId: "press-2", pressedBy: "user-owner" }, () => undefined))
+      .rejects.toThrow("No automation uses this button.");
+    expect(w.claims.size).toBe(0);
+  });
+
+  it("disables a button whose automation names a missing field, without claiming a run", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Absent: true}}]\n" } });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    await w.executor.open();
+    await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toEqual([
+      { field: "Mark paid", state: { kind: "disabled", reason: "Absent is not a field in Tasks." } },
+    ]);
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+      .rejects.toThrow("Absent is not a field in Tasks.");
+    expect(w.claims.size).toBe(0);
+  });
+
+  it("refuses a press on a record that left the Collection, and claims nothing", async () => {
+    const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
+    await w.executor.open();
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: "rec_gone", pressId: "press-1", pressedBy: "user-ice" }, () => undefined))
+      .rejects.toThrow("This record is no longer in Tasks.");
+    expect(w.claims.size).toBe(0);
+  });
+
+  it("runs a failed press again only for the person who pressed it or the owner", async () => {
+    const w = await world({
+      automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Total: '=record.Missing.length'}}]\n" },
+      mayRetryPress: async (pressedBy) => pressedBy === "user-ice",
+    });
+    const invoice = w.addRecord("Tasks", "invoice", {});
+    await w.executor.open();
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana" }, () => undefined);
+    if (pressed.busy) throw new Error("Expected a claim");
+    const claim = await w.settledClaim(w.claims.get(pressed.claimId)!);
+    expect(claim.state).toBe("failed");
+    await w.until(() => w.pressEvents.length > 0);
+    expect(w.pressEvents).toEqual([{ settled: { claimId: claim.claimId, outcome: "failed", error: claim.error } }]);
+    await expect(w.executor.retry({ automationId: "collection:Tasks#paid", claimId: claim.claimId, startOver: false })).resolves.toEqual({
+      status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again.",
+    });
+    expect(claim.state).toBe("failed");
   });
 
   it("finds records, changes each with its own values, branches, and adds records it then changes", async () => {
@@ -582,7 +1212,7 @@ describe("Collection automations", () => {
     expect(claim).toMatchObject({ state: "failed", error: "dohc could not write the record file." });
     expect(w.fieldsOf(task).Count).toBe(3);
 
-    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false })).resolves.toEqual({ status: "queued" });
+    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false })).resolves.toEqual({ status: "queued", press: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(3);
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toHaveLength(1);
@@ -622,8 +1252,10 @@ describe("Collection automations", () => {
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() >= 2);
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "definition-changed" });
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
     expect(claim.state).toBe("failed");
+    // Starting over makes new messages too, so the person hears that first.
+    expect(DEFINITION_CHANGED_ERROR).toContain("It may repeat changes, posts, direct messages, and notices the earlier run already made.");
     expect((await w.executor.runs(TASKS))[0]).toMatchObject({ definitionChanged: true });
 
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true });
@@ -685,10 +1317,10 @@ describe("Collection automations", () => {
 
     const summary = (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ seq: number }> } }> }).automations[0]!;
     await expect(w.executor.confirmReach({
-      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: 0, seq: summary.reach.steps[0]!.seq + 1,
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq + 1,
     })).resolves.toBe("changed");
     await expect(w.executor.confirmReach({
-      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: 0, seq: summary.reach.steps[0]!.seq,
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq,
     })).resolves.toBe("confirmed");
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
@@ -921,7 +1553,7 @@ describe("Collection automations", () => {
     await w.until(() => w.idleDrains() >= 2);
 
     await expect(w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "definition-changed" });
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: false });
     expect(claim.state).toBe("failed");
     await w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "done");
@@ -1048,7 +1680,7 @@ describe("Collection automations", () => {
       for (const [id, record] of w.records) if (record.path === path) w.records.delete(id);
     };
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
-      .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
     expect(trashed).toEqual([added!.path]);
     expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
@@ -1058,6 +1690,31 @@ describe("Collection automations", () => {
     expect(run).toMatchObject({ state: "done", undone: true, chainStopped: false });
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
+  });
+
+  it("undoes every finished run of the definitions a stopped person wrote, and no other", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const first = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    const second = w.claim("collection:Tasks#stamp", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(second);
+    expect(w.fieldsOf(task).Count).toBe(4);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const hash = file.automations[0]!.definitionHash;
+
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: "0000000000000000" }], async () => undefined))
+      .resolves.toEqual({ undone: 0, left: 0 });
+    expect(w.fieldsOf(task).Count).toBe(4);
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
+      .resolves.toEqual({ undone: 2, left: 0 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+    // Runs already undone are passed over.
+    await expect(w.executor.undoRunsOf([{ automationId: "collection:Tasks#stamp", definitionHash: hash }], async () => undefined))
+      .resolves.toEqual({ undone: 0, left: 0 });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {
@@ -1071,7 +1728,7 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Count).toBe(3);
 
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
-      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task).Count).toBe(2);
     await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
       .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
@@ -1111,7 +1768,7 @@ describe("Collection automations", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
 
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
-      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     const [finished] = await w.executor.runs("collection:Tasks#stamp");
     expect(finished).toMatchObject({ undone: true });
@@ -1153,7 +1810,7 @@ describe("Collection automations", () => {
     const trashed: string[] = [];
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async (path) => {
       trashed.push(path);
-    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0 });
+    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0, kept: 0, irreversible: 0 });
     expect(trashed).toEqual([added.path]);
   });
 
@@ -1180,6 +1837,35 @@ describe("Collection automations", () => {
     await w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
     // Back to before the first version ran, not only before the second.
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+  });
+
+  it("undoes only a stopped person's definition among a claim's runs", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const first = await w.executor.automationsIn("Tasks");
+    if (first.status !== "read" || !first.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const firstHash = first.automations[0]!.definitionHash;
+
+    await w.writeAutomations("Tasks", STAMP.replace("record.Count + 1", "record.Count + 10"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done");
+    const second = await w.executor.automationsIn("Tasks");
+    if (second.status !== "read" || !second.automations[0]!.valid) throw new Error("expected Stamp to read");
+    expect(w.fieldsOf(task).Count).toBe(13);
+
+    // The person wrote only the second version: its run goes back, the first stays.
+    await expect(w.executor.undoRunsOf(
+      [{ automationId: "collection:Tasks#stamp", definitionHash: second.automations[0]!.definitionHash }],
+      async () => undefined,
+    )).resolves.toEqual({ undone: 1, left: 0 });
+    expect(w.fieldsOf(task).Count).toBe(3);
+    expect(second.automations[0]!.definitionHash).not.toBe(firstHash);
   });
 
   it("lets only one of an Undo and a Try again started together change a run", async () => {
@@ -1390,8 +2076,13 @@ describe("Collection automations", () => {
   });
 
   it("records no reach for an automation dohc cannot run yet", async () => {
-    const notify = "  - id: tell\n    name: Tell\n    when: {field-changed: Status}\n    do: [{set: {X: 1}, records: null}, {notify: Hi, to: [user-1]}]\n".replace(", records: null", "");
-    const w = await world({ automations: { Tasks: notify } });
+    const unsupported = [
+      "  - id: code",
+      "    name: Code",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {X: 1}}, {run: 'return 1'}]",
+    ].join("\n");
+    const w = await world({ automations: { Tasks: unsupported } });
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
     await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
@@ -1521,10 +2212,10 @@ describe("Collection automations", () => {
     await w.baseStore.save({ ...saved!, plan: null, applied: [], compacted: true });
 
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
-      .resolves.toEqual({ status: "progress-gone" });
+      .resolves.toEqual({ status: "progress-gone", repeatsMessages: false });
     expect(claim.state).toBe("failed");
     await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true }))
-      .resolves.toEqual({ status: "queued" });
+      .resolves.toEqual({ status: "queued", press: false });
     await w.until(() => claim.state === "done");
     // The person chose to run it from the start, so its first step ran again.
     expect(w.fieldsOf(task).Count).toBe(4);
@@ -1640,8 +2331,8 @@ describe("Collection automations", () => {
     await expect(w.executor.resetHolds()).resolves.toBe("reset");
     const { holds, unreadable } = w.executor.holdState();
     expect(unreadable).toBe(false);
-    expect(holds).toMatchObject([{ automationId: "collection:Tasks#seen", step: 0, stoppedFor: null }]);
-    await w.executor.confirmReach({ automationId: holds[0]!.automationId, definitionHash: holds[0]!.definitionHash, step: 0, seq: holds[0]!.seq });
+    expect(holds).toMatchObject([{ automationId: "collection:Tasks#seen", step: "0", stoppedFor: null }]);
+    await w.executor.confirmReach({ automationId: holds[0]!.automationId, definitionHash: holds[0]!.definitionHash, step: "0", seq: holds[0]!.seq });
     await w.settledClaim(claim);
     expect(w.fieldsOf(task).Seen).toBe(true);
   });
@@ -1686,13 +2377,13 @@ describe("Collection automations", () => {
   });
 
   it("fails a claim for an automation this version cannot run, with the reason the panel shows", async () => {
-    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    when: {schedule: day, timezone: UTC}\n    do: [{find: 'true', as: all}]\n" } });
+    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    when: record-added\n    do: [{run: 'return 1'}]\n" } });
     const claim = w.claim("collection:Tasks#later", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
     await w.settledClaim(claim);
     expect(claim).toMatchObject({
       state: "failed",
-      error: "dohc can run automations that start from a record change. Other triggers come later.",
+      error: "dohc cannot run code steps yet.",
     });
     expect(w.journaled).toEqual([]);
   });
@@ -1874,4 +2565,691 @@ describe("Collection automations", () => {
     await w.executor.automationsIn("Trip");
     expect(w.executor.stops()).toEqual([]);
   });
+});
+
+describe("Collection automations that post", () => {
+  const TRIP: ChatDirectoryChannel = {
+    id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "posts", wireId: "trip", runningThreadId: null,
+  };
+  const DM_ANA: ChatDirectoryChannel = {
+    id: "dm-ana", name: "ana@dohc.test", slug: "dm-ana", kind: "dm", type: "chat", wireId: "dm-ana", runningThreadId: "thread-dm-ana",
+  };
+  // Ana holds the direct message's grant and nothing else, so she is not an editor.
+  const ANA_IN_DM: RosterGrant = {
+    grantId: "grant-dm-ana", recipientUserId: "user-ana", recipientEmail: "ana@dohc.test", files: null, channel: { wireId: "dm-ana", canPost: true },
+  };
+  const post = (...steps: string[]) => [
+    "  - id: tell",
+    "    name: Tell the trip",
+    "    when: {field-changed: Status}",
+    "    do:",
+    ...steps,
+  ].join("\n");
+
+
+  it("includes chat steps in share warnings and held summaries", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    await expect(w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).resolves.toEqual([
+      { automationId: "collection:Tasks#tell", automationName: "Tell the trip", collectionPath: "Tasks", target: "Trip", action: "post" },
+    ]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    const listed = await w.executor.automationsIn("Tasks");
+    expect(listed).toMatchObject({ automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", target: "Trip", action: "post" }] } }] });
+  });
+
+  it("posts in a Group and sends a direct message as the automation, keyed so a retry writes each once", async () => {
+    const w = await world({
+      channels: [TRIP, DM_ANA],
+      automations: { Tasks: post(
+        "      - post: 'Done: {record.Status}'",
+        "        group: Trip",
+        "      - direct-message: Your task is done",
+        "        to: [user-ana]",
+      ) },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const definition = parseAutomationsFile(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8"));
+    if (definition.status !== "read" || definition.entries[0]?.status !== "valid") throw new Error("unreadable fixture");
+    const seed = `${definitionHash(definition.entries[0].automation)}-1`;
+    const postId = `${stepKey(claim.claimId, seed, 0)}/post`;
+    const dmId = `${stepKey(claim.claimId, seed, 1)}/dm/user-ana`;
+    const automation = { automationId: "collection:Tasks#tell", name: "Tell the trip", depth: 1 };
+    expect(w.messages).toEqual([
+      expect.objectContaining({
+        target: { kind: "group", channelId: "trip", lane: "posts" },
+        effectId: postId, messageId: automationMessageId(postId), automation, body: "Done: Done",
+      }),
+      expect.objectContaining({
+        target: { kind: "direct-message", threadId: "thread-dm-ana" },
+        effectId: dmId, messageId: automationMessageId(dmId), automation, body: "Your task is done",
+      }),
+    ]);
+    const [run] = await w.executor.runs("collection:Tasks#tell");
+    expect(run!.writes).toEqual([
+      { kind: "message", messageId: automationMessageId(postId), name: "Trip" },
+      { kind: "message", messageId: automationMessageId(dmId), name: "your direct message with ana@dohc.test" },
+    ]);
+  });
+
+  it("writes into a chat Group's running conversation", async () => {
+    const w = await world({
+      channels: [{ ...TRIP, type: "chat" }],
+      automations: { Tasks: post("      - post: Done", "        group: Trip") },
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(w.messages.map((message) => message.target)).toEqual([{ kind: "group", channelId: "trip", lane: "chat" }]);
+  });
+
+  it("fails without writing when the Group or the direct message does not exist", async () => {
+    const w = await world({
+      channels: [TRIP],
+      automations: { Tasks: [
+        post("      - post: Done", "        group: Nowhere"),
+        "  - id: dm",
+        "    name: Tell Bob",
+        "    when: {field-changed: Status}",
+        "    do: [{direct-message: Done, to: [user-bob]}]",
+      ].join("\n") },
+    });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const group = w.claim("collection:Tasks#tell", task);
+    const direct = w.claim("collection:Tasks#dm", task);
+    await w.executor.open();
+    await w.settledClaim(group);
+    await w.settledClaim(direct);
+
+    expect(group).toMatchObject({ state: "failed", error: "dohc cannot find the Group Nowhere." });
+    expect(direct).toMatchObject({
+      state: "failed",
+      error: "There is no direct message with that person yet. Start one first: automations never start one.",
+    });
+    expect(w.chatWrites()).toBe(0);
+  });
+
+  it("stops a post that an editor could not make, including to a person a formula names", async () => {
+    const w = await world({
+      channels: [TRIP, DM_ANA],
+      automations: { Tasks: [
+        post("      - post: Done", "        group: Trip"),
+        "  - id: dm",
+        "    name: Tell Ana",
+        "    when: {field-changed: Status}",
+        "    do: [{direct-message: Done, to: ['=\"user-ana\"']}]",
+      ].join("\n") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const group = w.claim("collection:Tasks#tell", task);
+    const direct = w.claim("collection:Tasks#dm", task);
+    await w.executor.open();
+    await w.settledClaim(group);
+    await w.settledClaim(direct);
+
+    expect(group).toMatchObject({ state: "failed", error: "bob@dohc.test cannot post in Trip." });
+    expect(direct).toMatchObject({
+      state: "failed", error: "bob@dohc.test cannot post in your direct message with ana@dohc.test.",
+    });
+    expect(w.chatWrites()).toBe(0);
+  });
+
+  it("holds a direct message to a person a formula named once an editor's leaving allows it, until Allow", async () => {
+    const tellAna = post("      - direct-message: Done", "        to: ['=\"user-ana\"']");
+    const w = await world({ channels: [DM_ANA], automations: { Tasks: tellAna } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "bob@dohc.test cannot post in your direct message with ana@dohc.test." });
+
+    // Bob leaves. What his reach stopped now waits for a current editor.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    expect(w.messages).toEqual([]);
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({
+      action: "post", target: "your direct message with ana@dohc.test", recipient: "user-ana", stoppedFor: "bob@dohc.test",
+    });
+
+    await expect(w.executor.confirmReach({ ...hold!, recipient: hold!.recipient! })).resolves.toBe("confirmed");
+    await w.settledClaim(second);
+    expect(second.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
+  });
+
+  it("does not send a saved direct message after its people changed", async () => {
+    const w = await world({
+      channels: [DM_ANA],
+      automations: { Tasks: post("      - direct-message: Done", "        to: [user-ana]") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    let signedIn = false;
+    w.beforeChatWrite(async () => {
+      if (!signedIn) throw new AutomationChatSessionWait();
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+
+    // While the run waited, someone else was invited to the conversation.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [
+      ANA_IN_DM, { grantId: "grant-dm-eve", recipientUserId: null, recipientEmail: "eve@dohc.test", files: null, channel: { wireId: "dm-ana", canPost: true } },
+    ] });
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({
+      state: "failed",
+      error: "The people in your direct message with ana@dohc.test changed since this run began, so dohc did not send its message.",
+    });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("keeps each formula-named person's hold apart through a restart, until Allow", async () => {
+    const DM_CARA: ChatDirectoryChannel = { ...DM_ANA, id: "dm-cara", name: "cara@dohc.test", slug: "dm-cara", wireId: "dm-cara", runningThreadId: "thread-dm-cara" };
+    const CARA_IN_DM: RosterGrant = {
+      grantId: "grant-dm-cara", recipientUserId: "user-cara", recipientEmail: "cara@dohc.test", files: null, channel: { wireId: "dm-cara", canPost: true },
+    };
+    const tellBoth = post("      - direct-message: Done", "        to: ['=[\"user-ana\", \"user-cara\"]']");
+    const w = await world({ channels: [DM_ANA, DM_CARA], automations: { Tasks: tellBoth } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"]), ANA_IN_DM, CARA_IN_DM] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first.state).toBe("failed");
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM, CARA_IN_DM] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    expect(w.executor.holds().map((hold) => hold.recipient)).toEqual(["user-ana", "user-cara"]);
+
+    // A restart reads the holds back, one per person, and still sends nothing.
+    await w.executor.dispose();
+    const reopened = w.makeExecutor();
+    await reopened.open();
+    await w.until(() => w.events.filter((event) => event === `released ${second.claimId}`).length >= 2);
+    expect(w.messages).toEqual([]);
+    const holds = reopened.holds();
+    expect(holds.map((hold) => hold.recipient)).toEqual(["user-ana", "user-cara"]);
+    await reopened.confirmReach({ ...holds[0]!, recipient: holds[0]!.recipient! });
+    expect(reopened.holds().map((hold) => hold.recipient)).toEqual(["user-cara"]);
+    await reopened.confirmReach({ ...holds[1]!, recipient: holds[1]!.recipient! });
+    await w.settledClaim(second);
+    expect(w.messages.map((message) => message.target)).toEqual([
+      { kind: "direct-message", threadId: "thread-dm-ana" },
+      { kind: "direct-message", threadId: "thread-dm-cara" },
+    ]);
+  });
+
+  it("reads only the conversations of the people a formula named", async () => {
+    const w = await world({
+      channels: [DM_ANA],
+      automations: { Tasks: post("      - direct-message: Done", "        to: ['=\"user-ana\"']") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [ANA_IN_DM] });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const people = w.directoryNeeds.map((needs) => [...needs.people]);
+    // Before the formula runs no conversation is read; after, only Ana's.
+    expect(people).toContainEqual([]);
+    expect(people).toContainEqual(["user-ana"]);
+    expect(people.flat().every((userId) => userId === "user-ana")).toBe(true);
+  });
+
+  it("asks before a start-over that could send an automation's messages again", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    w.beforeChatWrite(async () => { throw new Error("The server did not answer."); });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    await w.writeAutomations("Tasks", post("      - post: Done again", "        group: Trip"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await expect(w.executor.retry({ automationId: "collection:Tasks#tell", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "definition-changed", repeatsMessages: true });
+  });
+
+  it("waits for a session in a synced workspace, then posts once one arrives", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: post("      - post: Done", "        group: Trip") } });
+    let signedIn = false;
+    w.beforeChatWrite(async () => {
+      if (!signedIn) throw new AutomationChatSessionWait();
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+    expect(claim.state).toBe("pending");
+    expect(w.messages).toEqual([]);
+
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
+  });
+});
+
+describe("Collection automations that notify", () => {
+  const viewer = (email: string, paths: string[]): RosterGrant => ({
+    grantId: `grant-${email}`, recipientUserId: `user-${email}`, recipientEmail: email,
+    files: { paths, versionId: null, access: "view" }, channel: null,
+  });
+  const notify = (to: string, text = "Done: {record.Status}") => [
+    "  - id: tell",
+    "    name: Tell people",
+    "    when: {field-changed: Status}",
+    `    do: [{notify: '${text}', to: ${to}}]`,
+  ].join("\n");
+
+  it("reports a newly allowed named notice recipient as held", async () => {
+    const w = await world({ automations: { Tasks: notify("[user-ana@dohc.test]") } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", action: "notify" }] } }] });
+  });
+
+  it("sends each person one notice with the automation's name, the text, and where it points", async () => {
+    const long = "x".repeat(600);
+    const w = await world({ automations: { Tasks: notify("[user-owner, user-ana@dohc.test]", long) } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    const definition = parseAutomationsFile(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8"));
+    if (definition.status !== "read" || definition.entries[0]?.status !== "valid") throw new Error("unreadable fixture");
+    const key = stepKey(claim.claimId, `${definitionHash(definition.entries[0].automation)}-1`, 0);
+    const notice = (recipientUserId: string) => ({
+      noticeId: automationNoticeId(key, recipientUserId),
+      kind: "automation-notify",
+      title: "Tell people",
+      body: `${"x".repeat(499)}…`,
+      target: { path: task.path, record: task.id, automation: "collection:Tasks#tell", run: claim.claimId },
+      recipientUserId,
+    });
+    expect(w.notices).toEqual([notice("user-owner"), notice("user-ana@dohc.test")]);
+    // Each notice goes out under the run's signal, so a stop ends it before it sends.
+    expect(w.noticeSignals).toHaveLength(2);
+    expect(w.noticeSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    const [run] = await w.executor.runs("collection:Tasks#tell");
+    expect(run!.writes).toEqual([
+      { kind: "notice", noticeId: automationNoticeId(key, "user-owner"), name: "you" },
+      { kind: "notice", noticeId: automationNoticeId(key, "user-ana@dohc.test"), name: "ana@dohc.test" },
+    ]);
+  });
+
+  it("notifies nobody when a person is not among the workspace's people or cannot view the Collection", async () => {
+    const w = await world({
+      collections: ["Tasks", "Budget"],
+      automations: { Tasks: [
+        notify("[user-zed]"),
+        "  - id: far",
+        "    name: Tell Bob",
+        "    when: {field-changed: Status}",
+        "    do: [{notify: Done, to: ['=\"user-bob@dohc.test\"']}]",
+      ].join("\n") },
+    });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("bob@dohc.test", ["Budget"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const unknown = w.claim("collection:Tasks#tell", task);
+    const far = w.claim("collection:Tasks#far", task);
+    await w.executor.open();
+    await w.settledClaim(unknown);
+    await w.settledClaim(far);
+
+    expect(unknown).toMatchObject({ state: "failed", error: "that person cannot view Tasks." });
+    expect(far).toMatchObject({ state: "failed", error: "bob@dohc.test cannot view Tasks." });
+    expect(w.notices).toEqual([]);
+  });
+
+  it("holds a notice to a person a formula named once they can newly view the Collection, until Allow", async () => {
+    const w = await world({ collections: ["Tasks", "Budget"], automations: { Tasks: notify("['=\"user-ana@dohc.test\"']") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Budget"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#tell", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "ana@dohc.test cannot view Tasks." });
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const second = w.claim("collection:Tasks#tell", task);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({ action: "notify", target: "ana@dohc.test", recipient: "user-ana@dohc.test" });
+    await w.executor.confirmReach({ ...hold!, recipient: hold!.recipient! });
+    await w.settledClaim(second);
+    expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["user-ana@dohc.test"]);
+  });
+
+  it("fails on a notice that did not reach its person, and Try again notifies only the people left", async () => {
+    const w = await world({ automations: { Tasks: notify("[user-owner, user-ana@dohc.test]") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [viewer("ana@dohc.test", ["Tasks"])] });
+    const posted: string[] = [];
+    let full = true;
+    w.beforeNotice(async (notice) => {
+      posted.push(notice.recipientUserId);
+      if (full && notice.recipientUserId === "user-ana@dohc.test") {
+        throw new NoticeNotSentError("This person has too many unread notices to get this one.");
+      }
+    });
+    const claim = w.claim("collection:Tasks#tell", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({
+      state: "failed",
+      error: "dohc could not notify ana@dohc.test. This person has too many unread notices to get this one.",
+    });
+
+    full = false;
+    await w.executor.retry({ automationId: "collection:Tasks#tell", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(posted).toEqual(["user-owner", "user-ana@dohc.test", "user-ana@dohc.test"]);
+    expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["user-owner", "user-ana@dohc.test"]);
+  });
+});
+
+describe("Collection automations that wake your agent", () => {
+  const ask = [
+    "  - id: ask",
+    "    name: Ask my agent",
+    "    when: {field-changed: Status}",
+    "    do: [{wake-agent: 'Plan {record.Status}', person: user-owner}]",
+  ].join("\n");
+
+  it("includes agent wakes in share warnings and held summaries", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    expect(await w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).toMatchObject([{ target: "your agent", action: "wake" }]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", target: "your agent", action: "wake" }] } }] });
+  });
+
+  it("sends the automation's message to the person's agent when they alone edit the Collection", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.messages).toEqual([expect.objectContaining({
+      target: { kind: "agent" },
+      threadId: automationWakeThreadId("collection:Tasks#ask"),
+      automation: { automationId: "collection:Tasks#ask", name: "Ask my agent", depth: 1 },
+      body: "Plan Done",
+    })]);
+    const [run] = await w.executor.runs("collection:Tasks#ask");
+    expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
+  });
+
+  it("does not wake an agent for a change an agent made", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }), { actorKind: "agent" });
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("breaks the agent, automation, automation, agent cycle at the wake", async () => {
+    // The agent changes a task; automation A stamps it; automation B, seeing
+    // A's change, would wake the agent, whose writes start again at depth 0.
+    const w = await world({ automations: { Tasks: [
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Stamped: true}}]",
+      ask.replace("{field-changed: Status}", "{field-changed: Stamped}"),
+    ].join("\n") } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const fromAgent = w.claim("collection:Tasks#stamp", task, { actorKind: "agent", authorOriginId: "dohc-chat-runner" });
+    await w.executor.open();
+    await w.settledClaim(fromAgent);
+    expect(fromAgent.state).toBe("done");
+    expect(w.fieldsOf(task).Stamped).toBe(true);
+
+    const fromStamp = w.claim("collection:Tasks#ask", task, {
+      actorKind: "automation", authorOriginId: "collection:Tasks#stamp",
+      fields: [{ field: "Stamped", historyId: 99, previous: null, next: { value: true } }],
+    });
+    w.executor.notifyClaimed();
+    await w.settledClaim(fromStamp);
+    expect(fromStamp).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
+    expect(w.messages).toEqual([]);
+
+    // A person's own change still wakes the agent.
+    const fromPerson = w.claim("collection:Tasks#ask", task, {
+      actorKind: "human", fields: [{ field: "Stamped", historyId: 100, previous: { value: true }, next: { value: false } }],
+    });
+    w.executor.notifyClaimed();
+    await w.settledClaim(fromPerson);
+    expect(fromPerson.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
+  });
+
+  it("fails a wake with the reason when dohc cannot check who can edit, instead of waiting for a sign-in", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Sign in, then try again." } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: "dohc could not check who can edit Tasks. Sign in, then try again." });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("does not wake an agent when no account says who this computer's person is", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    w.setRoster({ kind: "owner", ownerUserId: null, grants: [] });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: PERSONAL_NEEDS_ACCOUNT });
+  });
+
+  it("stops when someone else can also edit the Collection, or the step names another person", async () => {
+    const w = await world({ automations: { Tasks: [
+      ask,
+      "  - id: other",
+      "    name: Ask Ana's agent",
+      "    when: {field-changed: Status}",
+      "    do: [{wake-agent: Plan, person: user-ana@dohc.test}]",
+    ].join("\n") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const mine = w.claim("collection:Tasks#ask", task);
+    const others = w.claim("collection:Tasks#other", task);
+    await w.executor.open();
+    await w.settledClaim(mine);
+    await w.settledClaim(others);
+
+    expect(mine).toMatchObject({ state: "failed", error: "This step acts as you, and bob@dohc.test can also edit Tasks." });
+    expect(others).toMatchObject({ state: "failed", error: "This step acts as that person, and you can also edit Tasks." });
+    expect(w.messages).toEqual([]);
+  });
+});
+
+describe("Collection automations that a Group message starts", () => {
+  const TRIP: ChatDirectoryChannel = {
+    id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "posts", wireId: "trip", runningThreadId: null,
+  };
+  const task = [
+    "  - id: task",
+    "    name: Add a task",
+    "    when: {group-message: Trip, starts-with: /task}",
+    "    do: [{add-record: {Title: '=message.body.slice(6)', Asked by: '=person.name'}}]",
+  ].join("\n");
+  const messageClaim = (
+    w: Awaited<ReturnType<typeof world>>,
+    message: Partial<AutomationClaimMessage> = {},
+  ) => {
+    const claim = w.claim("collection:Tasks#task", w.addRecord("Tasks", "unused", {}), { fields: [] });
+    claim.recordId = null;
+    claim.trigger = { key: "message:m1" };
+    claim.change = { ...claim.change, kind: "message", message: {
+      id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
+      authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: "/task Buy tickets", ...message,
+    } };
+    return claim;
+  };
+  const added = (w: Awaited<ReturnType<typeof world>>) =>
+    [...w.records.values()].filter((record) => record.path.startsWith("Tasks/task-")).map((record) => w.fieldsOf(record));
+
+  it("includes Group reads in share warnings and held summaries", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    expect(await w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).toMatchObject([{ target: "Trip", action: "read" }]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", target: "Trip", action: "read" }, { verdict: "allowed" }] } }] });
+  });
+
+  it("subscribes to its Group's messages on the computer that runs them, and only there", async () => {
+    const here = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await here.executor.open();
+    await here.until(() => here.subscriptions.has("collection:Tasks#task"));
+    expect(here.subscriptions.get("collection:Tasks#task")).toEqual({
+      automationId: "collection:Tasks#task", groupId: "trip", startsWith: "/task",
+    });
+
+    const elsewhere = await world({ channels: [TRIP], automations: { Tasks: task }, runsGroupTriggers: false });
+    await elsewhere.executor.open();
+    const file = await elsewhere.executor.automationsIn("Tasks");
+    if (file.status !== "read") throw new Error("unreadable fixture");
+    const [automation] = file.automations;
+    expect(automation).toMatchObject({ cannotRun: expect.stringContaining("only on your main computer") });
+    expect(elsewhere.subscriptions.has("collection:Tasks#task")).toBe(false);
+  });
+
+  it("runs for a Group message with the message and its author in its formulas", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+  });
+
+  it("reads a body its claim carried truncated", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task }, messageBodies: { m1: "/task Pack the bags" } });
+    const claim = messageClaim(w, { body: { truncated: true, bytes: 70_000 } });
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(added(w)).toEqual([{ Title: "Pack the bags", "Asked by": "Ana" }]);
+  });
+
+  it("skips a message from another Group or without the starting text, as the automation reads now", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const otherGroup = messageClaim(w, { groupId: "family" });
+    const noCommand = messageClaim(w, { body: "hello" });
+    await w.executor.open();
+    await w.settledClaim(otherGroup);
+    await w.settledClaim(noCommand);
+
+    expect([otherGroup.state, noCommand.state]).toEqual(["done", "done"]);
+    expect(added(w)).toEqual([]);
+  });
+
+  it("stops a resumed run whose Group is no longer the one its message came from", async () => {
+    const LOG: ChatDirectoryChannel = { ...TRIP, id: "log", name: "Log", slug: "log", wireId: "log" };
+    const channels = [TRIP, LOG];
+    const relay = [
+      "  - id: task",
+      "    name: Relay",
+      "    when: {group-message: Trip, starts-with: /task}",
+      "    do: [{post: 'Asked: {message.body}', group: Log}]",
+    ].join("\n");
+    const w = await world({ channels, automations: { Tasks: relay } });
+    let signedIn = false;
+    w.beforeChatWrite(async () => { if (!signedIn) throw new AutomationChatSessionWait(); });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+
+    // While the run waited, "Trip" came to name another Group.
+    channels[0] = { ...TRIP, id: "trip-2", wireId: "trip-2" };
+    signedIn = true;
+    w.executor.sessionChanged();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: GROUP_CHANGED_ERROR });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("does not run a message claim, and drops its subscription, once this computer no longer runs Group triggers", async () => {
+    const options: Parameters<typeof world>[0] = { channels: [TRIP], automations: { Tasks: task } };
+    const w = await world(options);
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // Sync turned on: this computer is not the main one any more.
+    options.runsGroupTriggers = false;
+    const claim = messageClaim(w);
+    w.executor.notifyClaimed();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: expect.stringContaining("only on your main computer") });
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
+    expect(added(w)).toEqual([]);
+  });
+
+  it("holds a Group trigger an editor's leaving newly allows, until Allow", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const first = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(first);
+    expect(first).toMatchObject({ state: "failed", error: "bob@dohc.test cannot read Trip." });
+
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    const second = messageClaim(w);
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.includes(`released ${second.claimId}`));
+    const [hold] = w.executor.holds();
+    expect(hold).toMatchObject({ action: "read", target: "Trip", stoppedFor: "bob@dohc.test" });
+    await w.executor.confirmReach(hold!);
+    await w.settledClaim(second);
+    expect(second.state).toBe("done");
+  });
+
+  it("stops when an editor cannot read the Group", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const claim = messageClaim(w);
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim).toMatchObject({ state: "failed", error: "bob@dohc.test cannot read Trip." });
+    expect(added(w)).toEqual([]);
+  });
+
 });

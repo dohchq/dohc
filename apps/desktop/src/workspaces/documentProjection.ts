@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import {
+  documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
@@ -13,10 +14,11 @@ import {
 export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
-  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean };
+  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean }
+  | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean };
 
 type DocumentProjectionResult<Request extends DocumentProjectionRequest> =
-  Request extends { kind: "edit" } ? Uint8Array | null : string;
+  Request extends { kind: "edit" | "create" } ? Uint8Array | null : string;
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -50,6 +52,10 @@ export function runDocumentProjection(
       return settledDocumentMarkdown(request.markdown);
     case "edit":
       return documentEditUpdate(request.state, request.edit, {
+        keepBlocks: request.keepBlocks,
+      });
+    case "create":
+      return documentCreateUpdate(request.state, request.markdown, {
         keepBlocks: request.keepBlocks,
       });
   }

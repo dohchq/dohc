@@ -67,9 +67,6 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
   const all: Window[] = [];
   const createdOptions: Array<Parameters<Dependencies["createMainWindow"]>[0]> = [];
   const templates: MenuItemConstructorOptions[][] = [];
-  const guests: Contents[] = [];
-  const applyGuests = vi.fn((level: number) => { for (const guest of guests) guest.setZoomLevel(level); });
-  let pluginSurfaces: Dependencies["pluginSurfaces"] = { applyWebAppZoom: applyGuests };
   const dependencies: Dependencies = {
     app: {
       isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
@@ -95,12 +92,11 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
       const window = new Window(); all.push(window); return window.native;
     }),
     preloadArguments: ["--dohc-dev-tools"],
-    get pluginSurfaces() { return pluginSurfaces; },
     get rendererWorkspaceSessions() { return currentSessions; },
   };
   const windows = createDesktopWindows(dependencies);
   return {
-    windows, dependencies, sessions, all, templates, createdOptions, guests, applyGuests,
+    windows, dependencies, sessions, all, templates, createdOptions,
     setRead: (value: typeof read) => { read = value; },
     setStored: (value: typeof stored) => { stored = value; },
     setRows: (value: typeof rows) => { rows = value; },
@@ -108,7 +104,6 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     setCanInstall: (value: boolean) => { canInstall = value; },
     setRetirement: (value: typeof retirement) => { retirement = value; },
     setSessions: (value: typeof sessions) => { currentSessions = value; },
-    setPluginSurfaces: (value: typeof pluginSurfaces) => { pluginSurfaces = value; },
   };
 }
 
@@ -396,23 +391,20 @@ describe("desktop window zoom", () => {
     f.windows.trackWorkspaceWindow(window.native);
     expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(1);
     f.windows.applyZoomLevelToWindows(2); f.windows.seedZoomLevel(4);
-    const guest = new Contents(); f.windows.bindGuestZoom(guest);
-    expect(guest.setZoomLevel).toHaveBeenCalledWith(2);
+    expect(window.webContents.setZoomLevel).toHaveBeenLastCalledWith(2);
   });
 
-  it("applies the first persisted zoom to tracked hosts and attached guests", async () => {
-    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const window = new Window(); const utility = new Window(); const guest = new Contents();
-    f.all.push(window, utility); f.guests.push(guest); f.setRead(() => held.promise);
-    f.windows.trackWorkspaceWindow(window.native); f.windows.bindGuestZoom(guest);
+  it("applies the first persisted zoom to tracked windows only", async () => {
+    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const window = new Window(); const utility = new Window();
+    f.all.push(window, utility); f.setRead(() => held.promise);
+    f.windows.trackWorkspaceWindow(window.native);
     const reconciled = observePersistedZoomReconciliations();
     try {
       window.emit("ready-to-show");
-      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(guest.setZoomLevel).not.toHaveBeenCalled();
+      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
       held.resolve(settings(3)); await reconciled;
       expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(3);
-      expect(guest.setZoomLevel).toHaveBeenCalledWith(3);
       expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
-      expect(f.applyGuests).toHaveBeenCalledWith(3);
     } finally { held.resolve(settings(3)); await reconciled; }
   });
 
@@ -423,11 +415,10 @@ describe("desktop window zoom", () => {
     try {
       live.emit("ready-to-show"); closed.emit("ready-to-show");
       f.windows.applyZoomLevelToWindows(2); closed.destroy();
-      closed.webContents.setZoomLevel.mockClear(); live.webContents.setZoomLevel.mockClear(); f.applyGuests.mockClear();
+      closed.webContents.setZoomLevel.mockClear(); live.webContents.setZoomLevel.mockClear();
       held.resolve(settings(-2)); await reconciled;
       expect(live.webContents.setZoomLevel).toHaveBeenCalledWith(2);
       expect(closed.webContents.setZoomLevel).not.toHaveBeenCalled();
-      expect(f.applyGuests).not.toHaveBeenCalled();
     } finally { held.resolve(settings(-2)); await reconciled; }
   });
 
@@ -440,19 +431,7 @@ describe("desktop window zoom", () => {
       held.reject(new Error("settings unavailable"));
       await reconciled;
       expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
-      expect(f.applyGuests).not.toHaveBeenCalled();
     } finally { held.resolve(settings()); await reconciled; }
-  });
-
-  it("binds guest loads to the latest zoom and reads the current plugin surface owner", () => {
-    const f = fixture(); const guest = new Contents();
-    f.windows.seedZoomLevel(1); f.windows.bindGuestZoom(guest);
-    const replacement = { applyWebAppZoom: vi.fn() }; f.setPluginSurfaces(replacement);
-    f.windows.applyZoomLevelToWindows(4); guest.emit("did-finish-load");
-    expect(guest.setZoomLevel.mock.calls).toEqual([[1], [4]]);
-    expect(replacement.applyWebAppZoom).toHaveBeenCalledWith(4); expect(f.applyGuests).not.toHaveBeenCalled();
-    guest.destroyed = true; f.windows.applyZoomLevelToWindows(2); guest.emit("did-finish-load");
-    expect(guest.setZoomLevel.mock.calls).toEqual([[1], [4]]);
   });
 });
 

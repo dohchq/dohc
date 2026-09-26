@@ -1282,6 +1282,11 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
+export function startsWithFrontmatter(markdown: string): boolean {
+  return parseFrontmatter(markdown, false).body !== markdown
+}
+
 function writeMap(
   map: Y.Map<unknown>,
   values: Record<string, unknown>,

@@ -145,38 +145,32 @@ function openHarness() {
     },
   });
   let physicalCurrent = true;
-  let warmupWorkspace = workspace;
-  const warmup = vi.fn<() => Promise<void>>(async () => undefined);
   const operation = {
-    workspace, state: { pluginRuntimes: { ensure: warmup } },
+    workspace,
     assertCurrent: () => { if (!physicalCurrent) throw new Error("physical retired"); },
   };
-  let calls = 0;
   const withPhysicalWorkspaceOperation = async <Result>(id: string, work: (op: typeof operation) => Result | Promise<Result>) => {
     expect(id).toBe(workspace.workspaceId);
-    calls += 1;
-    return work(calls === 1 ? operation : { ...operation, workspace: warmupWorkspace });
+    return work(operation);
   };
   const activity = vi.fn(async () => status);
   const projection = vi.fn(async (_workspace: typeof workspace, value: SyncStatusResult) => value);
   const preferred = vi.fn();
   const opened = vi.fn();
-  const shared = vi.fn<() => unknown>(() => null);
   const handlers = new Map<string, (event: OpenEvent, payload: unknown) => unknown>();
   registerOpenWorkspaceIpcHandler<typeof sender, OpenEvent, typeof workspace, typeof operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
     setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, openWorkspaceActivity: activity,
-    syncStatusWithOwnedProjection: projection, sharedViewOf: shared,
+    syncStatusWithOwnedProjection: projection,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {
     workspaceId: workspace.workspaceId, rendererDocumentId: documentId,
   });
   return {
-    sender, workspace, sessions, activity, projection, preferred, opened, shared, warmup, handlers, invoke,
+    sender, workspace, sessions, activity, projection, preferred, opened, handlers, invoke,
     retirePhysical: () => { physicalCurrent = false; },
-    replaceWarmupAttachment: () => { warmupWorkspace = { ...workspace, attachmentId: Symbol("replacement") }; },
   };
 }
 
@@ -190,10 +184,9 @@ describe("registered workspace open", () => {
     expect(h.preferred).toHaveBeenCalledWith("workspace");
     expect(h.opened).toHaveBeenCalledWith("workspace");
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
-    expect(h.warmup).toHaveBeenCalledWith(h.workspace);
   });
 
-  it.each(["renderer", "physical"] as const)("rejects %s retirement during activity before warmup", async (kind) => {
+  it.each(["renderer", "physical"] as const)("rejects %s retirement during activity", async (kind) => {
     const h = openHarness();
     const held = deferred<SyncStatusResult>();
     const started = deferred();
@@ -205,7 +198,6 @@ describe("registered workspace open", () => {
     else await h.sessions.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, documentId);
     held.resolve(status);
     await expect(result).rejects.toThrow();
-    expect(h.warmup).not.toHaveBeenCalled();
     expect(h.opened).not.toHaveBeenCalled();
   });
 
@@ -219,27 +211,6 @@ describe("registered workspace open", () => {
     h.opened.mockImplementationOnce(() => { throw new Error("registry is read-only"); });
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.opened).toHaveBeenCalledWith("workspace");
-    expect(h.warmup).toHaveBeenCalledOnce();
-  });
-
-  it("skips plugin warmup for shared views and successor attachments", async () => {
-    const shared = openHarness();
-    shared.shared.mockReturnValue({});
-    await expect(shared.invoke()).resolves.toEqual(status);
-    expect(shared.warmup).not.toHaveBeenCalled();
-    const replaced = openHarness();
-    replaced.replaceWarmupAttachment();
-    await expect(replaced.invoke()).resolves.toEqual(status);
-    expect(replaced.warmup).not.toHaveBeenCalled();
-  });
-
-  it("does not wait for plugin warmup before returning the opened workspace", async () => {
-    const h = openHarness();
-    const held = deferred();
-    h.warmup.mockImplementation(() => held.promise);
-    await expect(h.invoke()).resolves.toEqual(status);
-    expect(h.warmup).toHaveBeenCalledOnce();
-    held.resolve();
   });
 });
 

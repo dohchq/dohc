@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import type { PlannedStep } from "./automationPlan";
+import type { PlannedEffect } from "./automationPlan";
 import type { StoredReachVerdict } from "./reachVerdicts";
 
 // This computer's record of each Collection automation run, under
@@ -41,6 +41,11 @@ const TargetSchema = z.union([
   z.object({ recordId: z.string(), collectionPath: z.string(), path: z.string() }),
   z.object({ addedBy: z.number().int().nonnegative() }),
 ]);
+const DatasetRecordIdSchema = z.union([z.string(), z.number()]);
+// The approved rules a dataset effect was planned under. It runs under them
+// or not at all.
+const DatasetRulesSchema = z.object({ datasetId: z.string(), revision: z.number().int().positive(), revisionSha256: z.string() });
+const DatasetFieldSchema = z.object({ fieldId: z.string(), field: z.string(), before: JsonValueSchema, after: JsonValueSchema });
 const EffectSchema = z.union([
   z.object({
     kind: z.literal("set"),
@@ -53,6 +58,57 @@ const EffectSchema = z.union([
     recordId: z.string(),
     name: z.string(),
     fields: z.array(z.object({ field: z.string(), value: JsonValueSchema })),
+  }),
+  z.object({
+    kind: z.literal("dataset-edit"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    // A record the plan read, at the version it read; or one an earlier step adds.
+    target: z.union([z.object({ recordId: DatasetRecordIdSchema, version: z.number().int().positive() }), z.object({ addedBy: z.number().int().nonnegative() })]),
+    fields: z.array(DatasetFieldSchema),
+  }),
+  z.object({
+    kind: z.literal("dataset-create"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    values: z.array(z.object({ fieldId: z.string(), field: z.string(), value: JsonValueSchema })),
+  }),
+  z.object({
+    kind: z.literal("message"),
+    effectId: z.string(),
+    messageId: z.string(),
+    threadId: z.string(),
+    to: z.union([
+      z.object({ kind: z.literal("group"), channelId: z.string(), lane: z.enum(["posts", "chat"]) }),
+      z.object({ kind: z.literal("direct-message"), userId: z.string(), threadId: z.string() }),
+    ]),
+    name: z.string(),
+    channelWireId: z.string(),
+    body: z.string(),
+    byFormula: z.boolean().optional(),
+  }),
+  z.object({
+    kind: z.literal("wake"),
+    effectId: z.string(),
+    messageId: z.string(),
+    threadId: z.string(),
+    person: z.string(),
+    body: z.string(),
+  }),
+  z.object({
+    kind: z.literal("notice"),
+    name: z.string(),
+    notice: z.object({
+      noticeId: z.string(),
+      kind: z.literal("automation-notify"),
+      title: z.string(),
+      body: z.string(),
+      target: z.object({ path: z.string(), record: z.string().optional(), automation: z.string(), run: z.string() }),
+      recipientUserId: z.string(),
+    }),
+    byFormula: z.boolean().optional(),
   }),
 ]);
 const WriteSchema = z.union([
@@ -74,7 +130,51 @@ const WriteSchema = z.union([
     current: JsonValueSchema,
   }),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }),
+  // A dataset edit that landed: each field's value before (the operation's
+  // priorValues) and after, and the record's version after it.
+  z.object({
+    kind: z.literal("dataset-edit"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    recordId: DatasetRecordIdSchema,
+    version: z.number().int().positive(),
+    fields: z.array(DatasetFieldSchema),
+  }),
+  z.object({
+    kind: z.literal("dataset-created"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    recordId: DatasetRecordIdSchema,
+    version: z.number().int().positive(),
+  }),
+  z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
+  z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
+  // A post or direct message the automation wrote, and where it went.
+  z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }),
+  // A notice the automation sent, and to whom.
+  z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }),
 ]);
+// A dataset edit refused because its record changed, sent again: the record's
+// new version, the fields still to write, and what the re-read kept.
+const ReplanSchema = z.object({
+  effect: z.number().int().nonnegative(),
+  replan: z.number().int().positive(),
+  version: z.number().int().positive(),
+  fields: z.array(DatasetFieldSchema),
+  kept: z.array(WriteSchema),
+});
+// A dataset Undo's request sent again after its record changed: saved before
+// it is sent, so an Undo that stops part way sends it again under the same key.
+const UndoRequestSchema = z.object({
+  datasetId: z.string(),
+  tableId: z.string(),
+  recordId: DatasetRecordIdSchema,
+  operationId: z.string(),
+  version: z.number().int().positive(),
+  values: z.record(z.string(), JsonValueSchema),
+});
 // Version 2 keeps progress in a file beside the plan. A run in any other
 // format cannot be read, and the claim fails instead of starting over.
 const StoredRunSchema = z.object({
@@ -88,6 +188,9 @@ const StoredRunSchema = z.object({
   plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   created: z.array(z.object({ ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() })),
+  replans: z.array(ReplanSchema),
+  undoRequests: z.array(UndoRequestSchema),
+  readableFields: z.array(z.string()).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
@@ -104,6 +207,15 @@ const StoredRunSchema = z.object({
  * record it could no longer find.
  */
 export type RunWrite = z.infer<typeof WriteSchema>;
+/** A planned effect on a dataset record, through one of its approved operations. */
+export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" }>;
+export type DatasetReplan = z.infer<typeof ReplanSchema>;
+export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
+/** One step's effects, on document records or on dataset records. */
+export interface StoredStep {
+  ordinal: number;
+  effects: Array<PlannedEffect | DatasetEffect>;
+}
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
@@ -120,7 +232,7 @@ export interface StoredRun {
    * The steps' planned effects, saved once every formula has an answer and
    * dropped when the run is done. Its writes stay.
    */
-  plan: PlannedStep[] | null;
+  plan: StoredStep[] | null;
   /** What each effect that landed did, in plan order, one entry per effect. */
   applied: Array<{ ordinal: number; writes: RunWrite[] }>;
   /**
@@ -128,6 +240,15 @@ export interface StoredRun {
    * saved before their fields are written.
    */
   created: Array<{ ordinal: number; recordId: string; path: string }>;
+  /** Dataset edits sent again after their record changed, saved before each is sent. */
+  replans: DatasetReplan[];
+  /** Dataset Undo requests sent again after their record changed, saved before each is sent. */
+  undoRequests: DatasetUndoRequest[];
+  /**
+   * The dataset fields the plan's formulas could see, or null for a document
+   * Collection. A run resumes only while every one of them is still readable.
+   */
+  readableFields: string[] | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
@@ -150,12 +271,19 @@ export interface StoredRun {
 
 const SubscriptionsSchema = z.object({
   version: z.literal(1),
-  subscriptions: z.array(z.object({
-    automationId: z.string().min(1),
-    path: z.string().min(1),
-    kinds: z.array(z.enum(["added", "changed", "removed"])),
-    fields: z.array(z.string()).optional(),
-  })),
+  subscriptions: z.array(z.union([
+    z.object({
+      automationId: z.string().min(1),
+      path: z.string().min(1),
+      kinds: z.array(z.enum(["added", "changed", "removed"])),
+      fields: z.array(z.string()).optional(),
+    }),
+    z.object({
+      automationId: z.string().min(1),
+      groupId: z.string().min(1),
+      startsWith: z.string().optional(),
+    }),
+  ])),
 });
 
 const ReachVerdictsSchema = z.object({
@@ -163,11 +291,12 @@ const ReachVerdictsSchema = z.object({
   verdicts: z.array(z.object({
     automationId: z.string().min(1),
     definitionHash: z.string().min(1),
-    step: z.number().int().nonnegative(),
+    step: z.string().min(1).max(512),
     verdict: z.enum(["allowed", "stopped", "held"]),
     stoppedFor: z.string().nullable(),
     narrowed: z.literal(true).optional(),
     seq: z.number().int().nonnegative(),
+    recipient: z.object({ userId: z.string(), name: z.string(), action: z.enum(["post", "notify"]) }).optional(),
   })),
 });
 
@@ -176,11 +305,21 @@ const TimeoutsSchema = z.object({
   timeouts: z.array(z.object({ automationId: z.string().min(1), count: z.number().int().nonnegative() })),
 });
 
-export interface StoredSubscription {
-  automationId: string;
-  path: string;
-  kinds: AutomationChangeKind[];
-  fields?: string[];
+/** An engine subscription this computer holds: records under a path, or one Group's messages. */
+export type StoredSubscription =
+  | { automationId: string; path: string; kinds: AutomationChangeKind[]; fields?: string[] }
+  | { automationId: string; groupId: string; startsWith?: string };
+
+/** What removes a subscription from the engine. */
+export function unsubscribeParams(subscription: StoredSubscription): { automationId: string; path: string } | { automationId: string; groupId: string } {
+  return "groupId" in subscription
+    ? { automationId: subscription.automationId, groupId: subscription.groupId }
+    : { automationId: subscription.automationId, path: subscription.path };
+}
+
+/** Whether two subscriptions name the same engine pair, so one replaces the other in place. */
+export function sameSubscriptionTarget(left: StoredSubscription, right: StoredSubscription): boolean {
+  return "groupId" in left ? "groupId" in right && left.groupId === right.groupId : "path" in right && left.path === right.path;
 }
 
 const HEADER_SUFFIX = ".json";
@@ -209,7 +348,8 @@ async function syncFolder(folder: string): Promise<void> {
 async function realFolder(path: string): Promise<string> {
   let stats = await lstat(path).catch(() => null);
   if (stats === null) {
-    await mkdir(path);
+    // Two readers can both find it missing; the second finds the first's folder.
+    await mkdir(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await syncFolder(dirname(path));
     stats = await lstat(path);
   }
@@ -291,6 +431,10 @@ export interface AutomationRunStore {
    * gave it, before its fields are written.
    */
   recordCreated(run: StoredRun, created: StoredRun["created"][number]): Promise<void>;
+  /** Records a dataset edit's replan before it is sent under its new key. */
+  recordReplan(run: StoredRun, replan: DatasetReplan): Promise<void>;
+  /** Records a dataset Undo request before it is sent again at a record's new version. */
+  recordUndoRequest(run: StoredRun, request: DatasetUndoRequest): Promise<void>;
   /**
    * Drops the oldest settled or superseded runs past the history bound,
    * compacts failed runs whose claims are not in `resumableClaims`, and
@@ -315,17 +459,23 @@ export interface AutomationRunStore {
 
 type ProgressLine =
   | ({ kind: "effect" } & StoredRun["applied"][number])
-  | ({ kind: "created" } & StoredRun["created"][number]);
+  | ({ kind: "created" } & StoredRun["created"][number])
+  | ({ kind: "replan" } & DatasetReplan)
+  | ({ kind: "undo-request" } & DatasetUndoRequest);
 
 const ProgressLineSchema = z.union([
   z.object({ kind: z.literal("effect"), ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) }),
   z.object({ kind: z.literal("created"), ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() }),
+  ReplanSchema.extend({ kind: z.literal("replan") }),
+  UndoRequestSchema.extend({ kind: z.literal("undo-request") }),
 ]);
 
 function progressText(run: StoredRun): string {
   const lines: ProgressLine[] = [
     ...run.created.map((created) => ({ kind: "created" as const, ...created })),
+    ...run.replans.map((replan) => ({ kind: "replan" as const, ...replan })),
     ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
+    ...run.undoRequests.map((request) => ({ kind: "undo-request" as const, ...request })),
   ];
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
@@ -347,10 +497,10 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
   // Every run keeps its plan and state in one file, written whole, and its
   // progress in a second, one line per landed effect.
   const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
-    const header = StoredRunSchema.omit({ applied: true, created: true }).safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
+    const header = StoredRunSchema.omit({ applied: true, created: true, replans: true, undoRequests: true }).safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
     if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
-    const run: StoredRun = { ...header.data, applied: [], created: [] };
+    const run: StoredRun = { ...header.data, applied: [], created: [], replans: [], undoRequests: [] };
     if (run.compacted) return run;
     // A run that can resume always has its progress file, empty or not.
     const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
@@ -368,6 +518,11 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
       const entry = ProgressLineSchema.safeParse(parsed);
       if (!entry.success) return null;
       if (entry.data.kind === "effect") run.applied.push({ ordinal: entry.data.ordinal, writes: entry.data.writes });
+      else if (entry.data.kind === "replan") run.replans.push({ effect: entry.data.effect, replan: entry.data.replan, version: entry.data.version, fields: entry.data.fields, kept: entry.data.kept });
+      else if (entry.data.kind === "undo-request") {
+        const { kind: _kind, ...request } = entry.data;
+        run.undoRequests.push(request);
+      }
       else {
         // The newest line for a step is the record it created.
         const { ordinal, recordId, path } = entry.data;
@@ -411,7 +566,7 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     await rm(join(folder, `${name}${HEADER_SUFFIX}`), { force: true });
   };
   const header = (run: StoredRun) => {
-    const { applied: _applied, created: _created, ...rest } = run;
+    const { applied: _applied, created: _created, replans: _replans, undoRequests: _undoRequests, ...rest } = run;
     return rest;
   };
 
@@ -452,6 +607,12 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     recordCreated(run, created) {
       return serial(() => appendLine(run, { kind: "created", ...created }));
     },
+    recordReplan(run, replan) {
+      return serial(() => appendLine(run, { kind: "replan", ...replan }));
+    },
+    recordUndoRequest(run, request) {
+      return serial(() => appendLine(run, { kind: "undo-request", ...request }));
+    },
     prune(automationId, resumableClaims) {
       return serial(async () => {
         const folder = await runsFolder(automationId);
@@ -474,7 +635,7 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
             compacted.push({ name, run });
           } else if (resumable !== null && run.outcome?.state === "failed" && !resumable.has(run.claimId)) {
             // Nothing offers its Try again any more, so only its failure stays.
-            const tombstone = { ...run, plan: null, applied: [], created: [], compacted: true };
+            const tombstone = { ...run, plan: null, applied: [], created: [], replans: [], undoRequests: [], compacted: true };
             await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(tombstone))}\n`);
             await rm(join(folder, `${name}${PROGRESS_SUFFIX}`), { force: true });
             compacted.push({ name, run: tombstone });

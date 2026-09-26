@@ -16,8 +16,7 @@ import { ipcErrorMessage } from "../ipcError";
 // async response is liveness-token gated before it touches state.
 
 // While the agent works: one calm line, no new streaming surface — the
-// History rail already shows the agent's edits as they land, and a run
-// blocked on a permission raises its own card (AgentPermissionRequests).
+// History rail already shows the agent's edits as they land.
 export function TryInVersionBanner(props: {
   task: string;
   versionName: string;

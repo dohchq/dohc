@@ -55,7 +55,7 @@ import {
   type ChatRelayIdentityTarget,
   type ResolvedChatRelayIdentity,
 } from "../workspaces/chatRelayIdentity";
-import type { ChatWrites, ChatWriter } from "../workspaces/chatWrites";
+import type { ChatWrites, PersonWriter } from "../workspaces/chatWrites";
 import {
   chatViewerAuthorId,
   createChatChannelIpcHandler,
@@ -79,7 +79,7 @@ import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ChatScope, createChatScopeCapability } from "./chatScope";
 
 // The renderer always writes as the local person, never as an agent.
-const RENDERER: ChatWriter = { via: "renderer" };
+const RENDERER: PersonWriter = { via: "renderer" };
 
 function chatWritePlace(scope: ChatScope) {
   return { workspaceId: scope.workspace.workspaceId, store: scope.store };

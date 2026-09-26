@@ -50,17 +50,11 @@ import {
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
-  isPluginDetailsTabPath,
-  isPluginPanelTabPath,
-  isPluginWebAppTabPath,
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseCollectionTabPath,
   parseTransactionalCollectionTabPath,
-  parsePluginDetailsTabPath,
-  parsePluginPanelTabPath,
-  parsePluginWebAppTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
@@ -241,15 +235,6 @@ export function editorTitle(path: string, label?: string): string {
   if (isHistoryTabPath(path)) return "History";
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
-  }
-  if (isPluginPanelTabPath(path)) {
-    return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
-  }
-  if (isPluginWebAppTabPath(path)) {
-    return `Plugin: ${parsePluginWebAppTabPath(path)?.webAppId ?? "app"}`;
-  }
-  if (isPluginDetailsTabPath(path)) {
-    return `Plugin: ${parsePluginDetailsTabPath(path)?.pluginId ?? "details"}`;
   }
   if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";

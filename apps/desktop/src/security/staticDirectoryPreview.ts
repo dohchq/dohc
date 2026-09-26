@@ -8,8 +8,8 @@ import { isInside } from "./pathContainment";
 
 /**
  * Serves one directory on loopback for a sandboxed frame to load, and refuses
- * every path that would leave it. Neutral on purpose: dohc's plugin panels are
- * served by this, and nothing here knows what a panel is.
+ * every path that would leave it. Neutral on purpose: nothing here knows what
+ * the directory holds.
  */
 
 interface StaticDirectoryPreview {

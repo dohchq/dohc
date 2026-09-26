@@ -16,16 +16,17 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_create_directory",
   "dohc_move_path",
   "dohc_delete_path",
-  "dohc_create_site",
+  "dohc_create_app",
   "dohc_import_data",
   // Collection writes change the granter's records, so they sit in the
   // document tier: a shared view never sees them.
   "dohc_set_record_fields",
   "dohc_create_record",
   "dohc_edit_document",
+  "dohc_create_document",
 ];
 
-const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_reply_to_chat"];
+const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
 
 const READ_TOOLS = [
   "dohc_list_files",
@@ -172,7 +173,7 @@ describe("parseArgs", () => {
 describe("MCP tool results", () => {
   it("omits tools that cannot perform the advertised action", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
-    for (const name of ["build_site", "preview_site", "publish_site", "share", "open_in_dohc", "resolve_conflict"]) {
+    for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {
       expect(names).not.toContain(`dohc_${name}`);
     }
   });
@@ -195,6 +196,20 @@ describe("MCP tool results", () => {
       ok: true, threadId: "thread-1", messageId: "message-2", warning: "Run provenance pending.",
     });
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.structuredContent, null, 2) }]);
+  });
+
+  it("forwards a file path to list one file's history", async () => {
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        requests.push(request.args);
+        return { changes: [], count: 0, totalAvailable: 0, hasMore: false, cursorMs: 0 };
+      },
+    });
+    const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
   });
 
   it("reports authorization refusals as tool errors", async () => {
@@ -242,6 +257,45 @@ describe("MCP tool results", () => {
       { cwd: root, actor: "agent", agent: "claude-code", ...edit },
       { cwd: root, actor: "agent", ...edit },
     ]);
+  });
+
+  it("creates a document under the agent name from the handshake", async () => {
+    const root = await workspaceRoot();
+    const sent: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        sent.push(request);
+        return { ok: true, path: "notes/new.md" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({ name: "dohc_create_document", arguments: { path: "notes/new.md", markdown: "# New" } });
+    expect(result.structuredContent).toEqual({ ok: true, path: "notes/new.md" });
+    expect(sent).toMatchObject([{
+      verb: "documentCreate",
+      args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" },
+    }]);
+  });
+
+  it("comments on a file by starting its chat", async () => {
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        expect(request).toMatchObject({
+          verb: "fileChatStart",
+          args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+        });
+        return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({
+      name: "dohc_start_file_chat",
+      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+    });
+    expect(result.structuredContent).toEqual({
+      ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",
+    });
   });
 
   it("turns poll options into a decision even without needsDecision", async () => {

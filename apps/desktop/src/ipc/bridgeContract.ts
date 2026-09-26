@@ -15,6 +15,7 @@ import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionAutomationHolds,
+  CollectionAutomationButton,
   CollectionAutomationRetry,
   CollectionAutomationRun,
   CollectionAutomationShareStop,
@@ -23,6 +24,8 @@ import type {
   CollectionFieldMark,
   CollectionAutomationTarget,
   CollectionAutomationUndo,
+  PressSettled,
+  PressWaitReason,
 } from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
@@ -32,7 +35,6 @@ import {
   NOTICE_TARGET_FIELD_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
 } from "@dohc/workspace-contracts/relay";
-import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
@@ -60,7 +62,6 @@ export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
   isChatsTabPath,
   canonicalSingletonEditorTabPath,
-  isPluginPanelTabPath,
   isSiteTabPath,
   isSingletonEditorTabPath,
   MAX_COLLECTION_VIEWS,
@@ -78,8 +79,6 @@ import {
   SIDEBAR_MIN_WIDTH,
   APP_VIEW_ID_PREFIX,
   parseAppViewId,
-  parsePluginViewId,
-  PLUGIN_VIEW_ID_PREFIX,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -91,34 +90,11 @@ import {
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
-  PLUGIN_PIPELINE_ERROR_STAGES,
-  PLUGIN_PIPELINE_STATUSES,
-  PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { OperationBridge, OperationTable } from "./operationTable";
-// The manifest schema is plain zod, which the sandboxed preload already
-// bundles, so the contract shares the settings declaration rather than keeping
-// a second copy of it. A copy that drifts would fail the whole plugin list's
-// parse over a value the manifest itself allows.
-import {
-  isHttpsUrl,
-  MAX_PLUGIN_DESCRIPTION_CHARS,
-  MAX_PLUGIN_DRIVER_NAME_CHARS,
-  MAX_PLUGIN_LICENSE_CHARS,
-  MAX_PLUGIN_PUBLISHER_CHARS,
-  MAX_PLUGIN_URL_CHARS,
-  MAX_PLUGIN_VERSION_CHARS,
-  MAX_PLUGIN_SETTINGS,
-  PluginSettingDeclarationSchema,
-  PluginSettingValueSchema,
-} from "../plugins/pluginManifestSchema";
-import {
-  MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
-  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
-} from "../plugins/pluginWebAppInstances";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -1427,6 +1403,13 @@ export const EngineMomentRecord = z.object({
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
   automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
+  // Present when a person the owner shared with wrote the moment directly
+  // (ADR 0013): main names them from the owner's share roster. The user id
+  // picks them for Stop and restore.
+  namedAuthor: z.object({
+    userId: z.string().min(1).max(256),
+    label: z.string().min(1).max(400),
+  }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -2661,18 +2644,6 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 // the workspace's engine capture like every version operation.
 const TRY_IN_VERSION_TASK_MAX = 2000;
 
-// How a driver is named wherever a payload or a result carries one. Every
-// surface on the path — the manifest, the probe list, the workspace's own
-// `agents.defaultDriverId`, and the task a driver is handed — reads these two,
-// so a driver dohc lists is always one dohc can be asked to run.
-//
-// A driver id is bounded by what workspace settings can store, because
-// `agents.defaultDriverId` has to be able to name any driver the list shows —
-// dohc's own and a plugin's alike. A display name takes the bound a plugin
-// manifest gives it, shared with it rather than matched by eye.
-const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
-const AgentDriverNameSchema = z.string().min(1).max(MAX_PLUGIN_DRIVER_NAME_CHARS);
-
 export const TryInWorkspaceVersionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   task: z
@@ -2682,12 +2653,6 @@ export const TryInWorkspaceVersionPayload = z.object({
     .refine((value) => value.trim().length > 0, {
       message: "task must not be blank",
     }),
-  // When present, main hands the task to this installed agent driver (a
-  // dohc-managed driver session); absent = a bare dohc-tracked run the
-  // user's own agent tool works inside. The id comes from the agent panel's
-  // own driver list, so it takes that list's bound: a tighter one here would
-  // refuse a driver dohc offered, chose, and probed.
-  driverId: AgentDriverIdSchema.optional(),
 });
 export type TryInWorkspaceVersionPayload = z.infer<
   typeof TryInWorkspaceVersionPayload
@@ -3097,543 +3062,6 @@ export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 const StopSitePreviewResult = z.void();
 type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
-const MAX_PLUGIN_ID_CHARS = 214;
-const MAX_PLUGIN_PANEL_ID_CHARS = 120;
-const PLUGIN_ID = z.string().min(1).max(MAX_PLUGIN_ID_CHARS).refine(
-  (value) => !value.includes("\0"),
-  "plugin id must not contain NUL bytes",
-);
-const PLUGIN_PANEL_ID = z.string().min(1).max(MAX_PLUGIN_PANEL_ID_CHARS).refine(
-  (value) => !value.includes("\0"),
-  "plugin panel id must not contain NUL bytes",
-);
-const PLUGIN_ROOT = z.string().min(1).max(4096).refine(
-  (value) => !value.includes("\0"),
-  "plugin root must not contain NUL bytes",
-);
-
-export const OpenPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginRoot: PLUGIN_ROOT,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type OpenPluginPanelPayload = z.infer<typeof OpenPluginPanelPayload>;
-
-export const OpenPluginPanelResult = z.object({
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type OpenPluginPanelResult = z.infer<typeof OpenPluginPanelResult>;
-
-export const PluginPanelOpenedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type PluginPanelOpenedEvent = z.infer<typeof PluginPanelOpenedEvent>;
-
-export const StartPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  /** Where the caller is mounting this panel. Main refuses a panel whose
-   * manifest places it elsewhere, so a tab restored from before an update
-   * cannot mount a panel the plugin has since moved to the view rail. */
-  placement: z.enum(["editor", "view"]),
-}).strict();
-export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
-
-export const StartPluginPanelResult = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("ok"),
-    url: LoopbackPreviewUrl,
-    title: z.string().min(1).max(120),
-    surfaceId: z.number().int().positive(),
-  }).strict(),
-  z.object({ status: z.literal("not-registered") }).strict(),
-]);
-export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
-
-/** Main retired this exact panel preview because the active runtime no
- * longer matches it. The page restarts only when it still shows surfaceId. */
-export const PluginPanelInvalidatedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  surfaceId: z.number().int().positive(),
-}).strict();
-export type PluginPanelInvalidatedEvent = z.infer<
-  typeof PluginPanelInvalidatedEvent
->;
-
-export function parsePluginPanelInvalidatedEventForIpc(
-  value: unknown,
-): PluginPanelInvalidatedEvent | null {
-  const parsed = PluginPanelInvalidatedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-export const InvokePluginCommandPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  commandId: z.string().min(1).max(120),
-}).strict();
-export type InvokePluginCommandPayload = z.infer<
-  typeof InvokePluginCommandPayload
->;
-
-export const InvokePluginCommandResult = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("ok") }).strict(),
-  z.object({
-    status: z.literal("plugin-not-found"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("plugin-not-running"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("command-not-declared"),
-    message: z.string(),
-  }).strict(),
-  z.object({
-    status: z.literal("command-failed"),
-    message: z.string(),
-  }).strict(),
-  // A rebuild's old-runtime stop is already draining this plugin's
-  // in-flight plugin work — refused outright rather than queued, so
-  // that wait stays bounded by the claims it began with (round-10
-  // finding 2).
-  z.object({
-    status: z.literal("plugin-rebuilding"),
-    message: z.string(),
-  }).strict(),
-]);
-export type InvokePluginCommandResult = z.infer<
-  typeof InvokePluginCommandResult
->;
-
-// Stopping names the running panel, which is keyed by workspace, plugin, and
-// panel alone. It carries no placement: a panel must stop wherever it runs.
-export const StopPluginPanelPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-}).strict();
-export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
-const StopPluginPanelResult = z.void();
-type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
-
-// Wrapper-plugin web apps: the guest is a main-process WebContentsView,
-// so the renderer never receives the guest URL — the pairing credential in
-// its fragment stays between the plugin process and main. The renderer gets
-// the title and the credential-free origin, and reports placeholder bounds.
-const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
-  (value) => !value.includes("\0"),
-  "plugin web app id must not contain NUL bytes",
-);
-
-/**
- * The instance an open targets, or null for a web app that opens one tab for
- * the whole manifest id. Null is a value here, never an absent field: which
- * of the two shapes a request means is exactly what the handlers check
- * against the manifest, so it must not arrive by omission.
- */
-const PLUGIN_WEB_APP_INSTANCE_KEY = z
-  .string()
-  .min(1)
-  .max(
-    MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
-    `plugin web app instance key: must be ${MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS} characters or fewer`,
-  )
-  .refine(
-    (value) => !value.includes("\0"),
-    "plugin web app instance key must not contain NUL bytes",
-  )
-  .nullable();
-
-export const OpenPluginWebAppPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginRoot: PLUGIN_ROOT,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type OpenPluginWebAppPayload = z.infer<typeof OpenPluginWebAppPayload>;
-
-export const OpenPluginWebAppResult = z.object({
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type OpenPluginWebAppResult = z.infer<typeof OpenPluginWebAppResult>;
-
-export const PluginWebAppOpenedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type PluginWebAppOpenedEvent = z.infer<typeof PluginWebAppOpenedEvent>;
-
-export const StartPluginWebAppPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
-
-export const StartPluginWebAppResult = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("ok"),
-    // The manifest title, or the one the plugin named for this instance.
-    // Both land here, so both answer to the same bound.
-    title: z.string().min(1).max(MAX_PLUGIN_WEB_APP_TITLE_CHARS),
-    origin: LoopbackPreviewUrl,
-  }).strict(),
-  z.object({ status: z.literal("not-registered") }).strict(),
-]);
-export type StartPluginWebAppResult = z.infer<typeof StartPluginWebAppResult>;
-
-const GUEST_BOUNDS_LIMIT = 1_000_000;
-export const SetPluginWebAppBoundsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-  bounds: z.object({
-    x: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
-    y: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
-    width: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
-    height: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
-  }).strict(),
-  visible: z.boolean(),
-}).strict();
-export type SetPluginWebAppBoundsPayload = z.infer<
-  typeof SetPluginWebAppBoundsPayload
->;
-
-export const StopPluginWebAppPayload = StartPluginWebAppPayload;
-export type StopPluginWebAppPayload = z.infer<typeof StopPluginWebAppPayload>;
-
-/** Main tells the page its guest died after the start had already answered
- * "ok". It carries no failure text: the load error can embed the start URL,
- * credential fragment included, so the page owns the words. */
-export const PluginWebAppFailedEvent = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  webAppId: PLUGIN_WEB_APP_ID,
-  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
-}).strict();
-export type PluginWebAppFailedEvent = z.infer<typeof PluginWebAppFailedEvent>;
-
-export function parsePluginWebAppFailedEventForIpc(
-  value: unknown,
-): PluginWebAppFailedEvent | null {
-  const parsed = PluginWebAppFailedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-// Workspace plugin management. Main owns one pipeline for the active
-// workspace. Every action returns a discriminated result, so expected plugin
-// failures cross as bounded data instead of opaque Electron exceptions.
-// Reuses PLUGIN_ID above (PR1b/the panel schemas) rather than a second
-// plugin-id validator for the same field.
-const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
-const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
-
-// The same rule the manifest applies, restated on the wire so a link the
-// details rail is about to hand the OS browser cannot arrive over http.
-const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS)
-  .refine(isHttpsUrl, "must be an https:// URL");
-
-export const PluginPipelineError = z.object({
-  stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
-  code: z.string().min(1).max(100),
-  message: z.string().min(1).max(10_000),
-}).strict();
-export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
-
-export const PluginStatusRecord = z.object({
-  id: PLUGIN_ID,
-  directoryName: z.string().min(1).max(255),
-  rootPath: PATH_STRING,
-  valid: z.boolean(),
-  status: z.enum(PLUGIN_PIPELINE_STATUSES),
-  disabledReason: z.enum(["user", "crash-loop", "approval", "repair"]).nullable(),
-  runtimeStatus: z
-    .enum(["starting", "ready", "failed", "crashed", "disabled"])
-    .nullable(),
-  sourceHash: PLUGIN_SOURCE_HASH.nullable(),
-  approvedHash: PLUGIN_SOURCE_HASH.nullable(),
-  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
-  // Manifest metadata, bounded by the manifest schema's own limits so the two
-  // cannot drift: a value the manifest allows must never fail this parse and
-  // take the whole plugin list down with it.
-  displayName: z.string().min(1).max(120).nullable(),
-  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
-  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
-  icon: z.string().min(1).max(1024).nullable(),
-  // What the plugin declares about itself that dohc cannot derive: the
-  // version string it calls this build, and where its source, its issues, and
-  // its licence are. The URLs are re-checked as https here rather than
-  // trusted from main, because this contract is also what a test fixture and
-  // the demo bridge have to satisfy.
-  pluginVersion: z.string().min(1).max(MAX_PLUGIN_VERSION_CHARS).nullable(),
-  repository: HTTPS_URL.nullable(),
-  issues: HTTPS_URL.nullable(),
-  license: z.string().min(1).max(MAX_PLUGIN_LICENSE_CHARS).nullable(),
-  /** What the plugin declares the user may set. Values travel separately —
-   * they are per-workspace state, not part of the plugin's identity. */
-  settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
-  /** True while a build has failed and its replacement is still owed, even
-   * through a runtime health change (crash, respawn) that would otherwise
-   * hide it — see PluginPipelinePluginStatus.hasFailedReplacement. */
-  hasFailedReplacement: z.boolean(),
-  /** The plugin's declared panels. `placement` says where each one shows:
-   * "editor" opens a tab, "view" gets a button in the activity bar. The
-   * entry path never crosses — the renderer asks for a panel by id. */
-  panels: z.array(
-    z.object({
-      id: PLUGIN_PANEL_ID,
-      title: z.string().min(1).max(120),
-      placement: z.enum(["editor", "view"]),
-      icon: z.string().min(1).max(1024).nullable(),
-    }).strict(),
-  ).max(100),
-  commands: z.array(
-    z.object({
-      id: z.string().min(1).max(120),
-      title: z.string().min(1).max(120),
-    }).strict(),
-  ).max(200),
-  webApps: z.array(
-    z.object({
-      id: z.string().min(1).max(120),
-      title: z.string().min(1).max(120),
-      /** True when this app opens one tab per instance. The plugin's page
-       * has no instance to name, so it offers no Open button for one — the
-       * plugin opens these from its own panel. */
-      instanced: z.boolean(),
-    }).strict(),
-  ).max(100),
-  diagnostics: z.array(PLUGIN_DIAGNOSTIC),
-  warnings: z.array(PLUGIN_DIAGNOSTIC),
-  error: PluginPipelineError.nullable(),
-}).strict();
-export type PluginStatusRecord = z.infer<typeof PluginStatusRecord>;
-
-export const PluginActionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-}).strict();
-
-// The directory a discovered (never-installed) row's own id can never
-// safely stand in for: that id is only ever a broken manifest's directory-
-// derived fallback, a plain string that can coincide with some other,
-// unrelated plugin's real, valid manifest id. Preflight resolves the exact
-// directory the caller named, never trusting pluginId alone to disambiguate
-// which plugin that id actually means.
-export const PluginUninstallPreflightPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type PluginUninstallPreflightPayload = z.infer<
-  typeof PluginUninstallPreflightPayload
->;
-export type PluginActionPayload = z.infer<typeof PluginActionPayload>;
-
-export const ListPluginsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-}).strict();
-export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
-
-// A plugin's settings values. Bounded by the same declaration count the
-// manifest allows, because a plugin can never have more settings than it
-// declares — main resolves the stored file against the manifest before this
-// ever crosses.
-const PluginSettingsValues = z.record(
-  z.string().min(1).max(120),
-  PluginSettingValueSchema,
-).refine(
-  (values) => Object.keys(values).length <= MAX_PLUGIN_SETTINGS,
-  `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
-);
-
-// directoryName, not pluginId alone, is what settles which row's answers a
-// call reads or writes: an id is only ever a broken manifest's directory-
-// derived fallback, which can coincide with some other, unrelated plugin's
-// real id.
-export const GetPluginSettingsPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type GetPluginSettingsPayload = z.infer<typeof GetPluginSettingsPayload>;
-
-export const SetPluginSettingsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  directoryName: z.string().min(1).max(255),
-  values: PluginSettingsValues,
-}).strict();
-export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
-
-export const PluginSettingsResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), values: PluginSettingsValues }).strict(),
-  z.object({
-    ok: z.literal(false),
-    message: z.string().min(1).max(10_000),
-  }).strict(),
-]);
-export type PluginSettingsResult = z.infer<typeof PluginSettingsResult>;
-
-export const ListPluginsResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plugins: z.array(PluginStatusRecord) }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
-
-export const PluginActionResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
-  z.object({
-    ok: z.literal(false),
-    error: PluginPipelineError,
-    plugin: PluginStatusRecord.nullable(),
-  }).strict(),
-]);
-export type PluginActionResult = z.infer<typeof PluginActionResult>;
-
-const PluginUninstallCounts = z.object({
-  unchanged: z.number().int().nonnegative(),
-  modified: z.number().int().nonnegative(),
-  addedSinceBaseline: z.number().int().nonnegative(),
-  removedSinceBaseline: z.number().int().nonnegative(),
-  unknownWithoutBaseline: z.number().int().nonnegative(),
-  notRecoverableFromHistory: z.number().int().nonnegative(),
-}).strict();
-
-// Only a bounded sample of unrecoverable paths crosses the bridge; the whole
-// inventory stays in main. counts.notRecoverableFromHistory is the real
-// total, which is what the dialog counts "and N more" from.
-const PluginUninstallWarning = z.object({
-  kind: z.enum(["local-modifications", "cannot-verify-baseline", "plugin-state"]),
-  summary: z.string().min(1).max(10_000),
-  details: z.array(PLUGIN_DIAGNOSTIC),
-  counts: PluginUninstallCounts,
-  notRecoverablePathSample: z
-    .array(PATH_STRING)
-    .max(PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT),
-}).strict();
-
-export const PluginUninstallPreflightRecord = z.object({
-  verification: z.enum(["verified", "cannot-verify"]),
-  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
-  liveHash: PLUGIN_SOURCE_HASH.nullable(),
-  baselineManifestPath: PATH_STRING,
-  summary: z.string().min(1).max(10_000),
-  counts: PluginUninstallCounts,
-  stateData: z.object({
-    path: PATH_STRING,
-    fileCount: z.number().int().nonnegative(),
-    totalBytes: z.number().int().nonnegative(),
-    additionalLocations: z.number().int().nonnegative(),
-  }).strict().nullable(),
-  warning: PluginUninstallWarning.nullable(),
-}).strict();
-export type PluginUninstallPreflightRecord = z.infer<
-  typeof PluginUninstallPreflightRecord
->;
-
-export const PluginUninstallPreflightResult = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    confirmationToken: z.uuid(),
-    preflight: PluginUninstallPreflightRecord,
-  }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type PluginUninstallPreflightResult = z.infer<
-  typeof PluginUninstallPreflightResult
->;
-
-// What this plugin takes up on this machine. Measured on request rather than
-// carried on PluginStatusRecord: the walk reads every file in the installed
-// tree, and the list surface shows many plugins at once and needs none of it.
-export const PluginSizesRecord = z.object({
-  installedBytes: z.number().int().nonnegative().nullable(),
-  dataBytes: z.number().int().nonnegative().nullable(),
-}).strict();
-export type PluginSizesRecord = z.infer<typeof PluginSizesRecord>;
-
-export const PluginSizesResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), sizes: PluginSizesRecord }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
-
-// directoryName is what settles which row's bytes a call reports: an id is
-// only ever a broken manifest's directory-derived fallback, which can
-// coincide with some other, unrelated plugin's real id.
-export const PluginSizesPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-}).strict();
-export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
-
-// directoryName is what confirmationToken alone cannot name apart: two rows
-// can share an id (a broken manifest's directory-derived fallback colliding
-// with some other, unrelated plugin's real id), and each row's own
-// preflight confirmation has to be resolved by the exact row it was issued
-// for, not whichever row this id happens to name second.
-export const UninstallPluginPayload = PluginActionPayload.extend({
-  directoryName: z.string().min(1).max(255),
-  confirmationToken: z.uuid(),
-}).strict();
-export type UninstallPluginPayload = z.infer<typeof UninstallPluginPayload>;
-
-export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("changed"),
-    workspaceId: WORKSPACE_ID,
-    plugin: PluginStatusRecord,
-  }).strict(),
-  // directoryName is the departed row's own — never re-derived from
-  // whatever this id currently names, which a collision can leave
-  // pointing at an entirely different, still-installed row.
-  z.object({
-    kind: z.literal("removed"),
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    directoryName: z.string().min(1).max(255),
-  }).strict(),
-  // An invalid, never-installed candidate's arrival or departure names no
-  // pluginId "changed"/"removed" could carry — this is the one honest fact
-  // discovery has to offer instead: something in this workspace's invalid
-  // candidates moved, so anything reading discovery (the plugin list)
-  // should re-check.
-  z.object({
-    kind: z.literal("discovery-changed"),
-    workspaceId: WORKSPACE_ID,
-  }).strict(),
-  // Emitted only where the pipeline itself has proven a rename, never
-  // guessed from directoryName drift on a "changed" event — a renderer
-  // tab tracking one open row retargets on this fact directly.
-  z.object({
-    kind: z.literal("renamed"),
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    from: z.string().min(1).max(255),
-    to: z.string().min(1).max(255),
-  }).strict(),
-]);
-export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;
-
-export function parsePluginStatusChangedEventForIpc(
-  value: unknown,
-): PluginStatusChangedEvent | null {
-  const parsed = PluginStatusChangedEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
 // The daemon caps its own capture event at this many paths; a merged or
 // oversized set stops being a useful hint and the payload omits it
 // ("refresh broadly"). One constant for the schema, the broadcaster, and
@@ -3664,8 +3092,7 @@ export function activityPathsAffectWorkspaceListing(
   return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
 }
 
-// Unlike plugin events, an activity ping must never be dropped on a schema
-// failure: under-notifying is the staleness bug the channel exists to
+// An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to
 // prevent. A malformed payload degrades to the global, payload-free ping.
 export function parseWorkspaceActivityEventForIpc(
   value: unknown,
@@ -3673,266 +3100,6 @@ export function parseWorkspaceActivityEventForIpc(
   const parsed = WorkspaceActivityEvent.safeParse(value);
   return parsed.success ? parsed.data : {};
 }
-
-// What one panel subscription event carries: a settled file change
-// (files.watch), or a collection record event (collections.watch). The
-// record shapes mirror the engine's fixed record event contract minus
-// workspaceId, which the enclosing event already carries.
-const PluginPanelFileWatchData = z
-  .object({
-    path: z.string(),
-    operation: z.enum(["update", "delete"]),
-    sha256: z.string().optional(),
-  })
-  .strict();
-
-// Declared attribution and the op's replication coordinate ride every record
-// event: `null` means unattributed (or a never-synced change for `source`),
-// so a subscriber can tell "undeclared" from "missing".
-const RecordEventAttributionFields = {
-  actorKind: z.enum(["human", "agent", "automation"]).nullable(),
-  onBehalfOf: z.string().nullable(),
-  depth: z.number().nullable(),
-  source: z
-    .object({ originId: z.string().min(1), originSeq: z.number() })
-    .strict()
-    .nullable(),
-};
-
-export const PluginPanelRecordChangedData = z
-  .object({
-    collectionPath: z.string().min(1),
-    recordId: z.string().min(1),
-    author: z.string().nullable(),
-    timestamp: z.number(),
-    ...RecordEventAttributionFields,
-  })
-  .strict();
-
-// previous/next are arbitrary JSON field values (an oversized one arrives
-// already replaced by the engine's truncation marker), so they revalidate
-// through the same bounded value schema every collection result uses.
-export const PluginPanelRecordFieldChangedData = z
-  .object({
-    collectionPath: z.string().min(1),
-    recordId: z.string().min(1),
-    field: z.string().min(1),
-    previous: CollectionValueSchema,
-    next: CollectionValueSchema,
-    author: z.string().nullable(),
-    timestamp: z.number(),
-    historyId: z.number(),
-    ...RecordEventAttributionFields,
-  })
-  .strict();
-
-export const PluginPanelSdkEvent = z
-  .object({
-    workspaceId: WORKSPACE_ID,
-    pluginId: PLUGIN_ID,
-    panelId: PLUGIN_PANEL_ID,
-    subscriptionId: z.string().min(1),
-    // Forwarded verbatim from whatever the subscribed registry emits
-    // (PluginWorkspaceEvents' "change" and record.* names today) — not a
-    // closed set this schema owns, so a later event kind slots in without a
-    // schema change.
-    event: z.string().min(1),
-    data: z.union([
-      PluginPanelFileWatchData,
-      PluginPanelRecordChangedData,
-      PluginPanelRecordFieldChangedData,
-    ]),
-  })
-  .strict();
-export type PluginPanelSdkEvent = z.infer<typeof PluginPanelSdkEvent>;
-
-export function parsePluginPanelSdkEventForIpc(
-  value: unknown,
-): PluginPanelSdkEvent | null {
-  const parsed = PluginPanelSdkEvent.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-// A guest never supplies user or workspace identity. The containing renderer
-// identifies the open surface and main re-derives its authority.
-// The preload applies this contract before ipcRenderer.invoke. The byte cap
-// is the exact UTF-8 size of the JSON representation; 4 MiB preserves the
-// supported 2 MiB text-write payload while bounding Electron deserialization.
-export const SDK_PARAMS_MAX_BYTES = 4 * 1024 * 1024;
-export const SDK_PARAMS_MAX_DEPTH = 32;
-export const SDK_PARAMS_MAX_VALUES = 20_000;
-
-type SdkParamFrame =
-  | { kind: "visit"; value: unknown; depth: number }
-  | { kind: "leave"; value: object };
-
-function boundedJsonStringBytes(value: string, remaining: number): number {
-  let bytes = 2; // JSON quotes.
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c) {
-      bytes += 2;
-    } else if (code <= 0x1f) {
-      bytes += code === 0x08 || code === 0x09 || code === 0x0a ||
-        code === 0x0c || code === 0x0d
-        ? 2
-        : 6;
-    } else if (code <= 0x7f) {
-      bytes += 1;
-    } else if (code <= 0x7ff) {
-      bytes += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4;
-        index += 1;
-      } else {
-        // Well-formed JSON.stringify escapes lone surrogates as \uXXXX.
-        bytes += 6;
-      }
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      bytes += 6;
-    } else {
-      bytes += 3;
-    }
-    if (bytes > remaining) return remaining + 1;
-  }
-  return bytes;
-}
-
-function sdkParamsIssue(root: unknown): string | null {
-  const stack: SdkParamFrame[] = [{ kind: "visit", value: root, depth: 0 }];
-  const ancestors = new WeakSet<object>();
-  let bytes = 0;
-  let values = 0;
-
-  const addBytes = (amount: number): boolean => {
-    bytes += amount;
-    return bytes <= SDK_PARAMS_MAX_BYTES;
-  };
-
-  try {
-    while (stack.length > 0) {
-      const frame = stack.pop()!;
-      if (frame.kind === "leave") {
-        ancestors.delete(frame.value);
-        continue;
-      }
-      if (frame.depth > SDK_PARAMS_MAX_DEPTH) return "nesting is too deep";
-      values += 1;
-      if (values > SDK_PARAMS_MAX_VALUES) return "too many values";
-
-      const current = frame.value;
-      if (current === null) {
-        if (!addBytes(4)) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "string") {
-        if (!addBytes(boundedJsonStringBytes(
-          current,
-          SDK_PARAMS_MAX_BYTES - bytes,
-        ))) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "boolean") {
-        if (!addBytes(current ? 4 : 5)) return "serialized value is too large";
-        continue;
-      }
-      if (typeof current === "number") {
-        if (!Number.isFinite(current)) return "numbers must be finite";
-        if (!addBytes(JSON.stringify(current).length)) {
-          return "serialized value is too large";
-        }
-        continue;
-      }
-      if (typeof current !== "object") return "value is not JSON-safe";
-      if (ancestors.has(current)) return "cyclic references are not allowed";
-
-      if (Array.isArray(current)) {
-        const keys = Object.keys(current);
-        if (
-          keys.length !== current.length ||
-          keys.some((key, index) => key !== String(index))
-        ) {
-          return "arrays must be dense and contain no extra properties";
-        }
-        if (!addBytes(2 + Math.max(0, current.length - 1))) {
-          return "serialized value is too large";
-        }
-        ancestors.add(current);
-        stack.push({ kind: "leave", value: current });
-        for (let index = current.length - 1; index >= 0; index -= 1) {
-          stack.push({ kind: "visit", value: current[index], depth: frame.depth + 1 });
-        }
-        continue;
-      }
-
-      const prototype = Object.getPrototypeOf(current);
-      if (prototype !== Object.prototype && prototype !== null) {
-        return "only plain objects and arrays are allowed";
-      }
-      const keys = Reflect.ownKeys(current);
-      if (!addBytes(2 + Math.max(0, keys.length - 1) + keys.length)) {
-        return "serialized value is too large";
-      }
-      const childValues: unknown[] = [];
-      for (const key of keys) {
-        if (typeof key !== "string") return "symbol keys are not allowed";
-        const descriptor = Object.getOwnPropertyDescriptor(current, key);
-        if (!descriptor?.enumerable || !("value" in descriptor)) {
-          return "object properties must be enumerable data values";
-        }
-        if (!addBytes(boundedJsonStringBytes(
-          key,
-          SDK_PARAMS_MAX_BYTES - bytes,
-        ))) return "serialized value is too large";
-        childValues.push(descriptor.value);
-      }
-      ancestors.add(current);
-      stack.push({ kind: "leave", value: current });
-      for (let index = childValues.length - 1; index >= 0; index -= 1) {
-        stack.push({ kind: "visit", value: childValues[index], depth: frame.depth + 1 });
-      }
-    }
-  } catch {
-    return "value could not be inspected safely";
-  }
-
-  return null;
-}
-
-const SdkParams = z.unknown().superRefine((value, ctx) => {
-  const issue = sdkParamsIssue(value);
-  if (!issue) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message:
-      `params must be JSON-safe and within ${SDK_PARAMS_MAX_BYTES} bytes, ` +
-      `${SDK_PARAMS_MAX_DEPTH} levels, and ${SDK_PARAMS_MAX_VALUES} values: ${issue}`,
-  });
-});
-
-export const InvokePluginPanelSdkPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-  panelId: PLUGIN_PANEL_ID,
-  method: z.string().min(1).max(200),
-  params: SdkParams.optional(),
-}).strict();
-export type InvokePluginPanelSdkPayload = z.infer<
-  typeof InvokePluginPanelSdkPayload
->;
-
-export function parseInvokePluginPanelSdkPayloadForIpc(
-  value: unknown,
-): InvokePluginPanelSdkPayload {
-  return InvokePluginPanelSdkPayload.parse(value);
-}
-
-export const InvokePluginPanelSdkResult = z.object({ result: z.unknown() }).strict();
-export type InvokePluginPanelSdkResult = z.infer<
-  typeof InvokePluginPanelSdkResult
->;
 
 // Server login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -5029,8 +4196,8 @@ const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
 
 // What one push did. A failure is an ordinary result, for the reason a failed
 // submit is one: Electron does not carry custom Error properties across IPC.
-// `unavailable`: the relay does not take direct writes, so every change
-// waits for Send changes. `failed` keeps the writes answered before it;
+// `unavailable`: the relay knows no Edit grant of this person's on the share,
+// because the owner ended the share or stopped them. `failed` keeps the writes answered before it;
 // `lasting` says trying again will not help, as when the grant is not Edit.
 export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
@@ -5331,6 +4498,9 @@ export const AutomationFailureNotice = z.object({
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
+  // A dataset automation's failures count per instance of its dataset, which
+  // a delete and remake or a restore replaces; null for a document Collection.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
 
@@ -5348,6 +4518,8 @@ export const DismissAutomationFailurePayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: z.string().min(1),
   generation: z.number().int().nonnegative(),
+  // The notice's dataset instance. A dismissal of an earlier instance changes nothing.
+  datasetInstance: z.string().min(1).max(2048).nullable(),
 });
 export type DismissAutomationFailurePayload = z.infer<
   typeof DismissAutomationFailurePayload
@@ -5419,14 +4591,52 @@ export const UndoCollectionAutomationRunPayload = z.object({
 export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
 export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
 
+// Stop and restore (ADR 0013): the owner stops a person they shared with and
+// puts back what that person wrote directly. Main finds the person's grants
+// on this workspace from the relay; the renderer names only the person.
+export const StopAndRestorePersonPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  userId: z.string().min(1).max(256),
+}).strict();
+export type StopAndRestorePersonPayload = z.infer<typeof StopAndRestorePersonPayload>;
+export const StopAndRestorePersonResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("restored"),
+    // Each file put back, with the forward moment its Undo restores before.
+    restored: z.array(z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID })),
+    // Files left for the owner to check, each with why.
+    review: z.array(z.discriminatedUnion("reason", [
+      z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+    ])),
+    // Runs of the person's automations undone, and those Undo could not undo.
+    runsUndone: z.number().int().nonnegative(),
+    runsLeft: z.number().int().nonnegative(),
+    // What stopped the restore part way; the files above were restored.
+    errorMessage: z.string().nullable(),
+  }).strict(),
+  // Access stopped, but this computer has not received every change the
+  // person wrote yet. Nothing was restored; trying again continues.
+  z.object({ status: z.literal("waiting") }).strict(),
+]);
+export type StopAndRestorePersonResult = z.infer<typeof StopAndRestorePersonResult>;
+export const UndoStopAndRestorePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+}).strict();
+export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
+
 // A current editor allows a step that became reachable only because an
 // editor left. `seq` names the hold the person saw.
 export const ConfirmCollectionAutomationStepPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
-  step: z.number().int().nonnegative().max(10_000),
+  step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
+  // A person a formula named, whose hold this is.
+  recipient: z.string().min(1).max(1_024).optional(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
 export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
@@ -5451,7 +4661,7 @@ export const DismissAutomationStopsPayload = z.object({
   stops: z.array(z.object({
     automationId: COLLECTION_AUTOMATION_ID,
     definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
-    step: z.number().int().nonnegative().max(10_000),
+    step: z.string().min(1).max(512),
     seq: z.number().int().nonnegative(),
   })).max(1_000),
 });
@@ -5501,6 +4711,54 @@ export type WriteCollectionAutomationsResult =
   | { status: "reformats" }
   | { status: "refused"; diagnostics: AutomationDiagnostic[] }
   | { status: "unavailable" };
+
+// ---- Button fields ----
+// Main decides which automation a button runs and who may press it. A window
+// makes a UUID for each press and sends it again after a lost reply. The
+// person a press acts for is main's own signed-in person, never a value a
+// window sends.
+export const ListAutomationButtonsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
+export type ListAutomationButtonsResult = { buttons: CollectionAutomationButton[] };
+
+// The record an open file is, and its Collection's buttons. Null when the
+// file is not a record in a Collection.
+export const ListRecordButtonsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type ListRecordButtonsPayload = z.infer<typeof ListRecordButtonsPayload>;
+export type ListRecordButtonsResult =
+  | { record: null }
+  | { record: CollectionRecord; collectionPath: string; buttons: CollectionAutomationButton[] };
+
+export const PressAutomationButtonPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  field: z.string().min(1).max(256),
+  recordId: z.string().min(1).max(1024),
+  pressId: z.uuid(),
+  // A dataset table's name. A document Collection has one table and sends null.
+  table: z.string().min(1).max(256).nullable(),
+});
+export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
+export type PressAutomationButtonResult =
+  // `settled` is set when a press sent again finds its run already ended;
+  // otherwise the window hears the end as an automation run event.
+  | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null }
+  // A shared view's press went to the relay, to run on the owner's computer.
+  // Its changes arrive as synced edits, and a failure as a notice.
+  | { busy: false; relayed: true }
+  // The button is running on this record for someone else.
+  | { busy: true; reason: string };
+
+/** Main to the pressing window: the engine settled the press's run. */
+export type AutomationRunSettledEvent = PressSettled & { workspaceId: string };
+/** Main to the pressing window: the run waits, and why. */
+export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; reason: PressWaitReason };
 
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
@@ -5653,114 +4911,6 @@ export const McpConfigResult = z.union([
   }),
 ]);
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
-
-const AgentPermissionKindSchema = z.enum([
-  "allow_once",
-  "allow_always",
-  "reject_once",
-  "reject_always",
-]);
-const AgentPermissionDecisionSchema = z.union([
-  AgentPermissionKindSchema,
-  z.literal("cancel"),
-]);
-export type AgentPermissionDecision = z.infer<typeof AgentPermissionDecisionSchema>;
-
-const AgentModelSchema = z.object({
-  id: OPAQUE_ID,
-  name: z.string().min(1).max(200),
-  planIncluded: z.boolean(),
-});
-
-const AgentDriverProbeSchema = z.object({
-  id: AgentDriverIdSchema,
-  displayName: AgentDriverNameSchema,
-  installed: z.boolean(),
-  version: z.string().max(200).optional(),
-  auth: z.object({
-    status: z.enum(["authenticated", "unauthenticated", "unknown"]),
-    label: z.string().max(200).optional(),
-  }),
-  models: z.array(AgentModelSchema).max(50),
-  errorMessage: z.string().max(500).optional(),
-});
-
-const AgentPermissionOptionSchema = z.object({
-  optionId: OPAQUE_ID,
-  name: z.string().min(1).max(100),
-  kind: AgentPermissionKindSchema,
-});
-
-const AgentPermissionRequestSchema = z.object({
-  requestId: OPAQUE_ID,
-  requestType: z.enum(["command", "file-change", "file-read", "tool", "other"]),
-  title: z.string().min(1).max(200),
-  detail: z.string().max(500).optional(),
-  locations: z.array(z.string().min(1).max(1000)).max(20),
-  options: z.array(AgentPermissionOptionSchema).max(8),
-});
-
-const AgentSessionSnapshotSchema = z.object({
-  driverId: AgentDriverIdSchema,
-  driverName: AgentDriverNameSchema,
-  status: z.enum([
-    "idle",
-    "starting",
-    "ready",
-    "running",
-    "waiting-permission",
-    "completed",
-    "failed",
-    "stopped",
-  ]),
-  startedAt: z.number(),
-  endedAt: z.number().optional(),
-  runId: OPAQUE_ID.optional(),
-  lastError: z.string().max(500).optional(),
-  messages: z.array(
-    z.object({
-      id: z.string().min(1).max(300),
-      role: z.enum(["assistant", "reasoning"]),
-      text: z.string().max(10_000),
-    }),
-  ).max(200),
-  items: z.array(
-    z.object({
-      id: z.string().min(1).max(300),
-      type: z.enum(["tool_call", "command", "file_change", "mcp_tool_call", "web_search", "plan", "other"]),
-      title: z.string().min(1).max(200),
-      detail: z.string().max(500).optional(),
-      status: z.enum(["pending", "in_progress", "completed", "failed"]),
-      locations: z.array(z.string().min(1).max(1000)).max(20),
-    }),
-  ).max(200),
-  pendingPermissions: z.array(AgentPermissionRequestSchema).max(20),
-  usage: z.object({
-    used: z.number(),
-    max: z.number().optional(),
-    input: z.number().optional(),
-    output: z.number().optional(),
-  }).optional(),
-  authNotices: z.array(z.string().min(1).max(300)).max(5),
-  loginRequired: z.boolean(),
-});
-
-export const AgentPanelSnapshotResult = z.object({
-  // This workspace's plugin drivers. The registry
-  // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
-  // merged list inside this bound instead of failing the whole list here.
-  drivers: z.array(AgentDriverProbeSchema).max(20),
-  session: AgentSessionSnapshotSchema.nullable(),
-  selectedDriverId: AgentDriverIdSchema.nullable(),
-});
-export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
-
-export const AgentPermissionResponsePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  requestId: OPAQUE_ID,
-  decision: AgentPermissionDecisionSchema,
-});
-export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
 
 export const RunnerSelfTestPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5969,28 +5119,6 @@ const WorkspaceEditorGroups = z.preprocess(
   z.array(WorkspaceEditorGroup).min(1),
 );
 
-// `plugin-view:<plugin>/<panel>`, both segments percent-encoded. The bound is
-// that worst case: each id character can encode to nine characters, because a
-// three-byte character spends "%XX" three times.
-const PLUGIN_VIEW_ID = z
-  .string()
-  .max(
-    PLUGIN_VIEW_ID_PREFIX.length +
-      MAX_PLUGIN_ID_CHARS * 9 +
-      "/".length +
-      MAX_PLUGIN_PANEL_ID_CHARS * 9,
-  )
-  .refine((value) => {
-    const parsed = parsePluginViewId(value);
-    // The ids it decodes to must be ids this contract would accept anywhere
-    // else — same length caps, same refusal of NUL.
-    return (
-      parsed !== null &&
-      PLUGIN_ID.safeParse(parsed.pluginId).success &&
-      PLUGIN_PANEL_ID.safeParse(parsed.panelId).success
-    );
-  });
-
 // A pinned app's view: its folder, where each character can encode to nine.
 const APP_VIEW_ID = z
   .string()
@@ -5999,9 +5127,9 @@ const APP_VIEW_ID = z
 
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  // dohc's own views, a view a plugin contributes, or a pinned app. The
-  // catch keeps a stored id that names none of them from failing the file.
-  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID, APP_VIEW_ID]).catch("explorer"),
+  // dohc's own views or a pinned app. The catch keeps a stored id that names
+  // neither from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
@@ -6069,9 +5197,7 @@ export const WorkspaceUiState = z.object({
               ? "Each chat can be open in only one editor group."
               : isSiteTabPath(tab)
                 ? "An app preview can be open in only one editor group."
-                : isPluginPanelTabPath(tab)
-                  ? "A plugin panel can be open in only one editor group."
-                  : "This tab can be open in only one editor group.",
+                : "This tab can be open in only one editor group.",
         });
       } else {
         singletonOwners.add(identity);
@@ -6313,6 +5439,66 @@ export const MarkNoticesPayload = z.object({
 });
 export type MarkNoticesPayload = z.infer<typeof MarkNoticesPayload>;
 export const NoticesChangedEvent = z.undefined();
+// Run now on a skipped schedule's notice, from the list for `account`.
+export const RunSkippedScheduleNowPayload = z.object({
+  account: NoticeAccountKey,
+  notice: NoticeRef,
+});
+// `note` is null once the run started on this computer, or says why not.
+export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
+
+// Which of the owner's computers runs a workspace's schedules.
+const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
+const ScheduleHostComputer = z.object({
+  installId: z.string().min(1).max(256),
+  label: z.string().min(1).max(64),
+  lastSeenMs: z.number().int().nonnegative(),
+  thisComputer: z.boolean(),
+});
+export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
+export const ScheduleHostResult = z.discriminatedUnion("kind", [
+  // A workspace that never synced runs its schedules here, its only computer.
+  z.object({ kind: z.literal("this-computer") }),
+  // A shared view never runs schedules.
+  z.object({ kind: z.literal("none") }),
+  // dohc cannot ask the relay; `message` says what to do.
+  z.object({ kind: z.literal("note"), message: z.string().min(1).max(300) }),
+  z.object({
+    kind: z.literal("relay"),
+    // Rises on every change; choose and take over name the one they read.
+    generation: z.number().int().nonnegative(),
+    hostInstallId: z.string().min(1).max(256).nullable(),
+    // The computer that is handing over, while a handover waits.
+    handoverFrom: z.string().min(1).max(256).nullable(),
+    // Most recently seen first.
+    computers: z.array(ScheduleHostComputer).max(64),
+  }),
+]);
+export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
+// The workspace whose schedule host changed.
+export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+
+export const scheduleHostOperations = {
+  readScheduleHost: {
+    channel: "desktop:read-schedule-host",
+    payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Starts a handover to another of the owner's computers.
+  chooseScheduleHost: {
+    channel: "desktop:choose-schedule-host",
+    payload: ScheduleHostWorkspace.extend({
+      installId: z.string().min(1).max(256),
+      generation: z.number().int().nonnegative(),
+    }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Ends a handover without the old computer. A run can repeat if it is still on.
+  takeOverScheduleHost: {
+    channel: "desktop:take-over-schedule-host",
+    payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
 
 export const noticeOperations = {
   listNotices: {
@@ -6322,6 +5508,10 @@ export const noticeOperations = {
   markNotices: {
     channel: "desktop:mark-notices",
     payload: MarkNoticesPayload, guard: "trusted-sender",
+  },
+  runSkippedScheduleNow: {
+    channel: "desktop:run-skipped-schedule-now",
+    payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6567,7 +5757,8 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
-    OperationBridge<typeof noticeOperations> {
+    OperationBridge<typeof noticeOperations>,
+    OperationBridge<typeof scheduleHostOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6704,49 +5895,6 @@ export interface DohcDesktopBridge
   onSitePreviewReplaced(
     listener: (event: SitePreviewReplacedEvent) => void,
   ): () => void;
-  openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
-  onPluginPanelOpened(
-    listener: (event: PluginPanelOpenedEvent) => void,
-  ): () => void;
-  startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
-  onPluginPanelInvalidated(
-    listener: (event: PluginPanelInvalidatedEvent) => void,
-  ): () => void;
-  invokePluginCommand(
-    payload: InvokePluginCommandPayload,
-  ): Promise<InvokePluginCommandResult>;
-  stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
-  invokePluginPanelSdk(
-    payload: InvokePluginPanelSdkPayload,
-  ): Promise<InvokePluginPanelSdkResult>;
-  onPluginPanelSdkEvent(
-    listener: (event: PluginPanelSdkEvent) => void,
-  ): () => void;
-  openPluginWebApp(payload: OpenPluginWebAppPayload): Promise<OpenPluginWebAppResult>;
-  onPluginWebAppOpened(
-    listener: (event: PluginWebAppOpenedEvent) => void,
-  ): () => void;
-  startPluginWebApp(
-    payload: StartPluginWebAppPayload,
-  ): Promise<StartPluginWebAppResult>;
-  setPluginWebAppBounds(payload: SetPluginWebAppBoundsPayload): Promise<void>;
-  stopPluginWebApp(payload: StopPluginWebAppPayload): Promise<void>;
-  onPluginWebAppFailed(
-    listener: (event: PluginWebAppFailedEvent) => void,
-  ): () => void;
-  listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
-  installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
-  pluginUninstallPreflight(
-    payload: PluginUninstallPreflightPayload,
-  ): Promise<PluginUninstallPreflightResult>;
-  pluginSizes(payload: PluginSizesPayload): Promise<PluginSizesResult>;
-  uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
-  getPluginSettings(payload: GetPluginSettingsPayload): Promise<PluginSettingsResult>;
-  setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
@@ -6850,6 +5998,8 @@ export interface DohcDesktopBridge
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
+  stopAndRestorePerson(payload: StopAndRestorePersonPayload): Promise<StopAndRestorePersonResult>;
+  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
@@ -6858,6 +6008,9 @@ export interface DohcDesktopBridge
   automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
+  listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
+  listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;
+  pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
@@ -6982,11 +6135,6 @@ export interface DohcDesktopBridge
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
-  probeAgentDrivers(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
-  getAgentSessionState(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
-  answerAgentPermission(
-    payload: AgentPermissionResponsePayload,
-  ): Promise<AgentPanelSnapshotResult>;
   stopAgentRun(payload: StopAgentRunPayload): Promise<void>;
   resumeThreadDispatch(payload: ResumeThreadDispatchPayload): Promise<void>;
   chatDispatchStateForThread(
@@ -7034,9 +6182,6 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  onPluginStatusChanged(
-    listener: (event: PluginStatusChangedEvent) => void,
-  ): () => void;
   // Live push: an automation claim failed (settled here, or recorded by the
   // engine at the depth cap). A poke, not the record — the subscriber
   // re-lists through listAutomationFailures, guarded by its own workspace.
@@ -7050,6 +6195,9 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // Which computer runs a workspace's schedules changed, as when a handover
+  // finished in the background.
+  onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(
@@ -7059,6 +6207,10 @@ export interface DohcDesktopBridge
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // A press this window made settled, or waits. Each event names its
+  // workspace; a window on another workspace drops it.
+  onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
+  onAutomationRunWaiting(listener: (event: AutomationRunWaitingEvent) => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

@@ -7,10 +7,12 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture, limits } from "./datasetTestFixture";
-import { createSyncRelayHandler, isDatasetRecoveryUpload } from "./server";
+import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
+import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
+import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
 
@@ -35,7 +37,7 @@ it("transfers a recovery archive over 21 MiB through the production HTTP adapter
   journal.fence({ expected: cursor, authorize() {} });
   const archive = await source.host.exportRecovery(owner, scope);
   const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 21 * 1024 * 1024,
-    streamBody: isDatasetRecoveryUpload,
+    streamBody: streamsRequestBody,
     oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -144,6 +146,35 @@ it("creates and manages one dataset through authenticated routes and the public 
   expect(await refusal.json()).toEqual({code: "missing_name", message: "A name is required."});
   expect((await f.http(`${f.path}/binding`, {publicationId, enabled: false})).status).toBe(200);
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
+});
+
+it("tells callers when to retry a dataset that waits to reopen", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  f.host.invoke = async () => { throw new DatasetReopenWaitError(9_500); };
+  const waiting = await f.invoke();
+  expect(waiting.status).toBe(503);
+  expect(waiting.headers.get("retry-after")).toBe("10");
+  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "The dataset stopped before its work finished. Try again in 10 s."});
+  // The failure that starts a wait says why, and when to retry.
+  const message = "The app's code ran too long: it used more than 5 s of CPU time while replaying journal event 3 of 64. Try again.";
+  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("worker_budget", message), {retryAfterMs: 5_000}); };
+  const failed = await f.invoke();
+  expect(failed.status).toBe(503);
+  expect(failed.headers.get("retry-after")).toBe("5");
+  expect(await failed.json()).toEqual({code: "worker_budget", message});
+  // A reopen that failed on storage or a checkpoint says only that, with its wait.
+  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("reopen_failed", "The dataset could not be reopened. Try again."), {retryAfterMs: 10_000}); };
+  const reopen = await f.invoke();
+  expect(reopen.status).toBe(503);
+  expect(reopen.headers.get("retry-after")).toBe("10");
+  expect(await reopen.json()).toEqual({code: "reopen_failed", message: "The dataset could not be reopened. Try again."});
+  // A failed operation starts no wait.
+  f.host.invoke = async () => { throw new PersistentRuntimeError("worker_stalled", "The dataset worker made no progress for 30 s while running the app operation. Try again."); };
+  const stalled = await f.invoke();
+  expect(stalled.status).toBe(503);
+  expect(stalled.headers.get("retry-after")).toBeNull();
+  expect((await stalled.json()).code).toBe("worker_stalled");
 });
 
 it("archives and restores a dataset with its rows, app bindings, and retry receipts intact", async () => {
