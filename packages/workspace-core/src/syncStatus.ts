@@ -6,6 +6,7 @@ type SyncState =
   | "syncing"
   | "local-changes"
   | "conflict"
+  | "sync-failed"
   | "cloud-disconnected";
 
 interface SyncStatus {
@@ -18,20 +19,24 @@ interface SyncStatusInput {
   pendingChangeCount: number;
   inFlight: boolean;
   hasConflict: boolean;
+  // The last sync pass failed and none has succeeded since.
+  syncFailed: boolean;
   cloudEnabled: boolean;
   cloudConnected: boolean;
   lastSyncedAtMs: number | null;
 }
 
 // Single source of truth for state precedence so the shell never re-derives
-// it: conflict beats everything, then in-flight, then disconnect (cloud only),
-// then pending edits, then settled.
+// it: conflict beats everything, then a failed sync (a retry in flight does
+// not undo it), then in-flight, then disconnect (cloud only), then pending
+// edits, then settled.
 export function deriveSyncStatus(input: SyncStatusInput): SyncStatus {
   const base = {
     pendingChangeCount: input.pendingChangeCount,
     lastSyncedAtMs: input.lastSyncedAtMs,
   };
   if (input.hasConflict) return { ...base, state: "conflict" };
+  if (input.syncFailed) return { ...base, state: "sync-failed" };
   if (input.inFlight) return { ...base, state: "syncing" };
   // Disconnection only matters once the user has opted into cloud sync;
   // local-only workspaces are never "disconnected".

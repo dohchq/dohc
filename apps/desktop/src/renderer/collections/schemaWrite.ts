@@ -3,6 +3,7 @@ import {
   type CollectionSchema,
 } from "@dohc/workspace-contracts/collection";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { readError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { serializeCollectionSchema } from "./schemaAuthoring";
 
@@ -59,7 +60,7 @@ export async function rewriteCollectionSchema(options: {
   } catch (error) {
     return {
       status: "error",
-      detail: error instanceof Error ? error.message : String(error),
+      detail: readError(error).words,
     };
   } finally {
     finishMutation?.();

@@ -86,6 +86,7 @@ async function harness() {
   const storeFor = vi.fn<Dependencies["receivedShareEngine"]["storeFor"]>(() => ({ watcherStatus: status } as unknown as ReturnType<Dependencies["receivedShareEngine"]["storeFor"]>));
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async () => { steps.push("reconcile"); return { kind: "refresh", outcome }; });
   const open = vi.fn<Dependencies["openWorkspaceActivity"]>(async () => { steps.push("open"); });
+  const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -100,13 +101,14 @@ async function harness() {
     },
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile }, receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open, requireWorkspace: id => registry.get(id)!, notifyRenderer: notify,
+    recordShareViewStoreRefusal: recordRefusal,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
     mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
-    open, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
+    open, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -253,6 +255,28 @@ describe("registered received-view handlers", () => {
     const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
     await started.promise; h.retireRenderer(); held.resolve({ kind: "refresh", outcome });
     await expect(result).rejects.toThrow("changed workspaces"); expect(h.notify).not.toHaveBeenCalled();
+  });
+
+  // A shared view has no recorder, so the refresh is what meets a store a
+  // newer dohc migrated. It puts that refusal on the workspace status and
+  // clears it once the store answers. A rebuild refusal stays a refresh
+  // error, because a shared view cannot rebuild its store.
+  it("records a store refusal that needs an update on the workspace status", async () => {
+    const h = await harness();
+    const refusal = (message: string) =>
+      Object.assign(new Error(message), { wireError: { code: "INTERNAL", message, retry: "no" } });
+    h.status.mockRejectedValueOnce(refusal("migrated-by-newer-build: a newer build ran migration 5 (next)"));
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("migrated-by-newer-build");
+    expect(h.recordRefusal).toHaveBeenCalledWith("existing", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    expect(h.reconcile).not.toHaveBeenCalled();
+
+    h.recordRefusal.mockClear();
+    h.status.mockRejectedValueOnce(refusal("foreign-database"));
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("foreign-database");
+    expect(h.recordRefusal).not.toHaveBeenCalled();
+
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toEqual(outcome);
+    expect(h.recordRefusal).toHaveBeenCalledWith("existing", null, null);
   });
 
   it("notifies about partial pull work and preserves damaged-pin and ended outcomes", async () => {

@@ -1,6 +1,7 @@
 import { useMemo, type MouseEvent } from "react";
 import { useImageRetryHandlers } from "./imageRetry";
 import { renderSafeMarkdown } from "./markdown";
+import { PropertiesAsWritten, splitFrontmatter } from "./PropertiesAsWritten";
 
 export function MarkdownContent(props: {
   markdown: string;
@@ -8,9 +9,10 @@ export function MarkdownContent(props: {
   resolveLink?: (href: string) => string | null;
   onNavigate?: (path: string) => void;
 }) {
+  const { block, body } = useMemo(() => splitFrontmatter(props.markdown), [props.markdown]);
   const html = useMemo(
-    () => renderSafeMarkdown(props.markdown, props.resolveImage, props.resolveLink),
-    [props.markdown, props.resolveImage, props.resolveLink],
+    () => renderSafeMarkdown(body, props.resolveImage, props.resolveLink),
+    [body, props.resolveImage, props.resolveLink],
   );
   const { retryImage, stopImageRetry } = useImageRetryHandlers(html);
   const navigate = (event: MouseEvent<HTMLElement>) => {
@@ -26,12 +28,15 @@ export function MarkdownContent(props: {
     props.onNavigate(path);
   };
   return (
-    <article
-      className="markdown"
-      onClick={navigate}
-      onErrorCapture={retryImage}
-      onLoadCapture={stopImageRetry}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <PropertiesAsWritten block={block} />
+      <article
+        className="markdown"
+        onClick={navigate}
+        onErrorCapture={retryImage}
+        onLoadCapture={stopImageRetry}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </>
   );
 }

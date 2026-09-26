@@ -16,8 +16,10 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  VersionedTextStoreError,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentWriteAuthor,
   type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
@@ -64,7 +66,7 @@ import {
   mediaTypeForPath,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -430,7 +432,7 @@ export interface WorkspaceEngineCapture {
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
-    author: MomentAuthor | null,
+    author: MomentWriteAuthor | null,
     options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
@@ -679,8 +681,6 @@ export type WorkspaceEngineCaptureFailure =
 
 export interface EngineDiskWriter {
   writeTextFile(absolutePath: string, text: string): Promise<void>;
-  // Creates the file, refusing with EEXIST when the path exists.
-  createTextFile(absolutePath: string, text: string): Promise<void>;
   writeBinaryFile(absolutePath: string, bytes: Uint8Array): Promise<void>;
   deletePath(absolutePath: string): Promise<void>;
 }
@@ -1394,7 +1394,6 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   async function writeEngineFile(
     absolutePath: string,
     data: string | Uint8Array,
-    flag: "w" | "wx" = "w",
   ): Promise<void> {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
@@ -1404,12 +1403,11 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
     await assertLeafNotSymlink(target);
-    await writeFile(target, data, { flag });
+    await writeFile(target, data);
   }
   return {
-    writeTextFile: (absolutePath, text) => writeEngineFile(absolutePath, text),
-    createTextFile: (absolutePath, text) => writeEngineFile(absolutePath, text, "wx"),
-    writeBinaryFile: (absolutePath, bytes) => writeEngineFile(absolutePath, bytes),
+    writeTextFile: writeEngineFile,
+    writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
       const target = await assertResolvedArea(absolutePath, "Engine delete path");
@@ -2636,7 +2634,7 @@ export function createWorkspaceEngineCapture(
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
@@ -2658,7 +2656,7 @@ export function createWorkspaceEngineCapture(
       | { kind: "text"; text: string; sha256: string }
       | { kind: "binary"; bytes: Uint8Array; sha256: string; byteLength: number },
     metadata: ActorNeutralWriteMetadata,
-    author?: MomentAuthor,
+    author?: MomentWriteAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     // Content equality is the no-op rule: it keeps one engine record per
@@ -3139,32 +3137,25 @@ export function createWorkspaceEngineCapture(
           summary: `Updated ${pathBasename(path)}`,
           correlationId: `authored-write-${createId()}`,
         };
-        const writeHead = () =>
-          engine.writeTextFile({
+        try {
+          await engine.writeTextFile({
             workspaceId,
             versionId,
             path,
             text,
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
             ...(author ? { author } : {}),
           });
-        if (writeOptions.createOnly) {
-          // The file is created on disk first, and the create refuses a path
-          // that exists, so a writer that created it meanwhile keeps its text
-          // and the store gets no head for text that never landed.
-          try {
-            await diskWriter.createTextFile(join(rootPath, path), text);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            throw Object.assign(new Error(`File already exists: ${path}`, { cause: error }), {
-              code: "EEXIST",
-            });
+        } catch (error) {
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
           }
-          await writeHead();
-          return { resolvedAbsolutePath: resolvedAbsolute };
+          throw error;
         }
-        await writeHead();
-        await materialize([{ kind: "write", path, text }], policy);
+        if (!writeOptions.createOnly) {
+          await materialize([{ kind: "write", path, text }], policy);
+        }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },

@@ -138,16 +138,18 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Storage(
         refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
         | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }),
+        | dohc_engine_storage::StorageError::MigrationFailed { .. }
+        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
     ) = &error
     {
         eprintln!("engine: store refused: {}", error_chain(refused));
-        // A failed migration names its cause after the code, the way other
+        // A migration refusal names its cause after the code, the way other
         // refusals carry a detail: the desktop matches the code prefix and
         // shows the rest. The cause is the storage crate's constant text
         // plus a migration id, never a path or content.
         let message = match refused {
-            dohc_engine_storage::StorageError::MigrationFailed { .. } => {
+            dohc_engine_storage::StorageError::MigrationFailed { .. }
+            | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. } => {
                 format!("{}: {}", refused.code(), error_chain(refused))
             }
             _ => refused.code().to_string(),
@@ -190,6 +192,12 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
+        }
+        // The same code as a relay that answered "not found", so retries treat
+        // them alike. The message is what lets the desktop tell a person which
+        // one happened: the server could not be reached at all.
+        RuntimeError::Relay(RelayError::Partitioned) => {
+            return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
         }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(
@@ -532,6 +540,12 @@ mod tests {
             )),
             RuntimeError::LiveApplication(ApplicationError::Storage(
                 StorageError::MigrationFailed { source: None },
+            )),
+            RuntimeError::LiveApplication(ApplicationError::Storage(
+                StorageError::MigratedByNewerBuild {
+                    ordinal: 5,
+                    id: "from-a-newer-build".to_owned(),
+                },
             )),
         ] {
             let expected = match &error {
@@ -936,6 +950,14 @@ mod tests {
             map_relay_code(RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
         );
+        // A relay that answered "not found" and one nobody could reach share
+        // the code; only the message tells the desktop which to name.
+        let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
+        assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
+        assert_eq!(unreachable.message, "relay-unreachable");
+        let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
+        assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);
+        assert_ne!(missing.message, "relay-unreachable");
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,

@@ -1,14 +1,20 @@
 import { useCallback, useMemo } from "react";
 import { bridge } from "../bridge";
-import { NoticeCenter, type WorkspaceErrorNotice } from "../workbench/NoticeCenter";
+import {
+  NoticeCenter,
+  type CrashReportNotice,
+  type WorkspaceErrorNotice,
+} from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
 import { useShellError } from "./useShellError";
 
 // What a connection attempt hands the surface that owns its notices. The
 // owner raises the toast and the Notices row; the panel shows nothing inline.
 export interface ConnectionErrorReport {
-  // Main's own sentence, already stripped of the IPC wrapper.
+  // The words a person reads, from `ipcErrorMessage`.
   message: string;
+  // The error that caused them, for Copy details.
+  cause?: unknown;
   // The address the failed attempt used, so an owner that reopens a closed
   // panel can put it back in the field. Null for a status check or a
   // disconnect, which carry no address of their own.
@@ -40,7 +46,9 @@ const NO_WORKSPACE = "";
 export function useConnectionNotices() {
   const {
     shellErrors,
+    reportShellFailure,
     reportShellError,
+    showSuccessNotice,
     retryShellError,
     hideShellError,
     dismissShellError,
@@ -51,21 +59,27 @@ export function useConnectionNotices() {
   const reporter = useCallback(
     (reopen?: (serverUrl: string | null) => void) =>
       (error: ConnectionErrorReport) => {
-        reportShellError(error.message, new Error(error.message), () => {
-          if (error.retry?.()) return;
-          reopen?.(error.serverUrl);
+        reportShellFailure({
+          message: error.message,
+          cause: error.cause,
+          retry: () => {
+            if (error.retry?.()) return;
+            reopen?.(error.serverUrl);
+          },
         });
       },
-    [reportShellError],
+    [reportShellFailure],
   );
 
   const notices = useMemo<WorkspaceErrorNotice[]>(
     () =>
       shellErrors.map((error) => ({
+        ...(error.tone ? { tone: error.tone } : {}),
         id: error.id,
         message: error.message,
         details: errorDetails([
           ["Error", error.message],
+          ...(error.details ?? []),
           ["Platform", bridge().platform],
           ["Time", new Date(error.atMs).toISOString()],
         ]),
@@ -78,6 +92,8 @@ export function useConnectionNotices() {
 
   return {
     reporter,
+    reportError: reportShellError,
+    showSuccess: showSuccessNotice,
     notices,
     retryNotice: retryShellError,
     hideNotice: hideShellError,
@@ -97,8 +113,11 @@ export function ConnectionNotices(props: {
   onRetry: (id: string) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
+  crashReport?: CrashReportNotice | null;
+  onSendCrashReport?: () => void;
+  onDismissCrashReport?: () => void;
 }) {
-  if (props.notices.length === 0) return null;
+  if (props.notices.length === 0 && !props.crashReport) return null;
   return (
     <div
       data-testid="connection-notices"
@@ -119,6 +138,9 @@ export function ConnectionNotices(props: {
         onRetryWorkspaceError={props.onRetry}
         onHideWorkspaceError={props.onHide}
         onDismissWorkspaceError={props.onDismiss}
+        crashReport={props.crashReport ?? null}
+        {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
+        {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
       />
     </div>
   );

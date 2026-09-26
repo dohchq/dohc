@@ -339,10 +339,32 @@ export async function createFile(
 // Import outcome: what landed (workspace-relative paths, destination prefix
 // included) plus how many sources could not land — callers surface both, so
 // an import is never silently smaller than what the user handed us.
+//
+// `stop` means a copy failed and the import stopped there. `interrupted`
+// adds that some files landed first: importing the same sources again would
+// copy those a second time under collision names, so callers name what
+// landed.
 export interface ImportCopyOutcome {
   imported: string[];
   skipped: number;
+  interrupted?: true;
+  stop?: ImportStop;
 }
+
+// Which file stopped an import, and why. A filesystem failure carries its
+// error code and raw text, for callers to put in the person's words and in a
+// report. A refusal dohc makes itself carries its kind as `refusal`, and
+// callers word it, so every file name in the text is shortened the same way.
+export interface ImportStop {
+  file: string;
+  code?: string;
+  detail?: string;
+  refusal?: "dangling-link";
+}
+
+// The longest error text an import result carries; the IPC contract holds
+// the same bound.
+export const IMPORT_STOP_TEXT_MAX_CHARS = 500;
 
 // Resolve + validate an import destination folder ("" / undefined = workspace
 // root). The folder must be a user-writable workspace-relative path (traversal
@@ -546,16 +568,13 @@ async function classifyCopyEnoent(
   return target === "absent" ? "danglingLink" : "unexplained";
 }
 
-// What the user gets to read when their pick was a link to nothing. A bare
-// ENOENT would name a path that is still right there, so it says which part is
-// missing and gives the two steps in the order they work: the target has to
-// come back before the user can import it.
-//
-// The name goes last and once. This renders in a single-line truncate span
-// (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
-// it pushed both the reason and the instruction off the end of the line.
-function danglingLinkRefusal(source: string): string {
-  return `dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is ${basename(source)}.`;
+// The user picked a link to nothing. A bare ENOENT would name a path that is
+// still right there, so the import stops as a refusal of its own, and the
+// renderer says which part is missing and what to do.
+class DanglingLinkError extends Error {
+  constructor(source: string, options: { cause: unknown }) {
+    super(`The symbolic link ${basename(source)} points to a missing file.`, options);
+  }
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -648,7 +667,7 @@ async function copyWithoutOverwrite(
         if (code === "ENOENT") {
           const enoent = await classifyCopyEnoent(source, absDir);
           if (enoent === "danglingLink") {
-            throw new Error(danglingLinkRefusal(source), { cause: error });
+            throw new DanglingLinkError(source, { cause: error });
           }
           if (enoent) throw error;
         }
@@ -687,7 +706,32 @@ export async function copyIntoWorkspace(
       skipped += 1;
       continue;
     }
-    const landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+    let landed: string | null;
+    try {
+      landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+    } catch (error) {
+      // The import stops at the first failed copy. Files already copied
+      // stay, and the result names them.
+      const code = (error as NodeJS.ErrnoException).code;
+      const text = (error instanceof Error ? error.message : String(error))
+        .trim()
+        .slice(0, IMPORT_STOP_TEXT_MAX_CHARS);
+      const stop: ImportStop = {
+        file: validated.normalized,
+        ...(error instanceof DanglingLinkError
+          ? { refusal: "dangling-link" as const }
+          : typeof code === "string" && code
+            ? { code }
+            : {}),
+        ...(text ? { detail: text } : {}),
+      };
+      return {
+        imported,
+        skipped,
+        ...(imported.length > 0 ? { interrupted: true as const } : {}),
+        stop,
+      };
+    }
     if (landed === null) {
       skipped += 1;
       continue;
@@ -714,10 +758,7 @@ export async function importDroppedPaths(
 ): Promise<ImportCopyOutcome> {
   const screened = await screenDroppedPaths(absolutePaths, registeredRoots);
   const outcome = await copyIntoWorkspace(rootPath, screened.usable, targetDir);
-  return {
-    imported: outcome.imported,
-    skipped: outcome.skipped + screened.refused,
-  };
+  return { ...outcome, skipped: outcome.skipped + screened.refused };
 }
 
 // The drag-in screen, exported because a share view's import needs the same

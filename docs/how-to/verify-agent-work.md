@@ -83,6 +83,15 @@ Read `result.json` before reporting a pass. Include the commit, gates, and evide
 After review fixes or integration changes, rerun affected checks and record why the remaining evidence still applies.
 Keep each receipt's tested commit and target unchanged; document reuse in the PR.
 Use the report's `steps[].seconds` when recording verification delays.
+Use its top-level `seconds` for the complete run, including preparation and cleanup.
+The `timings` rows record source checks, preparation, and database setup and cleanup, including failed phases.
+Rows can overlap during failed startup cleanup. Do not add them to estimate elapsed time.
+
+`pnpm test` builds the SDK and app runtime before testing packages.
+It runs repository tests first, then at most two packages concurrently, then desktop packaging tests.
+Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
+Package results and durations are in the JS test report referenced by `result.json`.
+The canonical verifier supplies the prerequisites once before running this test schedule.
 
 ## Measure performance
 

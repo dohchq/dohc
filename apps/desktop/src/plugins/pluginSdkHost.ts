@@ -1,4 +1,4 @@
-import type { ChangeAuthor, MomentAuthor } from "@dohc/workspace-contracts/engine";
+import type { ChangeAuthor, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import {
   assertRawTextWritable,
   invokeWorkspaceSdkHost,
@@ -125,7 +125,7 @@ export interface PluginSdkHostContext {
   writeAuthoredText: (
     path: string,
     text: string,
-    options: { overwrite: boolean; author: MomentAuthor },
+    options: { overwrite: boolean; author: MomentWriteAuthor },
   ) => Promise<{ path: string }>;
 }
 
@@ -436,7 +436,7 @@ export async function invokePluginSdkHost(
         );
       }
 
-      const author: MomentAuthor = {
+      const author: MomentWriteAuthor = {
         kind: "agent",
         agentId: pluginAgentId(context.pluginId),
         onBehalfOf: "local",

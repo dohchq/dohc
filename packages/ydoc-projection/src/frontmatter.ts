@@ -384,6 +384,18 @@ export function frontmatterEditsRefused(doc: Y.Doc): boolean {
 }
 
 /**
+ * The frontmatter block a document opens with, through its closing delimiter
+ * line, as a projection takes it from the body: a block that reads, or one
+ * that does not read but looks like properties. Undefined otherwise.
+ */
+export function leadingFrontmatter(markdown: string): { text: string; readable: boolean } | undefined {
+  const block = readFrontmatterBlock(markdown)
+  if (block) return { text: markdown.slice(0, markdown.length - block.rest.length), readable: true }
+  const prefix = unreadableFrontmatterPrefix(markdown)
+  return prefix === undefined ? undefined : { text: prefix, readable: false }
+}
+
+/**
  * Frontmatter values with top-level keys in document order, and the text after
  * the block. `undefined` when the document has no readable block.
  */
@@ -596,15 +608,20 @@ export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): vo
   patchFrontmatter(doc, new Map([[key, value]]))
 }
 
+function frontmatterValues(frontmatter: Y.Map<unknown>): Record<string, unknown> {
+  const values = nullPrototypeRecord()
+  for (const [key, value] of frontmatter) {
+    values[key] = value !== null && typeof value === 'object'
+      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
+  }
+  return values
+}
+
 /** Validate a whole property edit before changing any Y.Map item. */
 export function patchFrontmatter(doc: Y.Doc, values: ReadonlyMap<string, unknown>, remove: readonly string[] = []): void {
   const frontmatter = doc.getMap<unknown>('frontmatter')
   const meta = doc.getMap<unknown>('meta')
-  const current = nullPrototypeRecord()
-  for (const [key, value] of frontmatter) {
-    current[key] = value !== null && typeof value === 'object'
-      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
-  }
+  const current = frontmatterValues(frontmatter)
   for (const key of remove) delete current[key]
   for (const [key, value] of values) current[key] = value
   const candidate = frontmatterBlockFor(current, meta.get(FRONTMATTER_SOURCE_META_KEY), '', '\n', writtenFrontmatterKeys(frontmatter, meta))
@@ -785,6 +802,25 @@ export function frontmatterBlockFor(
   if (Object.keys(frontmatter).length === 0) return ''
   const block = `---\n${frontmatterYaml(frontmatter)}---${body.startsWith('\n') ? '\n' : '\n\n'}`
   return lineEnding === '\n' ? block : block.replaceAll('\n', '\r\n')
+}
+
+/**
+ * A live document's frontmatter block as its file holds it. Once a settle has
+ * written every edit (`settled`), that is the block the settle wrote. Until
+ * then, it is the text recorded from the file, or the canonical block of the
+ * values when no text was recorded.
+ */
+export function frontmatterAsWritten(doc: Y.Doc, settled: boolean): string {
+  const frontmatter = doc.getMap<unknown>('frontmatter')
+  const meta = doc.getMap<unknown>('meta')
+  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  if (typeof source === 'string' && !settled) return source
+  try {
+    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(frontmatter)), source, '', '\n', writtenFrontmatterKeys(frontmatter, meta))
+  } catch {
+    // A refused settle leaves the file as it was.
+    return typeof source === 'string' ? source : ''
+  }
 }
 
 /**

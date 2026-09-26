@@ -1,7 +1,7 @@
 //! The durable-layer invariants: two regimes (local-only prune vs replicated
 //! never-prune), base-once, replication idempotency + echo suppression, leases,
 //! and the yjs-non-atomic boundary (never journal invalid bytes). Crash-recovery
-//! / exactly-once tests live behind the `fault-injection` feature.
+//! / exactly-once tests use the storage fault seam enabled by testkit.
 
 mod common;
 
@@ -3687,7 +3687,6 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
 
 // ---- crash recovery / exactly-once (needs the shared storage fault seam) -----
 
-#[cfg(feature = "fault-injection")]
 mod crash {
     use super::*;
     use dohc_engine_storage::FaultPoint;

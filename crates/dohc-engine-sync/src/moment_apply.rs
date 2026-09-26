@@ -87,8 +87,13 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
-        #[serde(rename = "onBehalfOf")]
-        on_behalf_of: String,
+        #[serde(
+            rename = "onBehalfOf",
+            default,
+            deserialize_with = "optional_author_principal",
+            skip_serializing_if = "Option::is_none"
+        )]
+        on_behalf_of: Option<String>,
         #[serde(rename = "agentRunId", skip_serializing_if = "Option::is_none")]
         agent_run_id: Option<String>,
     },
@@ -114,10 +119,21 @@ enum MomentAuthor {
     Automation {
         #[serde(rename = "automationId")]
         automation_id: String,
-        #[serde(rename = "onBehalfOf")]
-        on_behalf_of: String,
+        #[serde(
+            rename = "onBehalfOf",
+            default,
+            deserialize_with = "optional_author_principal",
+            skip_serializing_if = "Option::is_none"
+        )]
+        on_behalf_of: Option<String>,
         depth: u32,
     },
+}
+
+fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 /// The relay-owned origin for a named recipient's direct writes. It carries
@@ -1137,7 +1153,7 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                 agent_run_id,
             } => {
                 agent_id.is_empty()
-                    || on_behalf_of.is_empty()
+                    || on_behalf_of.as_ref().is_some_and(String::is_empty)
                     || agent_run_id.as_ref().is_some_and(String::is_empty)
             }
             MomentAuthor::Public {
@@ -1162,7 +1178,7 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                 depth,
             } => {
                 automation_id.is_empty()
-                    || on_behalf_of.is_empty()
+                    || on_behalf_of.as_ref().is_some_and(String::is_empty)
                     || *depth > dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH
             }
         })
