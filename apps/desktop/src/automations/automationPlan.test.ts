@@ -115,7 +115,7 @@ describe("what the executor can run", () => {
 
   it("runs a document Collection's button, and names the dataset operations a button's steps invoke", () => {
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid}\ndo: [{set: {Paid: true}}]"))).toBeNull();
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid, table: Invoices}\ndo: [{set: {Paid: true}}]"))).toMatch(/dataset/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid, table: Invoices}\ndo: [{set: {Paid: true}}]"))).toMatch(/table/);
     const steps = automation([
       "id: a", "name: A", "when: {button: Mark paid, table: Invoices}", "do:",
       "  - set: {Paid: true}", "    operation: invoices.markPaid",
@@ -137,8 +137,8 @@ describe("what the executor can run", () => {
     const fromGroup = (step: string) => automation(`id: a\nname: A\nwhen: {group-message: Trip}\ndo: [${step}]`);
     expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
-    expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/dataset/);
+    expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/Collection action/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
     const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
     expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
     expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/no trigger record/);

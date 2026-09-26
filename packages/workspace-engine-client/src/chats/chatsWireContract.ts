@@ -586,6 +586,7 @@ const ChatRunSchema = mutableStruct({
 const ChatDispatchClaimSchema = mutableStruct({
   dispatch: ChatDispatchSchema,
   run: ChatRunSchema,
+  chainDepth: NonnegativeInt,
 });
 const ChatThreadPauseSchema = mutableStruct({
   workspaceId: Schema.String,

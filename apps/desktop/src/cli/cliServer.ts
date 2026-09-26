@@ -254,6 +254,11 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   localUserDisplayName(): string;
+  // The chain depth of the agent run in progress in the workspace, or 0. Every
+  // write during a run an automation started is the agent's at this depth, so
+  // an automation that woke the agent and the agent cannot start each other
+  // forever.
+  agentRunDepth(workspaceId: string): number;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -526,33 +531,56 @@ function decodedCollectionCursor(
   };
 }
 
+// Who a write through this socket is. While a run an automation started holds
+// the run slot, every write is that run's agent, whatever actor the caller
+// named, as disk edits during the run are: an agent that names itself a
+// person would otherwise write at depth 0 and start the chain over.
+function writeActor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): CliActor {
+  return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
+}
+
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic reaches this socket through the MCP server, whose declared identity
-// is agent `dohc-mcp` acting on behalf of the local owner; a human write is
-// attributed as this device's local author under the workspace display name.
-const CLI_AGENT_AUTHOR: ChangeAuthor = {
-  kind: "agent",
-  agentId: "dohc-mcp",
-  onBehalfOf: "local",
-};
-
+// is agent `dohc-mcp` acting on behalf of the local owner, at the depth of the
+// agent run in progress; a human write is attributed as this device's local
+// author under the workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
+  context: CliWorkspaceContext,
   options: CliServerOptions,
 ): ChangeAuthor {
-  if (actor === "agent") return CLI_AGENT_AUTHOR;
+  if (writeActor(actor, context, options) === "agent") {
+    return {
+      kind: "agent",
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      depth: options.agentRunDepth(context.workspaceId),
+    };
+  }
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under the name the agent gave itself or under none.
-// Any process holding the socket token could otherwise claim the person's
-// typing.
-function documentEditOrigin(agent: string | undefined): LiveDocumentEditOrigin {
+// local owner, recorded under the name the agent gave itself or under none,
+// at the depth of the agent run in progress. Any process holding the socket
+// token could otherwise claim the person's typing.
+function documentEditOrigin(
+  agent: string | undefined,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): LiveDocumentEditOrigin {
   return {
     ...(agent === undefined ? {} : { actorOriginId: agent }),
-    attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+    attribution: {
+      actorKind: "agent",
+      onBehalfOf: "local",
+      depth: options.agentRunDepth(context.workspaceId),
+    },
   };
 }
 
@@ -2112,7 +2140,7 @@ async function dispatch(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, options),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -2153,7 +2181,7 @@ async function dispatch(
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, options),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         return {
           ok: true as const,
@@ -2220,7 +2248,7 @@ async function dispatch(
           const outcome = await documents.edit({
             path,
             edit: { find, replacement },
-            origin: documentEditOrigin(agent),
+            origin: documentEditOrigin(agent, context, options),
           });
           return { done: true, result: { ok: true as const, ...outcome } };
         } catch (error) {
@@ -2259,7 +2287,7 @@ async function dispatch(
           ...(await documents.create({
             path: validated.normalized,
             markdown,
-            origin: documentEditOrigin(agent),
+            origin: documentEditOrigin(agent, context, options),
           })),
         };
       } catch (error) {
@@ -2484,8 +2512,9 @@ async function dispatch(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
+      const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor },
         channelId: channel.engine.id,
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
@@ -2496,7 +2525,7 @@ async function dispatch(
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
-        actor: request.args.actor,
+        actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
       }, options);
@@ -2539,8 +2568,9 @@ async function dispatch(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
+      const actor = writeActor(request.args.actor, context, options);
       const message = await options.chatWrites.sendMessage(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor },
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -2550,7 +2580,7 @@ async function dispatch(
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
-        actor: request.args.actor,
+        actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
       }, options);
@@ -2573,7 +2603,7 @@ async function dispatch(
           options.onError?.(error);
         }
       }
-      if (request.args.actor === "agent") {
+      if (actor === "agent") {
         try {
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
@@ -2615,7 +2645,7 @@ async function dispatch(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: { via: "cli", actor: request.args.actor },
+        writer: { via: "cli", actor: writeActor(request.args.actor, context, options) },
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,

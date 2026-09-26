@@ -532,6 +532,8 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     agentId: z.string().min(1),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
+    // Named only past 0, by a run an automation started.
+    depth: z.number().int().positive().optional(),
   }).strict(),
   z.object({
     kind: z.literal("public"),

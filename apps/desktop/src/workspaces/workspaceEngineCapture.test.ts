@@ -1037,6 +1037,28 @@ describe("workspaceEngineCapture batch capture", () => {
     await reopened.stop();
   });
 
+  it("names the agent on a response it removes during a run an automation started",async()=>{
+    const root=await createTestScratch("dohc-response-agent-");
+    const requests:Request[]=[];
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine(),requests);
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    await write(root,"responses/accepted-a.md","response");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    expect((await engine.undoAcceptedAppResponse(selection,{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3})).status).toBe("deleted");
+    expect(requests.findLast(request=>request.method==="versionedText.delete")?.params).toMatchObject({
+      requestId:"undo-a",author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3},
+    });
+    await engine.stop();
+  });
+
   it("pages long response history and recovers an interrupted deletion without deleting a restore",async()=>{
     const root=await createTestScratch("dohc-response-recovery-");
     const requests:Request[]=[];
@@ -2699,7 +2721,7 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // daemon stamps its captures with that author; an authored write carries its
 // own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
-  const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+  const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
 
   it("records an authored write under its own author, not the ambient run", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -2889,6 +2911,8 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     await engine.setActiveAgentRun(run);
     await engine.setActiveAgentRun(null);
+    // A run an automation woke names its chain depth; a person's names none.
+    await engine.setActiveAgentRun({ ...run, agentRunId: "run-woken", depth: 3 });
 
     const authorRequests = requests.filter((request) =>
       request.method === "capture.setAuthor" ||
@@ -2898,11 +2922,16 @@ describe("workspaceEngineCapture agent attribution", () => {
       "capture.setAuthor",
       "capture.flush",
       "capture.setAuthor",
+      "capture.setAuthor",
     ]);
+    const { depth: _personDepth, ...person } = run;
     expect(authorRequests[0]?.params).toEqual({
-      author: { kind: "agent", ...run },
+      author: { kind: "agent", ...person },
     });
     expect(authorRequests[2]?.params).toEqual({ author: null });
+    expect(authorRequests[3]?.params).toEqual({
+      author: { kind: "agent", ...person, agentRunId: "run-woken", depth: 3 },
+    });
     await engine.stop();
   });
 

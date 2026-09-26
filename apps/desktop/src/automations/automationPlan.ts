@@ -260,7 +260,7 @@ export function findQueryOf(condition: string): FindQuery | { problem: string } 
 export type DatasetFindFilter = { field: string; value: Extract<FindQuery, { match: "field" }>["value"] };
 
 const DATASET_FIND_SHAPE =
-  'A Find on a dataset can check fields with ==, such as record.Status == "Doing" && record.Paid == false.';
+  'This Collection needs a Find that checks fields with ==. Use a condition such as record.Status == "Doing" && record.Paid == false.';
 
 /**
  * Reads a Find condition on a dataset: `true`, or `record.F == value` terms
@@ -291,10 +291,6 @@ export function datasetFindOf(condition: string): DatasetFindFilter[] | { proble
   return visit(node) ? filters : { problem: DATASET_FIND_SHAPE };
 }
 
-const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
-  "record-added", "record-changed", "field-changed", "record-removed", "starts-matching",
-]);
-
 /** The dataset operations an automation's steps invoke, by name, once each. */
 export function operationsOf(automation: Automation): string[] {
   const names = new Set<string>();
@@ -304,8 +300,8 @@ export function operationsOf(automation: Automation): string[] {
   return [...names];
 }
 
-const DATASET_GROUP_TRIGGER_UNSUPPORTED = "Automations on dataset Collections can't start from Group messages.";
-export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
+const DATASET_GROUP_TRIGGER_UNSUPPORTED = "This Collection's automations cannot start from Group messages. Choose a record change as the trigger.";
+const DATASET_SCHEDULE_UNSUPPORTED = "This Collection's automations cannot start on a schedule yet. Choose a record change or a button as the trigger.";
 
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
@@ -313,7 +309,7 @@ export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a 
  * reason for the rest.
  */
 export function unsupportedReason(automation: Automation): string | null {
-  const DATASET = "Only a dataset Collection's automations can name tables and operations.";
+  const DATASET = "This document Collection's automations cannot name a table or a Collection action. Remove those names from the automation.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   for (const { step } of stepsInOrder(automation)) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) return DATASET;
@@ -444,16 +440,17 @@ export function subscriptionFor(trigger: AutomationTrigger): { kinds: Automation
 
 /**
  * The dataset ledger subscription a dataset Collection's automation needs:
- * its table, and its watched fields as field ids of the approved rules. Or
- * why the automation cannot watch the dataset.
+ * its table, and its watched fields as field ids of the approved rules. Null
+ * for a button, whose presses claim instead. Or why the automation cannot
+ * run on the dataset.
  */
 export function datasetSubscriptionFor(
   automation: Automation,
   definition: DatasetDefinition,
-): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } {
+): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } | null {
   const trigger = automation.when;
   if (trigger.kind === "group-message") return { problem: DATASET_GROUP_TRIGGER_UNSUPPORTED };
-  if (!RECORD_TRIGGERS.has(trigger.kind) || !("table" in trigger)) return { problem: RECORD_TRIGGERS_ONLY };
+  if (!("table" in trigger)) return { problem: DATASET_SCHEDULE_UNSUPPORTED };
   const table = trigger.table === null
     ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
     : definition.tables.find((candidate) => candidate.name === trigger.table);
@@ -462,9 +459,12 @@ export function datasetSubscriptionFor(
       ? `${definition.name} has several tables. Name the one this automation watches.`
       : `${definition.name} has no table named ${trigger.table}.` };
   }
-  const subscription = subscriptionFor(trigger);
-  if (subscription === null) return { problem: RECORD_TRIGGERS_ONLY };
-  const { kinds, fields } = subscription;
+  if (trigger.kind === "button") {
+    return table.fields.some((field) => field.type === "button" && field.name === trigger.field)
+      ? null
+      : { problem: `${table.name} has no button named ${trigger.field}.` };
+  }
+  const { kinds, fields } = subscriptionFor(trigger)!;
   const fieldIds: string[] = [];
   for (const name of fields ?? []) {
     const field = table.fields.find((candidate) => candidate.name === name);
@@ -485,6 +485,44 @@ function directMessageReach(chat: ChatDirectory | null, userId: string): ReachSt
   };
 }
 
+/** The Group whose messages start the automation, as the reach check reads it. */
+function groupTriggerReach(automation: Automation, chat: ChatDirectory | null): ReachStep[] {
+  if (automation.when.kind !== "group-message") return [];
+  const group = chat?.group(automation.when.group);
+  return [{
+    kind: "read-group",
+    group: group && !("problem" in group)
+      ? { channelWireId: group.wireId, name: group.name }
+      : { channelWireId: null, name: automation.when.group },
+  }];
+}
+
+/** The Group, people, or person's own reach one chat step reaches. Any other step reaches no chat. */
+function chatReachOf(step: AutomationStep, chat: ChatDirectory | null): ReachStep[] {
+  switch (step.kind) {
+    case "post": {
+      const group = chat?.group(step.group);
+      return [{
+        kind: "post",
+        group: group && !("problem" in group)
+          ? { channelWireId: group.wireId, name: group.name }
+          : { channelWireId: null, name: step.group },
+      }];
+    }
+    case "direct-message":
+      return step.to.flatMap((person) => !isFormula(person) && typeof person.value === "string" ? [directMessageReach(chat, person.value)] : []);
+    case "wake-agent":
+      // A personal step: it acts as its person, so it reaches only what they do alone.
+      return [{ kind: "personal", person: { userId: step.person, name: chat?.person(step.person) ?? "that person" } }];
+    case "notify":
+      return step.to.flatMap((person): ReachStep[] => isFormula(person) || typeof person.value !== "string"
+        ? []
+        : [{ kind: "notify", person: { userId: person.value, name: chat?.person(person.value) ?? "that person" } }]);
+    default:
+      return [];
+  }
+}
+
 /**
  * The Collections and chats each step reaches, for the reach check (ADR
  * 0012). A direct message to a person a formula names is checked once the
@@ -499,16 +537,7 @@ export function reachStepsOf(
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   const target = (path: string | null) => (path === null ? collection : collectionNamed(path));
-  const reach: ReachStep[] = [];
-  if (automation.when.kind === "group-message") {
-    const group = chat?.group(automation.when.group);
-    reach.push({
-      kind: "read-group",
-      group: group && !("problem" in group)
-        ? { channelWireId: group.wireId, name: group.name }
-        : { channelWireId: null, name: automation.when.group },
-    });
-  }
+  const reach = groupTriggerReach(automation, chat);
   for (const { step } of everyStep(steps)) {
     if (step.kind === "set") {
       const bound = step.records === null ? null : bindings.get(step.records);
@@ -517,29 +546,20 @@ export function reachStepsOf(
       reach.push({ kind: "change-records", collection: target(step.collection) });
     } else if (step.kind === "find") {
       reach.push({ kind: "find-records", collection: target(step.collection) });
-    } else if (step.kind === "post") {
-      const group = chat?.group(step.group);
-      reach.push({
-        kind: "post",
-        group: group && !("problem" in group)
-          ? { channelWireId: group.wireId, name: group.name }
-          : { channelWireId: null, name: step.group },
-      });
-    } else if (step.kind === "direct-message") {
-      for (const person of step.to) {
-        if (!isFormula(person) && typeof person.value === "string") reach.push(directMessageReach(chat, person.value));
-      }
-    } else if (step.kind === "wake-agent") {
-      // A personal step: it acts as its person, so it reaches only what they do alone.
-      reach.push({ kind: "personal", person: { userId: step.person, name: chat?.person(step.person) ?? "that person" } });
-    } else if (step.kind === "notify") {
-      for (const person of step.to) {
-        if (isFormula(person) || typeof person.value !== "string") continue;
-        reach.push({ kind: "notify", person: { userId: person.value, name: chat?.person(person.value) ?? "that person" } });
-      }
+    } else {
+      reach.push(...chatReachOf(step, chat));
     }
   }
   return reach;
+}
+
+/**
+ * Only the chats an automation reaches, as reachStepsOf reads them: the
+ * Group whose messages start it, then each step's Group, people, or person,
+ * in step order.
+ */
+export function chatReachStepsOf(automation: Automation, chat: ChatDirectory | null): ReachStep[] {
+  return [...groupTriggerReach(automation, chat), ...[...everyStep(orderSteps(automation.do))].flatMap(({ step }) => chatReachOf(step, chat))];
 }
 
 /**
@@ -643,6 +663,8 @@ export interface RunClaim {
     kind: AutomationClaim["change"]["kind"];
     fields: ReadonlyArray<Pick<Fact, "field" | "previous" | "next">>;
     fieldsOmitted: number;
+    /** Who made the change, when that is known; left out when it is not. */
+    actorKind?: AutomationClaim["change"]["actorKind"];
   };
 }
 
@@ -997,19 +1019,6 @@ export function formulaPeople(request: EvaluationRequest, results: readonly Auto
   return [...people];
 }
 
-export const AGENT_WAKES_AGENT =
-  "Only a person's change can wake an agent for now. An agent or another automation made this change, so this automation did not wake an agent. That keeps agents and automations from starting each other forever.";
-
-/**
- * Whether a person started this claim: a change that declared no actor, as a
- * person's write does, or one a person made. An agent's writes do not carry
- * their chain depth yet, so an agent's change, or an automation's change
- * that an agent's started, could wake the agent again without end.
- */
-function startedByPerson(claim: RunClaim): boolean {
-  return "actorKind" in claim.change && (claim.change.actorKind === null || claim.change.actorKind === "human");
-}
-
 /** The seed of every id and idempotency key a step's effects use. */
 export function stepKey(claimId: string, hash: string, ordinal: number): string {
   return `${claimId}/${hash}/${ordinal}`;
@@ -1105,9 +1114,9 @@ export function planRun(
         continue;
       }
       if (step.kind === "wake-agent") {
-        // Only a person's change wakes an agent until agents' writes carry
-        // their chain depth (see startedByPerson).
-        if (!startedByPerson(claim)) return AGENT_WAKES_AGENT;
+        // Any change can wake the agent. The wake message carries the
+        // claim's depth plus one, and the agent's writes one more, so the
+        // chain stops at the cap like any other.
         const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
         if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
         const effectId = `${stepKey(key.claimId, key.hash, ordinal)}/wake`;

@@ -97,8 +97,13 @@ export function RecordButton(props: {
           if (!blocked) void props.buttons.press(props.field, { id: props.recordId, label: props.recordLabel });
         }}
       >
-        {running ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
-        <span className="truncate">{props.field}</span>
+        {/* An invisible copy of the label, with room for the spinner, sits under the label, so the button keeps its width while it runs. */}
+        <span data-label={props.field} className="grid min-w-0 grid-cols-1 before:invisible before:col-start-1 before:row-start-1 before:min-w-0 before:truncate before:pl-4 before:content-[attr(data-label)]">
+          <span className="col-start-1 row-start-1 flex min-w-0 items-center justify-center gap-1">
+            {running ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+            <span className="truncate">{props.field}</span>
+          </span>
+        </span>
       </SecondaryButton>
       {description === null ? null : createPortal(
         <span

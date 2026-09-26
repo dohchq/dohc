@@ -458,7 +458,7 @@ fn capture_ingest_in_tx(
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
-    // A captured agent run declares itself as an agent at depth 0.
+    // A captured agent run declares itself as an agent at its run's depth.
     let attribution = actor_origin_id.as_ref().and_then(|_| {
         dohc_engine_domain::moment_author_attribution(input.author_json.as_deref()).1
     });

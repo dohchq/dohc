@@ -198,9 +198,9 @@ describe("useShellError", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellError(
       "Could not open this Collection.",
-      new Error("Error invoking remote method 'desktop:dataset': Error: Dataset changed after this preview. Preview it again."),
+      new Error("Error invoking remote method 'desktop:dataset': Error: The Collection changed after this preview. Preview the change again."),
     ));
     expect(result.current.shellErrors[0]!.message)
-      .toBe("Could not open this Collection. Dataset changed after this preview. Preview it again.");
+      .toBe("Could not open this Collection. The Collection changed after this preview. Preview the change again.");
   });
 });

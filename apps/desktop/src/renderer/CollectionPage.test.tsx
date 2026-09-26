@@ -1884,7 +1884,7 @@ describe("Button fields", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
     const pressed = bridge.pressAutomationButton.mock.calls[0]![0];
-    expect(pressed).toMatchObject({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", table: null });
+    expect(pressed).toEqual({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", pressId: expect.any(String) });
     expect(pressed.pressId).toMatch(/^[0-9a-f-]{36}$/);
     act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "roster" }));
     expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)
@@ -2063,9 +2063,9 @@ describe("Button fields", () => {
     const retry = onError.mock.calls[0]![2] as () => void;
     page.unmount();
     // Other Collections push this idle one out of the window.
-    const dropped = automationButtonsFor("ws-1", "tasks");
-    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", `other-${index}`);
-    expect(automationButtonsFor("ws-1", "tasks")).not.toBe(dropped);
+    const dropped = automationButtonsFor("ws-1", { collectionPath: "tasks" });
+    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", { collectionPath: `other-${index}` });
+    expect(automationButtonsFor("ws-1", { collectionPath: "tasks" })).not.toBe(dropped);
     await act(async () => retry());
     await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalled());
     act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
@@ -2087,8 +2087,8 @@ describe("Button fields", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledWith("Mark paid did not start.", expect.any(Error), expect.any(Function)));
     const retry = onError.mock.calls[0]![2] as () => void;
     page.unmount();
-    const dropped = automationButtonsFor("ws-1", "tasks");
-    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", `other-${index}`);
+    const dropped = automationButtonsFor("ws-1", { collectionPath: "tasks" });
+    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", { collectionPath: `other-${index}` });
     await dropped.press("Mark paid", { id: "rec-1", label: "Invoice 12" });
     expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1);
     fail = false;
@@ -2101,7 +2101,7 @@ describe("Button fields", () => {
   it("changes only the pressed button's view", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);
-    const buttons = automationButtonsFor("ws-1", "tasks");
+    const buttons = automationButtonsFor("ws-1", { collectionPath: "tasks" });
     await buttons.refresh();
     const other = buttons.view("Archive", "rec-1");
     const pressed = buttons.view("Mark paid", "rec-1");

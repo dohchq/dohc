@@ -193,6 +193,9 @@ describe("CLI socket server", () => {
   let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
+  // The chain depth of the agent run in progress in each workspace, as main
+  // reports it: this one for the fixture workspace, 0 for any other.
+  let agentRunDepth: number;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -397,6 +400,7 @@ describe("CLI socket server", () => {
         return momentId === moments.detail.id ? moments.detail : null;
       },
     };
+    agentRunDepth = 0;
     serverOptions = {
       stateDir,
       listWorkspaces() {
@@ -430,6 +434,7 @@ describe("CLI socket server", () => {
         notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
+      agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       async onWrite() {
         calls.writes += 1;
       },
@@ -1337,7 +1342,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
         },
       },
       {
@@ -1346,7 +1351,7 @@ describe("CLI socket server", () => {
           collectionPath: "tasks",
           name: "write-brief",
           fields: { status: "open" },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
         },
       },
       {
@@ -1445,6 +1450,86 @@ describe("CLI socket server", () => {
         origin: { attribution: agent },
       },
     ]);
+  });
+
+  it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
+    const authors: unknown[] = [];
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields(input) {
+          authors.push(input.author);
+          return { path: input.recordPath };
+        },
+        async createRecord(input) {
+          authors.push(input.author);
+          return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+        },
+      },
+    };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        authors.push(input.origin);
+        return { path: input.path, changed: true };
+      },
+      async create(input) {
+        authors.push(input.origin);
+        return { path: input.path };
+      },
+    };
+    agentRunDepth = 3;
+
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
+    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
+    await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
+    await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" });
+    // A write that names a person is the run's agent's too, so the agent
+    // cannot start the chain over by leaving out --as-agent.
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } });
+    // With no run an automation started, a person's write stays a person's.
+    agentRunDepth = 0;
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
+
+    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 };
+    const attribution = { actorKind: "agent", onBehalfOf: "local", depth: 3 };
+    expect(authors).toEqual([
+      woken,
+      woken,
+      { attribution },
+      { actorOriginId: "claude-code", attribution },
+      woken,
+      { kind: "local", label: "Sam" },
+    ]);
+  });
+
+  it("posts, replies, and reacts as the agent during a run an automation started, whatever actor the caller names", async () => {
+    if (!store) throw new Error("Store is not available");
+    agentRunDepth = 3;
+    const posted = await post({ actor: "human", title: "Stamped", body: "Stamped the tasks." });
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.",
+      attachments: [], needsDecision: false,
+    });
+    await invoke("react", { cwd: workspaceRoot, actor: "human", message: posted.messageId, emoji: "👍" });
+    const threadId = `thread-${posted.threadId.slice("th_".length)}`;
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    expect(messages.map((message) => message.author.kind)).toEqual(["agent", "agent"]);
+    const reactions = await store.listReactions({ workspaceId: WORKSPACE_ID, threadId });
+    expect(reactions.map((reaction) => reaction.author.kind)).toEqual(["agent"]);
+
+    // A person's run, or none, leaves the caller's actor as it is.
+    agentRunDepth = 0;
+    const own = await post({ actor: "human", title: "Mine", body: "My own post." });
+    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
+    expect(mine?.author.kind).toBe("human");
   });
 
   it("creates a Markdown document with provenance the door derives", async () => {

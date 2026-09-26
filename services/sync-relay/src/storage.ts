@@ -564,6 +564,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationHostStorage.takeOverAutomationHost(this, input);
   }
 
+  readAutomationGroupHandover(input: automationHostStorage.AutomationGroupHandoverInput) {
+    return automationHostStorage.readAutomationGroupHandover(this, input);
+  }
+
   commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
     return collectionWriteStorage.commitCollectionWrite(this, input);
   }

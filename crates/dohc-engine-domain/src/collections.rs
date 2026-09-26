@@ -2800,11 +2800,22 @@ pub struct ChangeAttribution {
 /// limit.
 pub const MAX_CHANGE_ATTRIBUTION_DEPTH: u32 = 64;
 
+/// The chain depth an agent author names: 1 to
+/// [`MAX_CHANGE_ATTRIBUTION_DEPTH`], in a run an automation started. A run a
+/// person started names none. Older builds stored an agent author without
+/// checking a depth, so any other value, 0 included, reads as none.
+pub fn agent_author_depth(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|depth| u32::try_from(depth).ok())
+        .filter(|depth| (1..=MAX_CHANGE_ATTRIBUTION_DEPTH).contains(depth))
+}
+
 /// The actor and attribution a moment's recorded author declares. An agent
-/// (`{kind: "agent", agentId, onBehalfOf}`) writes as itself at depth 0; an
-/// automation (`{kind: "automation", automationId, onBehalfOf, depth}`)
-/// writes as itself at its depth. Any other author, or none, declares
-/// neither, as a person's write does.
+/// (`{kind: "agent", agentId, onBehalfOf, depth?}`) writes as itself at its
+/// run's depth ([`agent_author_depth`]), 0 when it names none; an automation (`{kind: "automation",
+/// automationId, onBehalfOf, depth}`) writes as itself at its depth. Any
+/// other author, or none, declares neither, as a person's write does.
 pub fn moment_author_attribution(
     author_json: Option<&str>,
 ) -> (Option<String>, Option<ChangeAttribution>) {
@@ -2819,7 +2830,11 @@ pub fn moment_author_attribution(
             .map(str::to_owned)
     };
     let (actor, actor_kind, depth) = match author.get("kind").and_then(Value::as_str) {
-        Some("agent") => (text("agentId"), ChangeActorKind::Agent, 0),
+        Some("agent") => (
+            text("agentId"),
+            ChangeActorKind::Agent,
+            agent_author_depth(author.get("depth")).unwrap_or(0),
+        ),
         Some("automation") => (
             text("automationId"),
             ChangeActorKind::Automation,
@@ -2855,9 +2870,15 @@ pub fn moment_author_json(
     let actor = actor_origin_id?;
     let attribution = attribution?;
     let mut author = match attribution.actor_kind {
+        // An agent run a person started writes at depth 0 and names none.
+        ChangeActorKind::Agent if attribution.depth == 0 => serde_json::json!({
+            "kind": "agent",
+            "agentId": actor,
+        }),
         ChangeActorKind::Agent => serde_json::json!({
             "kind": "agent",
             "agentId": actor,
+            "depth": attribution.depth,
         }),
         ChangeActorKind::Automation => serde_json::json!({
             "kind": "automation",

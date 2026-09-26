@@ -310,18 +310,6 @@ export type StoredSubscription =
   | { automationId: string; path: string; kinds: AutomationChangeKind[]; fields?: string[] }
   | { automationId: string; groupId: string; startsWith?: string };
 
-/** What removes a subscription from the engine. */
-export function unsubscribeParams(subscription: StoredSubscription): { automationId: string; path: string } | { automationId: string; groupId: string } {
-  return "groupId" in subscription
-    ? { automationId: subscription.automationId, groupId: subscription.groupId }
-    : { automationId: subscription.automationId, path: subscription.path };
-}
-
-/** Whether two subscriptions name the same engine pair, so one replaces the other in place. */
-export function sameSubscriptionTarget(left: StoredSubscription, right: StoredSubscription): boolean {
-  return "groupId" in left ? "groupId" in right && left.groupId === right.groupId : "path" in right && left.path === right.path;
-}
-
 const HEADER_SUFFIX = ".json";
 const PROGRESS_SUFFIX = ".progress.jsonl";
 

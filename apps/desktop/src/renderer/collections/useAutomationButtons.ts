@@ -14,6 +14,8 @@ import { bridge } from "../bridge";
 // that button, and a table's cells keep their elements and focus.
 
 export type ReportButtonError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
+/** Whose buttons a store shows: a document Collection's, or one table's of a dataset Collection. */
+export type ButtonsOf = { collectionPath: string } | { datasetId: string; table: string };
 export interface ButtonReporter {
   onError: ReportButtonError;
   onNotice: (message: string) => void;
@@ -81,8 +83,8 @@ const generationOf = (workspaceId: string) => generations.get(workspaceId) ?? 0;
 const silent: ButtonReporter = { onError: () => undefined, onNotice: () => undefined };
 
 /** The store behind one Collection's buttons in this window. */
-export function createAutomationButtons(scope: { workspaceId: string; collectionPath: string }) {
-  const { workspaceId, collectionPath } = scope;
+export function createAutomationButtons(scope: { workspaceId: string; of: ButtonsOf }) {
+  const { workspaceId, of } = scope;
   let states: ReadonlyMap<string, AutomationButtonState> | null = null;
   const generation = generationOf(workspaceId);
   let closed = false;
@@ -95,6 +97,8 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
   // One listener set and one cached view per field and record.
   const listeners = new Map<string, Set<() => void>>();
   const views = new Map<string, ButtonView>();
+  // Surfaces that read again what this store's runs changed.
+  const settledListeners = new Set<() => void>();
   let requests = 0;
 
   const notify = (key: string) => {
@@ -113,7 +117,7 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
   // Collection, since this one may be dropped while the notice waits, and
   // does nothing once the workspace closed.
   const live = (): AutomationButtons | null =>
-    generationOf(workspaceId) === generation ? automationButtonsFor(workspaceId, collectionPath) : null;
+    generationOf(workspaceId) === generation ? automationButtonsFor(workspaceId, of) : null;
 
   function finish(key: string): void {
     runs.delete(key);
@@ -122,6 +126,7 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
 
   function settle(key: string, run: Run, outcome: Outcome): void {
     finish(key);
+    for (const listener of [...settledListeners]) listener();
     const { onError, onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
@@ -187,6 +192,12 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
 
     states: () => states,
 
+    /** Calls `listener` each time one of this store's runs ends, however it ended. */
+    onSettled(listener: () => void): () => void {
+      settledListeners.add(listener);
+      return () => settledListeners.delete(listener);
+    },
+
     /** Whether nothing shows or runs these buttons, so the window may drop the store. */
     idle: () => listeners.size === 0 && runs.size === 0,
 
@@ -202,10 +213,14 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
     async refresh(): Promise<void> {
       const request = ++requests;
       try {
-        const { buttons } = await bridge().listAutomationButtons({ workspaceId, collectionPath });
+        const { buttons } = await bridge().listAutomationButtons("collectionPath" in of
+          ? { workspaceId, collectionPath: of.collectionPath }
+          : { workspaceId, datasetId: of.datasetId });
         if (closed || request !== requests) return;
         notes.clear();
-        states = new Map(buttons.map(({ field, state }) => [field, state]));
+        // A dataset lists every table's buttons; this store shows one table's.
+        const shown = "table" in of ? buttons.filter((button) => button.table === of.table) : buttons;
+        states = new Map(shown.map(({ field, state }) => [field, state]));
         everyChanged();
       } catch (error) {
         if (closed || request !== requests) return;
@@ -226,7 +241,7 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
       notes.delete(key);
       changed(key);
       try {
-        const result = await bridge().pressAutomationButton({ workspaceId, collectionPath, field, recordId: record.id, pressId, table: null });
+        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId });
         if (closed) return;
         if (result.busy) {
           notes.set(key, result.reason);
@@ -279,6 +294,7 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
       earlyWaits.clear();
       everyChanged();
       listeners.clear();
+      settledListeners.clear();
     },
   };
 }
@@ -287,13 +303,13 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
 const stores = new Map<string, AutomationButtons>();
 
 /** The window's store for one Collection's buttons, made on first use. */
-export function automationButtonsFor(workspaceId: string, collectionPath: string): AutomationButtons {
-  const id = JSON.stringify([workspaceId, collectionPath]);
+export function automationButtonsFor(workspaceId: string, of: ButtonsOf): AutomationButtons {
+  const id = JSON.stringify("collectionPath" in of ? [workspaceId, of.collectionPath] : [workspaceId, of.datasetId, of.table]);
   let store = stores.get(id);
   if (store) {
     stores.delete(id);
   } else {
-    store = createAutomationButtons({ workspaceId, collectionPath });
+    store = createAutomationButtons({ workspaceId, of });
     const idle = [...stores].filter(([, candidate]) => candidate.idle());
     for (const [dropped, old] of idle.slice(0, Math.max(0, idle.length - IDLE_STORES + 1))) {
       old.close();
@@ -331,11 +347,11 @@ export function disposeAutomationButtons(workspaceId: string): void {
 export function useAutomationButtons(input: {
   workspaceId: string;
   /** Null until the component knows which Collection, as for a record view still reading. */
-  collectionPath: string | null;
+  of: ButtonsOf | null;
   onError: ReportButtonError;
   onNotice: (message: string) => void;
 }): AutomationButtons | null {
-  const buttons = input.collectionPath === null ? null : automationButtonsFor(input.workspaceId, input.collectionPath);
+  const buttons = input.of === null ? null : automationButtonsFor(input.workspaceId, input.of);
   const reporter = useRef<ButtonReporter>({ onError: input.onError, onNotice: input.onNotice });
   reporter.current = { onError: input.onError, onNotice: input.onNotice };
   const { workspaceId } = input;

@@ -271,6 +271,7 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
       : {}),
+    ...(author.depth !== undefined ? { depth: author.depth } : {}),
   };
 }
 
@@ -570,6 +571,7 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
       : {}),
+    ...(author.depth !== undefined && author.depth > 0 ? { depth: author.depth } : {}),
   };
 }
 

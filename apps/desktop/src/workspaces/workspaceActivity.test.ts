@@ -125,7 +125,7 @@ describe("workspaceActivity capture hooks", () => {
     await activity.open(workspace());
     expect(activity.hasAgentRun("activity-test")).toBe(false);
 
-    const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+    const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
     await activity.setAgentRun("activity-test", run);
     expect(setActiveAgentRun).toHaveBeenLastCalledWith(run);
     expect(activity.hasAgentRun("activity-test")).toBe(true);
@@ -153,11 +153,13 @@ describe("workspaceActivity capture hooks", () => {
       agentId: "chat-runner",
       onBehalfOf: "local",
       agentRunId: "run-1",
+      depth: 0,
     };
     const second = {
       agentId: "panel",
       onBehalfOf: "local",
       agentRunId: "run-2",
+      depth: 0,
     };
     expect(await activity.claimAgentRun("activity-test", first)).toBe(true);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(false);

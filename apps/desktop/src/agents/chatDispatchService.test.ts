@@ -122,7 +122,7 @@ interface FixtureOptions {
   temporaryRunActivity?: boolean;
   setRunAttribution?: (
     workspaceId: string,
-    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
+    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null,
   ) => void | Promise<void>;
   requeueFailures?: Error[];
   recordEligibleTriggerFailures?: Error[];
@@ -156,7 +156,7 @@ interface Fixture {
   presence: ChatDispatchPresenceInput[];
   attributions: Array<{
     workspaceId: string;
-    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null;
+    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null;
   }>;
   errors: unknown[];
   notices: PostNoticeInput[];
@@ -1070,6 +1070,46 @@ describe("chatDispatchService", () => {
       threadId: first.threadId,
     });
     expect(firstMessages.some((message) => message.body.startsWith("⚠"))).toBe(false);
+  });
+
+  it("runs the agent a person asked at depth 0, and one an automation woke one deeper than its message", async () => {
+    const fixture = await createFixture();
+    const asked = await createAgentThread(fixture, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(fixture);
+    const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    expect(personRun.chainDepth).toBe(0);
+    expect(fixture.attributions.at(-1)).toEqual({
+      workspaceId: WORKSPACE_ID,
+      run: { agentId: "dohc-chat-runner", onBehalfOf: "local", agentRunId: personRun.run.runId, depth: 0 },
+    });
+    await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    const wake = await fixture.chat.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Stamp the finish date" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#stamp", chainDepth: 2 },
+      body: "Stamp today's tasks.",
+    });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: wake.message.id,
+      threadId: wake.thread.id,
+    });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
+    const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
+    expect(fixture.attributions.at(-1)?.run).toEqual({
+      agentId: "dohc-chat-runner", onBehalfOf: "local", agentRunId: wokenRun.run.runId, depth: 3,
+    });
+    // The agent reads that an automation asked, not a person.
+    expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
   });
 
   it("releases temporary tray-only run activity after the owned child exits", async () => {

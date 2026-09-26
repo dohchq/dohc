@@ -73,36 +73,36 @@ it("keeps slow I/O work alive while the worker reports progress", async () => {
 
 it("fails a worker that stops reporting, naming the step it stopped in", async () => {
   const worker = await open((command, send) => {
-    send({ id: command.id, progress: "committing the operation" });
+    send({ id: command.id, progress: "saving the change" });
   }, { silenceMs: 40, commandCapMs: 60_000 });
   await expect(worker.discard("proposal")).rejects.toMatchObject({
     code: "worker_stalled",
-    message: "The dataset worker made no progress for 40 ms while committing the operation. Try again.",
+    message: "dohc made no progress on this Collection for 40 ms while saving the change. Try again.",
   });
 });
 
 it("lets a step with its own CPU budget stay quiet long enough to use it", async () => {
   const worker = await open((command, send) => {
     // A 100 ms budget: the host allows 40 ms + 2 × 100 ms of silence.
-    send({ id: command.id, progress: "checking the schema", cpuBudgetMs: 100 });
+    send({ id: command.id, progress: "checking the tables", cpuBudgetMs: 100 });
     if (command.command.kind === "discard") setTimeout(() => send({ id: command.id, ok: true, result: null }), 120);
   }, { silenceMs: 40, commandCapMs: 60_000 });
   await expect(worker.discard("proposal")).resolves.toBeUndefined();
   await expect(worker.snapshot(join(roots.at(-1)!, "never.sqlite"))).rejects.toMatchObject({
     code: "worker_stalled",
-    message: "The dataset worker made no progress for 240 ms while checking the schema. Try again.",
+    message: "dohc made no progress on this Collection for 240 ms while checking the tables. Try again.",
   });
 });
 
 it("fails a worker that keeps reporting but never finishes, at the command cap", async () => {
   let reporting: ReturnType<typeof setInterval> | undefined;
   const worker = await open((command, send) => {
-    reporting = setInterval(() => send({ id: command.id, progress: "replaying journal event 1 of 1" }), 10);
+    reporting = setInterval(() => send({ id: command.id, progress: "reapplying saved change 1 of 1" }), 10);
   }, { silenceMs: 40, commandCapMs: 200 });
   try {
     await expect(worker.discard("proposal")).rejects.toMatchObject({
       code: "worker_deadline",
-      message: "The dataset worker did not finish in 200 ms while replaying journal event 1 of 1. Try again.",
+      message: "dohc did not finish this Collection's work in 200 ms while reapplying saved change 1 of 1. Try again.",
     });
   } finally {
     clearInterval(reporting);
@@ -112,7 +112,7 @@ it("fails a worker that keeps reporting but never finishes, at the command cap",
 it("says the app's code ran too long when the CPU budget watch ended the worker", async () => {
   let end!: () => void;
   const worker = await open((command, send) => {
-    send({ id: command.id, progress: "running the app operation" });
+    send({ id: command.id, progress: "running the Collection action" });
     // The worker's budget watch leaves its marker, then the process ends.
     setTimeout(() => void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded"), "app 5000").then(end), 10);
   }, { silenceMs: 60_000, commandCapMs: 60_000 }, (exit) => { end = exit; });
@@ -128,6 +128,6 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
     }),
   ).rejects.toMatchObject({
     code: "worker_budget",
-    message: "The app's code ran too long: it used more than 5 s of CPU time while running the app operation. Try again.",
+    message: "The app's code ran too long: it used more than 5 s of CPU time while running the Collection action. Try again.",
   });
 });

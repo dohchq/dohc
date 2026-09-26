@@ -57,8 +57,8 @@ struct PendingMessageAppend {
     origin: Option<String>,
     body: String,
     created_at_ms: i64,
-    /// Another computer's automation message sends its chain depth; sync
-    /// apply checked it before parking the message.
+    /// Another computer's automation or agent message sends its chain depth;
+    /// sync apply checked it before parking the message.
     chain_depth: Option<u32>,
 }
 

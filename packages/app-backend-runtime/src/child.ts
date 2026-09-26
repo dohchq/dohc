@@ -25,7 +25,7 @@ function verifySchema(db: DatabaseSync, request: ChildRequest): void {
 
 async function handle(request: ChildRequest): Promise<ChildReply> {
   if(request.kind!=="evaluate" && request.journaled) {
-    try {assertReplayableSchema(request.schemaSql);}catch(error){return {ok:false,error:error instanceof Error ? error.message : "Invalid journaled schema."};}
+    try {assertReplayableSchema(request.schemaSql);}catch(error){return {ok:false,error:error instanceof Error ? error.message : "Invalid Collection schema."};}
   }
   const path = join(request.directory, "app.sqlite");
   if (request.kind !== "initialize") writeFileSync(path, request.database, { flag: "wx", mode: 0o600 });
@@ -67,7 +67,7 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
         ({resultJson,attachedFileIds} = await evaluate(db, request));
         db.setAuthorizer(null);
         changeset = session.changeset();
-        if (changeset.byteLength > request.limits.databaseBytes) throw new Error("App changeset exceeds the runtime limit.");
+        if (changeset.byteLength > request.limits.databaseBytes) throw new Error("This change is larger than an app can make at once.");
       } finally { session.close(); }
     }
     db.exec("COMMIT"); transaction = false;

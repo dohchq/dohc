@@ -21,6 +21,8 @@ import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
@@ -72,6 +74,8 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
+  decodeAutomationGroupHandover,
+  type AutomationGroupRelayRecord,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -203,10 +207,13 @@ import {
   computersOfAnswer,
   createAutomationHosts,
   hostOfAnswer,
+  automationHostGeneration,
+  isAutomationHost,
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "./automations/skippedRunsNotice";
+import { groupMessagesNotice } from "./automations/groupMessagesNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
@@ -1792,6 +1799,7 @@ function engineForWorkspace(
       const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
         runWorkspaceSharedChannelPass(workspace.workspaceId),
       );
+      if (outcome.changed) void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       return outcome.changed;
     },
     // A replicated chat message can mark a live bookmark pending without
@@ -1801,6 +1809,8 @@ function engineForWorkspace(
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       automationHosts.relayAnswered(workspace.workspaceId);
+      collectionAutomationsOf(workspace.workspaceId)?.relayAnswered();
+      void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       // The relay answers again, so this computer may be the host again.
       if (recovered) withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, (lease) => lease.state.relayedPresses)?.start();
       return withWorkspaceAttachmentAsync(workspace, () =>
@@ -2019,6 +2029,10 @@ const activity = {
   hasAgentRun: (workspaceId: string, expectedRootPath?: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.hasAgentRun(lease.state.activity, expectedRootPath),
+    ),
+  agentRunDepth: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.agentRunDepth(lease.state.activity),
     ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
@@ -3311,7 +3325,16 @@ const automationHosts = createAutomationHosts({
     }
   },
   startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
-  finishHere: (workspaceId) => automationScheduler.finishHere(workspaceId),
+  hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
+  // The release waits until the engine here claims no more Group messages,
+  // and carries what it decided so the next host claims each one once.
+  finishHere: async (workspaceId, stillHandingOver) => {
+    const automations = collectionAutomationsOf(workspaceId);
+    const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
+    if (released === null) return null;
+    const throughMs = await automationScheduler.finishHere(workspaceId);
+    return throughMs === null ? null : { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration };
+  },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
 
@@ -3382,15 +3405,10 @@ async function scheduleHostState(
   };
 }
 
-// Whether this computer runs a workspace's schedules. A synced workspace
-// runs them on the computer its relay names. One that does not sync runs
-// them here only when its own folder says it never synced: this is its
-// only computer. A workspace shared with this person is never theirs to run.
+// Whether this computer runs a workspace's schedules: it is the automation
+// host, with a synced workspace's host read again when the copy is old.
 async function runsSchedulesHere(workspaceId: string): Promise<boolean> {
-  const entry = findWorkspace(workspaceId);
-  if (entry === null || entry.shareView !== undefined) return false;
-  if (entry.remote !== undefined) return automationHosts.runsHere(workspaceId);
-  return (await readSyncHistory(entry.rootPath)) === "never-synced";
+  return await isAutomationHost(findWorkspace(workspaceId), () => automationHosts.runsHere(workspaceId));
 }
 
 // Turning sync on or opening a share records it in the folder and the
@@ -3403,9 +3421,35 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
 }
 
-// Whether any computer can run this workspace's schedules as it stands.
-// One that synced before, or whose folder has no record, needs sync on.
-async function schedulesCanRun(workspaceId: string): Promise<boolean> {
+// The relay's last release or take over, read at this host generation, as
+// the engine takes it: 0 for none, with the handover when a release left it
+// for this computer. The engine checks a handover again before it takes it.
+async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
+  const entry = findWorkspace(workspaceId);
+  if (!entry?.remote) return { generation: 0, handover: null };
+  const { credentials } = await remoteForWorkspace(entry);
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/automation-host/groups?generation=${generation}`,
+    { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
+    ? body as { generation?: unknown; groups?: unknown }
+    : undefined;
+  if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
+    throw new Error(`The relay answered the Group handover read with ${response.status}.`);
+  }
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
+  };
+}
+
+// Whether any computer can run this workspace's schedules and Group
+// triggers as it stands. One that synced before, or whose folder has no
+// record, needs sync on.
+async function hostCanRun(workspaceId: string): Promise<boolean> {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return false;
   return entry.remote !== undefined || (await readSyncHistory(entry.rootPath)) === "never-synced";
@@ -3542,13 +3586,16 @@ function createCollectionAutomationsFor(
       }),
     },
     postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
-    // Until dohc lets the owner choose a main computer, a workspace that does
-    // not sync is the only one that can be: its one computer claims each message.
-    runsGroupTriggers: () => findWorkspace(workspaceId)?.remote === undefined,
+    // From the last host read, with no relay request: the host module calls
+    // hostChanged when the answer may differ.
+    groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
+    groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
+    requestHost: () => automationHosts.admit(workspaceId),
+    groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
-    runsSchedules: () => schedulesCanRun(workspaceId),
+    hostCanRun: () => hostCanRun(workspaceId),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {
@@ -4944,6 +4991,7 @@ function registerIpcHandlers(): void {
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+    agentRunDepth: (workspace) => activity.agentRunDepth(workspace.workspaceId),
     exportArchive: async (workspace, input, signal, authorize) => {
       if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
       return exportDatasetArchive(workspace, input.datasetId, input.savePath, input.overwrite, signal, authorize);
@@ -4992,19 +5040,26 @@ function registerIpcHandlers(): void {
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
   ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  const undoAcceptedResponse=async(workspace:DesktopRendererWorkspaceOperation["workspace"],input:AppResponseUndoSelection,author?:MomentWriteAuthor)=>{
+    await openWorkspaceActivity(workspace);
+    const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
+    if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
+    return capture.undoAcceptedAppResponse(input,author);
+  };
   const ownerResponseDependencies={
     registerHandler:handleIpc,assertTrustedSender,withRendererWorkspaceOperation,
     remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
-    undoAcceptedResponse:async(workspace,input)=>{
-      await openWorkspaceActivity(workspace);
-      const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
-      if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
-      return capture.undoAcceptedAppResponse(input);
-    },
+    undoAcceptedResponse:(workspace,input)=>undoAcceptedResponse(workspace,input),
   } satisfies Parameters<typeof registerOwnerAppResponsesIpc<WebContents,DesktopRendererWorkspaceOperation["workspace"],DesktopRendererWorkspaceOperation>>[0];
   registerOwnerAppResponsesIpc(ownerResponseDependencies);
   const cliOwnerResponses=createOwnerAppResponsesHandler<string,DesktopRendererWorkspaceOperation["workspace"],WorkspaceAuthorityOperation<RegistryEntry,DesktopWorkspaceAuthorityState>>({
     ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
+    // During a run an automation started, a removal through the CLI is the
+    // run's agent's, so the removed record's claims carry the run's depth.
+    undoAcceptedResponse:(workspace,input)=>{
+      const depth=activity.agentRunDepth(workspace.workspaceId);
+      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth}:undefined);
+    },
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
   const {

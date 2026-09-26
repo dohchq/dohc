@@ -249,15 +249,15 @@ describe("changeset decoder", () => {
         expect(read, `cut at ${length}`).toEqual(rows.slice(0, read.length));
       }
     }
-    expect(refused(patchset)).toThrow("A patchset is not a changeset.");
+    expect(refused(patchset)).toThrow("The saved change has the wrong format.");
     const badType = Uint8Array.from(changeset);
     badType[badType.indexOf(0x12) + 2] = 9;
     expect(refused(badType)).toThrow("unknown type");
     const badOperation = Uint8Array.from(changeset);
     badOperation[badOperation.indexOf(0x12)] = 0x13;
-    expect(refused(badOperation)).toThrow("unknown operation");
+    expect(refused(badOperation)).toThrow("unknown kind of edit");
     expect(refused(Uint8Array.of(0x54, 0x01, 0x00, 0x74, 0x00))).toThrow("without a primary key");
-    expect(refused(Uint8Array.of(0x41))).toThrow("lacks a table header");
+    expect(refused(Uint8Array.of(0x41))).toThrow("does not name its table");
   });
 
   it("keeps text exactly, a leading U+FEFF included, and refuses text that is not UTF-8", () => {
@@ -365,14 +365,14 @@ describe("dataset change facts", () => {
     const [exact] = facts(db, `INSERT INTO tasks(id,tags) VALUES('t1','[1, 0.1, -2.5e3, "a", [true, null]]')`);
     expect(exact?.fields.find(({ fieldId }) => fieldId === TAGS.fieldId)?.next).toEqual([1, 0.1, -2500, "a", [true, null]]);
     for (const list of ["[9007199254740993]", "[1e400]", "[0.10000000000000000555]", "[1e-400]"]) {
-      expect(() => facts(tasks(), `INSERT INTO tasks(id,tags) VALUES('t1','${list}')`), list).toThrow("cannot hold exactly");
+      expect(() => facts(tasks(), `INSERT INTO tasks(id,tags) VALUES('t1','${list}')`), list).toThrow("too large to read exactly");
     }
     const [notList] = facts(tasks(), `INSERT INTO tasks(id,tags) VALUES('t1','9007199254740993')`);
     expect(notList?.fields.find(({ fieldId }) => fieldId === TAGS.fieldId)?.next, "text that is not a list stays text").toBe("9007199254740993");
   });
 
   it("refuses a table the changeset keys by another column, or by several", () => {
-    const refusal = "The changeset keys tasks by other columns than its approved primary key, id.";
+    const refusal = "The saved change finds records in tasks by something other than its approved primary key, id.";
     const byName = new DatabaseSync(":memory:");
     byName.exec("CREATE TABLE tasks(id TEXT NOT NULL, name TEXT PRIMARY KEY NOT NULL, done, tags, estimate)");
     expect(() => facts(byName, "INSERT INTO tasks VALUES('t1','Plan',0,NULL,NULL)")).toThrow(refusal);
@@ -410,12 +410,12 @@ describe("dataset change facts", () => {
     expect(refused({ columns: { tasks: columns.tasks!.slice(1) } })).toThrow("do not match its changes");
     expect(refused({ columns: { tasks: columns.tasks!.map((name) => (name === "tags" ? "labels" : name)) } })).toThrow("lack an approved field");
     expect(refused({ columns: { tasks: [...columns.tasks!.slice(0, -1), "NAME"] } })).toThrow("do not match its changes");
-    expect(refused({ definition: { ...definition, tables: [{ ...definition.tables[0]!, sqlName: "other" }] } })).toThrow("does not have");
+    expect(refused({ definition: { ...definition, tables: [{ ...definition.tables[0]!, sqlName: "other" }] } })).toThrow("approved rules do not have");
 
     const blob = new DatabaseSync(":memory:");
     blob.exec("CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, name, done, tags, estimate)");
     expect(() => facts(blob, "INSERT INTO tasks VALUES('t1', x'00', 0, NULL, NULL)")).toThrow("holds bytes");
-    expect(() => facts(blob, "INSERT INTO tasks VALUES('t2', NULL, 0, NULL, 9007199254740993)")).toThrow("cannot hold exactly");
+    expect(() => facts(blob, "INSERT INTO tasks VALUES('t2', NULL, 0, NULL, 9007199254740993)")).toThrow("too large to read exactly");
   });
 });
 

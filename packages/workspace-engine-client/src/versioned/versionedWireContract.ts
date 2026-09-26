@@ -62,6 +62,8 @@ export type AgentAuthor = JsonObject & {
   agentId: string;
   onBehalfOf: string;
   agentRunId?: string;
+  /** The run's chain depth when an automation started it. */
+  depth?: number;
 };
 
 /**
@@ -610,6 +612,8 @@ const AgentAuthorSchema = mutableStruct({
   agentId: Schema.String,
   onBehalfOf: Schema.optionalKey(Schema.String),
   agentRunId: Schema.optionalKey(Schema.String),
+  // Named only past 0, by a run an automation started.
+  depth: Schema.optionalKey(Schema.Int),
 });
 const PublicAuthorSchema = mutableStruct({
   kind: Schema.Literal("public"),

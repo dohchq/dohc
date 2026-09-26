@@ -82,6 +82,19 @@ describe("markdown renderers", () => {
     expect(formatMessageHandle("msg_123")).toBe("msg_123");
   });
 
+  it("says a message came from an automation", () => {
+    const fromAutomation: ShowResult = {
+      ...showResult,
+      messages: [{
+        ...showResult.messages[0]!,
+        author: { kind: "automation", displayName: "Stamp the finish date" },
+      }],
+    };
+    expect(renderThreadMarkdown(fromAutomation)).toContain(
+      "**Stamp the finish date** · automation · 2026-07-03T04:05:06.000Z · msg_root",
+    );
+  });
+
   it("renders a redacted attachment with an opaque label", () => {
     const redacted: ShowResult = {
       ...showResult,

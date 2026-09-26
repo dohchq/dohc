@@ -45,7 +45,7 @@ export interface StagedDatasetRecovery {
   dispose(): Promise<void>;
 }
 
-function fail(message: string): never { throw new Error(`Invalid dataset recovery: ${message}`); }
+function fail(message: string): never { throw new Error(`dohc could not read this recovery file: ${message}`); }
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("expected an object.");
   return value as Record<string, unknown>;

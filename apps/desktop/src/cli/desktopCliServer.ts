@@ -40,11 +40,15 @@ import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projectio
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 // The History author of a document an agent creates: the agent under the
-// name it gave, on behalf of the local owner, or no author without a name.
+// name it gave, on behalf of the local owner, at its run's depth. Without a
+// name it has no author, unless an automation started the run: then the MCP
+// server's agent authors it, so a record it adds carries the run's depth.
 function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
-  return origin.actorOriginId === undefined
+  const depth = origin.attribution.depth ?? 0;
+  const agentId = origin.actorOriginId ?? (depth > 0 ? "dohc-mcp" : undefined);
+  return agentId === undefined
     ? null
-    : { kind: "agent", agentId: origin.actorOriginId, onBehalfOf: "local" };
+    : { kind: "agent", agentId, onBehalfOf: "local", ...(depth > 0 ? { depth } : {}) };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -69,6 +73,7 @@ interface DesktopCliServerDependencies<State> {
       | "listVersions" | "writeAuthoredTextFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
+    agentRunDepth(workspaceId: string): number;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -382,6 +387,7 @@ export function createDesktopCliServer<State>(
       openWorkspace: openCliWorkspace,
       chatWrites,
       localUserDisplayName,
+      agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

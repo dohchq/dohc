@@ -257,6 +257,58 @@ describe("ChatsView live activity refresh", () => {
     });
   });
 
+  it("names the automation that asked for a run, and nobody for a person's request", async () => {
+    const user = userEvent.setup();
+    const wake = message({
+      authorKind: "automation",
+      authorDisplayName: "Stamp the finish date",
+      authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:Tasks#stamp", collectionPath: "Tasks" },
+      body: "Stamp today's tasks.",
+    });
+    const reply = (id: string, createdAtMs: number) => message({
+      id,
+      parentMessageId: wake.id,
+      authorKind: "agent",
+      authorDisplayName: "Claude",
+      body: `Stamped (${id})`,
+      createdAtMs,
+    });
+    const run = (runId: string, triggerMessageId: string) => ({
+      runId,
+      threadId: "thread-1",
+      triggerMessageId,
+      command: "claude -p",
+      startedAtMs: NOW,
+      exitCode: 0,
+    });
+    const asked = message({ id: "person-ask", parentMessageId: wake.id, body: "Also stamp tomorrow's.", createdAtMs: NOW + 2 });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 4 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [wake, reply("woken-reply", NOW + 1), asked, reply("asked-reply", NOW + 3)],
+    });
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({
+      runs: {
+        "woken-reply": run("run-woken", wake.id),
+        "asked-reply": run("run-asked", asked.id),
+      },
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const lines = await screen.findAllByTestId("chats-run-line");
+    expect(lines).toHaveLength(2);
+    const askedBy = screen.getAllByTestId("chats-run-asked-by");
+    expect(askedBy).toHaveLength(1);
+    expect(lines[0]!.contains(askedBy[0]!)).toBe(true);
+    expect(askedBy[0]!.textContent).toBe("Asked by Stamp the finish date for Ice");
+    expect(askedBy[0]!.getAttribute("title")).toBe("for Ice");
+    // A person's own request adds nothing beside the run.
+    expect(lines[1]!.querySelector("[data-testid='chats-run-asked-by']")).toBeNull();
+    expect(lines[1]!.querySelector("[data-testid='chats-run-chip']")?.textContent).toBe("run run-ask");
+  });
+
   // The write lands in a chat the user does not have open, so the roll-up
   // badge on the channel list is the only place it shows. Without the list's
   // own subscription the count waits for a navigation or a relaunch.

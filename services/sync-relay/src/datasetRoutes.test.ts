@@ -155,22 +155,22 @@ it("tells callers when to retry a dataset that waits to reopen", async () => {
   const waiting = await f.invoke();
   expect(waiting.status).toBe(503);
   expect(waiting.headers.get("retry-after")).toBe("10");
-  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "The dataset stopped before its work finished. Try again in 10 s."});
+  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "dohc's work on this Collection stopped before it finished. Try again in 10 s."});
   // The failure that starts a wait says why, and when to retry.
-  const message = "The app's code ran too long: it used more than 5 s of CPU time while replaying journal event 3 of 64. Try again.";
+  const message = "The app's code ran too long: it used more than 5 s of CPU time while reapplying saved change 3 of 64. Try again.";
   f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("worker_budget", message), {retryAfterMs: 5_000}); };
   const failed = await f.invoke();
   expect(failed.status).toBe(503);
   expect(failed.headers.get("retry-after")).toBe("5");
   expect(await failed.json()).toEqual({code: "worker_budget", message});
   // A reopen that failed on storage or a checkpoint says only that, with its wait.
-  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("reopen_failed", "The dataset could not be reopened. Try again."), {retryAfterMs: 10_000}); };
+  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("reopen_failed", "dohc could not reopen this Collection. Try again."), {retryAfterMs: 10_000}); };
   const reopen = await f.invoke();
   expect(reopen.status).toBe(503);
   expect(reopen.headers.get("retry-after")).toBe("10");
-  expect(await reopen.json()).toEqual({code: "reopen_failed", message: "The dataset could not be reopened. Try again."});
+  expect(await reopen.json()).toEqual({code: "reopen_failed", message: "dohc could not reopen this Collection. Try again."});
   // A failed operation starts no wait.
-  f.host.invoke = async () => { throw new PersistentRuntimeError("worker_stalled", "The dataset worker made no progress for 30 s while running the app operation. Try again."); };
+  f.host.invoke = async () => { throw new PersistentRuntimeError("worker_stalled", "dohc made no progress on this Collection for 30 s while running the Collection action. Try again."); };
   const stalled = await f.invoke();
   expect(stalled.status).toBe(503);
   expect(stalled.headers.get("retry-after")).toBeNull();

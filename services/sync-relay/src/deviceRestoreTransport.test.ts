@@ -33,7 +33,7 @@ async function fixture(maxRestoreBytes: number | null = 1_000_000) {
   const output = Buffer.alloc(600_001,37);
   const native = {ready:async()=>undefined,sendRequest:vi.fn(async()=>({result:{provisioned:true}})),
     sendLiveRestore:vi.fn(async(_request:unknown,_operation:string,_bytes:Uint8Array,_maxBytes:number,_signal?:AbortSignal) => ({response:{result:{}},bytes:output}))};
-  const ownerFor = vi.fn(()=>{throw Error("A stopped restore must not reacquire its retired owner session.");});
+  const ownerFor = vi.fn(async ()=>{throw Error("A stopped restore must not reacquire its retired owner session.");});
   const stop = vi.fn(()=>connection?.close());
   transport = startExistingOwnerDeviceTransport({config:{client:native as unknown as EngineClient,
     workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor,maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,

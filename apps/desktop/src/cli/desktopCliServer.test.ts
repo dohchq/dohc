@@ -93,7 +93,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn() },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -427,6 +427,14 @@ describe("desktop CLI workspace context", () => {
       expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", null, { createOnly: true }]);
       await context.documents!.create({ path: "named.md", markdown: "Hi.", origin: { ...origin, actorOriginId: "Codex" } });
       expect(write.mock.calls[1]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local" });
+      // During a run an automation started, the file names the run's depth,
+      // so a record it adds carries the chain on; with no name, the MCP
+      // server's agent authors it.
+      const woken = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 3 } };
+      await context.documents!.create({ path: "woken.md", markdown: "Hi.", origin: woken });
+      expect(write.mock.calls[2]![2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 });
+      await context.documents!.create({ path: "woken-named.md", markdown: "Hi.", origin: { ...woken, actorOriginId: "Codex" } });
+      expect(write.mock.calls[3]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local", depth: 3 });
 
       await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
         .rejects.toThrow("taken.md already exists. Edit it instead.");
@@ -438,7 +446,7 @@ describe("desktop CLI workspace context", () => {
       await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
         .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
       expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
-      expect(edit).toHaveBeenCalledTimes(3);
+      expect(edit).toHaveBeenCalledTimes(5);
 
       // Two creates of one path: one creates it, the other is told it exists.
       const race = await Promise.allSettled([

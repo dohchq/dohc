@@ -9,7 +9,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
-import type { DatasetAutomationClaim, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetAutomationClaim, DatasetAutomationSubscription, DatasetPressed, DatasetPressInput } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
@@ -33,7 +33,9 @@ type OwnerContext = { readonly owner: true };
  * its writes declare, one more than the claim that started the run.
  */
 export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
-type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext;
+/** The owner's agent in a run an automation started: the owner's authority, at the run's chain depth. */
+type AgentContext = { readonly agentDepth: number };
+type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
 export interface LocalDatasetHostOptions {
   workspaceId: string;
@@ -68,6 +70,12 @@ export interface LocalDatasetInvocation {
   input: JsonValue;
   idempotencyKey: string;
   signal?: AbortSignal;
+  /**
+   * Set by main for the owner's agent in a run an automation started: the
+   * chain depth the run's writes declare, so the claims its commit makes
+   * carry the chain on.
+   */
+  agentDepth?: number;
 }
 export interface LocalDatasetUpload {
   datasetId: string;
@@ -128,6 +136,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   // Each automation's retries keep their own identity, derived from the workspace like the owner's.
   const automationKey = (automationId: string) => digest(JSON.stringify(["dohc-dataset-automation-v1", workspaceId, automationId]));
   const automationContexts = new WeakSet<LocalDatasetAutomationContext>();
+  const agentContexts = new WeakSet<AgentContext>();
+  // The owner, or the owner's agent: both reach every file the owner can.
+  const ownerAuthority = (context: LocalContext) => context === owner || agentContexts.has(context as AgentContext);
   const pending = new Map<string, { preparation: LocalDatasetPreparation; schemaSql: string; operationSource: string; expires: number }>();
   function assertCurrent() {
     if (closed) throw new Error("This Collection session ended. Reopen the workspace.");
@@ -177,7 +188,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerDirectory = join(directory, "workers");
     await mkdir(workerDirectory).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
     const workerStat = await lstat(workerDirectory);
-    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
+    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("dohc cannot use the folder that holds this workspace's Collections. It must be a folder, not a link.");
     let resources:Resources|undefined;
     // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
     supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,
@@ -240,8 +251,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       resolveAuthority(context, request) {
         assertCurrent();
         const automation = automationContexts.has(context as LocalDatasetAutomationContext) ? context as LocalDatasetAutomationContext : null;
-        if (context !== owner && automation === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
+        const agent = agentContexts.has(context as AgentContext) ? context as AgentContext : null;
+        if (context !== owner && automation === null && agent === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
+        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agentDepth } };
         if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
         return { caller: { kind: "owner", userId: ownerId }, principalKey: automationKey(automation.automationId),
           automation: { automationId: automation.automationId, depth: automation.depth } };
@@ -278,7 +291,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const files: AppBackendFile[] = [];
         for (const fileId of ids) {
           const row = db.prepare("SELECT metadata,key,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)").get(workspaceId, request.datasetId, fileId, Date.now());
-          if (row && (context === owner || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
+          if (row && (ownerAuthority(context) || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
         }
         if (files.length > APP_BACKEND_OPERATION_FILES) throw new Error(`A Collection action can attach at most ${APP_BACKEND_OPERATION_FILES} files.`);
         const capturedFiles = new Set(files.map(file => file.fileId));
@@ -287,7 +300,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           for (const fileId of allocation.attachedFileIds) {
             if (!capturedFiles.has(fileId)) throw new Error("This Collection file is unavailable.");
             const current=db.prepare("SELECT key FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId,request.datasetId,fileId);
-            if (!current || (context !== owner && JSON.parse(String(current.key))[2] !== request.authority.principalKey)) throw new Error("This Collection file is unavailable.");
+            if (!current || (!ownerAuthority(context) && JSON.parse(String(current.key))[2] !== request.authority.principalKey)) throw new Error("This Collection file is unavailable.");
             const changed = db.prepare("UPDATE local_dataset_files SET attached_revision=coalesce(attached_revision,?) WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)")
               .run(allocation.revision, workspaceId, request.datasetId, fileId, Date.now());
             if (changed.changes !== 1) throw new Error("This Collection file expired. Upload it again.");
@@ -355,9 +368,15 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     function invoke(input: LocalDatasetInvocation, readOnly?: boolean): Promise<DatasetInvocationResult> {
       return tracked(async () => {
         checkInvocation(input, readOnly);
-        return host.invoke(owner, {workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256, operationId: input.operationId, input: input.input,
+        const context = input.agentDepth ? agentContext(input.agentDepth) : owner;
+        return host.invoke(context, {workspaceId, datasetId: input.datasetId, revision: input.revision, revisionSha256: input.revisionSha256, operationId: input.operationId, input: input.input,
           idempotencyKey: input.idempotencyKey, signal: signal(input.signal)});
       });
+    }
+    function agentContext(agentDepth: number): AgentContext {
+      const context = Object.freeze({ agentDepth });
+      agentContexts.add(context);
+      return context;
     }
     const recovery = createLocalDatasetRecovery({workspaceId,directory:exportDirectory,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
       prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
@@ -526,6 +545,22 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         claims(automationId: string) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId); },
         claim(automationId: string, claimId: string) { assertCurrent(); return host.automationClaims.claim(workspaceId, automationId, claimId); },
         failures() { assertCurrent(); return host.automationClaims.failures(workspaceId); },
+        /**
+         * Claims a press by `pressedBy`, the account main pressed for. Every
+         * person on this computer is the owner of its datasets, so the run
+         * acts with the owner's authority, which is theirs.
+         */
+        press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed {
+          assertCurrent();
+          const { pressedBy, ...press } = input;
+          return host.automationClaims.press({ workspaceId, datasetId, ...press, presser: { kind: "owner", userId: pressedBy } });
+        },
+        /** Throws why this host cannot take a press of this button, as `press` would. */
+        assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">) {
+          assertCurrent(); host.automationClaims.assertPressable({ workspaceId, datasetId, ...button });
+        },
+        /** A press the ledger remembers, with its claim, or null. */
+        pressed(pressId: string) { assertCurrent(); return host.automationClaims.pressed(workspaceId, pressId); },
       },
       close(): Promise<void> {
         return closePromise ??= (async () => {

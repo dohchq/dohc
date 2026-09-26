@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetChangeFacts, DatasetChangeFactsError, type DatasetChangeFact, type DatasetFieldChange } from "./dataset-change-facts.js";
-import type { DatasetScope, JournalDb } from "./journal.js";
+import type { DatasetCursor, DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetCommit } from "./supervisor.js";
 
 // Automation claims for dataset commits (ADR 0008).
@@ -31,6 +31,15 @@ import type { DatasetCommit } from "./supervisor.js";
 // has a new epoch, so its count starts over under a new instance and no
 // earlier dismissal applies to it. The count is charged to the dataset once,
 // and deleting the dataset forgets it with its claims.
+//
+// A press of a Button field claims too, through `press`, with no commit: one
+// pending claim keyed `press:<press id>` that acts for the person who
+// pressed. The ledger remembers each press 30 days, so the same press sent
+// again after a lost reply answers its claim instead of running twice, and
+// trimming keeps a claim a remembered press names. While the button runs on
+// a record, the same person's new press of the same automation joins that
+// claim, and any other press is busy. A press also names the definition of
+// the automation it was checked against, so its run can refuse another.
 
 /** A change at this depth runs no automation. Its claims fail at once and say why. */
 export const DATASET_AUTOMATION_CHAIN_DEPTH = 4;
@@ -40,6 +49,8 @@ export const DATASET_AUTOMATION_CLAIMS_PER_COMMIT = 200;
 export const DATASET_AUTOMATION_ATTEMPTS = 2;
 /** Settled claims kept per automation, as its run history. Its newest failure also stays. */
 export const DATASET_AUTOMATION_HISTORY = 100;
+/** How long the ledger remembers a press, so the same press sent again finds its claim. */
+export const DATASET_AUTOMATION_PRESS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** History names the automation behind each of a dataset's newest revisions, this many back. */
 export const DATASET_AUTOMATION_ATTRIBUTED_REVISIONS = 10_000;
 export const DATASET_AUTOMATION_CHAIN_STOPPED = "chain-stopped";
@@ -56,14 +67,20 @@ const ERROR_BYTES = 1024, ROW_BYTES = 256;
 
 export type DatasetChangeKind = DatasetChangeFact["kind"];
 /**
- * Who made a commit. The host derives it from the invoking context, never
- * from input. A link visitor stays anonymous.
+ * Who made a commit or pressed a button. The host derives it from the
+ * invoking context, never from input. A link visitor stays anonymous. A
+ * press names the owner's account too, since the run acts for the person
+ * who pressed.
  */
 export type DatasetActor =
-  | { kind: "owner"; appId?: string }
+  | { kind: "owner"; userId?: string; appId?: string }
   | { kind: "named"; userId: string; appId?: string }
   | { kind: "link"; appId?: string }
-  | { kind: "automation"; automationId: string; depth: number };
+  | { kind: "automation"; automationId: string; depth: number }
+  // The owner's agent, in a run an automation started, at the run's chain depth.
+  | { kind: "agent"; depth: number };
+/** The person who pressed a button: the owner or a named person, by account. */
+export type DatasetPresser = { kind: "owner" | "named"; userId: string };
 export interface DatasetAutomationSubscription {
   automationId: string;
   tableId: string;
@@ -78,7 +95,37 @@ export interface DatasetAutomationSubscription {
 }
 /** A value too large for a claim reads null, with `truncated`. The executor reads the record instead. */
 export interface DatasetClaimFieldChange extends DatasetFieldChange { truncated?: true }
-export interface DatasetClaimFact extends Omit<DatasetChangeFact, "fields"> { fields: DatasetClaimFieldChange[] }
+/** A committed change to one record, as its claim carries it. */
+export interface DatasetChangeClaimFact extends Omit<DatasetChangeFact, "fields"> { fields: DatasetClaimFieldChange[] }
+/**
+ * A press of the Button field `fieldId` on one record. The run reads the
+ * record as it is then, and runs only the automation `definitionHash` names.
+ */
+export interface DatasetPressFact { kind: "button"; datasetId: string; tableId: string; recordId: string | number; fieldId: string; definitionHash: string }
+export type DatasetClaimFact = DatasetChangeClaimFact | DatasetPressFact;
+/** A person pressed a Button field on one record of the dataset. */
+export interface DatasetPressInput {
+  /** The pressing window's id for this press. The same press sent again carries it again. */
+  pressId: string;
+  /**
+   * The hex SHA-256 of the press as its window asked for it. The same press
+   * sent again must ask for the same, even after the button's name changed.
+   */
+  request: string;
+  /** The automation the button runs. */
+  automationId: string;
+  /** The executor's hash of that automation's entry, as it was checked for this press. */
+  definitionHash: string;
+  tableId: string;
+  fieldId: string;
+  /** The record's primary key. */
+  recordId: string | number;
+  presser: DatasetPresser;
+}
+/** A press the ledger remembers, with the claim it names and its request. */
+export interface DatasetRememberedPress { claim: DatasetAutomationClaim; request: string }
+/** What a press did: made a claim, joined one for the same press or person, or found the button busy. */
+export type DatasetPressed = { kind: "claimed" | "joined"; claim: DatasetAutomationClaim } | { kind: "busy" };
 export type DatasetAutomationClaimState = "pending" | "running" | "done" | "failed";
 export interface DatasetAutomationClaim {
   claimId: string;
@@ -160,7 +207,7 @@ function wants(subscription: Pick<DatasetAutomationSubscription, "tableId" | "ki
 // fields of about 90 bytes each when bare, a record id within RECORD_ID_BYTES,
 // and identifiers within their bounds, the bare claim stays far under
 // CLAIM_BYTES, so the budget never goes negative.
-function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null, envelope: number): DatasetClaimFact {
+function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null, envelope: number): DatasetChangeClaimFact {
   const fields = fieldIds === null ? fact.fields : fact.fields.filter(field => fieldIds.includes(field.fieldId));
   const bare = (field: DatasetFieldChange): DatasetClaimFieldChange => ({ fieldId: field.fieldId, previous: null, next: null, truncated: true });
   let budget = CLAIM_BYTES - envelope - bytes({ ...fact, fields: fields.map(bare) });
@@ -265,14 +312,29 @@ export function createDatasetAutomationClaims(options: {
       .get(scope.workspaceId, scope.datasetId, hostEpoch, automationId, storageBytes);
     return Number(row?.generation) === 1 ? storageBytes : 0;
   };
-  // An automation keeps its newest settled claims and its newest failure. Returns the bytes removed.
+  // An automation keeps its newest settled claims, its newest failure, and
+  // each claim a remembered press names. Returns the bytes removed.
   function trim(scope: DatasetScope, automationId: string): number {
     const owned = "workspace_id=?1 AND dataset_id=?2 AND automation_id=?3";
     return refunded(db.prepare(`DELETE FROM dohc_dataset_automation_claims WHERE ${owned} AND state IN('done','failed')
       AND rowid NOT IN(SELECT rowid FROM dohc_dataset_automation_claims WHERE ${owned} AND state IN('done','failed') ORDER BY rowid DESC LIMIT ?4)
-      AND rowid IS NOT (SELECT rowid FROM dohc_dataset_automation_claims WHERE ${owned} AND state='failed' ${NEWEST} LIMIT 1) RETURNING storage_bytes`)
+      AND rowid IS NOT (SELECT rowid FROM dohc_dataset_automation_claims WHERE ${owned} AND state='failed' ${NEWEST} LIMIT 1)
+      AND NOT EXISTS(SELECT 1 FROM dohc_dataset_automation_presses p WHERE p.claim_id=dohc_dataset_automation_claims.claim_id) RETURNING storage_bytes`)
       .all(scope.workspaceId, scope.datasetId, automationId, DATASET_AUTOMATION_HISTORY));
   }
+  // A press this ledger still remembers, with the claim it names, or null.
+  const remembered = (workspaceId: string, pressId: string): DatasetRememberedPress | null => {
+    const row = db.prepare("SELECT claim_id,request FROM dohc_dataset_automation_presses WHERE workspace_id=? AND press_id=? AND pressed_at_ms>=?")
+      .get(workspaceId, pressId, now() - DATASET_AUTOMATION_PRESS_RETENTION_MS);
+    const found = row ? read(workspaceId, String(row.claim_id)) : undefined;
+    return row && found ? { claim: claim(found), request: String(row.request) } : null;
+  };
+  // An unfinished claim for this press's button and record, of any automation, or undefined.
+  const activePress = (workspaceId: string, fact: DatasetPressFact, other?: string): DatasetAutomationClaim | undefined =>
+    db.prepare(`SELECT ${COLUMNS} FROM dohc_dataset_automation_claims WHERE workspace_id=? AND state IN('pending','running') AND dataset_id=?`)
+      .all(workspaceId, fact.datasetId).map(claim)
+      .find(({ claimId, fact: found }) => claimId !== other && found?.kind === "button" && found.datasetId === fact.datasetId &&
+        found.tableId === fact.tableId && found.fieldId === fact.fieldId && found.recordId === fact.recordId);
   tx(() => {
     db.exec(`CREATE TABLE IF NOT EXISTS dohc_dataset_automation_subscriptions(
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,automation_id TEXT NOT NULL,table_id TEXT NOT NULL,
@@ -294,7 +356,13 @@ export function createDatasetAutomationClaims(options: {
     CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL,automation_id TEXT NOT NULL,depth INTEGER NOT NULL,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
-      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`);
+      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_automation_presses(
+      workspace_id TEXT NOT NULL,press_id TEXT NOT NULL,dataset_id TEXT NOT NULL,claim_id TEXT NOT NULL,request TEXT NOT NULL,
+      pressed_at_ms INTEGER NOT NULL,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
+      PRIMARY KEY(workspace_id,press_id)) STRICT;
+    CREATE INDEX IF NOT EXISTS dohc_dataset_automation_presses_claim ON dohc_dataset_automation_presses(claim_id);
+    CREATE INDEX IF NOT EXISTS dohc_dataset_automation_presses_age ON dohc_dataset_automation_presses(workspace_id,pressed_at_ms);`);
     // The reaper. A running claim here belongs to a process that no longer runs.
     const reaped = db.prepare(`UPDATE dohc_dataset_automation_claims SET state=CASE WHEN attempts>=?1 THEN 'failed' ELSE 'pending' END,
       error=CASE WHEN attempts>=?1 THEN ?2 END,updated_at_ms=?3 WHERE state='running' RETURNING workspace_id,dataset_id,host_epoch,automation_id,state`)
@@ -320,7 +388,8 @@ export function createDatasetAutomationClaims(options: {
      */
     recordCommit(input: DatasetCommit & { approved: DatasetRevision; actor: DatasetActor }): number {
       const { cursor, actor } = input, scope = { workspaceId: cursor.workspaceId, datasetId: cursor.datasetId };
-      const self = actor.kind === "automation" ? actor.automationId : undefined, depth = actor.kind === "automation" ? actor.depth : 0;
+      const self = actor.kind === "automation" ? actor.automationId : undefined;
+      const depth = actor.kind === "automation" || actor.kind === "agent" ? actor.depth : 0;
       const subscriptions = db.prepare("SELECT automation_id,table_id,kinds,field_ids FROM dohc_dataset_automation_subscriptions WHERE workspace_id=? AND dataset_id=? ORDER BY automation_id")
         .all(cursor.workspaceId, cursor.datasetId).filter(row => row.automation_id !== self).map(row => ({ automationId: String(row.automation_id),
           tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)) as DatasetChangeKind[], fieldIds: row.field_ids === null ? null : JSON.parse(String(row.field_ids)) as string[] }));
@@ -411,6 +480,70 @@ export function createDatasetAutomationClaims(options: {
       const row = tx(() => read(workspaceId, claimId));
       return row && String(row.automation_id) === automationId ? claim(row) : null;
     },
+    /** A press the ledger remembers, by its press id, with its claim, or null. */
+    pressed(workspaceId: string, pressId: string): DatasetRememberedPress | null {
+      return tx(() => remembered(workspaceId, pressId));
+    },
+    /**
+     * Record one press and answer the claim that runs it, in one transaction.
+     * `cursor` is the dataset's head, whose epoch the claim belongs to. The
+     * host checks the table and button against the approved rules, and
+     * derives who pressed.
+     */
+    press(input: DatasetPressInput & { cursor: Pick<DatasetCursor, "workspaceId" | "datasetId" | "hostEpoch" | "revision"> }): DatasetPressed {
+      const { cursor } = input, scope = { workspaceId: text(cursor.workspaceId, "workspace"), datasetId: text(cursor.datasetId, "dataset") };
+      const pressId = text(input.pressId, "press", 256), automationId = text(input.automationId, "id");
+      if (typeof input.request !== "string" || !/^[a-f0-9]{64}$/.test(input.request)) throw new Error("Invalid automation press request.");
+      if (typeof input.definitionHash !== "string" || !/^[a-f0-9]{64}$/.test(input.definitionHash)) throw new Error("Invalid automation definition hash.");
+      const fact: DatasetPressFact = { kind: "button", datasetId: scope.datasetId, tableId: text(input.tableId, "table", 256),
+        recordId: input.recordId, fieldId: text(input.fieldId, "field", 256), definitionHash: input.definitionHash };
+      if ((typeof fact.recordId !== "string" && !Number.isSafeInteger(fact.recordId)) || bytes(fact.recordId) > RECORD_ID_BYTES) throw new Error("Invalid automation record.");
+      if (input.presser.kind !== "owner" && input.presser.kind !== "named") throw new Error("Invalid automation presser.");
+      const presser: DatasetPresser = { kind: input.presser.kind, userId: text(input.presser.userId, "presser") };
+      const samePresser = ({ actor }: DatasetAutomationClaim) =>
+        (actor.kind === "owner" || actor.kind === "named") && actor.kind === presser.kind && actor.userId === presser.userId;
+      const another = () => new Error("This press id already names another press.");
+      return tx(() => {
+        const at = now();
+        // Presses past retention are forgotten, and their claims can trim.
+        const forgotten = db.prepare("DELETE FROM dohc_dataset_automation_presses WHERE workspace_id=? AND pressed_at_ms<? RETURNING dataset_id,storage_bytes")
+          .all(scope.workspaceId, at - DATASET_AUTOMATION_PRESS_RETENTION_MS);
+        for (const row of forgotten) account({ workspaceId: scope.workspaceId, datasetId: String(row.dataset_id) }, -Number(row.storage_bytes));
+        // The same press sent again is the same request, whatever the rules or automations say now.
+        const known = remembered(scope.workspaceId, pressId);
+        if (known !== null) {
+          if (known.request !== input.request || !samePresser(known.claim)) throw another();
+          return { kind: "joined", claim: known.claim };
+        }
+        // One run per button and record at a time: a double click, or two windows, run once.
+        const active = activePress(scope.workspaceId, fact);
+        if (active !== undefined && (active.automationId !== automationId || !samePresser(active))) return { kind: "busy" };
+        let pressed = active;
+        let delta = 0;
+        if (pressed === undefined) {
+          // The key names the request, so only the same press can meet its claim again.
+          const key = [scope.workspaceId, scope.datasetId, automationId, cursor.hostEpoch, cursor.revision, fact.tableId, `press:${pressId}:${input.request}`];
+          const claimId = digest(["dohc-dataset-automation-claim-v1", ...key]);
+          // A press the ledger forgot can still have its claim, when nothing committed since.
+          const kept = read(scope.workspaceId, claimId);
+          if (kept) {
+            pressed = claim(kept);
+            if (!samePresser(pressed)) throw another();
+          } else {
+            const factJson = JSON.stringify(fact), actorJson = JSON.stringify(presser);
+            const storageBytes = bytes([claimId, ...key, factJson, actorJson]) + ERROR_BYTES + ROW_BYTES;
+            db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,0,'pending',0,1,NULL,?,?,?)")
+              .run(claimId, ...key, factJson, actorJson, at, at, storageBytes);
+            delta += storageBytes;
+            pressed = claim(read(scope.workspaceId, claimId)!);
+          }
+        }
+        const storageBytes = bytes([scope.workspaceId, pressId, scope.datasetId, pressed.claimId, input.request]) + ROW_BYTES;
+        db.prepare("INSERT INTO dohc_dataset_automation_presses VALUES(?,?,?,?,?,?,?)").run(scope.workspaceId, pressId, scope.datasetId, pressed.claimId, input.request, at, storageBytes);
+        account(scope, delta + storageBytes);
+        return { kind: delta > 0 ? "claimed" : "joined", claim: pressed };
+      });
+    },
     /**
      * Each automation's newest failed claim, the one its failure notice
      * offers to try again, with its failure count. A claim that failed
@@ -458,7 +591,10 @@ export function createDatasetAutomationClaims(options: {
         if (Number(changed.changes) !== 1) throw new Error("This automation run is no longer current.");
       });
     },
-    /** Try again: a failed claim runs again with the facts it holds, as its next run. */
+    /**
+     * Try again: a failed claim runs again with the facts it holds, as its
+     * next run. A press cannot while its button runs on the record again.
+     */
     retry(input: Pick<DatasetAutomationClaim, "workspaceId" | "claimId">): DatasetAutomationClaim {
       return tx(() => {
         const row = read(input.workspaceId, input.claimId);
@@ -467,6 +603,9 @@ export function createDatasetAutomationClaims(options: {
         if (current.state === "done") throw new Error("This automation run already finished.");
         if (current.state === "failed" && current.attempts === 0) throw new Error("This automation run stopped before it started, so it cannot run again.");
         if (current.state !== "failed") return current;
+        if (current.fact?.kind === "button" && activePress(current.workspaceId, current.fact, current.claimId) !== undefined) {
+          throw new Error("This button is already running for this record.");
+        }
         db.prepare("UPDATE dohc_dataset_automation_claims SET state='pending',error=NULL,run=run+1,updated_at_ms=? WHERE workspace_id=? AND claim_id=? AND state='failed'")
           .run(now(), input.workspaceId, input.claimId);
         return claim(read(input.workspaceId, input.claimId)!);
@@ -477,7 +616,7 @@ export function createDatasetAutomationClaims(options: {
      * transaction. It refunds nothing: the host refunds all the dataset retained.
      */
     forget(scope: DatasetScope): void {
-      for (const table of ["dohc_dataset_automation_subscriptions", "dohc_dataset_automation_claims", "dohc_dataset_automation_revisions", "dohc_dataset_automation_failure_generations"])
+      for (const table of ["dohc_dataset_automation_subscriptions", "dohc_dataset_automation_claims", "dohc_dataset_automation_revisions", "dohc_dataset_automation_failure_generations", "dohc_dataset_automation_presses"])
         db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(scope.workspaceId, scope.datasetId);
     },
   };

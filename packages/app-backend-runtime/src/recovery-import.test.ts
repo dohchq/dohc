@@ -230,9 +230,9 @@ it("requires trusted local recovery and explicit stopped-host acknowledgement fo
     const input={transferId:"local-recovery",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize};
     await t.installer.install({},input);
     const claim={...f.scope,transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:f.head(),authorize:f.authorize};
-    expect(() => t.installer.claim({},claim)).toThrow(/fenced source/);
+    expect(() => t.installer.claim({},claim)).toThrow(/saved while the Collection still accepted changes/);
     const relayInstaller=createRecoveryInstaller({db:t.db,journal:t.journal,transaction:t.transaction});
-    expect(() => relayInstaller.claim({},{...claim,oldHostStopped:true})).toThrow(/fenced source/);
+    expect(() => relayInstaller.claim({},{...claim,oldHostStopped:true})).toThrow(/saved while the Collection still accepted changes/);
     expect(t.journal.head(f.scope,f.authorize).active).toBe(false);
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_data_grants").get()!.n).toBe(0);
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_recovered_permissions").get()!.n).toBe(1);

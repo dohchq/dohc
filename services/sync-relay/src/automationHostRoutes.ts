@@ -2,8 +2,10 @@ import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/se
 import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
   AUTOMATION_HOST_MAX_BODY_BYTES,
+  AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
   isNoticeLine,
+  type RelayAutomationGroupHandoverResponse,
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "./errors";
 import { relayPathSegments } from "./requestInputs";
@@ -31,7 +33,16 @@ export function isAutomationHostPath(path: string | readonly string[]): boolean 
     parts[1] !== "shares" && parts[1] !== "notices" && parts[2] === "automation-host";
 }
 
-const AUTOMATION_HOST_ACTIONS = ["check-in", "choose", "release", "take-over"] as const;
+// The largest request body a path takes, or null when it is not one of
+// these routes. A release carries the Group handover, so it takes more.
+export function automationHostMaxBodyBytes(path: string): number | null {
+  if (!isAutomationHostPath(path)) return null;
+  return relayPathSegments(path)[3] === "release"
+    ? AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES
+    : AUTOMATION_HOST_MAX_BODY_BYTES;
+}
+
+const AUTOMATION_HOST_ACTIONS = ["check-in", "choose", "release", "take-over", "groups"] as const;
 
 export type AutomationHostRoute = {
   route: "automation-host";
@@ -57,6 +68,7 @@ export function createAutomationHostRoutes(
     | "chooseAutomationHost"
     | "releaseAutomationHost"
     | "takeOverAutomationHost"
+    | "readAutomationGroupHandover"
   >,
   nowMs: () => number,
   changeRateLimiter: TokenBucketLimiter,
@@ -72,9 +84,22 @@ export function createAutomationHostRoutes(
       if (request.method !== "GET") throw relayError("method_not_allowed");
       return jsonResponse({ ok: true, ...storage.readAutomationHost(scope) }, 200);
     }
+    if (route.action === "groups") {
+      if (request.method !== "GET") throw relayError("method_not_allowed");
+      const asked = new URL(request.url).searchParams.get("generation");
+      const kept = storage.readAutomationGroupHandover({
+        ...scope,
+        generation: generation(asked === null || asked === "" ? Number.NaN : Number(asked)),
+      });
+      const answer: RelayAutomationGroupHandoverResponse = { ok: true, ...kept };
+      return jsonResponse(answer, 200);
+    }
     if (request.method !== "POST") throw relayError("method_not_allowed");
     if (!changeRateLimiter.allow(ownerUserId, nowMs())) throw relayError("automation_host_rate_limited");
-    const body = await readBody(request);
+    const body = await readBody(
+      request,
+      route.action === "release" ? AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES : AUTOMATION_HOST_MAX_BODY_BYTES,
+    );
     const state = (() => {
       switch (route.action) {
         case "check-in":
@@ -98,6 +123,8 @@ export function createAutomationHostRoutes(
             installId: installId(body.installId),
             generation: generation(body.generation),
             releasedThroughMs: nonNegativeInteger(body.releasedThroughMs, "releasedThroughMs"),
+            groups: groupHandover(body.groups),
+            groupsWatched: generation(body.groupsWatched),
           });
         case "take-over":
           return storage.takeOverAutomationHost({ ...scope, generation: generation(body.generation) });
@@ -107,10 +134,10 @@ export function createAutomationHostRoutes(
   };
 }
 
-async function readBody(request: Request): Promise<Record<string, unknown>> {
+async function readBody(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
-    value = await readBoundedJson(request, AUTOMATION_HOST_MAX_BODY_BYTES, request.signal);
+    value = await readBoundedJson(request, maxBytes, request.signal);
   } catch (error) {
     if (error instanceof RangeError) throw relayError("payload_too_large");
     throw badRequest("request body must be valid JSON");
@@ -119,6 +146,15 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
     throw badRequest("request body must be a JSON object");
   }
   return value as Record<string, unknown>;
+}
+
+// The Group handover a release carries, kept as the JSON text it arrived as.
+// Only the next host's engine reads it.
+function groupHandover(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("groups must be a JSON object");
+  }
+  return JSON.stringify(value);
 }
 
 function installId(value: unknown): string {

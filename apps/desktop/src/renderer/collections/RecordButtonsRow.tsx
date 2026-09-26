@@ -18,7 +18,9 @@ export function RecordButtonsRow(props: {
 }) {
   const { workspaceId, path } = props;
   const [found, setFound] = useState<{ record: CollectionRecord; collectionPath: string; fields: string[] } | null>(null);
-  const buttons = useAutomationButtons({ workspaceId, collectionPath: found?.collectionPath ?? null, onError: props.onError, onNotice: props.onNotice });
+  const buttons = useAutomationButtons({
+    workspaceId, of: found === null ? null : { collectionPath: found.collectionPath }, onError: props.onError, onNotice: props.onNotice,
+  });
   const answer = useRef<Awaited<ReturnType<ReturnType<typeof bridge>["listRecordButtons"]>> | null>(null);
   const requests = useRef(0);
   const report = useRef(props.onError);

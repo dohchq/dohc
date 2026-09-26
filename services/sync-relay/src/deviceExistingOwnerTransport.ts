@@ -25,7 +25,8 @@ export interface ExistingOwnerSession {
 export interface ExistingOwnerDeviceConfig {
   client: EngineClient;
   workspaces: readonly { workspaceId: string; workspaceHandle: string }[];
-  ownerFor(binding: LiveObjectBinding): ExistingOwnerSession;
+  /** May wait for the open document to learn a claim this device just made. */
+  ownerFor(binding: LiveObjectBinding): Promise<ExistingOwnerSession>;
   maxQueuedBytes: number;
   maxFrameBytes: number;
   maxUploads: number;
@@ -85,6 +86,7 @@ export function startExistingOwnerDeviceTransport(options: {
   const workspaces = new Map(config.workspaces.map(row => [row.workspaceHandle, row.workspaceId]));
   if (!workspaces.size || workspaces.size !== config.workspaces.length || new Set(workspaces.values()).size !== workspaces.size) throw new Error("Invalid existing owner workspaces.");
   const retired = new AbortController(), operations = new Map<number,Operation>(), registrations = new Map<number,Registration>();
+  const admitting = new Map<string,{adds: boolean; done: Promise<void>}>();
   const decoder = new FrameDecoder(config.maxFrameBytes,256*1024);
   const receive = deviceLiveHostReceive(limits,{ maxPayloadBytes: limits.maxPayloadBytes,maxPendingBytes: config.maxQueuedBytes });
   const credit = new DeviceCreditWindow(receive.maxPendingBytes,receive.maxPayloadBytes);
@@ -208,34 +210,45 @@ export function startExistingOwnerDeviceTransport(options: {
         const params = configRecord(operation.params,["binding"],["resumeAdoptionId"]), binding = parseLiveObjectBinding(params.binding);
         const resumeAdoptionId = params.resumeAdoptionId === undefined ? undefined : string(params.resumeAdoptionId);
         if (workspaces.get(operation.workspace) !== binding.workspaceId) throw new Error("Owner workspace mismatch.");
+        // One admission per binding at a time, counted against capacity until it
+        // finishes, so a lookup that waits cannot register the same binding twice.
+        const key = JSON.stringify(binding);
+        for (let held = admitting.get(key); held; held = admitting.get(key)) await held.done;
+        check(); signal.throwIfAborted();
         const existing = [...registrations.values()].find(row => isDeepStrictEqual(row.binding,binding));
         if (existing && resumeAdoptionId === undefined) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}},signal); return; }
-        if (!existing && registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
-        try {owner = existing?.owner ?? config.ownerFor(binding); owner.assertCurrent();}
-        catch (error) {
-          if (resumeAdoptionId === undefined) throw error;
-          owner = undefined;
-          await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}},signal); return;
-        }
-        const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
-        registration = existing ?? {nativeId,binding,owner,adopted: false};
-        registrations.set(nativeId,registration);
-        observeOwner(registration);
-        owner.assertCurrent();
-        if (resumeAdoptionId !== undefined) {
-          if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
-          const response = await config.client.sendRequest({...request,id: next(),method: "liveApplication.ownerState",params: {registrationId: nativeId,sessionId: owner.nativeSessionId}},signal);
-          owner.assertCurrent();
-          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
-          if (state.throughCursor === null) {
-            await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}},signal); return;
+        const adds = !existing;
+        if (adds && registrations.size + [...admitting.values()].filter(row => row.adds).length >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
+        let admitted!: () => void;
+        const reservation = {adds, done: new Promise<void>(resolve => { admitted = resolve; })};
+        admitting.set(key, reservation);
+        try {
+          try {owner = existing?.owner ?? await config.ownerFor(binding); owner.assertCurrent();}
+          catch (error) {
+            if (resumeAdoptionId === undefined) throw error;
+            owner = undefined;
+            await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}},signal); return;
           }
-          integer(state.throughCursor);
-          if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
-          registration.adopted = true;
-          registration.dirty = true;
-        }
-        result = {registrationId: nativeId};
+          const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
+          registration = existing ?? {nativeId,binding,owner,adopted: false};
+          registrations.set(nativeId,registration); reservation.adds = false;
+          observeOwner(registration);
+          owner.assertCurrent();
+          if (resumeAdoptionId !== undefined) {
+            if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
+            const response = await config.client.sendRequest({...request,id: next(),method: "liveApplication.ownerState",params: {registrationId: nativeId,sessionId: owner.nativeSessionId}},signal);
+            owner.assertCurrent();
+            const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+            if (state.throughCursor === null) {
+              await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}},signal); return;
+            }
+            integer(state.throughCursor);
+            if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
+            registration.adopted = true;
+            registration.dirty = true;
+          }
+          result = {registrationId: nativeId};
+        } finally { admitting.delete(key); admitted(); }
       } else {
         registration = registrationFor(operation); owner = registration.owner; owner.assertCurrent();
         const native = { ...request,registrationId: registration.nativeId,sessionId: owner.nativeSessionId };
