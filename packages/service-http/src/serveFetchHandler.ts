@@ -6,7 +6,11 @@ export interface ServeFetchHandlerOptions {
   handler: (request: Request) => Promise<Response>;
   /** The most request-body bytes buffered for this URL before the upload is refused. */
   maxBodyBytes: (url: URL) => number;
-  /** Dispatch without buffering. These handlers must authenticate before reading and bound body size and receipt time. */
+  /**
+   * Dispatch without buffering, for any method. These handlers must
+   * authenticate before reading and bound body size and receipt time. A GET
+   * or HEAD reaches them with no body, and any upload it carries stays unread.
+   */
   streamBody?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
@@ -44,10 +48,10 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       outgoing.destroy();
     });
     const method = incoming.method ?? "GET";
-    if (method !== "GET" && method !== "HEAD" && options.streamBody?.(url, method)) {
+    if (options.streamBody?.(url, method)) {
       const headers = new Headers(incoming.headers as Record<string, string>);
       options.prepareHeaders?.(headers, incoming, url);
-      const body = Readable.toWeb(incoming, {
+      const body = method === "GET" || method === "HEAD" ? null : Readable.toWeb(incoming, {
         strategy: { highWaterMark: 64 * 1024, size: (chunk: Uint8Array) => chunk.byteLength },
       }) as ReadableStream<Uint8Array>;
       const init: RequestInit & { duplex: "half" } = { method, headers, signal: disconnect.signal, body, duplex: "half" };

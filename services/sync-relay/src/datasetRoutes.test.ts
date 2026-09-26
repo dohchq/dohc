@@ -7,7 +7,7 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture, limits } from "./datasetTestFixture";
-import { createSyncRelayHandler, isDatasetRecoveryUpload } from "./server";
+import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
@@ -37,7 +37,7 @@ it("transfers a recovery archive over 21 MiB through the production HTTP adapter
   journal.fence({ expected: cursor, authorize() {} });
   const archive = await source.host.exportRecovery(owner, scope);
   const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 21 * 1024 * 1024,
-    streamBody: isDatasetRecoveryUpload,
+    streamBody: streamsRequestBody,
     oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   try {

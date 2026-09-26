@@ -117,7 +117,7 @@ import {
 } from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
-import { useShareDirectWrites } from "./shell/useShareDirectWrites";
+import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
@@ -2187,7 +2187,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
-  const refreshShareViewRef = useRef<() => Promise<boolean>>(async () => true);
+  const refreshShareViewRef = useRef<() => Promise<ShareViewRefresh>>(async () => "current");
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2202,8 +2202,8 @@ export function DesktopWorkspaceShell(props: {
       // stale (damaged, failed, or overtaken by another refresh) says why
       // nothing opened.
       const retry = () => {
-        void refreshShareViewRef.current().then((current) => {
-          if (current) {
+        void refreshShareViewRef.current().then((refresh) => {
+          if (refresh === "current") {
             void importFiles(undefined, targetDir);
             return;
           }
@@ -4125,11 +4125,9 @@ export function DesktopWorkspaceShell(props: {
     showSuccess: showSuccessNotice,
   });
 
-  // Resolves true when the view is current: refreshed, or not a shared
-  // view at all. A failed, superseded, or ended refresh resolves false.
-  const refreshShareView = useCallback(async (): Promise<boolean> => {
-    if (!shareView) return true;
-    if (shareViewDamaged) return false;
+  const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
+    if (!shareView) return "current";
+    if (shareViewDamaged) return "stale";
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -4148,15 +4146,15 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return false;
+      if (token !== shareRefreshToken.current) return "stale";
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return false;
+        if (token !== shareRefreshToken.current) return "stale";
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
         );
-        return false;
+        return "stale";
       }
       if (outcome.collisionRecordQuarantined) {
         reportShellFailure({
@@ -4173,7 +4171,7 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
-      return outcome.status !== "ended";
+      return outcome.status === "ended" ? "ended" : "current";
     } catch (error) {
       // A store only a newer dohc opens stops the whole workspace, and the
       // stop state already says so. A toast would repeat it.
@@ -4184,10 +4182,10 @@ export function DesktopWorkspaceShell(props: {
         status?.engineStoreRefused != null &&
         engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
       ) {
-        return false;
+        return "stale";
       }
       reportShellError("Couldn't refresh the shared view.", error);
-      return false;
+      return "stale";
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
