@@ -1347,6 +1347,43 @@ async fn group_messages_written_here_claim_through_rpc() {
     assert_eq!(unsubscribed, json!({ "unsubscribed": true }));
     send(&mut id, "m4", "/task Again").await;
     assert!(claimed_events(&mut notices).is_empty(), "unsubscribed");
+
+    // Before a handover the desktop removes every Group subscription at once.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.subscribe",
+        json!({ "automationId": TASK, "groupId": "trip" }),
+    )
+    .await;
+    let stray = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.unsubscribeGroups",
+        json!({ "groupId": "trip" }),
+    )
+    .await;
+    assert_eq!(
+        stray.code,
+        ErrorCode::InvalidParams,
+        "it takes no parameters"
+    );
+    let removed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.unsubscribeGroups",
+        json!({}),
+    )
+    .await;
+    assert_eq!(removed, json!({ "removed": 1 }));
+    send(&mut id, "m5", "/task Once more").await;
+    assert!(
+        claimed_events(&mut notices).is_empty(),
+        "every Group subscription went"
+    );
 }
 
 /// A button press and a schedule step claim through RPC: a new press

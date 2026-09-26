@@ -20,6 +20,7 @@ use dohc_engine_domain::{
     list_automation_failures, reclaim_running_automations, release_automation_claim,
     retry_automation_claim, settle_automation_claim, subscribe_automation,
     subscribe_automation_group, unsubscribe_automation, unsubscribe_automation_group,
+    unsubscribe_automation_groups,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1510,6 +1511,71 @@ fn a_group_message_claims_each_matching_subscription_once() {
     unsubscribe_automation_group(&mut store, WS, TASK, GROUP, &NO_FAULTS).expect("unsubscribe");
     let claims = posted(&mut store, &post("m3", "/task Pack", 40));
     assert_eq!(claimed_ids(&claims), vec![ALL]);
+}
+
+/// Before a handover the desktop removes every Group subscription in the
+/// workspace at once, including one it lost track of. Messages stored after
+/// that claim nothing here until a Group subscription is added again. Record
+/// subscriptions and another workspace's Group subscriptions stay.
+#[test]
+fn removing_every_group_subscription_stops_message_claims_here() {
+    const OTHER: &str = "ws-other";
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    LinkedChatStore::new(&mut store)
+        .ensure_general_channel(OTHER, GROUP, 5, &NO_FAULTS)
+        .expect("the other workspace's Group");
+    subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("task");
+    subscribe_group(&mut store, ALL, GROUP, None).expect("all");
+    subscribe_automation_group(
+        &mut store,
+        OTHER,
+        &AutomationGroupSubscription {
+            automation_id: TASK.to_owned(),
+            channel_id: GROUP.to_owned(),
+            starts_with: None,
+        },
+        10,
+        &NO_FAULTS,
+    )
+    .expect("the other workspace's subscription");
+    assert!(subscribe(&mut store, TASK, "Trip/Tasks"));
+    let group_rows = |store: &EngineStore, workspace_id: &str| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM automation_group_subscriptions WHERE workspace_id = ?1",
+                    [workspace_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count Group subscriptions")
+    };
+
+    assert_eq!(
+        unsubscribe_automation_groups(&mut store, WS, &NO_FAULTS).expect("remove"),
+        2
+    );
+    assert_eq!(group_rows(&store, WS), 0);
+    assert!(posted(&mut store, &post("m1", "/task Buy tickets", 20)).is_empty());
+    assert_eq!(
+        unsubscribe_automation_groups(&mut store, WS, &NO_FAULTS).expect("again"),
+        0,
+        "nothing is left to remove"
+    );
+    assert_eq!(
+        group_rows(&store, OTHER),
+        1,
+        "another workspace keeps its own"
+    );
+    assert!(
+        !subscribe(&mut store, TASK, "Trip/Tasks"),
+        "the record subscription stays"
+    );
+
+    subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("task again");
+    let claims = posted(&mut store, &post("m2", "/task Pack", 30));
+    assert_eq!(claimed_ids(&claims), vec![TASK]);
 }
 
 /// An automation's post never claims for that automation, carries its

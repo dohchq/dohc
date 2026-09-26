@@ -83,6 +83,11 @@ struct AutomationGroupUnsubscribeParams {
     group_id: String,
 }
 
+/// Removing every Group subscription takes no parameters.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutomationUnsubscribeGroupsParams {}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationClaimNextParams {
@@ -313,6 +318,29 @@ impl EngineService {
             }
         };
         Ok(json!({ "unsubscribed": unsubscribed }))
+    }
+
+    /// Every Group subscription in the workspace, removed in one write.
+    pub(super) async fn automations_unsubscribe_groups(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let AutomationUnsubscribeGroupsParams {} = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let removed = Self::read_under_ctx(
+            &cancellation,
+            "automations.unsubscribeGroups",
+            open.actor.automation_unsubscribe_groups(
+                open.workspace_id.clone(),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "removed": removed }))
     }
 
     pub(super) async fn automations_claim_next(

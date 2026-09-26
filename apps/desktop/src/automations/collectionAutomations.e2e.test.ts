@@ -67,7 +67,8 @@ async function harness(automations: string, run: (context: {
     withEngine,
     // These automations never post.
     chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
-    runsGroupTriggers: () => false,
+    runsGroupTriggers: async () => false,
+    requestHost: async () => undefined,
     readMessageBody: async () => null,
     postNotice: async () => { throw new Error("No notices in this test."); },
     withRecordWrites: async (signal, work) => await work(editContext(signal)),

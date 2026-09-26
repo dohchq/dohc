@@ -829,6 +829,10 @@ impl EngineService {
                 self.automations_unsubscribe(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.unsubscribeGroups" => {
+                self.automations_unsubscribe_groups(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.claimNext" => {
                 self.automations_claim_next(&ctx, request.workspace, request.params)
                     .await?
@@ -1159,6 +1163,7 @@ mod tests {
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
+            "automations.unsubscribeGroups",
             "capture.flush",
             "capture.reconcile",
             "capture.setAuthor",

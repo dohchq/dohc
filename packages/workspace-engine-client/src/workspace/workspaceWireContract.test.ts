@@ -612,6 +612,16 @@ describe("automations wire schemas", () => {
         unsubscribed: false,
       }),
     ).toEqual({ unsubscribed: false });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
+        removed: 2,
+      }),
+    ).toEqual({ removed: 2 });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
+        removed: true,
+      }),
+    ).toThrow();
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {

@@ -111,6 +111,27 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn automation_unsubscribe_groups(
+        &self,
+        workspace_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<usize, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::unsubscribe_automation_groups(
+                    store,
+                    &workspace_id,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
     pub async fn automation_claim_next(
         &self,
         workspace_id: String,

@@ -36,6 +36,7 @@ export const WORKSPACE_METHOD = {
   captureSetAuthor: "capture.setAuthor",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
+  automationsUnsubscribeGroups: "automations.unsubscribeGroups",
   automationsClaimNext: "automations.claimNext",
   automationsFailures: "automations.failures",
   automationsListClaims: "automations.listClaims",
@@ -275,6 +276,9 @@ export type AutomationSubscribeResult =
 export type AutomationUnsubscribeResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribe];
 
+export type AutomationUnsubscribeGroupsResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribeGroups];
+
 /** Null when no pending claim remains: the drain loop's stop condition. */
 export type AutomationClaimNextResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsClaimNext];
@@ -339,6 +343,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
+  [WORKSPACE_METHOD.automationsUnsubscribeGroups]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
   [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
@@ -1080,6 +1085,10 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.automationsUnsubscribe]: mutableStruct({
     unsubscribed: Schema.Boolean,
+  }),
+  /** How many Group subscriptions the call removed; none are left after it. */
+  [WORKSPACE_METHOD.automationsUnsubscribeGroups]: mutableStruct({
+    removed: Schema.Int,
   }),
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
   /**
