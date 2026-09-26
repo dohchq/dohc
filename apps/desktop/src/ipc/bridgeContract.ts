@@ -6331,6 +6331,59 @@ export const RunSkippedScheduleNowPayload = z.object({
 // `note` is null once the run started on this computer, or says why not.
 export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
 
+// Which of the owner's computers runs a workspace's schedules.
+const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
+const ScheduleHostComputer = z.object({
+  installId: z.string().min(1).max(256),
+  label: z.string().min(1).max(64),
+  lastSeenMs: z.number().int().nonnegative(),
+  thisComputer: z.boolean(),
+});
+export type ScheduleHostComputer = z.infer<typeof ScheduleHostComputer>;
+export const ScheduleHostResult = z.discriminatedUnion("kind", [
+  // A workspace that never synced runs its schedules here, its only computer.
+  z.object({ kind: z.literal("this-computer") }),
+  // A shared view never runs schedules.
+  z.object({ kind: z.literal("none") }),
+  // dohc cannot ask the relay; `message` says what to do.
+  z.object({ kind: z.literal("note"), message: z.string().min(1).max(300) }),
+  z.object({
+    kind: z.literal("relay"),
+    // Rises on every change; choose and take over name the one they read.
+    generation: z.number().int().nonnegative(),
+    hostInstallId: z.string().min(1).max(256).nullable(),
+    // The computer that is handing over, while a handover waits.
+    handoverFrom: z.string().min(1).max(256).nullable(),
+    // Most recently seen first.
+    computers: z.array(ScheduleHostComputer).max(64),
+  }),
+]);
+export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
+// The workspace whose schedule host changed.
+export const ScheduleHostChangedEvent = z.string().min(1).max(256);
+
+export const scheduleHostOperations = {
+  readScheduleHost: {
+    channel: "desktop:read-schedule-host",
+    payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Starts a handover to another of the owner's computers.
+  chooseScheduleHost: {
+    channel: "desktop:choose-schedule-host",
+    payload: ScheduleHostWorkspace.extend({
+      installId: z.string().min(1).max(256),
+      generation: z.number().int().nonnegative(),
+    }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+  // Ends a handover without the old computer. A run can repeat if it is still on.
+  takeOverScheduleHost: {
+    channel: "desktop:take-over-schedule-host",
+    payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
+    result: ScheduleHostResult, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 export const noticeOperations = {
   listNotices: {
     channel: "desktop:list-notices",
@@ -6588,7 +6641,8 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
-    OperationBridge<typeof noticeOperations> {
+    OperationBridge<typeof noticeOperations>,
+    OperationBridge<typeof scheduleHostOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -7073,6 +7127,9 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // Which computer runs a workspace's schedules changed, as when a handover
+  // finished in the background.
+  onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

@@ -14,6 +14,7 @@ import {
 } from "../../workspaces/workspaceSettings";
 import { pushOverlay, removeOverlay } from "../guestBlockingUi";
 import { Overlay } from "../Overlay";
+import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import { SettingsDialog } from "./SettingsDialog";
 import { deferred } from "../../testing/deferred";
 
@@ -147,6 +148,11 @@ const bridge = {
     source: "stored" as const,
   })),
   getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
+  readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
+  onScheduleHostChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn(() => () => undefined),
+  chooseScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
+  takeOverScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),

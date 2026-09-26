@@ -281,6 +281,8 @@ export const CHANNELS = {
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
   noticesChanged: "desktop:notices-changed",
+  // Which of the owner's computers runs a workspace's schedules changed.
+  scheduleHostChanged: "desktop:schedule-host-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
