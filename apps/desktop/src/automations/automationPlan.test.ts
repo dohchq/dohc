@@ -185,6 +185,46 @@ describe("plans", () => {
     } finally { await evaluator.close(); }
   });
 
+  it("blocks formulas after an active overflowing Find and ignores an inactive Find", () => {
+    const definition = automation([
+      "id: find", "name: Find", "when: record-added", "do:",
+      "  - if: record.Count > 5", "    do: [{find: 'true', as: items}]",
+      "    otherwise: [{set: {Note: '=\"fallback\"'}}]",
+      "  - set: {Seen: '=true'}",
+    ].join("\n"));
+    const run = inputs(definition, { found: new Map([[1, [task]]]), truncatedFinds: new Set([1]) });
+    const request = evaluationRequest(run, 0);
+    expect(request.scope.bindings).not.toHaveProperty("items");
+    expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
+      [], [{ index: 0, truthy: true }],
+      [{ index: 0, truthy: false }, { index: 1, truthy: false }], [{ index: 1, truthy: false }],
+    ]);
+    const active = [true, true, null, null].map(value => ({ ok: true as const, value }));
+    expect(planRun(run, request, active, key)).toEqual({
+      kind: "failed", error: "A Find matched more than 50 records. Narrow its condition, then try again.", timedOut: false,
+    });
+    const inactive = [false, null, "fallback", true].map(value => ({ ok: true as const, value }));
+    const planned = planRun(run, request, inactive, key);
+    expect(planned.kind === "plan" && planned.steps.map(step => step.ordinal)).toEqual([2, 3]);
+  });
+
+  it("refuses a pre-step condition that reads a truncated Find instead of supplying zero matches", async () => {
+    const definition = automation([
+      "id: find", "name: Find", "when: record-added", "if: items.length > 50", "do:",
+      "  - find: 'true'", "    as: items", "  - set: {Seen: true}",
+    ].join("\n"));
+    const run = inputs(definition, { found: new Map([[0, [task]]]), truncatedFinds: new Set([0]) });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(results[0]).toMatchObject({ ok: false, error: { code: "runtime" } });
+      expect(planRun(run, request, results, key)).toMatchObject({
+        kind: "failed", error: expect.stringContaining('The "Only if" condition failed.'),
+      });
+    } finally { await evaluator.close(); }
+  });
+
   it.each([
     'when: {starts-matching: record.Status == "Done"}',
     `when: {field-changed: Status, to: '= "Done"'}`,

@@ -121,12 +121,19 @@ async function world(options: {
       if (!record || record.collection !== collectionPath) throw new Error("collection-record-not-found");
       return { collection: { path: collectionPath, status: "valid", reasons: [] }, record: collectionRecord(record), history: [], nextBeforeHistoryId: null };
     },
-    queryCollectionRecords: async ({ collectionPath, filter, limit }) => ({
-      collection: { path: collectionPath, status: "valid", reasons: [] },
-      records: [...records.values()].filter((record) => record.collection === collectionPath && matches(record, filter))
-        .slice(0, limit).map(collectionRecord),
-      groups: null, nextCursor: null,
-    }),
+    queryCollectionRecords: async ({ collectionPath, filter, limit }) => {
+      const matching = [...records.values()].filter((record) => record.collection === collectionPath && matches(record, filter));
+      const page = matching.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        collection: { path: collectionPath, status: "valid", reasons: [] },
+        records: page.map(collectionRecord),
+        groups: null,
+        nextCursor: matching.length > page.length && last
+          ? { sortValues: [], recordPath: last.path, recordId: last.id }
+          : null,
+      };
+    },
     subscribeAutomation: async (input) => { subscriptions.set(input.automationId, input); return { subscribed: true }; },
     unsubscribeAutomation: async ({ automationId }) => { subscriptions.delete(automationId); return { unsubscribed: true }; },
     claimNextAutomation: async () => {
@@ -804,6 +811,86 @@ describe("Collection automations", () => {
   });
 
   const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
+
+  it.each([50, 51])("requires a complete Find before using its records with %i matches", async (count) => {
+    let boundCount: number | undefined;
+    const w = await world({
+      collections: ["Tasks", "Items"], automations: { Tasks: ITEMS },
+      evaluator: {
+        evaluate: async (...args) => {
+          const items = args[1].bindings?.items;
+          boundCount = Array.isArray(items) ? items.length : undefined;
+          return evaluator.evaluate(...args);
+        },
+      },
+    });
+    const items = Array.from({ length: count }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const claim = w.claim("collection:Tasks#tick", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    if (count === 50) {
+      expect(claim.state).toBe("done");
+      expect(boundCount).toBe(50);
+      expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(50).fill(1));
+    } else {
+      expect(claim.state).toBe("failed");
+      expect(claim.error).toBe("A Find matched more than 50 records. Narrow its condition, then try again.");
+      expect(boundCount).toBeUndefined();
+      expect(w.saves()).toBe(0);
+      expect(w.journaled).toEqual([]);
+      expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(51).fill(0));
+    }
+  });
+
+  it.each(["branch", "only-if", "count"])("handles a truncated Find in %s without partial writes", async (mode) => {
+    const steps = mode === "branch" ? [
+      "      - if: 'false'",
+      "        do:",
+      "          - find: 'true'",
+      "            collection: Items",
+      "            as: items",
+      "          - set: {Count: '=record.Count + 1'}",
+      "            records: items",
+      "        otherwise: [{set: {Note: fallback}}]",
+    ] : [
+      "      - find: 'true'",
+      "        collection: Items",
+      "        as: items",
+      "      - if: items.length > 50",
+      "        do: [{set: {Note: many}}]",
+      "        otherwise: [{set: {Note: few}}]",
+    ];
+    const body = [
+      "  - id: overflow",
+      "    name: Overflow",
+      "    when: {field-changed: Status}",
+      ...(mode === "only-if" ? ["    if: 'false'"] : []),
+      "    do:",
+      ...steps,
+    ].join("\n");
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: body } });
+    const items = Array.from({ length: 51 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#overflow", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(Array(51).fill(0));
+    if (mode === "branch") {
+      expect(claim.state).toBe("done");
+      expect(w.fieldsOf(task).Note).toBe("fallback");
+    } else {
+      expect(w.journaled).toEqual([]);
+      expect(w.saves()).toBe(0);
+      if (mode === "only-if") {
+        expect(claim.state).toBe("done");
+        expect(claim.error).toBeUndefined();
+      } else {
+        expect(claim.state).toBe("failed");
+        expect(claim.error).toBe("A Find matched more than 50 records. Narrow its condition, then try again.");
+        expect(w.fieldsOf(task).Note).toBeUndefined();
+      }
+    }
+  });
 
   it("resumes a step over 50 records at the record where it stopped, so each record changes once", async () => {
     const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: ITEMS } });
