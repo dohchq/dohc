@@ -50,7 +50,7 @@ import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type Sto
 // apply the plan's effects in order, saving each one as it lands. The
 // executor settles the claim with the outcome.
 
-const RECORD_NOT_FOUND = "collection-record-not-found";
+export const RECORD_NOT_FOUND = "collection-record-not-found";
 
 export const DEADLINE_ERROR = "The automation did not finish within 5 minutes.";
 export const GROUP_CHANGED_ERROR =
@@ -93,6 +93,8 @@ export interface CollectionAutomationRunDependencies {
   isCollection(path: string): boolean;
   /** Whether a folder keeps its records in a dataset (it holds dataset.json). */
   isDatasetCollection(path: string): Promise<boolean>;
+  /** The name a formula's `person` shows for the person who pressed a button. */
+  personName(userId: string): string;
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
   nowMs(): number;
@@ -449,7 +451,9 @@ async function plan(
     if ("outcome" in read) return stop(read.outcome);
     message = read.message;
   }
-  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat };
+  const pressedBy = claim.change.kind === "button" ? claim.change.onBehalfOf : null;
+  const person = pressedBy === null ? null : { id: pressedBy, name: dependencies.personName(pressedBy) };
+  const inputs: RunInputs = { automation, claim, record: read.record, found: read.found, truncatedFinds: read.truncatedFinds, message, chat, person };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   // Formulas read `now` as the time of the change, or a schedule's due
   // time, so every attempt plans the same values.

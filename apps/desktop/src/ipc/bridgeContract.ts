@@ -15,6 +15,7 @@ import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionAutomationHolds,
+  CollectionAutomationButton,
   CollectionAutomationRetry,
   CollectionAutomationRun,
   CollectionAutomationShareStop,
@@ -23,6 +24,8 @@ import type {
   CollectionFieldMark,
   CollectionAutomationTarget,
   CollectionAutomationUndo,
+  PressSettled,
+  PressWaitReason,
 } from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
@@ -5512,6 +5515,40 @@ export type WriteCollectionAutomationsResult =
   | { status: "refused"; diagnostics: AutomationDiagnostic[] }
   | { status: "unavailable" };
 
+// ---- Button fields ----
+// Main decides which automation a button runs and who may press it. A window
+// makes a UUID for each press and sends it again after a lost reply. The
+// person a press acts for is main's own signed-in person, never a value a
+// window sends.
+export const ListAutomationButtonsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
+export type ListAutomationButtonsResult = { buttons: CollectionAutomationButton[] };
+
+export const PressAutomationButtonPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  field: z.string().min(1).max(256),
+  recordId: z.string().min(1).max(1024),
+  pressId: z.uuid(),
+  // A dataset table's name. A document Collection has one table and sends null.
+  table: z.string().min(1).max(256).nullable(),
+});
+export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
+export type PressAutomationButtonResult =
+  // `settled` is set when a press sent again finds its run already ended;
+  // otherwise the window hears the end as an automation run event.
+  | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null }
+  // The button is running on this record for someone else.
+  | { busy: true; reason: string };
+
+/** Main to the pressing window: the engine settled the press's run. */
+export type AutomationRunSettledEvent = PressSettled & { workspaceId: string };
+/** Main to the pressing window: the run waits, and why. */
+export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; reason: PressWaitReason };
+
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
@@ -6935,6 +6972,8 @@ export interface DohcDesktopBridge
   automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
+  listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
+  pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
@@ -7139,6 +7178,10 @@ export interface DohcDesktopBridge
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // A press this window made settled, or waits. Each event names its
+  // workspace; a window on another workspace drops it.
+  onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
+  onAutomationRunWaiting(listener: (event: AutomationRunWaitingEvent) => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

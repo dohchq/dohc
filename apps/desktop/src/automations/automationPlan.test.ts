@@ -12,6 +12,7 @@ import {
   findQueryOf,
   localIsoTime,
   runNowSkippedFrom,
+  operationsOf,
   parseCollectionAutomationId,
   planRun,
   scheduleDueAt,
@@ -56,7 +57,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
 const task = { id: "rec_task", path: "Tasks/one.md", values: { Status: "Done", Count: 2 } };
 
 function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): RunInputs {
-  return { automation: definition, claim: claim(), record: task, found: new Map(), message: null, chat: null, ...overrides };
+  return { automation: definition, claim: claim(), record: task, found: new Map(), person: null, message: null, chat: null, ...overrides };
 }
 
 describe("automation ids", () => {
@@ -108,6 +109,20 @@ describe("what the executor can run", () => {
     expect(subscriptionFor({ kind: "record-changed", fields: null, table: null })).toEqual({ kinds: ["changed"] });
     expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
     expect(subscriptionFor({ kind: "schedule", every: "day", at: "09:00", timezone: "UTC" })).toBeNull();
+    // A press claims a button's run; no change does.
+    expect(subscriptionFor({ kind: "button", field: "Mark paid", table: null })).toBeNull();
+  });
+
+  it("runs a document Collection's button, and names the dataset operations a button's steps invoke", () => {
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid}\ndo: [{set: {Paid: true}}]"))).toBeNull();
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid, table: Invoices}\ndo: [{set: {Paid: true}}]"))).toMatch(/dataset/);
+    const steps = automation([
+      "id: a", "name: A", "when: {button: Mark paid, table: Invoices}", "do:",
+      "  - set: {Paid: true}", "    operation: invoices.markPaid",
+      "  - if: record.Total > 100", "    do: [{add-record: {Note: large}, collection: Log, operation: log.add}]",
+      "  - set: {Paid: true}", "    operation: invoices.markPaid",
+    ].join("\n"));
+    expect(operationsOf(steps)).toEqual(["invoices.markPaid", "log.add"]);
   });
 
   it("names why it cannot run code or a Find the query cannot express", () => {
@@ -127,8 +142,8 @@ describe("what the executor can run", () => {
     const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
     expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
     expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/no trigger record/);
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid}\ndo: [{set: {Paid: true}}]")))
-      .toMatch(/record change or a schedule/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]")))
+      .toBeNull();
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -181,7 +196,7 @@ describe("schedule claims", () => {
   });
 
   it("matches only a schedule claim, and gives formulas the due time instead of a record", () => {
-    const run = { message: null, chat: null, automation: sweep, claim: scheduled(`schedule:${due}`), record: null, found: new Map() };
+    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(`schedule:${due}`), record: null, found: new Map() };
     expect(triggerMatches(run)).toBe(true);
     expect(triggerMatches({ ...run, claim: claim() })).toBe(false);
     const request = evaluationRequest(run, due);
@@ -205,7 +220,7 @@ describe("schedule claims", () => {
     for (const other of [`schedule:${first}`, "run-now:other:1", `run-now:schedule-skipped:${first}`]) {
       expect(runNowSkippedFrom(scheduled(other)), other).toBeNull();
     }
-    const run = { message: null, chat: null, automation: sweep, claim: scheduled(key), record: null, found: new Map() };
+    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(key), record: null, found: new Map() };
     expect(triggerMatches(run)).toBe(true);
     expect(evaluationRequest(run, due).scope.trigger).toEqual({
       kind: "schedule",
@@ -373,6 +388,24 @@ describe("plans", () => {
     const plan = planRun(inputs(definition), request,
       [true, false, null, null, null, "missing", true].map(value => ({ ok: true as const, value })), key);
     expect(plan.kind === "plan" && plan.steps.map(step => step.ordinal)).toEqual([4, 5]);
+  });
+
+  it("runs a press for the record as it is now, naming the button, when it was pressed, and who pressed it", () => {
+    const definition = automation("id: paid\nname: Paid\nwhen: {button: Mark paid}\ndo: [{set: {Paid by: '=person.name'}}]");
+    const pressedAt = Date.UTC(2026, 8, 25, 2, 0);
+    const press = { ...claim({ kind: "button", onBehalfOf: "user-ice", fields: [] }), trigger: { key: "press:p1" }, createdAtMs: pressedAt };
+    const run = inputs(definition, { claim: press, person: { id: "user-ice", name: "Ice" } });
+    expect(triggerMatches(run)).toBe(true);
+    expect(triggerMatches(inputs(definition))).toBe(false);
+    const request = evaluationRequest(run, pressedAt);
+    expect(request.scope).toEqual({
+      record: { Status: "Done", Count: 2, id: "rec_task" },
+      previous: {},
+      trigger: { kind: "button", field: "Mark paid", pressedAt: localIsoTime(pressedAt), record: { Status: "Done", Count: 2, id: "rec_task" } },
+      person: { id: "user-ice", name: "Ice" },
+      bindings: {},
+      now: localIsoTime(pressedAt),
+    });
   });
 
   it("asks for every formula in one request, reading now as the time of the change", () => {

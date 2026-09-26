@@ -99,7 +99,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return { status: "reset" as const };
     }),
     revealAutomationHolds: vi.fn(async () => undefined),
-    retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" })),
+    retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false })),
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
       ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0, kept: 0, irreversible: 0 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),

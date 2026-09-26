@@ -20,6 +20,7 @@ import {
   type AutomationClaimSummary,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
+import { namesButton, resolveButton, type AutomationButtonState } from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   collectionAutomationId,
@@ -51,6 +52,7 @@ import {
   runsForClaim,
   UNDONE_RUN_ERROR,
   sendsMessages,
+  RECORD_NOT_FOUND,
   UNREADABLE_RUN_ERROR,
   type AutomationChatDependencies,
   type CollectionAutomationReads,
@@ -111,6 +113,8 @@ const BUSY_RETRY_MS = 2_000;
 const MAX_SETTLE_ERROR_CHARS = 1000;
 
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
+type AutomationPressResult = Awaited<ReturnType<VersionedLiveAdapter["pressAutomation"]>>;
+
 type AutomationClaimScheduleResult = Awaited<ReturnType<VersionedLiveAdapter["claimAutomationSchedule"]>>;
 type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
 
@@ -137,6 +141,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
   /** Claims Run now from a skipped-run notice; a repeat answers the same claim. */
   runAutomationNow(input: { automationId: string; noticeId: string }): Promise<unknown>;
+  pressAutomation(input: { pressId: string; automationId: string; recordId: string; pressedBy: string }): Promise<AutomationPressResult>;
 }
 
 /** An enabled schedule this executor can run. */
@@ -215,6 +220,14 @@ export interface CollectionAutomationsOptions {
   onSchedulesChanged?(): void;
   /** Whether some computer can run the workspace's schedules. True unless set. */
   runsSchedules?(): Promise<boolean>;
+  /** The name a formula's `person` shows for the person who pressed a button. */
+  personName(userId: string): string;
+  /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
+  mayRetryPress(pressedBy: string | null): Promise<boolean>;
+  /** The engine took a press's settle. */
+  onPressSettled(event: PressSettled): void;
+  /** A press's run went back to wait. */
+  onPressWaiting(event: { claimId: string; reason: PressWaitReason }): void;
   onError(context: string, error: unknown): void;
   /**
    * This workspace's dataset host, while it is open; resolves null when it is
@@ -345,8 +358,42 @@ export interface CollectionAutomationRun {
   undone: boolean;
 }
 
+/**
+ * How a press's run ended. `skipped` did nothing: its record, or its
+ * automation, was gone or off. `ended` is a run that ended before dohc
+ * could say which: a press sent again after its run record was trimmed.
+ */
+export interface PressSettled {
+  claimId: string;
+  outcome: "done" | "skipped" | "failed" | "ended";
+  error: string | null;
+}
+
+/** What a press answers: its run's claim, how the run ended if it has, or busy. */
+export type CollectionAutomationPress =
+  | { busy: true }
+  | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null };
+
+/** A press this computer took, so the same press sent again finds its claim whatever changed since. */
+interface RememberedPress {
+  collectionPath: string;
+  field: string;
+  recordId: string;
+  pressedBy: string;
+  automationId: string;
+}
+// Presses remembered for a resend after a lost reply; the oldest go first.
+const REMEMBERED_PRESSES = 500;
+
+/** One Button field in a Collection, and what its button shows. */
+export interface CollectionAutomationButton {
+  field: string;
+  state: AutomationButtonState;
+}
+
 export type CollectionAutomationRetry =
-  | { status: "queued" }
+  // `press` is true for a button's run, whose window hears how it settles.
+  | { status: "queued"; press: boolean }
   // The automation changed since the run began. Running it again starts
   // from the beginning and can repeat what it already did, so the person
   // must choose that. `repeatsMessages` says the confirmation must also say
@@ -414,13 +461,14 @@ type ClaimHistory = {
 };
 /** What a released claim waits for; later drains pass it by until that clears. */
 type WaitReason = "roster" | "held" | "busy" | "session";
+export type PressWaitReason = WaitReason;
 /**
  * What the engine must hear about a claim this computer holds: hand it back
  * to wait, or settle it. `settled` runs once the engine takes the settle.
  */
 type ClaimAction =
   | { kind: "release"; waitsFor?: WaitReason }
-  | { kind: "settle"; input: SettleInput; settled: () => Promise<void> };
+  | { kind: "settle"; input: SettleInput; outcome: Exclude<PressSettled["outcome"], "ended">; settled: () => Promise<void> };
 // Run history shows this many runs, and their failures keep what Try again needs.
 const RESUMABLE_FAILURES = 20;
 
@@ -467,6 +515,8 @@ export class CollectionAutomations {
    * neither starts while the other runs.
    */
   private readonly changing = new Set<string>();
+  /** Presses this computer took, by press id, oldest first. */
+  private readonly presses = new Map<string, RememberedPress>();
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
   /**
@@ -1144,9 +1194,14 @@ export class CollectionAutomations {
    * queues the claim, this wakes the drain and asks the failure notices to
    * re-read, because the engine's own wake-up event can be dropped and a
    * repeated retry sends none. `startOver` confirms running a changed
-   * automation, or a run whose progress is gone, from the beginning.
+   * automation, or a run whose progress is gone, from the beginning. For a
+   * press, `watch` runs before the drain wakes, so the window that asked
+   * hears how the run settles.
    */
-  async retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry> {
+  async retry(
+    input: { automationId: string; claimId: string; startOver: boolean },
+    watch?: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationRetry> {
     await this.ready();
     const parsed = parseCollectionAutomationId(input.automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
@@ -1162,15 +1217,24 @@ export class CollectionAutomations {
     // Undo of the same run cannot start between this check and the retry.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     this.changing.add(input.claimId);
+    let press = false;
     try {
+      let pressedBy: string | null | undefined;
       const known = this.datasets.has(parsed.collectionPath)
         ? await this.withLiveHost((ledger) => ledger.claim(input.automationId, input.claimId) !== null)
-        : await this.withLiveEngine(async (engine) =>
-          (await engine.listAutomationClaims({ automationId: input.automationId })).claims.some((claim) => claim.claimId === input.claimId));
+        : await this.withLiveEngine(async (engine) => {
+          const listedClaim = (await engine.listAutomationClaims({ automationId: input.automationId })).claims.find((claim) => claim.claimId === input.claimId);
+          if (listedClaim?.change.kind === "button") pressedBy = listedClaim.change.onBehalfOf;
+          return listedClaim !== undefined;
+        });
       if (known === null) throw new Error("The workspace engine is not running.");
       // Without its run history, dohc cannot tell what the run already did.
       if (!known) {
         return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+      }
+      press = pressedBy !== undefined;
+      if (press && !(await this.options.mayRetryPress(pressedBy ?? null))) {
+        return { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." };
       }
       const runs = await runsForClaim(this.options.store, input, automation);
       if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
@@ -1200,9 +1264,150 @@ export class CollectionAutomations {
     } finally {
       this.changing.delete(input.claimId);
     }
+    if (press) watch?.(input.claimId, null);
     this.notifyClaimed();
     this.options.onFailuresChanged();
-    return { status: "queued" };
+    return { status: "queued", press };
+  }
+
+  /**
+   * What each Button field shows in one Collection. A button is ready when
+   * one switched-on automation uses it, dohc can run that automation, and
+   * no step is stopped or waits for an editor to allow it. States read the
+   * roster the last listing left, so showing a Collection never waits on
+   * the relay. A roster dohc cannot read yet does not stop a press: the
+   * run checks reach again before it writes, and waits for the roster.
+   */
+  async buttons(collectionPath: string, fields: readonly string[]): Promise<CollectionAutomationButton[]> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    const buttons: CollectionAutomationButton[] = [];
+    for (const field of fields) buttons.push({ field, state: await this.buttonState(collectionPath, field, roster) });
+    return buttons;
+  }
+
+  /**
+   * Presses a ready button on one record. `pressedBy` is the person main
+   * checked; the run acts for them. A press sent again with its `pressId`
+   * answers the same claim, even if the button or record changed since: only
+   * a new press is checked. `busy` when the button runs on the record for
+   * someone else. `watch` gets an unsettled claim, and why it waits, before
+   * the drain wakes, so the pressing window hears how the run settles.
+   */
+  async press(
+    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+    /** Checks a new press the way the caller must, such as that the field is still a button. */
+    checkNew: () => Promise<void> = async () => undefined,
+  ): Promise<CollectionAutomationPress> {
+    await this.ready();
+    const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
+    let automationId: string;
+    if (remembered) {
+      if (remembered.collectionPath !== input.collectionPath || remembered.field !== input.field ||
+        remembered.recordId !== input.recordId || remembered.pressedBy !== input.pressedBy) {
+        throw new Error("This press id already names another press.");
+      }
+      automationId = remembered.automationId;
+    } else {
+      await checkNew();
+      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster());
+      if (state.kind !== "ready") throw new Error(state.reason);
+      automationId = state.automationId;
+    }
+    const pressed = await this.withLiveEngine(async (engine) => {
+      if (!remembered) {
+        try {
+          await engine.getCollectionRecord({ collectionPath: input.collectionPath, recordId: input.recordId, historyLimit: 1 });
+        } catch (error) {
+          if (error instanceof Error && error.message === RECORD_NOT_FOUND) {
+            throw new Error(`This record is no longer in ${collectionNamed(input.collectionPath).name}.`);
+          }
+          throw error;
+        }
+      }
+      return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy });
+    });
+    if (pressed === null) throw new Error("The workspace engine is not running.");
+    if (pressed.busy) return { busy: true };
+    const { claim } = pressed;
+    this.presses.delete(input.pressId);
+    this.presses.set(input.pressId, { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressedBy: input.pressedBy, automationId });
+    if (this.presses.size > REMEMBERED_PRESSES) this.presses.delete(this.presses.keys().next().value!);
+    if (claim.state === "failed") return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    watch(claim.claimId, this.waitingFor.get(claim.claimId) ?? null);
+    // The engine's wake-up event can be dropped, so the press wakes the drain too.
+    this.notifyClaimed();
+    return { busy: false, claimId: claim.claimId, settled: null };
+  }
+
+  /**
+   * A press the engine already has, after a restart or once this computer
+   * forgot it. The engine keeps presses 30 days, keyed `press:<press id>`,
+   * but answers only by automation, so each automation this button could
+   * name, switched on or not, is asked. The press it finds is checked
+   * against this one before anything joins it. A press whose automation
+   * left the file is not found, and is checked as new.
+   */
+  private async pressInEngine(input: { collectionPath: string; field: string; pressId: string }): Promise<RememberedPress | null> {
+    const file = this.files.get(input.collectionPath)?.file;
+    if (file?.status !== "read") return null;
+    const ids = file.entries.flatMap((entry) => {
+      if (entry.status === "valid") {
+        const { when, id } = entry.automation;
+        return when.kind === "button" && when.field === input.field && when.table === null ? [id] : [];
+      }
+      return entry.id !== null && namesButton(entry.raw, input.field) ? [entry.id] : [];
+    });
+    const key = `press:${input.pressId}`;
+    for (const id of new Set(ids)) {
+      const automationId = collectionAutomationId(input.collectionPath, id);
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      const claim = listed.claims.find((candidate) => "key" in candidate.trigger && candidate.trigger.key === key);
+      if (claim === undefined) continue;
+      if (claim.change.kind !== "button" || claim.recordId === null || claim.change.onBehalfOf === null) {
+        throw new Error("This press id already names another press.");
+      }
+      return { collectionPath: claim.collectionPath, field: input.field, recordId: claim.recordId, pressedBy: claim.change.onBehalfOf, automationId };
+    }
+    return null;
+  }
+
+  /**
+   * Whether a done claim's run changed anything. A run that wrote keeps its
+   * record until run history trims it. A run that stopped before it had a
+   * plan, as when its record left, saved none, and neither did a trimmed
+   * one, so without a record the run only ended.
+   */
+  private async doneOutcome(claim: Pick<AutomationClaimSummary, "automationId" | "claimId">): Promise<"done" | "ended"> {
+    const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
+    return runs.some((run) => !run.superseded && run.outcome?.state === "done") ? "done" : "ended";
+  }
+
+  private async buttonState(
+    collectionPath: string,
+    field: string,
+    roster: ReachRoster,
+  ): Promise<AutomationButtonState> {
+    const collection = collectionNamed(collectionPath);
+    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collection.name);
+    if (resolved.kind === "state") return resolved.state;
+    const { automation } = resolved;
+    const unsupported = this.cannotRun(collectionPath, automation);
+    if (unsupported !== null) return { kind: "disabled", reason: unsupported };
+    const automationId = collectionAutomationId(collectionPath, automation.id);
+    if (roster.kind === "unknown") return { kind: "ready", automationId };
+    for (const reach of checkAutomationReach(roster, {
+      id: automation.id, collection, codeFiles: [], steps: this.reachSteps(collectionPath, automation),
+    })) {
+      if (!reach.allowed) return { kind: "disabled", reason: reach.reason };
+    }
+    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }])) {
+      return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.` };
+    }
+    return { kind: "ready", automationId };
   }
 
   /**
@@ -1796,7 +2001,10 @@ export class CollectionAutomations {
         // Released at the end, so this drain does not take the claim again.
         if (action.kind === "release") {
           release.push(held);
-          if (action.waitsFor) this.waitingFor.set(claimId, action.waitsFor);
+          if (action.waitsFor) {
+            this.waitingFor.set(claimId, action.waitsFor);
+            if (held.source === "engine" && held.claim.change.kind === "button") this.options.onPressWaiting({ claimId: claimId, reason: action.waitsFor });
+          }
           continue;
         }
         this.waitingFor.delete(claimId);
@@ -1844,7 +2052,16 @@ export class CollectionAutomations {
       if (!answered) continue;
       this.owed.delete(id);
       if (action.kind === "settle" && action.input.state === "failed") this.options.onFailuresChanged();
-      if (action.kind === "settle") await action.settled();
+      if (action.kind === "settle") {
+        await action.settled();
+        if (held.source === "engine" && held.claim.change.kind === "button") {
+          this.options.onPressSettled({
+            claimId: id,
+            outcome: action.outcome,
+            error: action.input.state === "failed" ? errorText(action.input.error) : null,
+          });
+        }
+      }
     }
   }
 
@@ -1926,14 +2143,14 @@ export class CollectionAutomations {
     if (id === null || automation === null || !automation.enabled || !inCollection) {
       // The automation is gone or off, so its subscription is stale.
       if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
-      return { kind: "settle", input: { state: "done" }, settled: async () => undefined };
+      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: async () => undefined };
     }
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
     // notice and Try again runs it once that is fixed.
     const unsupported = this.cannotRun(id.collectionPath, automation);
     if (unsupported !== null) {
-      return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
+      return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
     }
     // A message claim runs, or resumes, only where Group triggers run: after
     // sync turns on, this computer may no longer be the one. Its Group
@@ -1942,7 +2159,7 @@ export class CollectionAutomations {
       const problem = this.groupTriggerProblem(automation);
       if (problem !== null) {
         void this.enqueue(() => this.reconcile(false));
-        return { kind: "settle", input: { state: "failed", error: problem }, settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error: problem }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
       }
     }
     // Every step needs the roster, even one inside the Collection: someone
@@ -1958,7 +2175,7 @@ export class CollectionAutomations {
         const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })
           .find((reach) => !reach.allowed);
         const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
-        return { kind: "settle", input: { state: "failed", error }, settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
       }
       return { kind: "release", waitsFor: "roster" };
     }
@@ -1992,10 +2209,10 @@ export class CollectionAutomations {
       case "done":
       case "skipped":
         await this.countTimeout(claim.automationId, false);
-        return { kind: "settle", input: { state: "done" }, settled: () => this.markSettled(claim, automation) };
+        return { kind: "settle", input: { state: "done" }, outcome: outcome.kind, settled: () => this.markSettled(claim, automation) };
       case "failed-before":
         // Its run was counted when it failed.
-        return { kind: "settle", input: { state: "failed", error: outcome.error }, settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error: outcome.error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
       case "failed": {
         let error = outcome.error;
         if (await this.countTimeout(claim.automationId, outcome.timedOut) >= TIMEOUTS_BEFORE_SWITCH_OFF) {
@@ -2003,7 +2220,7 @@ export class CollectionAutomations {
           if (note === null) return release;
           error = `${error} ${note}`;
         }
-        return { kind: "settle", input: { state: "failed", error }, settled: () => this.pruneRuns(claim.automationId) };
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
       }
     }
   }
@@ -2135,6 +2352,7 @@ export class CollectionAutomations {
       withRecordWrites: this.options.withRecordWrites,
       isCollection: (path) => this.collections.has(path),
       isDatasetCollection: (path) => this.options.pathExists(`${path}/dataset.json`),
+      personName: this.options.personName,
       evaluator: this.options.evaluator,
       store: this.options.store,
       nowMs: this.nowMs,
