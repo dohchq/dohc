@@ -227,12 +227,12 @@ function currentFile(
   storage: StorageContext,
   workspaceId: string,
   path: string,
-): { blobSha256: string; contentKind: string } | null {
+): { blobSha256: string } | null {
   const row = storage.db.prepare(
-    `SELECT blob_sha256, content_kind FROM sync_relay_current_files
+    `SELECT blob_sha256 FROM sync_relay_current_files
      WHERE workspace_id = ? AND version_id = ? AND path = ?`,
   ).get(workspaceId, MAIN_VERSION_ID, path);
-  return row ? { blobSha256: String(row.blob_sha256), contentKind: String(row.content_kind) } : null;
+  return row ? { blobSha256: String(row.blob_sha256) } : null;
 }
 
 // Compare-and-swap against the owner's current files: an edit's base is
@@ -248,14 +248,17 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
     return;
   }
   const schema = currentFile(storage, workspaceId, schemaPath);
-  // A folder that stopped being a Collection takes no direct write.
-  if (schema === null || schema.contentKind !== "text") {
+  // A folder that stopped being a Collection takes no direct write. A
+  // schema stored as binary is still the Collection's schema.
+  if (schema === null) {
     if (write.kind === "schema") throw new CollectionWriteStaleError(schemaPath, null);
     throw relayError("share_op_rejected");
   }
   const change = write.change;
   const current = currentFile(storage, workspaceId, change.afterPath!);
-  if ((current?.blobSha256 ?? null) !== change.basedOnBlobSha256 || (current !== null && current.contentKind !== "text")) {
+  // The base is the bytes, whatever their kind. A file the owner stored as
+  // binary before dohc read it as text takes an edit and becomes text.
+  if ((current?.blobSha256 ?? null) !== change.basedOnBlobSha256) {
     throw new CollectionWriteStaleError(change.afterPath!, current?.blobSha256 ?? null);
   }
   if (current === null && spellingTaken(storage, workspaceId, change.afterPath!)) {

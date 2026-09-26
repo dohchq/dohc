@@ -1179,6 +1179,51 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("does not save a Collection file stored as binary as an edit when its bytes are unchanged", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const current = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from("version: 1\n") });
+    const changed = await store.writeBinaryFile({ ...target, bytes: Buffer.from(current) });
+    await write(root, target.path, current);
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await engine.restoreFileToBeforeMoment(changed.moment.id);
+
+    const summaries = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.map(
+      (moment) => moment.metadata.summary,
+    );
+    expect(summaries).not.toContain("Saved latest edits");
+    expect(await readFile(join(root, target.path), "utf8")).toBe("version: 1\n");
+    await engine.stop();
+  });
+
+  it("restores nothing when the current text has the bytes of the binary state before the moment", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const original = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from(original) });
+    const edited = await store.writeTextFile({ ...target, text: "version: 1\n" });
+    await store.writeTextFile({ ...target, text: original });
+    await write(root, target.path, original);
+    const before = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.length;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await expect(engine.restoreFileToBeforeMoment(edited.moment.id)).resolves.toMatchObject({
+      restoredMomentId: edited.moment.id,
+    });
+
+    expect((await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(before);
+    expect((await store.readTextFile(target))?.contentKind).toBe("text");
+    await engine.stop();
+  });
+
   it("closes both daemon stores when the final capture flush rejects", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

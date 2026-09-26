@@ -81,11 +81,11 @@ async function relay(
 class Owner {
   private seq = 0;
   readonly moments = new Map<string, string>();
-  private readonly contents = new Map<string, string>();
+  private readonly contents = new Map<string, { text: string; contentKind: "text" | "binary" }>();
 
   constructor(private readonly h: SyncRelayHandler) {}
 
-  async write(objectId: string, path: string, text: string): Promise<string> {
+  async write(objectId: string, path: string, text: string, contentKind: "text" | "binary" = "text"): Promise<string> {
     const blobSha256 = await putBlob(this.h, OWNER, WORKSPACE, text);
     const originSeq = this.seq++;
     const momentId = `owner-moment-${originSeq}`;
@@ -93,13 +93,13 @@ class Owner {
     const before = previous === undefined
       ? { payloadBeforeBlobSha256: null, payloadBeforePath: null, beforePresent: "null" }
       : {
-          payloadBeforeBlobSha256: sha256(previous),
+          payloadBeforeBlobSha256: sha256(previous.text),
           payloadBeforePath: path,
-          payloadBeforeContentKind: "text",
+          payloadBeforeContentKind: previous.contentKind,
           beforePresent: "present",
           beforeObjectId: objectId,
           beforePath: path,
-          beforeBlobSha256: sha256(previous),
+          beforeBlobSha256: sha256(previous.text),
           beforeLatestMomentId: this.moments.get(path),
         };
     const response = await this.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({
@@ -117,7 +117,7 @@ class Owner {
           operation: "write",
           payloadAfterBlobSha256: blobSha256,
           payloadAfterPath: path,
-          payloadAfterContentKind: "text",
+          payloadAfterContentKind: contentKind,
           payloadAfterByteLength: new TextEncoder().encode(text).byteLength,
           metadata: { origin: "user" },
           ...before,
@@ -126,7 +126,7 @@ class Owner {
     })));
     expect(response.status, await response.clone().text()).toBe(200);
     this.moments.set(path, momentId);
-    this.contents.set(path, text);
+    this.contents.set(path, { text, contentKind });
     return momentId;
   }
 
@@ -271,6 +271,50 @@ describe("direct writes to a Collection's own files", () => {
     const body = await expectCode(await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, mine)]), 409, "stale");
     expect(body).toMatchObject({ path: `${PACKING}/collection.yaml`, currentBlobSha256: sha256(SCHEMA_TWO) });
     expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("takes an edit of automations the owner stored as binary, and the file becomes text", async () => {
+    const r = await relay();
+    const one = automations(STAMP);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, one, "binary");
+    await upload(r, two);
+    const response = await write(r, [edit(`${PACKING}/automations.yaml`, one, two)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+
+    const [moment, ...rest] = await r.owner.directMoments();
+    expect(rest).toEqual([]);
+    expect(moment!.payload).toMatchObject({
+      objectId: "object-automations",
+      operation: "write",
+      payloadBeforeBlobSha256: sha256(one),
+      payloadBeforeContentKind: "binary",
+      payloadAfterBlobSha256: sha256(two),
+      payloadAfterContentKind: "text",
+      beforeLatestMomentId: r.owner.moments.get(`${PACKING}/automations.yaml`),
+    });
+  });
+
+  it("takes edits beside and to a schema the owner stored as binary", async () => {
+    const r = await relay();
+    await r.owner.write("object-schema", `${PACKING}/collection.yaml`, SCHEMA_TWO, "binary");
+    const one = automations(STAMP);
+    const third = `${SCHEMA_TWO}  Notes:\n    type: text\n`;
+    await upload(r, one, third);
+    const created = await write(r, [create(`${PACKING}/automations.yaml`, one)]);
+    expect(created.status, await created.clone().text()).toBe(200);
+    const edited = await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA_TWO, third)], { submitId: "submit-2" });
+    expect(edited.status, await edited.clone().text()).toBe(200);
+
+    const moments = await r.owner.directMoments();
+    expect(moments.map((op) => op.payload.path)).toEqual([
+      `${PACKING}/automations.yaml`,
+      `${PACKING}/collection.yaml`,
+    ]);
+    expect(moments[1]!.payload).toMatchObject({
+      payloadBeforeContentKind: "binary",
+      payloadAfterContentKind: "text",
+    });
   });
 
   it("creates automations.yaml beside a Collection and edits it", async () => {

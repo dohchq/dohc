@@ -1,4 +1,4 @@
-import { basename, isAbsolute } from "node:path";
+import { isAbsolute } from "node:path";
 import {
   isSiteSourcePath,
   mediaTypeForPath as coreMediaTypeForPath,
@@ -22,9 +22,15 @@ export function mediaTypeForPath(path: string): string {
   );
 }
 
+// The name after the last "/" or "\", split the way the engine's
+// `crates/dohc-engine-files/src/media.rs` splits it on every platform.
+function fileName(path: string): string {
+  return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+}
+
 export function isSqliteMediaType(mediaType: string, path = "") {
   const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
-  const name = basename(path).toLowerCase();
+  const name = fileName(path).toLowerCase();
   const extension = name.match(/(\.[^.]+)$/)?.[1] ?? "";
   return (
     type === "application/vnd.sqlite3" ||
@@ -41,11 +47,18 @@ export function isSqliteMediaType(mediaType: string, path = "") {
   );
 }
 
+// The Collection files that dohc reads and writes as text. The media table
+// has no entry for `.yaml`, so these names are text by rule. The engine's
+// `is_text_media_type` holds the same list, and `text-media-cases.json`
+// holds both rules to the same answers.
+const COLLECTION_TEXT_FILENAMES = new Set(["collection.yaml", "automations.yaml"]);
+
 export function isTextMediaType(mediaType: string, path = "") {
   const lower = `${mediaType} ${path}`.toLowerCase();
   return (
     !isSqliteMediaType(mediaType, path) &&
-    (lower.includes("text/") ||
+    (COLLECTION_TEXT_FILENAMES.has(fileName(path)) ||
+      lower.includes("text/") ||
       lower.includes("json") ||
       lower.includes("csv") ||
       isSiteSourcePath(path) ||

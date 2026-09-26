@@ -2947,7 +2947,14 @@ export function createWorkspaceEngineCapture(
       });
       return true;
     }
-    if (current && current.contentKind !== "binary" && current.text === disk.text) return false;
+    // A binary head of the same bytes, stored before its path was read as
+    // text, is unchanged too: a change of kind alone is not a change.
+    if (
+      current &&
+      (current.contentKind === "binary" ? current.sha256 === disk.sha256 : current.text === disk.text)
+    ) {
+      return false;
+    }
     // The mirror transition: a binary-tracked path whose content is UTF-8
     // text again continues as the same object with an honest moment.
     const becameText = current?.contentKind === "binary";
@@ -5588,11 +5595,12 @@ export function createWorkspaceEngineCapture(
             path,
           });
           if (target) {
+            // Equal bytes are the pre-moment state, whatever their kinds.
             if (
               current &&
-              (target.contentKind === "binary"
-                ? current.contentKind === "binary" && current.sha256 === target.sha256
-                : current.contentKind !== "binary" && current.text === target.text)
+              (target.contentKind === "binary" || current.contentKind === "binary"
+                ? current.sha256 !== undefined && current.sha256 === target.sha256
+                : current.text === target.text)
             ) {
               // Already in the pre-moment state. Returning the same moment id
               // keeps undo a no-op (undoing an idempotent restore restores the
