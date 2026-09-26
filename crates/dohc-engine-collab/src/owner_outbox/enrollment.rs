@@ -185,7 +185,7 @@ pub fn enroll_in_tx(
         )
         .map_err(write_sql)?;
         tx.execute("DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq>0 AND up_to_seq<?4",params![key.workspace_id,key.version_id,key.object_id,head]).map_err(write_sql)?;
-        tx.execute("UPDATE ydoc_docs SET head_update_seq=?4,head_snapshot_seq=?4,updated_at_ms=?5 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id,head,now_ms]).map_err(write_sql)?;
+        tx.execute("UPDATE ydoc_docs SET head_update_seq=?4,head_snapshot_seq=?4,settled_update_seq=NULL,updated_at_ms=?5 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id,head,now_ms]).map_err(write_sql)?;
     }
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),

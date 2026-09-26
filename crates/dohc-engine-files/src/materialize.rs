@@ -151,6 +151,13 @@ pub trait AtomicReplacer: Send + Sync {
         std::fs::rename(target, displaced)
     }
 
+    /// Check that this filesystem can move `incoming` to another name without
+    /// replacing, before a replace moves anything. Fails with
+    /// [`ErrorKind::Unsupported`] when it cannot.
+    fn check_no_replace(&self, incoming: &Path) -> std::io::Result<()> {
+        check_no_replace_support(incoming)
+    }
+
     /// Move `incoming` to `target` only while nothing exists at `target`.
     /// Fails with [`ErrorKind::AlreadyExists`] otherwise.
     fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
@@ -187,7 +194,8 @@ impl AtomicReplacer for StdReplacer {}
 /// Linux and macOS ask the kernel for an exclusive rename. Other Unix
 /// systems, and filesystems that refuse the flag, claim the name with a hard
 /// link and then remove the incoming name. A Unix filesystem that supports
-/// neither falls back to a rename after an absence check.
+/// neither fails with [`ErrorKind::Unsupported`]: a rename after an absence
+/// check could replace a file another program created in between.
 #[cfg(windows)]
 fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
     // Cleanup is disabled first, so dropping the path, including on the error
@@ -220,7 +228,10 @@ fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
             let _ = std::fs::remove_file(incoming);
             Ok(())
         }
-        Err(err) if hard_links_unsupported(&err) => rename_after_absence_check(incoming, target),
+        Err(err) if hard_links_unsupported(&err) => Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "this filesystem has no rename that refuses to replace",
+        )),
         Err(err) => Err(err),
     }
 }
@@ -235,13 +246,42 @@ fn hard_links_unsupported(err: &std::io::Error) -> bool {
         })
 }
 
+/// Windows' no-replace move is atomic on every filesystem.
+#[cfg(windows)]
+fn check_no_replace_support(_incoming: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Move the job's temp file to a probe name and back with the same
+/// no-replace rename a replace uses. A device that passed once is not probed
+/// again for the life of the process.
 #[cfg(not(windows))]
-fn rename_after_absence_check(incoming: &Path, target: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(target) {
-        Ok(_) => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
-        Err(err) if err.kind() == ErrorKind::NotFound => std::fs::rename(incoming, target),
-        Err(err) => Err(err),
+fn check_no_replace_support(incoming: &Path) -> std::io::Result<()> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Mutex, OnceLock};
+    static CONFIRMED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    let confirmed = CONFIRMED.get_or_init(|| Mutex::new(HashSet::new()));
+    let device = std::fs::symlink_metadata(incoming)?.dev();
+    if confirmed
+        .lock()
+        .is_ok_and(|devices| devices.contains(&device))
+    {
+        return Ok(());
     }
+    let mut name = incoming.file_name().unwrap_or_default().to_os_string();
+    name.push(".probe");
+    let probe = incoming.with_file_name(name);
+    let _ = std::fs::remove_file(&probe);
+    rename_no_replace(incoming, &probe)?;
+    if rename_no_replace(&probe, incoming).is_err() {
+        // The temp's own name holds nothing but this file's old name.
+        std::fs::rename(&probe, incoming)?;
+    }
+    if let Ok(mut devices) = confirmed.lock() {
+        devices.insert(device);
+    }
+    Ok(())
 }
 
 /// The delay schedule between bounded atomic-replace retries. Injectable so
@@ -676,6 +716,13 @@ pub enum MaterializeError {
     /// sharing violations; the job is left pending for startup replay.
     #[error("atomic replace exhausted {MAX_REPLACE_ATTEMPTS} attempts (file locked)")]
     FileLocked,
+    /// The target's filesystem has no rename that refuses to replace, so a
+    /// write could destroy a file another program creates while it runs. The
+    /// job stays pending, its content in the store and in its temp file.
+    #[error(
+        "{path}: this filesystem cannot replace files without risking another program's changes"
+    )]
+    NoAtomicPlacement { path: String },
     /// The content or an on-disk file exceeded the materialization byte cap.
     #[error("materialization content {actual} bytes exceeds the cap")]
     TooLarge { actual: usize },
@@ -699,6 +746,7 @@ impl MaterializeError {
             MaterializeError::SymlinkTarget => "symlink-target",
             MaterializeError::BlockedTarget => "blocked-target",
             MaterializeError::FileLocked => "file-locked",
+            MaterializeError::NoAtomicPlacement { .. } => "no-atomic-placement",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
         }
     }
@@ -1212,8 +1260,17 @@ fn materialize_ordinary_write(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
+    // Refuse before anything moves when the filesystem cannot place the new
+    // file without risking a replace. The temp keeps the job's content.
+    options
+        .replacer
+        .check_no_replace(&tmp)
+        .map_err(|err| match err.kind() {
+            ErrorKind::Unsupported => no_atomic_placement(target),
+            _ => MaterializeError::io(&tmp, &err),
+        })?;
     let outcome = swap_in_temp(store, target, &tmp, job, options);
-    if outcome.is_err() {
+    if outcome.is_err() && !matches!(outcome, Err(MaterializeError::NoAtomicPlacement { .. })) {
         let _ = std::fs::remove_file(&tmp); // best-effort cleanup
     }
     outcome
@@ -1662,8 +1719,15 @@ fn place_attempt(
     match replacer.place(incoming, target) {
         Ok(()) => Ok(Attempt::Done(true)),
         Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(Attempt::Done(false)),
+        Err(err) if err.kind() == ErrorKind::Unsupported => Err(no_atomic_placement(target)),
         Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
         Err(err) => Err(MaterializeError::io(target, &err)),
+    }
+}
+
+fn no_atomic_placement(target: &Path) -> MaterializeError {
+    MaterializeError::NoAtomicPlacement {
+        path: target.to_string_lossy().into_owned(),
     }
 }
 
@@ -4167,29 +4231,6 @@ mod tests {
 
         std::fs::remove_file(&target).expect("empty the name");
         rename_no_replace(&incoming, &target).expect("empty target");
-        assert_eq!(std::fs::read(&target).expect("target"), b"incoming");
-        assert!(!incoming.exists(), "the incoming name is gone");
-    }
-
-    /// The Unix fallback for filesystems with neither an exclusive rename nor
-    /// hard links obeys the same rule. Common filesystems have both, so this
-    /// calls it directly.
-    #[cfg(not(windows))]
-    #[test]
-    fn no_replace_fallback_never_replaces_an_existing_file() {
-        let scratch = Scratch::new("no-replace-fallback");
-        let incoming = scratch.root.join(".dohc-write-incoming.tmp");
-        let target = scratch.root.join("target.md");
-        std::fs::write(&incoming, b"incoming").expect("incoming");
-        std::fs::write(&target, b"someone else's").expect("occupied target");
-
-        let refused = rename_after_absence_check(&incoming, &target).expect_err("occupied target");
-        assert_eq!(refused.kind(), ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&target).expect("target"), b"someone else's");
-        assert_eq!(std::fs::read(&incoming).expect("incoming"), b"incoming");
-
-        std::fs::remove_file(&target).expect("empty the name");
-        rename_after_absence_check(&incoming, &target).expect("empty target");
         assert_eq!(std::fs::read(&target).expect("target"), b"incoming");
         assert!(!incoming.exists(), "the incoming name is gone");
     }

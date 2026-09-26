@@ -2497,6 +2497,17 @@ CREATE TABLE share_direct_write_plan (
 ) STRICT;
 ";
 
+// The lineage update the workspace file is known to hold: the head_update_seq a
+// settle covered, or NULL when nothing proves it. An open compares it with the
+// head to tell a lineage that is ahead of its file from one that is not. A
+// writer that rewinds the head must clear it; the check refuses one that
+// rewinds below it.
+const V2_YDOC_SETTLED_UPDATE_SEQ_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
+    CHECK (settled_update_seq IS NULL
+        OR (settled_update_seq >= 0 AND settled_update_seq <= head_update_seq));
+";
+
 /// Files the materializer moved off a target before writing or deleting it.
 /// An `open` row is written before the move, turns `placed` once the job's
 /// content is at the target, and is deleted when nothing is left at the
@@ -2614,6 +2625,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 14,
         id: "v2-authored-create-intent",
         sql: "CREATE TABLE authored_create_intent (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), input_json TEXT NOT NULL, stage_id TEXT NOT NULL) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 15,
+        id: "v2-ydoc-settled-update-seq",
+        sql: V2_YDOC_SETTLED_UPDATE_SEQ_DDL,
         sets_user_version: None,
     },
     Migration {
@@ -2942,6 +2959,10 @@ mod tests {
             (
                 "v2-authored-create-intent",
                 "be47dca6cca30c2330af64417998687bd61443adf6ad5677325216f63b9a590e",
+            ),
+            (
+                "v2-ydoc-settled-update-seq",
+                "ff19c6ed0c9ceb9d4fde2fc59e12529c5e428a9ef722d7c4280748e839e1e65a",
             ),
             (
                 "v2-materialization-displacements",

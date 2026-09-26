@@ -13,6 +13,7 @@ import {
   type EngineDocLease,
   type EngineDocLeaseSnapshot,
   type EngineDocSaveState,
+  type DocumentGoneCause,
 } from "./engineDocLease";
 
 export type { EngineRemovalInProgress };
@@ -88,9 +89,11 @@ export type UseEngineDoc = {
   // The canonical drawing's image records conflict with authoritative
   // storage. Retrying cannot repair this state.
   artifactAssetsInvalid: boolean;
-  // Main confirmed that it removed this file while the live session was
-  // bound. The current document is retained for recovery only.
+  // Main confirmed that this document left its path while the live session
+  // was bound: the file was deleted, or another file now holds the path
+  // (`goneCause`). The current document is retained for recovery only.
   deletedWhileEditing: boolean;
+  goneCause: DocumentGoneCause | null;
   // The recovery row created for this deletion, if it still exists.
   deletedDraftId: number | null;
   // Image recovery for a drawing retained after deletion or a read-only
@@ -210,6 +213,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const deletedDraftId = deletedWhileEditing
     ? (settled?.deletion?.draftId ?? null)
     : null;
+  const goneCause = deletedWhileEditing
+    ? (settled?.deletion?.cause ?? "deleted")
+    : null;
   const readOnlyWhileEditing =
     outcome?.kind === "bound" &&
     settled?.readOnlyTransition?.token === outcome.token;
@@ -240,6 +246,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     engineMayHoldDocument,
     artifactAssetsInvalid,
     deletedWhileEditing,
+    goneCause,
     deletedDraftId,
     recoveryAssets,
     permanentFailureWhileEditing,

@@ -2572,3 +2572,65 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
     drain(&store, &sc, &StdReplacer, &NoFaults);
     assert_newer_save_shown(&sc, &store);
 }
+
+/// A filesystem with neither an exclusive rename nor hard links, as FAT or an
+/// SMB share can be on Linux and macOS.
+struct NoAtomicRename;
+
+impl AtomicReplacer for NoAtomicRename {
+    fn check_no_replace(&self, _incoming: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    fn place(&self, _incoming: &Path, _target: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
+/// With no rename that refuses to replace, a write refuses before anything
+/// moves: the target keeps its bytes, the job's content stays in its temp,
+/// and the job stays pending with a named error.
+#[test]
+fn a_filesystem_without_atomic_no_replace_refuses_the_write() {
+    for preimage_on_disk in [true, false] {
+        let sc = Scratch::new(if preimage_on_disk {
+            "no-atomic-overwrite"
+        } else {
+            "no-atomic-create"
+        });
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        if preimage_on_disk {
+            stage_overwrite(&sc, &mut store);
+        } else {
+            let job = spec("j1", "a.md", &hex_sha256(OURS), Preimage::Absent, 1, 10);
+            stage_job(&mut store, OURS, &job);
+        }
+
+        let err = run_pending_jobs(
+            &store,
+            sc.workspace(),
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &NoAtomicRename,
+                backoff: &NoBackoff,
+                now_ms: 20,
+                faults: &NoFaults,
+            },
+        )
+        .expect_err("the write refuses");
+
+        assert_eq!(err.code(), "no-atomic-placement");
+        assert_eq!(
+            read(&sc, "a.md"),
+            preimage_on_disk.then(|| PREIMAGE.to_vec()),
+            "the target is untouched"
+        );
+        assert_eq!(
+            read(&sc, ".dohc-write-j1.tmp").as_deref(),
+            Some(OURS),
+            "the job's content stays in its temp"
+        );
+        assert_nothing_displaced(&sc, &store);
+        assert_eq!(job_status(&store), JobStatus::Pending);
+    }
+}

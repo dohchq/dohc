@@ -22,8 +22,9 @@
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
 //! its path is canonical and can change while the document is closed. The
 //! enrollment read therefore prefers the snapshot path and uses the Y.Doc path
-//! only for a never-settled lineage. Deferring the live case was unsafe: the
-//! local settle path does not retry origination.
+//! only for a never-settled lineage. A lineage an open session holds is
+//! deferred: the session's next record or its close originates it, and a
+//! later sweep claims it once no session holds it.
 //!
 //! Secret-version payloads always read `secret_fork_bases`, including the
 //! source tip's frozen last-edit timestamp. Receivers store `updatedAtMs` in
@@ -31,10 +32,10 @@
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_domain::{SecretMomentRecord, SecretOp, VersionKind, VersionRecord};
-use rusqlite::{Row, Transaction, params};
+use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::{
-    BaseOrigination, SharingDeclined, SyncError, journal_moment_append_in_tx,
+    BaseOrigination, LeaseProbe, SharingDeclined, SyncError, journal_moment_append_in_tx,
     journal_secret_delete_in_tx, journal_secret_put_from_moment_in_tx,
     journal_secret_version_fork_in_tx, journal_version_create_in_tx, originate_ydoc_base_in_tx,
 };
@@ -42,12 +43,13 @@ use crate::{
 pub(crate) fn backfill_enrolment_window_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
-        let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+        let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
         backfill_moments_and_conflict_bundles(tx, workspace_id)?;
         declined
     } else {
@@ -60,16 +62,25 @@ pub(crate) fn backfill_enrolment_window_in_tx(
 pub(crate) fn finish_live_history_enrolment_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+    let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     Ok(declined)
 }
 
+/// A lineage with a live session is left unclaimed. The claim is the
+/// lineage's durable state, and a session recording into it holds edits the
+/// claim would not name, so claiming under it would turn the person's next
+/// keystroke into a stale write. The session's own next record originates the
+/// base in the same transaction and learns the claim from the result; closing
+/// the session originates it too. This sweep claims whatever is left once no
+/// session holds it.
 pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
@@ -98,6 +109,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
             version_id,
             object_id,
         };
+        if leases.is_live(&key) {
+            continue;
+        }
         if let BaseOrigination::Declined(declined) =
             originate_ydoc_base_in_tx(tx, &key, &path, None, None, now_ms)?
         {
@@ -105,6 +119,67 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
         }
     }
     Ok(sharing_declined)
+}
+
+/// Originate the lineage a live session holds, once enrollment is ready. The
+/// sweep leaves such a lineage alone because the session's next write would
+/// expect the old claim. The daemon calls this for each live session instead,
+/// serialized with that session's writes, and hands the session the claim.
+/// Reads the path the way the sweep does.
+pub fn originate_live_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    if crate::live_audit::enrollment::pending_in_tx(tx, &key.workspace_id)? {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE(s.path,d.path) \
+             FROM ydoc_docs d LEFT JOIN snapshots s \
+               ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+              AND s.object_id=d.object_id \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+               AND d.lineage_claim_status = 'unclaimed'",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    match path {
+        Some(path) => originate_ydoc_base_in_tx(tx, key, &path, None, None, now_ms),
+        None => Ok(BaseOrigination::NothingToDo),
+    }
+}
+
+/// Originate the lineage a closing session held, when the sweep left it for
+/// that session. A local-only close prunes the lineage, so this is the last
+/// point its history can reach the relay. The file's current path comes
+/// from its snapshot. A deleted file has none, and a claim would let peers
+/// bring it back, so it originates nothing.
+pub fn originate_closing_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT s.path FROM ydoc_docs d JOIN snapshots s \
+             ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+             AND s.object_id=d.object_id \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+             AND d.lineage_claim_status = 'unclaimed'",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    match path {
+        Some(path) => originate_ydoc_base_in_tx(tx, key, &path, None, None, now_ms),
+        None => Ok(BaseOrigination::NothingToDo),
+    }
 }
 
 fn backfill_moments_and_conflict_bundles(
@@ -478,7 +553,7 @@ mod tests {
                 [],
             )
             .map_err(SyncError::persist)?;
-            backfill_enrolment_window_in_tx(tx, "ws", 1_000)
+            backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_000)
         })? {
             dohc_engine_storage::TxnOutcome::Committed(_) => Ok(()),
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
@@ -775,7 +850,7 @@ mod tests {
         };
 
         assert!(matches!(
-            crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_000),
+            crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
             Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.is_empty()
         ));
         assert_eq!(
@@ -799,8 +874,15 @@ mod tests {
             .expect("pending refusal count");
         assert_eq!(pending_refusals, 0, "the committed report is cleared");
 
-        crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_001)
-            .expect("repeat cursor commit");
+        crate::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_001,
+        )
+        .expect("repeat cursor commit");
         assert_eq!(
             local_ops(&store)
                 .iter()
@@ -1417,12 +1499,10 @@ mod tests {
             |_, _, _update_sha| Ok(()),
         )
         .expect_err("the same request id cannot name a different path");
-        match error {
-            dohc_engine_collab::CollabError::Corrupt { reason } => {
-                assert_eq!(reason, "idempotency key reused with different content")
-            }
-            other => panic!("unexpected request-id reuse error: {other:?}"),
-        }
+        assert!(
+            matches!(error, dohc_engine_collab::CollabError::IdempotencyKeyReused),
+            "unexpected request-id reuse error: {error:?}"
+        );
         assert_eq!(
             ydoc_path(&store, "legacy-request"),
             None,
@@ -1468,6 +1548,199 @@ mod tests {
             ydoc_path(&store, "legacy-content").as_deref(),
             Some("legacy-content.md"),
             "a content-hash retry must repair the path before it returns"
+        );
+    }
+
+    fn claim_status(store: &EngineStore, object_id: &str) -> (String, Option<String>) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT lineage_claim_status, lineage_claim_id FROM ydoc_docs
+                     WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                    [object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("claim status")
+    }
+
+    // Turning sync on while a document is open must not claim its lineage
+    // under the open session: the claim names durable state, and the session
+    // holds edits that are not durable yet.
+    #[test]
+    fn enrolment_leaves_a_live_lineage_unclaimed_and_a_later_sweep_claims_it() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let key = DocKey::new("ws", "main", "open-plan").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "typed while open");
+        record_unsettled_ydoc(&mut store, &key, &update, Some("open-plan.md"), None);
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let lease = leases.acquire(&key).expect("open session lease");
+
+        match store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',-1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000)
+            })
+            .expect("enroll")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(_) => {}
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        }
+        assert_eq!(
+            claim_status(&store, "open-plan"),
+            ("unclaimed".to_owned(), None)
+        );
+        assert!(
+            local_ops(&store)
+                .iter()
+                .all(|(kind, _)| kind != "ydoc.update"),
+            "no base may be journaled while the session holds the lineage"
+        );
+
+        drop(lease);
+        let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 1,
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            refusal_report_id: None,
+            settlement_report_id: None,
+        };
+        crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &leases, 1_001)
+            .expect("cursor commit");
+        let (status, claim) = claim_status(&store, "open-plan");
+        assert_eq!(status, "exact");
+        assert!(claim.is_some());
+        let marker = dohc_engine_collab::read_marker(&store, &key)
+            .expect("marker")
+            .expect("claimed marker");
+        let originated_here = |marker: &dohc_engine_collab::Marker| {
+            store
+                .read_with(|conn| crate::lineage_originated_here(conn, &key, marker))
+                .expect("origin check")
+        };
+        assert!(
+            originated_here(&marker),
+            "a session that opened this lineage unclaimed may keep its document"
+        );
+        let relay_base = dohc_engine_collab::Marker {
+            base_origin_id: Some("peer".to_owned()),
+            ..marker.clone()
+        };
+        let successor = dohc_engine_collab::Marker {
+            lineage_parent_claim_id: Some("f".repeat(64)),
+            ..marker.clone()
+        };
+        assert!(
+            !originated_here(&relay_base),
+            "a relay base is another lineage"
+        );
+        assert!(
+            !originated_here(&successor),
+            "a successor is another lineage"
+        );
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "ydoc.update" && payload["objectId"] == "open-plan"
+                })
+                .count(),
+            1,
+            "the next sweep originates the released lineage once"
+        );
+    }
+
+    // The sweep leaves an open lineage to its session. A local-only close
+    // prunes the lineage, so the close has to originate it first.
+    #[test]
+    fn a_closing_session_originates_the_lineage_the_sweep_left_to_it() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "closing-plan",
+            "moment-closing",
+            "typed while open",
+            "capture",
+            2,
+        );
+        let key = DocKey::new("ws", "main", "closing-plan").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "typed while open");
+        record_unsettled_ydoc(&mut store, &key, &update, Some("closing-plan.md"), None);
+        // A file deleted while its session stayed open has no snapshot left.
+        let deleted = DocKey::new("ws", "main", "deleted-plan").expect("key");
+        let deleted_update = Ydoc::wire().plaintext_insert(0, "gone");
+        record_unsettled_ydoc(
+            &mut store,
+            &deleted,
+            &deleted_update,
+            Some("deleted-plan.md"),
+            None,
+        );
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let _lease = leases.acquire(&key).expect("open session lease");
+        let _deleted_lease = leases.acquire(&deleted).expect("open session lease");
+        match store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',-1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000)
+            })
+            .expect("enroll")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(_) => {}
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        }
+        assert_eq!(claim_status(&store, "closing-plan").0, "unclaimed");
+
+        let originated = match store
+            .write_with(&NoFaults, |tx| {
+                originate_closing_ydoc_base_in_tx(tx, &key, 1_001)
+            })
+            .expect("close origination")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert!(matches!(originated, BaseOrigination::Originated { .. }));
+        assert_eq!(claim_status(&store, "closing-plan").0, "exact");
+        let payloads: Vec<_> = local_ops(&store)
+            .into_iter()
+            .filter_map(|(kind, payload)| {
+                (kind == "ydoc.update" && payload["objectId"] == "closing-plan").then_some(payload)
+            })
+            .collect();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["path"], "closing-plan.md");
+
+        let deleted_outcome = match store
+            .write_with(&NoFaults, |tx| {
+                originate_closing_ydoc_base_in_tx(tx, &deleted, 1_002)
+            })
+            .expect("deleted close origination")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert_eq!(deleted_outcome, BaseOrigination::NothingToDo);
+        assert_eq!(
+            claim_status(&store, "deleted-plan").0,
+            "unclaimed",
+            "a deleted file must not reach peers through its closing session"
         );
     }
 
@@ -2398,8 +2671,15 @@ mod tests {
             refusal_report_id: None,
             settlement_report_id: None,
         };
-        let declines = match crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_000)
-            .expect("commit relay cursor after the local append")
+        let declines = match crate::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
+        .expect("commit relay cursor after the local append")
         {
             dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
@@ -2409,13 +2689,20 @@ mod tests {
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");
         assert!(declines[0].observed_bytes > declines[0].limit_bytes);
 
-        let pushed_declines =
-            match crate::cursor::write_pushed_seq(&mut store, "ws", "local", 0, &NoFaults, 1_001)
-                .expect("advance a pushed origin after enrolment")
-            {
-                dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
-                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-            };
+        let pushed_declines = match crate::cursor::write_pushed_seq(
+            &mut store,
+            "ws",
+            "local",
+            0,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_001,
+        )
+        .expect("advance a pushed origin after enrolment")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
         assert!(
             pushed_declines.is_empty(),
             "pushed-origin updates must not repeat the per-pass full-state scan"
@@ -2425,13 +2712,19 @@ mod tests {
             cursor: 1,
             ..cursor
         };
-        let next_declines =
-            match crate::commit_relay_cursor(&mut store, "ws", &next_cursor, &NoFaults, 1_002)
-                .expect("commit next relay cursor")
-            {
-                dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
-                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-            };
+        let next_declines = match crate::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &next_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_002,
+        )
+        .expect("commit next relay cursor")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
 
         assert_eq!(
             next_declines, declines,

@@ -385,7 +385,14 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect("push workspace");
     assert!(matches!(
         outcome,
@@ -420,7 +427,14 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect_err("ahead relay must diverge");
     assert_eq!(error, RelayError::OriginDiverged);
     assert_eq!(
@@ -495,7 +509,14 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
         }
     });
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect("rewind retry");
     assert!(matches!(
         outcome,
@@ -569,6 +590,7 @@ fn push_rewind_is_durable_before_a_failed_retry() {
             &mut engine,
             "ws",
             &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
             1_000,
             0,
         ),
@@ -1003,7 +1025,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     );
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
+            .commit_pull_cursor(
+                &mut reopened,
+                "ws",
+                &pending,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+                1_000
+            )
             .expect("commit after materialization"),
         TxnOutcome::Committed(Vec::new())
     );
