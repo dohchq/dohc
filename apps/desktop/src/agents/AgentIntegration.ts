@@ -71,7 +71,7 @@ export interface AgentIntegrationOptions {
   createId?: () => string;
   // Fired after a known run's terminal status is durably recorded.
   // endAgentRun is the single funnel every terminal path goes through
-  // (AgentSessionManager finalizeRun, the panel's Stop, the endAgentRun IPC),
+  // (a Settings stop, the endAgentRun IPC),
   // so run-completion consumers (the try-in-version review card) hook here.
   onRunEnded?: (input: {
     attachmentId: symbol;
@@ -167,10 +167,12 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       });
       try {
         authority.assertCurrent();
+        // A person starts this run, so its writes begin a chain at depth 0.
         await authority.setAgentRun({
           agentId: record.agentId,
           onBehalfOf: record.onBehalfOf,
           agentRunId: record.id,
+          depth: 0,
         });
         authority.assertCurrent();
         state.activeRun = record;

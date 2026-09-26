@@ -9,7 +9,7 @@ function fixture() {
     for (const operation of ['read', 'write']) for (let round = 1; round <= 3; round++) stages.push(stage(`${dataset}/warm-${operation}/${round}`, 200));
     stages.push(stage(`${dataset}/cold-reopen`, 30));
     stages.push(stage(`${dataset}/burst-10`, 10, {rowsAdded: 10}));
-    stages.push(stage(`${dataset}/burst-100`, 100, {count: 64, rowsAdded: 64, failures: Array.from({length: 36}, () => ({message: 'Dataset operation queue is full. Retry this operation.'}))}));
+    stages.push(stage(`${dataset}/burst-100`, 100, {count: 64, rowsAdded: 64, failures: Array.from({length: 36}, () => ({message: 'This Collection has too much work waiting. Try again in a moment.'}))}));
     for(const diagnostic of ['late-page','broad-text-search','export'])stages.push(stage(`${dataset}/${diagnostic}`,3));
   }
   stages.push(stage('ten-dataset-churn',100),stage('soak/0',100));
@@ -21,7 +21,7 @@ function fixture() {
 test('only explicit bounded overload in the hundred-caller burst is expected', () => {
   assert.equal(isExpectedOverload('narrow/burst-100',{code:'queue_full'}),true);
   assert.equal(isExpectedOverload('narrow/burst-10',{code:'queue_full'}),false);
-  assert.equal(isExpectedOverload('soak/0',{message:'Dataset workers are busy. Retry this operation.'}),false);
+  assert.equal(isExpectedOverload('soak/0',{message:'dohc is busy with other Collections. Try again in a moment.'}),false);
   assert.equal(isExpectedOverload('narrow/burst-100',{code:'queue_full',message:'Worker deadline expired'}),false);
   assert.equal(isExpectedOverload('narrow/burst-100',{code:'worker_deadline',message:'The dataset worker exceeded its deadline.'}),false);
   assert.equal(isExpectedOverload('narrow/burst-100',{message:'operation refused'}),false);
@@ -43,7 +43,7 @@ test('one failed round or cold fixture cannot disappear inside pooled percentile
 
 test('any workload failure, missing duration, duplicate burst count, or survivor fails', () => {
   for (const mutate of [
-    value=>value.stages.at(-1).failures.push({message:'Dataset workers are busy. Retry this operation.'}),
+    value=>value.stages.at(-1).failures.push({message:'dohc is busy with other Collections. Try again in a moment.'}),
     value=>value.soak.actualSeconds=3599,
     value=>value.stages.find(stage=>stage.label.endsWith('/burst-100')).rowsAdded++,
     value=>value.remainingOwnedPids.push(99),

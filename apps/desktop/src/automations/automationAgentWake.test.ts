@@ -1,0 +1,60 @@
+import { describe, expect, it, vi } from "vitest";
+import { AUTOMATION_NO_RUNNER, wakeAgent, type AgentWakeDependencies } from "./automationAgentWake";
+import type { AutomationChatMessage } from "./automationChat";
+
+const message: AutomationChatMessage = {
+  target: { kind: "agent" },
+  effectId: "atc_1/h/0/wake",
+  messageId: "message-auto-1",
+  threadId: "thread-auto-wake",
+  automation: { automationId: "collection:Tasks#ask", name: "Ask my agent", depth: 1 },
+  body: "Plan the trip",
+};
+
+function dependencies(overrides: Partial<AgentWakeDependencies> = {}) {
+  return {
+    runnerReady: vi.fn(async () => true),
+    agentChannelId: vi.fn(async () => "agent-channel"),
+    threadExists: vi.fn(async () => false),
+    start: vi.fn(async () => undefined),
+    send: vi.fn(async () => undefined),
+    recordTrigger: vi.fn(async () => true),
+    scan: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("waking a person's agent", () => {
+  it("starts the automation's thread in My agent, then queues its message as the trigger", async () => {
+    const wake = dependencies();
+    await wakeAgent(wake, message);
+    expect(wake.start).toHaveBeenCalledWith({ channelId: "agent-channel", message });
+    expect(wake.send).not.toHaveBeenCalled();
+    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake" });
+    expect(wake.scan).toHaveBeenCalledOnce();
+  });
+
+  it("adds later wakes to the same thread", async () => {
+    const wake = dependencies({ threadExists: vi.fn(async () => true) });
+    await wakeAgent(wake, message);
+    expect(wake.send).toHaveBeenCalledWith({ message });
+    expect(wake.start).not.toHaveBeenCalled();
+    expect(wake.recordTrigger).toHaveBeenCalledOnce();
+  });
+
+  it("queues the trigger once more when the thread's first message landed before a stop", async () => {
+    const wake = dependencies({
+      threadExists: vi.fn(async () => true),
+      send: vi.fn(async () => { throw new Error("idempotency-key-reuse-mismatch"); }),
+    });
+    await wakeAgent(wake, message);
+    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake" });
+  });
+
+  it("fails before writing when no agent runner is set up", async () => {
+    const wake = dependencies({ runnerReady: vi.fn(async () => false) });
+    await expect(wakeAgent(wake, message)).rejects.toThrow(AUTOMATION_NO_RUNNER);
+    expect(wake.start).not.toHaveBeenCalled();
+    expect(wake.recordTrigger).not.toHaveBeenCalled();
+  });
+});

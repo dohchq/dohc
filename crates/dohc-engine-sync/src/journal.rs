@@ -55,12 +55,12 @@ pub enum ShareViewIdentityOutcome {
     AlreadyRecorded,
 }
 
-#[cfg(any(test, feature = "fault-injection"))]
+#[cfg(test)]
 pub(crate) fn crashes(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
     faults.poll(point) == dohc_engine_storage::FaultAction::Crash
 }
 
-#[cfg(not(any(test, feature = "fault-injection")))]
+#[cfg(not(test))]
 pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
@@ -102,7 +102,16 @@ pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
 ) -> Result<bool, SyncError> {
-    tx.query_row(
+    workspace_replicates_with_relay(tx, workspace_id)
+}
+
+/// [`workspace_replicates_with_relay_in_tx`] for a reader outside a write
+/// transaction, so a caller can skip opening one when the answer is `false`.
+pub fn workspace_replicates_with_relay(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
            AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
              OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",

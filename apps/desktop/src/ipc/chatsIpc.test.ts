@@ -50,7 +50,7 @@ function fixture(kind: ScopeKind = "local") {
   }
   const storeMethods = {
     createThread: vi.fn<DesktopLinkedChatStore["createThread"]>(async () => thread),
-    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async input => ({ ...message, ...input, attachments: storedAttachments(input.attachments) })),
+    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, ...input }) => ({ ...message, ...input, attachments: storedAttachments(input.attachments) })),
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
@@ -63,7 +63,7 @@ function fixture(kind: ScopeKind = "local") {
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
     getChannelWireId: vi.fn<DesktopLinkedChatStore["getChannelWireId"]>(async () => "wire"),
     createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", type: input.type ?? "posts", purpose: input.purpose ?? "", ...(input.folderPath ? { folderPath: input.folderPath } : {}), createdAtMs: 1, updatedAtMs: 1 })),
-    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async input => ({
+    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async ({ automation: _automation, ...input }) => ({
       thread: { id: thread.id, workspaceId: thread.workspaceId, title: thread.title, createdAtMs: 1, updatedAtMs: 2, channelId: input.channelId },
       message: { ...message, ...input, attachments: storedAttachments(input.attachments) },
     })),
@@ -137,6 +137,7 @@ function fixture(kind: ScopeKind = "local") {
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
+    notifyRenderer: () => undefined,
   });
   const sender = { trusted: true };
   const assertTrustedSender = vi.fn((event: Event) => {
@@ -222,6 +223,25 @@ describe("chat message IPC identity", () => {
     expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" })))
       .toMatchObject({ authorUserId: "person-1" });
     expect(ChatMessageRecord.parse(chatMessageForIpc(message))).not.toHaveProperty("authorUserId");
+  });
+
+  it("carries an automation author and the automation that wrote the message", () => {
+    const { message } = fixture();
+    const automated = {
+      ...message,
+      author: { kind: "automation" as const, displayName: "Stamp the finish date" },
+      authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+    };
+    expect(ChatMessageRecord.parse(chatMessageForIpc(automated))).toMatchObject({
+      authorKind: "automation",
+      authorDisplayName: "Stamp the finish date",
+      authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+    });
+    // Another computer's automation arrives without the automation.
+    const { automation: _automation, ...remote } = automated;
+    expect(ChatMessageRecord.parse(chatMessageForIpc(remote))).not.toHaveProperty("automation");
   });
 });
 
@@ -393,6 +413,17 @@ describe("registered channels and personal chat projections", () => {
     expect(test.desktopChatBookmarks.materializeChatBookmark).toHaveBeenCalledWith(test.workspace, test.capture, expect.objectContaining({ bookmarkId: "bookmark" }));
     expect(await test.invoke(CHANNELS.archiveChatBookmark, { workspaceId: "workspace", bookmarkId: "bookmark" })).toMatchObject({ bookmark: { state: "archived", generation: 2 } });
     expect(test.desktopChatBookmarks.archiveChatBookmark).toHaveBeenCalledWith(test.workspace, test.capture, "owner", "bookmark");
+  });
+
+  it("refuses to follow an automation as an author", async () => {
+    const test = fixture();
+    test.storeMethods.listMessages.mockResolvedValueOnce([{
+      ...test.message, author: { kind: "automation", displayName: "Stamp the finish date" }, authorUserId: "person-1",
+    }]);
+    await expect(test.invoke(CHANNELS.setChatFollow, {
+      workspaceId: "workspace", target: { kind: "author", threadId: test.message.threadId, messageId: test.message.id }, state: "following",
+    })).rejects.toThrow("An automation cannot be followed. Follow its Group instead.");
+    expect(test.storeMethods.setFollow).not.toHaveBeenCalled();
   });
 
   it("keeps personal follows and feed cursors owned by the warmed local identity", async () => {

@@ -40,6 +40,8 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   stateDir(): string;
   chatDispatchService: Pick<ChatDispatchService, "isPaused" | "setPaused">;
   showOrCreateMainWindow(): Promise<unknown>;
+  /** How many schedules this computer runs. Any keep dohc in the tray. */
+  runningSchedules(): number;
   readonly appLifecycle: { isQuitting(): boolean };
 }) {
   const {
@@ -48,6 +50,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   } = dependencies;
 
   let dispatchTray: DesktopTrayInstance<Image, Menu> | null = null;
+  let dispatchEnabled = false;
 
   function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
     return settings.runner.enabled && configuredRunnerCommand(settings.runner).length > 0;
@@ -89,6 +92,8 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
 
   function rebuildDispatchTrayMenu(): void {
     if (!dispatchTray) return;
+    const schedules = dependencies.runningSchedules();
+    dispatchTray.setToolTip(dispatchEnabled ? "dohc agent dispatch" : "dohc");
     dispatchTray.setContextMenu(
       Menu.buildFromTemplate([
         {
@@ -97,15 +102,20 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
             void showOrCreateMainWindow();
           },
         },
-        {
-          label: "Pause agent dispatch",
-          type: "checkbox",
-          checked: chatDispatchService.isPaused(),
-          click: (item) => {
-            chatDispatchService.setPaused(item.checked);
-            rebuildDispatchTrayMenu();
-          },
-        },
+        ...(schedules > 0
+          ? [{ label: schedules === 1 ? "Running 1 schedule" : `Running ${schedules} schedules`, enabled: false }]
+          : []),
+        ...(dispatchEnabled
+          ? [{
+            label: "Pause agent dispatch",
+            type: "checkbox" as const,
+            checked: chatDispatchService.isPaused(),
+            click: (item: { checked: boolean }) => {
+              chatDispatchService.setPaused(item.checked);
+              rebuildDispatchTrayMenu();
+            },
+          }]
+          : []),
         { type: "separator" },
         {
           label: "Quit dohc",
@@ -118,7 +128,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   function ensureDispatchTray(): void {
     if (!dispatchTray) {
       dispatchTray = new Tray(dispatchTrayIcon());
-      dispatchTray.setToolTip("dohc agent dispatch");
       dispatchTray.on("double-click", () => {
         void showOrCreateMainWindow();
       });
@@ -139,9 +148,12 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
   }
 
+  // The tray keeps dohc running after its windows close while agent
+  // dispatch is on or this computer runs a schedule.
   async function refreshDispatchTray(): Promise<boolean> {
     const { settings } = await readCachedUserSettingsFile(stateDir());
-    const enabled = configuredRunnerEnabled(settings);
+    dispatchEnabled = configuredRunnerEnabled(settings);
+    const enabled = dispatchEnabled || dependencies.runningSchedules() > 0;
     if (enabled && !dependencies.appLifecycle.isQuitting()) {
       ensureDispatchTray();
     } else if (dispatchTray) {
@@ -152,5 +164,8 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
 
-  return { refreshDispatchTray, refreshSystemThemeDesktopIcons };
+  /** Whether agent dispatch keeps dohc running, as the last refresh read it. */
+  const dispatchKeepsRunning = () => dispatchEnabled;
+
+  return { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning };
 }

@@ -5,10 +5,12 @@
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::materialize::MaterializationJob;
-use crate::schema::{open_engine_db, open_engine_db_read_only};
+use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
 /// non-empty). Used to guard the one place a table name is interpolated rather
@@ -65,7 +67,36 @@ impl EngineStore {
     /// writer primitive — the single-writer-per-file contract is enforced by
     /// `dohc-engine-runtime`'s supervisor, which is the intended entry point.
     pub fn open(path: &Path, now_ms: i64) -> Result<Self, StorageError> {
-        let opened = open_engine_db(path, now_ms)?;
+        Self::open_counting(path, now_ms, None)
+    }
+
+    /// [`Self::open`], counting its SQLite work into `work` while it runs. A
+    /// migration or the integrity check on a large store can take long; the
+    /// count lets a caller tell that from a stuck open.
+    pub fn open_counting(
+        path: &Path,
+        now_ms: i64,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = open_engine_db(path, now_ms, work)?;
+        Ok(EngineStore {
+            conn: opened.conn,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+        })
+    }
+
+    /// Open a store, recording a fresh root binding in its initial schema transaction.
+    /// The caller must persist the matching root marker before calling this.
+    /// An existing store is never rebound; verify its binding before use.
+    pub fn open_with_root_token(
+        path: &Path,
+        now_ms: i64,
+        token: &str,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened =
+            crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
@@ -77,12 +108,40 @@ impl EngineStore {
     /// this never creates the database, changes persistent pragmas, or runs the
     /// migration ledger.
     pub fn open_read_only(path: &Path) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path)?;
+        Self::open_read_only_counting(path, None)
+    }
+
+    /// [`Self::open_read_only`], counting its SQLite work into `work`.
+    pub fn open_read_only_counting(
+        path: &Path,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = open_engine_db_read_only(path, work)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: false,
             database_path: path.to_path_buf(),
         })
+    }
+
+    /// Count this connection's SQLite work into `work` for as long as someone
+    /// else holds it; `None` stops counting. The weak reference means the
+    /// counter never outlives its owner, and a dead one costs one failed
+    /// upgrade per step until the caller stops counting.
+    pub fn count_work(&self, work: Option<Weak<AtomicU64>>) -> Result<(), StorageError> {
+        match work {
+            Some(work) => self.conn.progress_handler(
+                OPEN_WORK_STEP_OPS,
+                Some(move || {
+                    if let Some(work) = work.upgrade() {
+                        work.fetch_add(1, Ordering::Relaxed);
+                    }
+                    false
+                }),
+            ),
+            None => self.conn.progress_handler(0, None::<fn() -> bool>),
+        }
+        .map_err(StorageError::corrupt)
     }
 
     /// Whether this open initialized a fresh database rather than reopening an
@@ -196,6 +255,23 @@ impl EngineStore {
         }
 
         Ok(TxnOutcome::Committed(value))
+    }
+
+    /// Validate a mutation on a transaction that always rolls back.
+    pub fn preview_write<T, E>(
+        &mut self,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::persist)?;
+        let result = f(&tx);
+        tx.rollback().map_err(StorageError::persist)?;
+        result
     }
 
     /// The database's `PRAGMA synchronous` setting (`1` = normal). Exposed so a

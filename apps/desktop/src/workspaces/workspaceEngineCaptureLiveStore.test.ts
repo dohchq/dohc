@@ -437,6 +437,36 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
+  it("keeps an authored create request identity across a session retry", async () => {
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      throw SENTINEL;
+    });
+    const sessions = sessionsFor(client);
+    const run = sessions.run.bind(sessions);
+    sessions.run = async (workspace, operation, options) => {
+      try {
+        return await run(workspace, operation, options);
+      } catch (error) {
+        if (error !== SENTINEL) throw error;
+        return await run(workspace, operation, options);
+      }
+    };
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessions,
+    );
+    await expect(store.writeTextFile({
+      workspaceId: WORKSPACE_ID, versionId: "main", path: "note.md",
+      text: "hello", createOnly: true, metadata: { origin: "api" },
+    })).rejects.toBe(SENTINEL);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.params).toMatchObject({ createOnly: true, requestId: expect.any(String) });
+    expect(requests[1]?.params).toEqual(requests[0]?.params);
+    expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
+    expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
+  });
+
   it("retries transport failures for reads but not mutations", async () => {
     const optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [];
     const requests: Request[] = [];
@@ -1495,10 +1525,13 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
-  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
-    "keeps a named recipient's authorship returned by %s",
-    async (method) => {
-      const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const;
+  it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
+    { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
+    { method, author: { kind: "agent", agentId: "agent" } as const },
+    { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
+  ]))(
+    "keeps $author.kind authorship returned by $method",
+    async ({ method, author }) => {
       const namedMoment = { ...moment, author };
       const client = clientFor(async (request) => ({
         id: request.id,
@@ -1746,5 +1779,53 @@ describe("createCaptureLiveStores", () => {
       workspaceId: WORKSPACE_ID,
       limit: 200,
     });
+  });
+
+  it("keeps a live settle's origin on history moments and nowhere else", async () => {
+    const client = clientFor(async (request) => {
+      if (request.method === VERSIONED_METHOD.historyPage) {
+        return {
+          id: request.id,
+          result: {
+            activeVersion: {
+              id: "main",
+              workspaceId: WORKSPACE_ID,
+              kind: "main",
+              name: "Main",
+              createdAtMs: 0,
+            },
+            textMomentPage: {
+              moments: [
+                { ...moment, metadataOrigin: "ydoc" },
+                { ...moment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
+              ],
+              nextBeforeMomentOrder: null,
+              latestMomentOrder: 1,
+            },
+            protectedMoments: [],
+            protectedTruncated: false,
+          },
+        };
+      }
+      expect(request.method).toBe(VERSIONED_METHOD.textRead);
+      return { id: request.id, result: { ...snapshot, metadataOrigin: "ydoc" } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
+    expect(
+      page.textMomentPage.moments.map((entry) => entry.metadata.origin),
+    ).toEqual(["ydoc", "local-file"]);
+    // A snapshot's metadata shares the write type, so no write can carry the
+    // live origin forward.
+    const read = await store.readTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+    });
+    expect(read?.metadata.origin).toBe("unknown");
   });
 });

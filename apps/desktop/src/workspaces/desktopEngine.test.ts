@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
   createRustEngineDaemon,
@@ -13,8 +13,6 @@ import { createDesktopEngine } from "./desktopEngine";
 import { EngineRelayClient } from "./engineRelayClient";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import type { RegistryEntry } from "./registryStore";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { PluginWorkspaceRuntimes, type PluginWorkspaceRuntimeParts } from "../plugins/pluginWorkspaceRuntimes";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
 
@@ -25,7 +23,9 @@ const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
 
-type State = { pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace> };
+type State = {
+  collectionAutomations: { notifyClaimed: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };
+};
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
 
 function workspaceIdOf(request: Request): unknown {
@@ -62,39 +62,14 @@ class Client implements EngineDaemonClient {
   waitForExit() { return this.exitWait; }
 }
 
-function parts(dispose: () => Promise<void> = async () => undefined) {
-  return {
-    pipeline: {
-      start: vi.fn(async () => undefined), cancelStart: vi.fn(), dispose: vi.fn(dispose),
-      handleWatcherEvents: vi.fn(async () => undefined), pluginRegistration: vi.fn(() => null),
-      hasUnrecoverableFailedReplacement: vi.fn(() => false),
-    },
-    agentDrivers: { list: vi.fn(() => []) },
-    workspaceEvents: { dispose: vi.fn(), handleWatcherEvents: vi.fn(), handleRecordEvent: vi.fn() },
-    automations: { dispose: vi.fn(async () => undefined), stopForEngineRestart: vi.fn(), notifyClaimed: vi.fn() },
-  };
-}
-
 function fixture() {
   const rows = new Map<string, RegistryEntry>();
   const states = new Map<string, State>();
-  const created: Array<{ workspaceId: string; parts: ReturnType<typeof parts> }> = [];
-  let makeParts = (_workspace: CreatedWorkspace) => parts();
-  const cleanupErrors = vi.fn();
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: (id) => rows.get(id) ?? null,
     canonicalizeRoot: resolve,
     createState: (binding): State => {
-      const state = { pluginRuntimes: new PluginWorkspaceRuntimes<CreatedWorkspace>({
-        assertWritable: () => undefined,
-        isOpen: (id) => rows.has(id),
-        create: (workspace) => {
-          const result = makeParts(workspace);
-          created.push({ workspaceId: workspace.workspaceId, parts: result });
-          return result as unknown as PluginWorkspaceRuntimeParts;
-        },
-        onPipelineStatus: () => undefined, onCleanupError: cleanupErrors,
-      }) };
+      const state = { collectionAutomations: { notifyClaimed: vi.fn(), pauseForEngineRestart: vi.fn(), resumeAfterEngineRestart: vi.fn() } };
       states.set(binding.workspaceId, state);
       return state;
     },
@@ -124,43 +99,32 @@ function fixture() {
     }),
     defaultEngineBinaryPath: vi.fn(() => resolve("test-engine")),
     isQuitting: () => quitting,
+    recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
-    pluginWorkspaceRuntimes: {
-      current: (id) => {
-        if (!rows.has(id)) return undefined;
-        const lease = authorities.acquire(id);
-        try { return lease.state.pluginRuntimes.current(id); } finally { lease.release(); }
-      },
-    },
+    collectionAutomations: { current: (id) => rows.has(id) ? states.get(id)?.collectionAutomations : undefined },
     notifyRenderer: vi.fn(), notifyAutomationFailuresChanged: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
   const engine = createDesktopEngine(dependencies);
   return {
-    engine, dependencies, client, rows, states, created, cleanupErrors, authorities, daemons, spawns,
+    engine, dependencies, client, rows, states, authorities, daemons, spawns,
     options: () => options,
     setQuitting: (value: boolean) => { quitting = value; },
     setLaunch: (value: typeof launch) => { launch = value; },
     setDaemon: (value: typeof configureDaemon) => { configureDaemon = value; },
-    setParts: (value: typeof makeParts) => { makeParts = value; },
     async addWorkspace(workspaceId: string) {
       const workspace: RegistryEntry = { workspaceId, rootPath: resolve(workspaceId), kind: "personal", mode: "local-first" };
       rows.set(workspaceId, workspace);
-      const lease = authorities.acquire(workspaceId);
-      try { await lease.state.pluginRuntimes.ensure(workspace); } finally { lease.release(); }
+      authorities.acquire(workspaceId).release();
       return workspace;
     },
-    async close(expectedRuntimeError?: Error) {
+    async close() {
       quitting = true;
-      const stopped = await Promise.allSettled([...states].map(([id, state]) => state.pluginRuntimes.stop(id)));
       try { await engine.closeAllRelayTransportWorkspaces(); }
       finally {
         await Promise.all(daemons.map((daemon) => daemon.stop()));
         await authorities.close();
-      }
-      for (const result of stopped) {
-        if (result.status === "rejected" && result.reason !== expectedRuntimeError) throw result.reason;
       }
     },
   };
@@ -396,7 +360,7 @@ describe("desktop engine construction", () => {
     } finally { await f.close(); }
   });
 
-  it("contains binary path failure and shows the startup dialog", async () => {
+  it("contains binary path failure, and shows the startup dialog", async () => {
     const f = fixture(); const error = new Error("binary path failed");
     f.dependencies.defaultEngineBinaryPath = () => { throw error; };
     const engine = createDesktopEngine(f.dependencies);
@@ -405,6 +369,7 @@ describe("desktop engine construction", () => {
       expect(f.dependencies.createRustEngineDaemon).not.toHaveBeenCalled();
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Rust engine failed to start",
         "binary path failed\n\nThe desktop cannot start without the Rust engine.");
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledWith(error, "startup");
       expect(engine.daemon).toBeNull(); expect(engine.sessions).toBeNull(); expect(engine.relayClient).toBeNull();
     } finally { await f.close(); }
   });
@@ -448,141 +413,87 @@ describe("desktop engine construction", () => {
 });
 
 describe("desktop engine restart coordination", () => {
-  it("retires real plugin runtimes before publication and recreates them after launch", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred();
-    let first = true;
-    f.setParts(() => {
-      const initial = first; first = false;
-      return parts(async () => { if (initial) { entered.resolve(); await held.promise; } });
-    });
-    const workspace = await f.addWorkspace("workspace");
-    const original = f.created[0]!.parts;
-    const started = f.engine.start();
-    let waiting: Promise<unknown> | undefined;
-    try {
-      await entered.promise;
-      expect(original.automations.stopForEngineRestart).toHaveBeenCalledOnce();
-      expect(() => f.engine.daemon!.currentClient()).toThrow();
+  it("pauses Collection automations before publication and resumes them after launch", async () => {
+    const f = fixture();
+    await f.addWorkspace("workspace");
+    const collection = f.states.get("workspace")!.collectionAutomations;
+    collection.pauseForEngineRestart.mockImplementation(() => {
       expect(f.engine.sessions).toBeNull();
-      expect(f.dependencies.notifyRenderer).not.toHaveBeenCalled();
-      waiting = f.states.get("workspace")!.pluginRuntimes.ensure(workspace);
-      expect(f.created).toHaveLength(1);
-      held.resolve();
-      expect(await started).toBe(true);
-      await waiting;
-      expect(f.created).toHaveLength(2);
+      expect(collection.resumeAfterEngineRestart).not.toHaveBeenCalled();
+    });
+    try {
+      expect(await f.engine.start()).toBe(true);
+      expect(collection.pauseForEngineRestart).toHaveBeenCalledOnce();
+      expect(collection.resumeAfterEngineRestart).toHaveBeenCalledOnce();
       expect(f.engine.daemon!.currentClient()).toBe(f.client);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith();
-      expect(f.cleanupErrors).not.toHaveBeenCalled();
-    } finally { held.resolve(); await started; await waiting; await f.close(); }
+    } finally { await f.close(); }
   });
 
   it("keeps the composed session and relay owners through a real daemon restart", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred(); const relaunched = deferred();
-    let generation = 0;
-    f.setParts(() => {
-      const current = generation++;
-      return parts(async () => { if (current === 1) { entered.resolve(); await held.promise; } });
-    });
-    const workspace = await f.addWorkspace("workspace");
-    let restarting: Promise<unknown> | undefined;
+    const f = fixture(); const relaunched = deferred();
+    await f.addWorkspace("workspace");
     try {
       await f.engine.start(); await f.client.smokeClosed.promise;
-      const runtimes = f.states.get("workspace")!.pluginRuntimes;
-      await runtimes.ensure(workspace);
       const sessions = f.engine.sessions; const relay = f.engine.relayClient; const daemon = f.engine.daemon;
       const replacement = new Client();
       f.setLaunch(async () => replacement);
       vi.mocked(f.dependencies.notifyRenderer).mockImplementation(() => { relaunched.resolve(); });
       f.spawns[0]!.onExit!(1, null);
-      await entered.promise;
+      await relaunched.promise;
       expect(f.engine.daemon).toBe(daemon);
-      expect(() => daemon!.currentClient()).toThrow();
-      expect(f.engine.sessions).toBe(sessions); expect(f.engine.relayClient).toBe(relay);
-      restarting = runtimes.ensure(workspace);
-      held.resolve(); await relaunched.promise; await restarting;
       expect(daemon!.currentClient()).toBe(replacement);
-      expect(f.created).toHaveLength(3);
+      expect(f.engine.sessions).toBe(sessions); expect(f.engine.relayClient).toBe(relay);
       expect(f.dependencies.launchMarks.daemonReady).toHaveBeenCalledOnce();
-      // The recreated plugin runtime drained once at its start; the claim wakes it again.
-      const woken = f.created[2]!.parts.automations.notifyClaimed.mock.calls.length;
+      // The Collection executor paused before each daemon was published and
+      // resumed once it answered: at the first start and at the restart.
+      const collection = f.states.get("workspace")!.collectionAutomations;
+      expect(collection.pauseForEngineRestart).toHaveBeenCalledTimes(2);
+      expect(collection.resumeAfterEngineRestart).toHaveBeenCalledTimes(2);
       replacement.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
-      expect(f.created[2]!.parts.automations.notifyClaimed).toHaveBeenCalledTimes(woken + 1);
-    } finally { held.resolve(); await restarting; await f.close(); }
+      expect(collection.notifyClaimed).toHaveBeenCalledOnce();
+    } finally { await f.close(); }
   });
 
-  it("holds every physical workspace lease until its own restart preparation drains", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred();
-    f.setParts((workspace) => parts(async () => {
-      if (workspace.workspaceId === "first") { entered.resolve(); await held.promise; }
-    }));
-    await f.addWorkspace("first"); await f.addWorkspace("second");
-    const first = f.states.get("first")!.pluginRuntimes;
-    const second = f.states.get("second")!.pluginRuntimes;
-    const secondPrepared = vi.spyOn(second, "prepareForEngineRestart");
-    const firstResumed = vi.spyOn(first, "resumeAfterEngineRestart");
-    const started = f.engine.start();
-    let drained: Promise<void> | undefined; let disposed = false;
-    try {
-      await entered.promise;
-      drained = f.authorities.invalidate("first").then(() => { disposed = true; });
-      expect(secondPrepared).toHaveBeenCalledOnce();
-      expect(disposed).toBe(false);
-      held.resolve(); await started; await drained;
-      expect(disposed).toBe(true);
-      expect(firstResumed).toHaveBeenCalledOnce();
-    } finally { held.resolve(); await started; await drained; await f.close(); }
-  });
-
-  it("propagates preparation failure to paused plugin callers and the startup failure path", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred(); const error = new Error("host teardown failed");
-    f.setParts(() => parts(async () => { entered.resolve(); await held.promise; throw error; }));
-    const workspace = await f.addWorkspace("workspace");
-    const runtimes = f.states.get("workspace")!.pluginRuntimes;
-    const failed = vi.spyOn(runtimes, "failEngineRestart");
-    const started = f.engine.start();
-    let waiting: Promise<unknown> | undefined;
-    try {
-      await entered.promise;
-      waiting = runtimes.ensure(workspace).catch((failure: unknown) => failure);
-      held.resolve();
-      expect(await started).toBe(false);
-      expect(await waiting).toBe(error);
-      expect(failed).toHaveBeenCalledWith(error);
-      expect(f.engine.sessions).toBeNull();
-    } finally { held.resolve(); await started; await waiting; await f.close(error); }
-  });
-
-  it("reads quitting state on terminal failure and fails only the prepared restart set", async () => {
+  it("records one crash problem per engine crash, then the final verdict", async () => {
     const f = fixture();
-    const workspace = await f.addWorkspace("workspace");
-    const error = new Error("terminal failure");
-    let waiting: Promise<unknown> | undefined;
+    const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await f.engine.start();
-      const runtimes = f.states.get("workspace")!.pluginRuntimes;
-      await runtimes.ensure(workspace);
-      const failed = vi.spyOn(runtimes, "failEngineRestart");
+      const record = vi.mocked(f.dependencies.recordEngineProblem);
+      f.options().onFailure!(exit, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(verdict, true);
+      expect(record.mock.calls).toEqual([[exit, "restarting"], [verdict, "stopped"]]);
+      // A launch ends the crash, so the next failure is a new problem.
+      f.options().onLaunch!();
+      f.options().onFailure!(exit, false);
+      expect(record).toHaveBeenCalledTimes(3);
+      expect(record).toHaveBeenLastCalledWith(exit, "restarting");
+    } finally { await f.close(); }
+  });
+
+  it("reads quitting state on terminal failure", async () => {
+    const f = fixture();
+    const error = new Error("terminal failure");
+    try {
+      await f.engine.start();
       f.options().onFailure!(error, true);
-      expect(failed).not.toHaveBeenCalled();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledWith(error, "stopped");
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("The workspace engine stopped",
         "dohc stopped restarting the workspace engine.\n\nRestart dohc. If this happens again, review the desktop logs. If it continues, reinstall dohc.");
       vi.mocked(f.dependencies.dialog.showErrorBox).mockClear();
-      await f.options().beforePublish!();
-      waiting = runtimes.ensure(workspace).catch((failure: unknown) => failure);
       f.options().onFailure!(error, false);
-      expect(failed).not.toHaveBeenCalled();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenLastCalledWith(error, "restarting");
       f.setQuitting(true);
       f.options().onFailure!(error, true);
-      expect(await waiting).toBe(error);
-      expect(failed).toHaveBeenCalledWith(error);
+      // A failure while dohc quits is the quit, not a crash.
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledTimes(2);
       expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
       expect(f.engine.sessions).not.toBeNull();
-    } finally {
-      f.states.get("workspace")!.pluginRuntimes.failEngineRestart(error);
-      await waiting;
-      await f.close();
-    }
+    } finally { await f.close(); }
   });
 });
 
@@ -643,30 +554,18 @@ describe("desktop engine composed sessions and events", () => {
     } finally { held.resolve(); await closing; await f.close(); }
   });
 
-  it("routes record and automation events to current runtimes and capture events to the renderer", async () => {
-    const f = fixture(); const workspace = await f.addWorkspace("workspace");
+  it("routes automation events to the current workspace and capture events to the renderer", async () => {
+    const f = fixture(); await f.addWorkspace("workspace");
     try {
-      await f.engine.start(); await f.states.get("workspace")!.pluginRuntimes.ensure(workspace);
-      const original = f.created[0]!.parts;
-      const current = f.created.at(-1)!.parts;
-      // The runtime drained once when it started; each pending claim wakes it once more.
-      const drainedAtStart = current.automations.notifyClaimed.mock.calls.length;
-      const payload = { workspaceId: "workspace", collectionPath: "tasks", recordId: "record", author: null,
-        timestamp: 10, actorKind: "human", onBehalfOf: null, depth: 0, source: { originId: "origin", originSeq: 1 } };
-      f.client.emit("record.updated", payload);
+      await f.engine.start();
+      const collection = f.states.get("workspace")!.collectionAutomations;
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "failed" });
-      expect(original.workspaceEvents.handleRecordEvent).not.toHaveBeenCalled();
-      expect(current.workspaceEvents.handleRecordEvent).toHaveBeenCalledWith({ name: "record.updated",
-        data: { collectionPath: "tasks", recordId: "record", author: null, timestamp: 10, actorKind: "human",
-          onBehalfOf: null, depth: 0, source: { originId: "origin", originSeq: 1 } } });
-      expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
+      expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       expect(f.dependencies.notifyAutomationFailuresChanged).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
-      f.client.emit("record.updated", payload);
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
-      expect(current.workspaceEvents.handleRecordEvent).toHaveBeenCalledOnce();
-      expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
+      expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       vi.useFakeTimers();
       f.client.emit("capture.momentRecorded", { workspaceId: "workspace", paths: ["notes.md"], appliedCount: 1, notOwnedCount: 0 });
       await vi.advanceTimersByTimeAsync(100);

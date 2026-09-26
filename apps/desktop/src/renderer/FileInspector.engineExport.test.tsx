@@ -32,6 +32,7 @@ const engineDocState: UseEngineDoc = {
   engineMayHoldDocument: false,
   artifactAssetsInvalid: false,
   deletedWhileEditing: false,
+  goneCause: null,
   deletedDraftId: null,
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
@@ -173,7 +174,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `---\ntitle: Live Title\nicon: 🚀\n---\n${LIVE_BODY}`,
+        `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY}`,
       ),
     );
   });

@@ -5,6 +5,10 @@
 //! change appends a new migration with the next ordinal and flows through the
 //! same runner.
 //!
+//! Before the runner, the open ritual refuses a store whose ledger holds a
+//! migration this list does not define, completed or not: a newer build ran
+//! it.
+//!
 //! The runner walks the list in order. A migration whose completed ledger row
 //! matches this build's checksum is skipped; a completed row with a different
 //! checksum fails closed; a missing row is applied. Body, `user_version`
@@ -31,11 +35,12 @@ pub(crate) struct Migration {
 }
 
 /// Ambient inputs stamped into every ledger row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct MigrationContext {
     pub engine_build: &'static str,
     pub protocol_version: i64,
     pub now_ms: i64,
+    pub initial_root_token: Option<String>,
 }
 
 impl MigrationContext {
@@ -45,6 +50,7 @@ impl MigrationContext {
             engine_build: ENGINE_BUILD,
             protocol_version: ENGINE_STORAGE_PROTOCOL_VERSION,
             now_ms,
+            initial_root_token: None,
         }
     }
 }
@@ -2130,7 +2136,420 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
-/// The frozen, ordered list of migrations this build knows.
+const V2_RELAY_DEFERRED_OPS_DDL: &str = "\
+CREATE TABLE relay_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES sync_identity(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK(origin_seq >= 0),
+    replication_epoch TEXT NOT NULL,
+    stream_identity TEXT NOT NULL,
+    envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+    retained_bytes INTEGER NOT NULL CHECK(retained_bytes > 0),
+    checked_sequence INTEGER NOT NULL DEFAULT 0 CHECK(checked_sequence >= 0),
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+CREATE TABLE relay_deferred_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    is_text INTEGER NOT NULL CHECK(is_text IN (0,1)),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK ((is_text=1 AND text_sha256 IS NOT NULL AND text_sha256=sha256 AND binary_sha256 IS NULL)
+        OR (is_text=0 AND binary_sha256 IS NOT NULL AND binary_sha256=sha256 AND text_sha256 IS NULL)),
+    PRIMARY KEY(workspace_id,origin_id,origin_seq,sha256,is_text),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq)
+        REFERENCES relay_deferred_ops(workspace_id,origin_id,origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_relay_deferred_text_blob ON relay_deferred_blobs(text_sha256);
+CREATE INDEX idx_relay_deferred_binary_blob ON relay_deferred_blobs(binary_sha256);
+";
+
+/// Added and removed records. Reconcile claims them keyed by the moment that
+/// brought the record's file into its Collection or took it out, so a claim
+/// may now hold a third trigger shape. SQLite cannot change a CHECK in
+/// place, so the claims table is rebuilt with every row kept. Capture now
+/// looks up the record a written file is bound to, so bindings gain an index
+/// by object. `merged_moments` names the moments a merge wrote: they replay
+/// another version's changes, which claimed where they were made. A Y.Doc
+/// lineage keeps the author of its first update in `creator_author_json`,
+/// so the settle that creates its file names that author after compaction
+/// folds the update away.
+const V2_AUTOMATION_RECORD_LIFECYCLE_DDL: &str = "\
+CREATE TABLE automation_claims_next (
+    workspace_id          TEXT    NOT NULL,
+    claim_id              TEXT    NOT NULL,
+    automation_id         TEXT    NOT NULL,
+    trigger_origin_id     TEXT,
+    trigger_origin_seq    INTEGER,
+    trigger_history_id    INTEGER,
+    trigger_moment_order  INTEGER,
+    record_id             TEXT    NOT NULL,
+    collection_path       TEXT    NOT NULL,
+    depth                 INTEGER NOT NULL CHECK (depth >= 0),
+    state                 TEXT    NOT NULL
+                          CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts              INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error                 TEXT,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    change_kind           TEXT    NOT NULL DEFAULT 'changed'
+                          CHECK (change_kind IN ('added', 'changed', 'removed')),
+    author_origin_id      TEXT,
+    actor_kind            TEXT
+                          CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation')),
+    on_behalf_of          TEXT,
+    change_fields_json    TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(change_fields_json)),
+    change_fields_omitted INTEGER NOT NULL DEFAULT 0 CHECK (change_fields_omitted >= 0),
+    run                   INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1),
+    PRIMARY KEY (workspace_id, claim_id),
+    CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
+    CHECK ((trigger_origin_id IS NOT NULL) + (trigger_history_id IS NOT NULL)
+           + (trigger_moment_order IS NOT NULL) = 1)
+) STRICT;
+INSERT INTO automation_claims_next
+    (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+     trigger_history_id, record_id, collection_path, depth, state, attempts, error,
+     created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of,
+     change_fields_json, change_fields_omitted, run)
+SELECT workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+       trigger_history_id, record_id, collection_path, depth, state, attempts, error,
+       created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of,
+       change_fields_json, change_fields_omitted, run
+FROM automation_claims;
+DROP TABLE automation_claims;
+ALTER TABLE automation_claims_next RENAME TO automation_claims;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
+    ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
+    WHERE trigger_origin_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_history
+    ON automation_claims(workspace_id, automation_id, trigger_history_id)
+    WHERE trigger_history_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
+    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
+    WHERE trigger_moment_order IS NOT NULL;
+CREATE INDEX idx_automation_claims_state
+    ON automation_claims(workspace_id, state, created_at_ms, claim_id);
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+CREATE INDEX collection_records_by_object
+    ON collection_records(workspace_id, version_id, object_id);
+CREATE TABLE merged_moments (
+    workspace_id TEXT    NOT NULL,
+    moment_order INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, moment_order)
+) STRICT;
+ALTER TABLE ydoc_docs ADD COLUMN creator_author_json TEXT
+    CHECK (creator_author_json IS NULL OR json_valid(creator_author_json));
+";
+
+/// Collection automations post in chat under a third author kind. SQLite
+/// cannot change a CHECK in place, so the message and mention tables are
+/// rebuilt with every row kept; no trigger or foreign key points at either.
+/// A message this computer's automation wrote also records which automation
+/// wrote it and its chain depth. Both stay on this computer: rows from other
+/// computers leave them empty, and only automation rows may carry them.
+const V2_CHAT_AUTOMATION_AUTHOR_DDL: &str = "\
+CREATE TABLE chat_messages_next (
+    workspace_id              TEXT    NOT NULL,
+    thread_id                 TEXT    NOT NULL,
+    message_order             INTEGER NOT NULL,
+    message_id                TEXT    NOT NULL,
+    author_kind               TEXT    NOT NULL
+                              CHECK (author_kind IN ('human', 'agent', 'automation')),
+    author_display_name       TEXT    NOT NULL,
+    author_user_id            TEXT,
+    parent_message_id         TEXT,
+    origin                    TEXT,
+    body                      TEXT    NOT NULL,
+    created_at_ms             INTEGER NOT NULL,
+    author_owner_display_name TEXT,
+    automation_id             TEXT,
+    chain_depth               INTEGER CHECK (chain_depth IS NULL OR chain_depth >= 1),
+    PRIMARY KEY (workspace_id, message_id),
+    UNIQUE (workspace_id, thread_id, message_order),
+    FOREIGN KEY (workspace_id, thread_id)
+      REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE,
+    CHECK ((automation_id IS NULL) = (chain_depth IS NULL)),
+    CHECK (automation_id IS NULL OR author_kind = 'automation')
+) STRICT;
+INSERT INTO chat_messages_next
+    (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name,
+     author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name)
+SELECT workspace_id, thread_id, message_order, message_id, author_kind, author_display_name,
+       author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name
+FROM chat_messages;
+DROP TABLE chat_messages;
+ALTER TABLE chat_messages_next RENAME TO chat_messages;
+CREATE INDEX idx_chat_messages_thread_order
+    ON chat_messages(workspace_id, thread_id, message_order);
+CREATE INDEX idx_chat_messages_thread_created
+    ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_workspace_created
+    ON chat_messages(workspace_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_author_feed
+    ON chat_messages(workspace_id, author_user_id, author_kind, created_at_ms DESC, message_id DESC);
+CREATE TABLE chat_mentions_next (
+    workspace_id  TEXT    NOT NULL,
+    thread_id     TEXT    NOT NULL,
+    message_id    TEXT    NOT NULL,
+    handle        TEXT    NOT NULL,
+    author_kind   TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent', 'automation')),
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, handle)
+) STRICT;
+INSERT INTO chat_mentions_next
+    (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms)
+SELECT workspace_id, thread_id, message_id, handle, author_kind, created_at_ms
+FROM chat_mentions;
+DROP TABLE chat_mentions;
+ALTER TABLE chat_mentions_next RENAME TO chat_mentions;
+CREATE INDEX idx_chat_mentions_handle
+    ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
+";
+
+/// Claims that no record change starts. A Group message, a button press,
+/// and a schedule each key a claim on a trigger key the claim's trigger
+/// names (`message:<id>`, `press:<id>`, `schedule:<dueMs>`), and a message
+/// or schedule claim has no record. Only a message claim is written here;
+/// the button and schedule kinds are fixed now so the claims table is
+/// rebuilt once. SQLite cannot change a CHECK in place, so the rebuild keeps
+/// every row.
+///
+/// A Collection automation subscribes to messages in a Group. Only the
+/// computer that runs such automations registers these subscriptions, and it
+/// claims a Group message the one time it stores that message, however the
+/// message arrives. A message claim carries the message itself, within the
+/// claim budget.
+///
+/// Two partial indexes let settle prune only the claims it can change: done
+/// record claims, and done moment or message claims that still carry facts.
+/// Their state and run are key columns too, so the planner prefers them to
+/// the automation index when the key rows of message claims pile up.
+const V2_AUTOMATION_TRIGGER_KEYS_DDL: &str = "\
+CREATE TABLE automation_group_subscriptions (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    channel_id    TEXT    NOT NULL,
+    starts_with   TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id, channel_id)
+) STRICT;
+CREATE INDEX idx_automation_group_subscriptions_channel
+    ON automation_group_subscriptions(workspace_id, channel_id);
+CREATE TABLE automation_claims_next (
+    workspace_id          TEXT    NOT NULL,
+    claim_id              TEXT    NOT NULL,
+    automation_id         TEXT    NOT NULL,
+    trigger_origin_id     TEXT,
+    trigger_origin_seq    INTEGER,
+    trigger_history_id    INTEGER,
+    trigger_moment_order  INTEGER,
+    trigger_key           TEXT,
+    record_id             TEXT,
+    collection_path       TEXT    NOT NULL,
+    depth                 INTEGER NOT NULL CHECK (depth >= 0),
+    state                 TEXT    NOT NULL
+                          CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts              INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error                 TEXT,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    change_kind           TEXT    NOT NULL DEFAULT 'changed'
+                          CHECK (change_kind IN ('added', 'changed', 'removed', 'message',
+                                                 'button', 'schedule')),
+    author_origin_id      TEXT,
+    actor_kind            TEXT
+                          CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation')),
+    on_behalf_of          TEXT,
+    change_fields_json    TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(change_fields_json)),
+    change_fields_omitted INTEGER NOT NULL DEFAULT 0 CHECK (change_fields_omitted >= 0),
+    run                   INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1),
+    message_json          TEXT    CHECK (message_json IS NULL OR json_valid(message_json)),
+    PRIMARY KEY (workspace_id, claim_id),
+    CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
+    CHECK ((trigger_origin_id IS NOT NULL) + (trigger_history_id IS NOT NULL)
+           + (trigger_moment_order IS NOT NULL) + (trigger_key IS NOT NULL) = 1),
+    CHECK ((trigger_key IS NOT NULL) = (change_kind IN ('message', 'button', 'schedule'))),
+    CHECK ((record_id IS NULL) = (change_kind IN ('message', 'schedule'))),
+    CHECK (message_json IS NULL OR change_kind = 'message')
+) STRICT;
+INSERT INTO automation_claims_next
+    (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+     trigger_history_id, trigger_moment_order, record_id, collection_path, depth, state,
+     attempts, error, created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind,
+     on_behalf_of, change_fields_json, change_fields_omitted, run)
+SELECT workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+       trigger_history_id, trigger_moment_order, record_id, collection_path, depth, state,
+       attempts, error, created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind,
+       on_behalf_of, change_fields_json, change_fields_omitted, run
+FROM automation_claims;
+DROP TABLE automation_claims;
+ALTER TABLE automation_claims_next RENAME TO automation_claims;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
+    ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
+    WHERE trigger_origin_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_history
+    ON automation_claims(workspace_id, automation_id, trigger_history_id)
+    WHERE trigger_history_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
+    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
+    WHERE trigger_moment_order IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_key
+    ON automation_claims(workspace_id, automation_id, trigger_key)
+    WHERE trigger_key IS NOT NULL;
+CREATE INDEX idx_automation_claims_prunable
+    ON automation_claims(workspace_id, automation_id, state, run)
+    WHERE state = 'done' AND run = 1
+      AND trigger_moment_order IS NULL AND change_kind <> 'message';
+CREATE INDEX idx_automation_claims_settled_facts
+    ON automation_claims(workspace_id, automation_id, state, run)
+    WHERE state = 'done' AND run = 1
+      AND (trigger_moment_order IS NOT NULL OR change_kind = 'message')
+      AND (change_fields_json <> '[]' OR message_json IS NOT NULL);
+CREATE INDEX idx_automation_claims_state
+    ON automation_claims(workspace_id, state, created_at_ms, claim_id);
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+";
+
+/// Buttons and schedules. A button claim keys on `press:<press id>` and a
+/// schedule claim on `schedule:<due ms>`, in the trigger key the claims
+/// table already has. One button claim at a time is pending or running per
+/// automation and record, so a double click runs once. A press key is
+/// looked up across the workspace's buttons, so a press id sent to another
+/// button is recognized. `automation_presses` remembers each press for 30
+/// days, so a press sent again after a lost reply finds its claim.
+/// `automation_schedule_marks` records, per schedule, the time up to which
+/// every due time was claimed or skipped.
+const V2_AUTOMATION_BUTTONS_AND_SCHEDULES_DDL: &str = "\
+CREATE UNIQUE INDEX idx_automation_claims_active_button
+    ON automation_claims(workspace_id, automation_id, record_id)
+    WHERE change_kind = 'button' AND state IN ('pending', 'running');
+CREATE INDEX idx_automation_claims_press_key
+    ON automation_claims(workspace_id, trigger_key)
+    WHERE change_kind = 'button';
+CREATE TABLE automation_presses (
+    workspace_id  TEXT    NOT NULL,
+    press_id      TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    record_id     TEXT    NOT NULL,
+    pressed_by    TEXT    NOT NULL,
+    pressed_at_ms INTEGER NOT NULL,
+    claim_id      TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, press_id)
+) STRICT;
+CREATE INDEX automation_presses_by_claim ON automation_presses(workspace_id, claim_id);
+CREATE INDEX automation_presses_by_time ON automation_presses(workspace_id, pressed_at_ms);
+CREATE TABLE automation_schedule_marks (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    schedule_hash TEXT    NOT NULL,
+    through_ms    INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id)
+) STRICT;
+";
+
+/// The count of changes applied to each workspace that did not originate on
+/// this computer (`remote_changes.rs`). A store upgraded to this migration
+/// starts at 0. An owner tells its own accepted drafts from other frames by
+/// digest, so outbox entries gain an index by digest.
+const V2_REMOTE_CHANGES_DDL: &str = "\
+CREATE TABLE remote_changes (
+    workspace_id TEXT    NOT NULL PRIMARY KEY,
+    applied      INTEGER NOT NULL CHECK (applied >= 0)
+) STRICT;
+CREATE INDEX owner_ydoc_outbox_entries_by_digest
+    ON owner_ydoc_outbox_entries(update_digest);
+";
+
+/// A share recipient's direct writes to a Collection's own files: where the
+/// direct lane last read this replica's journal for a share, its two
+/// positions for each file, and the writes it planned and has not finished.
+const V2_SHARE_DIRECT_WRITES_DDL: &str = "\
+CREATE TABLE share_direct_write_state (
+    workspace_id      TEXT    NOT NULL,
+    share_id          TEXT    NOT NULL,
+    scanned_seq       INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    plan_seq          INTEGER CHECK (plan_seq IS NULL OR plan_seq >= -1),
+    plan_more_pending INTEGER NOT NULL DEFAULT 0 CHECK (plan_more_pending IN (0, 1)),
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+CREATE TABLE share_direct_write_marks (
+    workspace_id      TEXT    NOT NULL,
+    share_id          TEXT    NOT NULL,
+    object_id         TEXT    NOT NULL,
+    delivered_through INTEGER NOT NULL CHECK (delivered_through >= -1),
+    decided_through   INTEGER NOT NULL CHECK (decided_through >= delivered_through),
+    PRIMARY KEY (workspace_id, share_id, object_id)
+) STRICT;
+CREATE TABLE share_direct_write_plan (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    ordinal      INTEGER NOT NULL CHECK (ordinal >= 0),
+    submit_id    TEXT    NOT NULL,
+    changes_json TEXT    NOT NULL CHECK (json_valid(changes_json)),
+    objects_json TEXT    NOT NULL CHECK (json_valid(objects_json)),
+    result_json  TEXT    CHECK (result_json IS NULL OR json_valid(result_json)),
+    PRIMARY KEY (workspace_id, share_id, ordinal)
+) STRICT;
+";
+
+// The lineage update the workspace file is known to hold: the head_update_seq a
+// settle covered, or NULL when nothing proves it. An open compares it with the
+// head to tell a lineage that is ahead of its file from one that is not. A
+// writer that rewinds the head must clear it; the check refuses one that
+// rewinds below it.
+const V2_YDOC_SETTLED_UPDATE_SEQ_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
+    CHECK (settled_update_seq IS NULL
+        OR (settled_update_seq >= 0 AND settled_update_seq <= head_update_seq));
+";
+
+/// Group message claims that hold across a handover (ADR 0012).
+///
+/// A frozen Group subscription claims nothing: the computer handing over
+/// freezes them all, and keeps them so a repeated release answers the same.
+/// The coverage names every (automation, message) a host decided, claimed
+/// or skipped as the automation's own post, including those an earlier host
+/// handed over. A message it names never claims again here, and the next
+/// host gets the recent part. The state row holds, per workspace, the host
+/// generation this computer last watched at, so a relay record no newer than
+/// it changes nothing, when it last took a handover, the coverage floor, and
+/// when a Group message last started nothing because it was dated ahead of
+/// this computer's clock or arrived after the floor passed it. Every Group
+/// subscription already here starts now, because the claims kept so far do
+/// not say which older messages were decided.
+const V2_AUTOMATION_GROUP_COVERAGE_DDL: &str = "\
+ALTER TABLE automation_group_subscriptions
+    ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1));
+UPDATE automation_group_subscriptions
+    SET created_at_ms = CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER);
+CREATE TABLE automation_group_coverage (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    message_id    TEXT    NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id, message_id)
+) STRICT;
+CREATE INDEX idx_automation_group_coverage_created
+    ON automation_group_coverage(workspace_id, created_at_ms);
+CREATE TABLE automation_group_state (
+    workspace_id        TEXT    NOT NULL PRIMARY KEY,
+    generation          INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    imported_at_ms      INTEGER NOT NULL DEFAULT 0,
+    floor_ms            INTEGER,
+    ahead_skipped_at_ms INTEGER,
+    late_skipped_at_ms  INTEGER
+) STRICT;
+";
+
+/// The frozen, ordered list of migrations this build knows. No build may
+/// delete or rename the `v2-baseline` ledger row, because an older build
+/// recognizes a newer store only by that row and would otherwise offer
+/// Rebuild for it.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 0,
@@ -2172,6 +2591,67 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 6,
         id: "v2-relay-bootstrap-complete",
         sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 7,
+        id: "v2-relay-deferred-ops",
+        sql: V2_RELAY_DEFERRED_OPS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 8,
+        id: "v2-automation-record-lifecycle",
+        sql: V2_AUTOMATION_RECORD_LIFECYCLE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 9,
+        id: "v2-chat-automation-author",
+        sql: V2_CHAT_AUTOMATION_AUTHOR_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 10,
+        id: "v2-automation-trigger-keys",
+        sql: V2_AUTOMATION_TRIGGER_KEYS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 11,
+        id: "v2-automation-buttons-and-schedules",
+        sql: V2_AUTOMATION_BUTTONS_AND_SCHEDULES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 12,
+        id: "v2-remote-changes",
+        sql: V2_REMOTE_CHANGES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 13,
+        id: "v2-share-direct-writes",
+        sql: V2_SHARE_DIRECT_WRITES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 14,
+        id: "v2-authored-create-intent",
+        sql: "CREATE TABLE authored_create_intent (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), input_json TEXT NOT NULL, stage_id TEXT NOT NULL) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 15,
+        id: "v2-ydoc-settled-update-seq",
+        sql: V2_YDOC_SETTLED_UPDATE_SEQ_DDL,
+        sets_user_version: None,
+    },
+    // Ordinal 16 belongs to another change that may land first.
+    Migration {
+        ordinal: 17,
+        id: "v2-automation-group-coverage",
+        sql: V2_AUTOMATION_GROUP_COVERAGE_DDL,
         sets_user_version: None,
     },
 ];
@@ -2249,6 +2729,44 @@ fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError
         }
     }
     Ok(())
+}
+
+/// The refusal for a store a newer build migrated, or `None`. The ledger must
+/// be this engine's, which the baseline row proves, and hold a row
+/// `migrations` does not define. A newer build wrote that row, whether or not
+/// its migration completed, and this build cannot know what it changed.
+/// Reads only, so the open ritual asks before it writes anything.
+pub(crate) fn newer_build_refusal(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> rusqlite::Result<Option<StorageError>> {
+    let mut ledger = match conn
+        .prepare("SELECT ordinal, id FROM engine_migrations ORDER BY ordinal")
+    {
+        Ok(statement) => statement,
+        // No ledger, no newer migration. The open's validation judges the
+        // rest of the file.
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            return Ok(None);
+        }
+        Err(other) => return Err(other),
+    };
+    let rows = ledger
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !rows.iter().any(|(_, id)| id == BASELINE_MIGRATION_ID) {
+        return Ok(None);
+    }
+    Ok(rows
+        .into_iter()
+        .find(|(_, id)| !migrations.iter().any(|migration| migration.id == id))
+        .map(|(ordinal, id)| StorageError::MigratedByNewerBuild {
+            ordinal,
+            // The id reaches the desktop's technical details; bound it.
+            id: id.chars().take(64).collect(),
+        }))
 }
 
 /// Run every pending migration in `migrations` (ordered) against `conn`,
@@ -2336,6 +2854,13 @@ fn apply_transactional(
             rusqlite::params![ctx.now_ms, ctx.engine_build, ENGINE_SCHEMA_VERSION],
         )
         .map_err(StorageError::migration)?;
+        if let Some(token) = &ctx.initial_root_token {
+            tx.execute(
+                "INSERT INTO shadow_clone (rowid_guard, token) VALUES (1, ?1)",
+                [token],
+            )
+            .map_err(StorageError::migration)?;
+        }
     }
 
     let integrity_ok = quick_check_ok(&tx)?;
@@ -2418,6 +2943,46 @@ mod tests {
                 "v2-relay-bootstrap-complete",
                 "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
             ),
+            (
+                "v2-relay-deferred-ops",
+                "1290cb517b2ca2e246daa474eb9e3ed8ba2446ba64b59f68fd00b016f3492407",
+            ),
+            (
+                "v2-automation-record-lifecycle",
+                "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
+            ),
+            (
+                "v2-chat-automation-author",
+                "d5589dd027faf792b65857b27897731a0da25379df7b421c2c8749985ac1e947",
+            ),
+            (
+                "v2-automation-trigger-keys",
+                "57599cccea26a02546761c6e3ea414ceff2a38d7bdbe631807ed9c4db910f03a",
+            ),
+            (
+                "v2-automation-buttons-and-schedules",
+                "64a653b710618fbc4ae3031f6cd1382c4fab7f8c730c9e79392ca6f45fa0ab00",
+            ),
+            (
+                "v2-remote-changes",
+                "e7025812c2e9291510cd2a8fb99b6f5cd54bc001244b1e36ac399160dda57212",
+            ),
+            (
+                "v2-share-direct-writes",
+                "8a34d5488c9313ad8f2ad2b84cb5c274ff1e2a9a06b962a14141e9188b399c46",
+            ),
+            (
+                "v2-authored-create-intent",
+                "be47dca6cca30c2330af64417998687bd61443adf6ad5677325216f63b9a590e",
+            ),
+            (
+                "v2-ydoc-settled-update-seq",
+                "ff19c6ed0c9ceb9d4fde2fc59e12529c5e428a9ef722d7c4280748e839e1e65a",
+            ),
+            (
+                "v2-automation-group-coverage",
+                "5b2247e5582d3fdb328eae4d4af88ae7c2e9be8acf0e2dd8aa6ccfa81d23afe8",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2472,6 +3037,397 @@ mod tests {
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
+    }
+
+    /// Claims written before trigger keys keep every column and trigger, and
+    /// the rebuilt table takes each kind with its key and record rules.
+    #[test]
+    fn automation_claims_from_before_trigger_keys_upgrade_unchanged() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-automation-trigger-keys")
+            .expect("the trigger key migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("store before trigger keys");
+        conn.execute_batch(
+            "INSERT INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_moment_order, record_id, \
+                  collection_path, depth, state, attempts, error, created_at_ms, updated_at_ms, \
+                  change_kind, change_fields_json, run) \
+                 VALUES ('ws', 'atc_added', 'collection:Trip#stamp', 7, 'rec', 'Trip', 1, \
+                         'failed', 2, 'boom', 3, 4, 'added', '[]', 2);",
+        )
+        .expect("seed a claim");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        type Row = (
+            String,
+            Option<i64>,
+            Option<String>,
+            i64,
+            String,
+            i64,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
+        let row: Row = conn
+            .query_row(
+                "SELECT automation_id, trigger_moment_order, trigger_key, depth, state, \
+                        attempts, error, run, message_json FROM automation_claims",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .expect("upgraded claim");
+        assert_eq!(
+            row,
+            (
+                "collection:Trip#stamp".into(),
+                Some(7),
+                None,
+                1,
+                "failed".into(),
+                2,
+                Some("boom".into()),
+                2,
+                None
+            )
+        );
+        let insert = |claim_id: &str,
+                      key: Option<&str>,
+                      record_id: Option<&str>,
+                      kind: &str,
+                      message_json: Option<&str>| {
+            conn.execute(
+                "INSERT INTO automation_claims \
+                     (workspace_id, claim_id, automation_id, trigger_key, record_id, \
+                      collection_path, depth, state, created_at_ms, updated_at_ms, change_kind, \
+                      message_json) \
+                 VALUES ('ws', ?1, 'collection:Trip#task', ?2, ?3, 'Trip', 0, 'pending', 5, 5, \
+                         ?4, ?5)",
+                rusqlite::params![claim_id, key, record_id, kind, message_json],
+            )
+        };
+        let message = Some("{\"id\":\"message-1\"}");
+        insert("atc_message", Some("message:1"), None, "message", message)
+            .expect("a message claim");
+        insert("atc_button", Some("press:1"), Some("rec"), "button", None)
+            .expect("a button claim names its record");
+        insert("atc_schedule", Some("schedule:9"), None, "schedule", None)
+            .expect("a schedule claim has no record");
+        for (claim_id, key, record_id, kind, message_json, why) in [
+            (
+                "atc_again",
+                Some("message:1"),
+                None,
+                "message",
+                None,
+                "one claim per key and automation",
+            ),
+            (
+                "atc_kind",
+                Some("message:2"),
+                Some("rec"),
+                "changed",
+                None,
+                "a record change keys on its change, not a trigger key",
+            ),
+            (
+                "atc_nokey",
+                None,
+                None,
+                "message",
+                None,
+                "a message claim names its key",
+            ),
+            (
+                "atc_record",
+                Some("message:3"),
+                Some("rec"),
+                "message",
+                None,
+                "a message claim has no record",
+            ),
+            (
+                "atc_norecord",
+                Some("press:2"),
+                None,
+                "button",
+                None,
+                "a button claim names its record",
+            ),
+            (
+                "atc_json",
+                Some("press:3"),
+                Some("rec"),
+                "button",
+                message,
+                "only a message claim carries a message",
+            ),
+        ] {
+            assert!(
+                insert(claim_id, key, record_id, kind, message_json).is_err(),
+                "{why}"
+            );
+        }
+        conn.execute(
+            "INSERT INTO automation_group_subscriptions \
+                 (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
+             VALUES ('ws', 'collection:Trip#task', 'channel-1', '/task', 1)",
+            [],
+        )
+        .expect("a Group subscription");
+    }
+
+    /// One button claim at a time is pending or running per automation and
+    /// record, and a store gains the press and schedule mark tables.
+    #[test]
+    fn one_button_claim_is_active_per_automation_and_record() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("migrate");
+        let insert = |claim_id: &str, record_id: &str, state: &str| {
+            conn.execute(
+                "INSERT INTO automation_claims \
+                     (workspace_id, claim_id, automation_id, trigger_key, record_id, \
+                      collection_path, depth, state, created_at_ms, updated_at_ms, change_kind) \
+                 VALUES ('ws', ?1, 'collection:Invoices#pay', 'press:' || ?1, ?2, 'Invoices', \
+                         0, ?3, 5, 5, 'button')",
+                rusqlite::params![claim_id, record_id, state],
+            )
+        };
+        insert("atc_done", "rec", "done").expect("a finished press");
+        insert("atc_failed", "rec", "failed").expect("a failed press");
+        insert("atc_pending", "rec", "pending").expect("an unfinished press");
+        assert!(
+            insert("atc_running", "rec", "running").is_err(),
+            "a second unfinished press of the same button on the same record"
+        );
+        insert("atc_other", "rec_2", "running").expect("another record");
+        conn.execute_batch(
+            "INSERT INTO automation_presses \
+                 (workspace_id, press_id, automation_id, record_id, pressed_by, pressed_at_ms, \
+                  claim_id) \
+                 VALUES ('ws', 'p1', 'collection:Invoices#pay', 'rec', 'user:ada', 5, \
+                         'atc_pending'); \
+             INSERT INTO automation_schedule_marks \
+                 (workspace_id, automation_id, schedule_hash, through_ms) \
+                 VALUES ('ws', 'collection:Invoices#report', 'h', 5);",
+        )
+        .expect("a press and a schedule mark");
+    }
+
+    /// Every Group subscription from before the coverage starts at the
+    /// upgrade, so a later handover replays no message from before it, and
+    /// stays on.
+    #[test]
+    fn group_subscriptions_from_before_the_coverage_start_at_the_upgrade() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-automation-group-coverage")
+            .expect("the Group coverage migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("the schema before it");
+        conn.execute_batch(
+            "INSERT INTO automation_group_subscriptions \
+                 (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
+                 VALUES ('ws', 'collection:Trip#task', 'trip', '/task', 1);",
+        )
+        .expect("a subscription");
+        let clock = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64
+        };
+        let upgrading = clock();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let upgraded = clock();
+        let (start, frozen): (i64, i64) = conn
+            .query_row(
+                "SELECT created_at_ms, frozen FROM automation_group_subscriptions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("subscription");
+        assert!(
+            (upgrading - 1..=upgraded + 1).contains(&start),
+            "{start} is the upgrade"
+        );
+        assert_eq!(frozen, 0, "a subscription stays on");
+        assert!(
+            conn.execute("UPDATE automation_group_subscriptions SET frozen = 2", [],)
+                .is_err(),
+            "frozen is a flag"
+        );
+        let coverage: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM automation_group_coverage",
+                [],
+                |row| row.get(0),
+            )
+            .expect("coverage");
+        assert_eq!(coverage, 0);
+    }
+
+    /// Messages and mentions written before automations could post keep every
+    /// column, and the rebuilt tables take the automation kind with its local
+    /// provenance on automation rows only.
+    #[test]
+    fn chat_rows_from_before_automation_authors_upgrade_unchanged() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-chat-automation-author")
+            .expect("the chat automation author migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("store before automation authors");
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', NULL, NULL, 'Hi @ana', 2, NULL), \
+                        ('ws', 'thread-1', 1, 'message-2', 'agent', 'Helper', 'user-ice', 'message-1', 'cli', 'Done', 3, 'Ice'); \
+             INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 'message-1', 'ana', 'human', 2);",
+        )
+        .expect("seed pre-upgrade chat rows");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT message_id, author_kind, author_display_name, author_user_id, parent_message_id, \
+                        origin, body, created_at_ms, author_owner_display_name, automation_id, chain_depth \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .expect("message query")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?))
+            })
+            .expect("messages")
+            .collect::<Result<_, _>>()
+            .expect("message rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "message-1".into(),
+                    "human".into(),
+                    "Ice".into(),
+                    Some("user-ice".into()),
+                    None,
+                    None,
+                    "Hi @ana".into(),
+                    2,
+                    None,
+                    None,
+                    None
+                ),
+                (
+                    "message-2".into(),
+                    "agent".into(),
+                    "Helper".into(),
+                    Some("user-ice".into()),
+                    Some("message-1".into()),
+                    Some("cli".into()),
+                    "Done".into(),
+                    3,
+                    Some("Ice".into()),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let mention: (String, String) = conn
+            .query_row(
+                "SELECT handle, author_kind FROM chat_mentions WHERE message_id = 'message-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mention");
+        assert_eq!(mention, ("ana".to_owned(), "human".to_owned()));
+
+        let insert = |kind: &str, automation_id: Option<&str>, depth: Option<i64>, order: i64| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      body, created_at_ms, automation_id, chain_depth) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Stamp the finish date', 'Done', 4, ?4, ?5)",
+                rusqlite::params![order, format!("message-{order}"), kind, automation_id, depth],
+            )
+        };
+        insert(
+            "automation",
+            Some("collection:Trip/Tasks#stamp"),
+            Some(1),
+            10,
+        )
+        .expect("a local automation message");
+        insert("automation", None, None, 11).expect("an automation message from another computer");
+        assert!(
+            insert("human", Some("collection:Trip/Tasks#stamp"), Some(1), 12).is_err(),
+            "only automation rows name an automation"
+        );
+        assert!(
+            insert("automation", Some("collection:Trip/Tasks#stamp"), None, 13).is_err(),
+            "an automation id comes with its depth"
+        );
+        assert!(
+            insert(
+                "automation",
+                Some("collection:Trip/Tasks#stamp"),
+                Some(0),
+                14
+            )
+            .is_err(),
+            "an automation write is at depth 1 or more"
+        );
+        conn.execute(
+            "INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws', 'thread-1', 'message-10', 'ana', 'automation', 4)",
+            [],
+        )
+        .expect("an automation mention");
     }
 
     /// Plugin subscriptions and claims written before the automation facts
@@ -2661,6 +3617,125 @@ mod tests {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
     }
 
+    /// The ordinal a newer build's first migration takes: one past this
+    /// build's last, so the fixtures hold whatever this build ships.
+    fn next_ordinal() -> u32 {
+        BASELINE_MIGRATIONS.last().expect("a migration").ordinal + 1
+    }
+
+    /// This build's migrations plus newer stand-ins at the following ordinals.
+    fn newer_list(ids: &[&'static str]) -> Vec<Migration> {
+        let mut newer = BASELINE_MIGRATIONS.to_vec();
+        for (offset, &id) in (0u32..).zip(ids) {
+            newer.push(Migration {
+                ordinal: next_ordinal() + offset,
+                id,
+                sql: match offset {
+                    0 => "CREATE TABLE from_a_newer_build_0 (x INTEGER);",
+                    _ => "CREATE TABLE from_a_newer_build_1 (x INTEGER);",
+                },
+                sets_user_version: None,
+            });
+        }
+        newer
+    }
+
+    /// An older build cannot know what a newer build's migration changed, so
+    /// it must not run against the store.
+    #[test]
+    fn a_shorter_migration_list_refuses_a_store_with_an_extra_completed_row() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let newer = newer_list(&["from-a-newer-build"]);
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("the newer build migrates");
+
+        assert!(
+            newer_build_refusal(&conn, &newer)
+                .expect("read ledger")
+                .is_none(),
+            "the newer build opens its store"
+        );
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("a shorter list refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "a newer build ran migration {} (from-a-newer-build), which this build does not define",
+                next_ordinal()
+            )
+        );
+    }
+
+    /// A store two migrations ahead is refused by naming the first migration
+    /// this build does not define.
+    #[test]
+    fn a_store_two_migrations_ahead_names_the_first_unknown_migration() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let newer = newer_list(&["newer-first", "newer-second"]);
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("migrate two ahead");
+
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("the older build refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "a newer build ran migration {} (newer-first), which this build does not define",
+                next_ordinal()
+            )
+        );
+    }
+
+    /// A newer build's migration that stopped before it completed can still
+    /// have changed the store. Its started row alone refuses the store.
+    #[test]
+    fn a_newer_builds_unfinished_migration_refuses_the_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("migrate");
+        conn.execute(
+            "INSERT INTO engine_migrations \
+             (ordinal, id, checksum, engine_build, protocol_version, transactional, started_at) \
+             VALUES (?1, 'from-a-newer-build', 'newer', 'newer', 1, 0, 2)",
+            [i64::from(next_ordinal())],
+        )
+        .expect("a newer build starts a migration and stops");
+
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("the started row refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+    }
+
+    /// Only this engine's ledger names a newer build. A table with the same
+    /// name but no baseline row belongs to something else, and the open's own
+    /// checks classify it.
+    #[test]
+    fn a_ledger_without_the_baseline_row_names_no_newer_build() {
+        let dir = tempdir();
+        let conn = open_bare(&dir.join("engine.db"));
+        conn.execute_batch(
+            "CREATE TABLE engine_migrations (ordinal INTEGER, id TEXT);
+             INSERT INTO engine_migrations VALUES (0, 'someone-elses-migration');",
+        )
+        .expect("a foreign ledger");
+        assert!(
+            newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+                .expect("read ledger")
+                .is_none()
+        );
+    }
+
     /// A one-shot crash injector local to the storage crate's tests (the
     /// testkit's `ScriptedFaults` cannot be used here without a dependency
     /// cycle).
@@ -2703,7 +3778,9 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_MIGRATIONS.len() as u32,
+            ordinal: BASELINE_MIGRATIONS
+                .last()
+                .map_or(0, |last| last.ordinal + 1),
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,
@@ -3093,6 +4170,51 @@ mod tests {
             })
             .expect("foreign key check");
         assert_eq!(fk_violations, 0);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn initial_root_binding_survives_both_migration_crash_boundaries() {
+        for point in [
+            FaultPoint::MigrateBeforeLedgerCommit,
+            FaultPoint::MigrateBetweenSteps,
+        ] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut ctx = MigrationContext::current(1_000);
+            ctx.initial_root_token = Some("root-token".to_owned());
+            {
+                let mut conn = open_bare(&path);
+                assert_eq!(
+                    run_migrations(
+                        &mut conn,
+                        BASELINE_MIGRATIONS,
+                        &ctx,
+                        &OneShotCrash::at(point)
+                    )
+                    .unwrap(),
+                    MigrationOutcome::Crashed,
+                );
+            }
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 2_000, "root-token", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            drop(reopened);
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 3_000, "other-root", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            assert!(!reopened.bind_root_token("other-root", &NoFaults).unwrap());
+        }
+    }
+
+    #[test]
+    fn initial_root_binding_never_adopts_an_existing_unbound_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        drop(crate::EngineStore::open(&path, 1_000).unwrap());
+        let mut reopened =
+            crate::EngineStore::open_with_root_token(&path, 2_000, "new-root", None).unwrap();
+        assert!(!reopened.bind_root_token("new-root", &NoFaults).unwrap());
     }
 
     #[cfg(feature = "fault-injection")]

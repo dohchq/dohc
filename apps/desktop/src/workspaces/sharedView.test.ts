@@ -899,6 +899,127 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("captures an edit to a Collection's automations as text and leaves its schema alone", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "trip/automations.yaml";
+    const edited = "version: 1\nautomations: []\n# packing list\n";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("trip/collection.yaml", "name: Trip\n");
+    relay.addWrite(path, "version: 1\nautomations: []\n");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), edited, "utf8");
+
+    const store = harness.openStore(target);
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const beforeIds = new Set(before.moments.map((moment) => moment.id));
+
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      expect(refreshed.changedPaths).toBe(1);
+      expect(refreshed.unjournalablePaths).toEqual([]);
+
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const captured = after.moments.filter((moment) => !beforeIds.has(moment.id));
+      expect(captured.map((moment) => moment.path)).toEqual([path]);
+      const moment = await store.getMoment({ workspaceId: WORKSPACE, momentId: captured[0]!.id });
+      expect(moment?.payload.after.text).toBe(edited);
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ contentKind: "text", text: edited });
+    } finally {
+      await store.close();
+    }
+  });
+
+  // A Collection file stored as binary before capture read it as text. Its
+  // bytes on disk are the same, so nothing changed.
+  async function binaryAutomationsView() {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "trip/automations.yaml";
+    const text = "version: 1\nautomations: []\n";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("trip/collection.yaml", "name: Trip\n");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    const store = harness.openStore(target);
+    const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+    await store.writeBinaryFile({
+      workspaceId: WORKSPACE,
+      versionId: main.id,
+      path,
+      bytes: Buffer.from(text, "utf8"),
+      metadata: { origin: "sync" },
+    });
+    await writeFile(join(rootDir, path), text, "utf8");
+    return { rootDir, harness, store, target, path, text };
+  }
+
+  it.each(["edit", "view"] as const)(
+    "leaves a Collection file stored as binary alone when its bytes are unchanged (%s)",
+    async (access) => {
+      const { rootDir, harness, store, target, path, text } = await binaryAutomationsView();
+      try {
+        const before = await momentIds(store);
+        const refreshed = await reconcileStandaloneForTest({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access },
+          recordRefusals: async () => undefined,
+          ended: false,
+        });
+        if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+        expect(refreshed).toMatchObject({ status: "unchanged", unjournalablePaths: [] });
+        expect(await momentIds(store)).toEqual(before);
+        expect(await readFile(join(rootDir, path), "utf8")).toBe(text);
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it("repairs an interrupted pull over a Collection file stored as binary without a collision", async () => {
+    const { rootDir, store, path } = await binaryAutomationsView();
+    try {
+      await writePendingMaterializationPaths(rootDir, [path]);
+      await writeFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "");
+      const before = await momentIds(store);
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
+      ).resolves.toMatchObject({ unjournalablePaths: [] });
+      expect(await momentIds(store)).toEqual(before);
+      await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).resolves.toEqual({
+        pendingPaths: new Set(),
+        collisionPaths: new Set(),
+        pullInFlight: false,
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   it("repairs an interrupted pull for a view-level share without journaling", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
@@ -6414,7 +6535,7 @@ describe("shared view refresh", () => {
     ["a cased access", { paths: ["docs"], versionId: null, access: "View" }],
     ["a padded access", { paths: ["docs"], versionId: null, access: "edit " }],
     [
-      "a chat-channel access value",
+      "a chat access value",
       { paths: ["docs"], versionId: null, access: "read-write" },
     ],
   ];

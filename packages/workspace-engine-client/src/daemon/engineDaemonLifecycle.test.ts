@@ -373,7 +373,7 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("fails publication when retiring the previous hosts fails", async () => {
-    const failure = new Error("plugin host teardown failed");
+    const failure = new Error("host teardown failed");
     const client = new FakeClient();
     const onLaunch = vi.fn();
     const lifecycle = new EngineDaemonLifecycle({

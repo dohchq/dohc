@@ -72,6 +72,37 @@ export async function engineDaemonPids(appPid: number): Promise<number[]> {
     .map((row) => row.pid);
 }
 
+/**
+ * Hard-kills the app and every process under it, the way a crash does: no
+ * graceful exit, no quit-time settle. The launcher is a shim whose child is the
+ * real main process, so killing the launcher alone would leave the app running.
+ */
+export async function hardKillAppTree(appPid: number): Promise<void> {
+  if (process.platform === "win32") {
+    await execFileAsync("taskkill.exe", ["/PID", String(appPid), "/T", "/F"], {
+      windowsHide: true,
+    }).catch(() => undefined);
+    return;
+  }
+  const rows = await processTable();
+  const tree = new Set<number>([appPid]);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const row of rows) {
+      if (tree.has(row.pid) || !tree.has(row.parentPid)) continue;
+      tree.add(row.pid);
+      changed = true;
+    }
+  }
+  for (const pid of tree) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
 /** Hard-kills a pid the way a crash or `taskkill /F` would: no graceful exit. */
 export async function hardKillPid(pid: number): Promise<void> {
   if (process.platform === "win32") {

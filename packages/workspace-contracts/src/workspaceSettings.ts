@@ -1,12 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
-import { NonEmptyString } from "./baseSchemas";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   ATTACHMENT_LOCATIONS,
-  DEFAULT_DRIVER_ID_MAX_LENGTH,
-  DEFAULT_MODEL_MAX_LENGTH,
   WORKSPACE_PREVIEW_MODES,
   WORKSPACE_SETTINGS_DEFAULTS,
 } from "./workspaceSettingsValues";
@@ -25,20 +22,6 @@ export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 // unhandled exception instead of a rejected edit.
 const WorkspaceAgentsSettings = Schema.Struct({
   mcpAutoStart: Schema.Boolean,
-  defaultDriverId: Schema.NullOr(
-    NonEmptyString.check(
-      Schema.isMaxLength(DEFAULT_DRIVER_ID_MAX_LENGTH, {
-        message: `Default driver IDs must contain ${DEFAULT_DRIVER_ID_MAX_LENGTH} characters or fewer.`,
-      }),
-    ),
-  ),
-  defaultModel: Schema.NullOr(
-    NonEmptyString.check(
-      Schema.isMaxLength(DEFAULT_MODEL_MAX_LENGTH, {
-        message: `Default models must contain ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer.`,
-      }),
-    ),
-  ),
 }).mapFields(Struct.map(Schema.mutableKey));
 
 const WorkspaceSitesSettings = Schema.Struct({

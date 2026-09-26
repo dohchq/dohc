@@ -1,3 +1,4 @@
+import { namedShareOrigin } from "./relayLogInputs";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { MAX_BLOB_BYTES, type SyncRelayHandler } from "./server";
@@ -311,7 +312,7 @@ describe("the proposal route's level gate", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
   });
 
-  it("refuses a chat-channel grant's submit with the same bytes", async () => {
+  it("refuses a chat grant's submit with the same bytes", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -711,7 +712,7 @@ describe("the origin an accept writes", () => {
     ).toBe(200);
 
     const log = await granter.log();
-    const recipientOrigin = `share:${shareId}:origin-recipient`;
+    const recipientOrigin = namedShareOrigin(shareId, RECIPIENT, "origin-recipient");
     expect(log.filter((op) => op.originId === recipientOrigin).length).toBe(2);
     expect(
       log.filter((op) => op.originId === recipientOrigin && op.opKind === "moment.append").length,

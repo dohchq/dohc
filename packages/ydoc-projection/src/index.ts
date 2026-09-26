@@ -14,8 +14,18 @@ export {
   markdownToYDoc,
   plainTextToYDoc,
   serializeRichdocBody,
+  startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
 export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
 export { codeBlockFence } from "./markdown-fence.js";
+export {
+  documentCreateUpdate,
+  FRONTMATTER_REFUSAL,
+  documentEditUpdate,
+  settledDocumentMarkdown,
+  type DocumentEditOptions,
+  documentMarkdown,
+  type DocumentEdit,
+} from "./document-edit.js";

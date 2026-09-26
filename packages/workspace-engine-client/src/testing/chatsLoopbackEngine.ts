@@ -54,6 +54,8 @@ interface WorkspaceState {
   runs: Map<string, ChatRun>;
   runLinks: Map<string, string>;
   pauses: Map<string, ChatThreadPause>;
+  // Each automation message's chain depth, which stays in the engine.
+  chainDepths: Map<string, number>;
   scanHighWaterMs: number;
 }
 
@@ -70,6 +72,22 @@ type SeedChannelInput = {
 };
 
 type LedgerEntry = { fingerprint: string; result: JsonValue };
+
+/** The engine's rule: an automation message names its Collection automation, and only it does. */
+function messageAutomation(authorKind: string, value: unknown): ChatMessage["automation"] {
+  if (value === undefined || value === null) {
+    if (authorKind === "automation") throw new Error("invalid-input");
+    return undefined;
+  }
+  if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-input");
+  const { automationId, chainDepth, ...rest } = value as Record<string, unknown>;
+  const match = typeof automationId === "string" ? /^collection:(.+)#([^#]+)$/su.exec(automationId) : null;
+  if (Object.keys(rest).length > 0 || !match || automationId !== (automationId as string).trim() ||
+    typeof chainDepth !== "number" || !Number.isInteger(chainDepth) || chainDepth < 1 || chainDepth > 64) {
+    throw new Error("invalid-input");
+  }
+  return { automationId: automationId as string, collectionPath: match[1]! };
+}
 
 function strictObject(
   value: JsonValue,
@@ -569,7 +587,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
+        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -583,7 +601,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
+        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -730,6 +748,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run.failureReason = "reclaimed-crashed";
       }
       if (dispatch.attemptCount < 2) {
+        if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
         dispatch.state = "pending";
         delete dispatch.runId;
         delete dispatch.failureReason;
@@ -1475,7 +1494,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const messageId = requiredString(params, "messageId", "invalid-message-body");
     if (state.messages.has(messageId)) throw new Error("target-exists");
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
-    if (authorKind !== "human" && authorKind !== "agent") throw new Error("invalid-sender");
+    if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
+    const automation = messageAutomation(authorKind, params.automation);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1493,11 +1513,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
       author,
       body,
       createdAtMs: atMs,
+      ...(automation ? { automation } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
     if (ownerName !== undefined) {
-      if (authorKind !== "agent") throw new Error("invalid-sender");
+      if (authorKind === "human") throw new Error("invalid-sender");
       message.authorOwnerDisplayName = normalizeNonempty(ownerName, "invalid-sender");
     }
     const authorUserId = optionalString(params, "authorUserId");
@@ -1526,6 +1547,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     state.messages.set(messageId, message);
+    if (automation) state.chainDepths.set(messageId, (params.automation as { chainDepth: number }).chainDepth);
     const ids = state.threadMessages.get(threadId) ?? [];
     ids.push(messageId);
     state.threadMessages.set(threadId, ids);
@@ -1638,6 +1660,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
                     opening.body.length > 500
                       ? `${opening.body.slice(0, 500).trimEnd()}…`
                       : opening.body,
+                  ...(opening.automation ? { automation: opening.automation } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }
@@ -1682,9 +1705,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       lines.push("");
     }
     for (const message of threadMessages(state, thread.id)) {
-      const author = message.author.kind === "agent"
-        ? `${message.author.displayName} (agent)`
-        : message.author.displayName;
+      const author = message.author.kind === "human"
+        ? message.author.displayName
+        : `${message.author.displayName} (${message.author.kind})`;
       lines.push(`## ${author}`, "", message.body, "");
     }
     const text = `${lines.join("\n").trimEnd()}\n`;
@@ -2573,7 +2596,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         (row) => row.state === "running" && row.runId === runId,
       );
       if (existingRun.endedAtMs === undefined && existingDispatch) {
-        return jsonResult({ dispatch: existingDispatch, run: existingRun });
+        return jsonResult({ dispatch: existingDispatch, run: existingRun, chainDepth: this.runChainDepth(state, runId) });
       }
       throw new Error("invalid-input");
     }
@@ -2614,7 +2637,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const logPath = optionalString(params, "logPath");
     if (logPath !== undefined) run.logPath = logPath;
     state.runs.set(runId, run);
-    return jsonResult({ dispatch, run });
+    return jsonResult({ dispatch, run, chainDepth: this.runChainDepth(state, runId) });
+  }
+
+  // The engine's rule: one more than the deepest automation message among
+  // the run's triggers, or 0 when only people's messages started it.
+  private runChainDepth(state: WorkspaceState, runId: string): number {
+    let deepest = 0;
+    for (const dispatch of state.dispatches.values()) {
+      if (dispatch.runId !== runId) continue;
+      const depth = state.chainDepths.get(dispatch.triggerMessageId);
+      if (depth !== undefined) deepest = Math.max(deepest, depth + 1);
+    }
+    return deepest;
   }
 
   private dispatchListPending(
@@ -2641,7 +2676,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       const runs = unended.filter((run) =>
         run.runId === dispatch.runId && run.triggerMessageId === dispatch.triggerMessageId);
       if (runs.length !== 1) throw new Error("state-corrupt");
-      claims.push({ dispatch, run: runs[0]! });
+      claims.push({ dispatch, run: runs[0]!, chainDepth: this.runChainDepth(state, runs[0]!.runId) });
     }
     if (unended.some((run) => !claims.some((claim) => claim.run.runId === run.runId))) {
       throw new Error("state-corrupt");
@@ -2839,11 +2874,25 @@ export class ChatsLoopbackEngine implements EngineTransport {
       dispatch.runId === runId &&
       dispatch.attemptCount < 2;
     if (!applies || !dispatch) return jsonResult(false);
+    const atMs = this.tick();
+    this.requeueCovered(state, runId, 2, atMs);
     dispatch.state = "pending";
     delete dispatch.runId;
     delete dispatch.failureReason;
-    dispatch.updatedAtMs = this.tick();
+    dispatch.updatedAtMs = atMs;
     return jsonResult(true);
+  }
+
+  // The engine's rule: an interrupted run's covered triggers go back to the
+  // queue with its first trigger, unless they have used their attempts.
+  private requeueCovered(state: WorkspaceState, runId: string, maxAttempts: number, atMs: number): void {
+    for (const covered of state.dispatches.values()) {
+      if (covered.runId !== runId || covered.state !== "done" || covered.attemptCount >= maxAttempts) continue;
+      covered.state = "pending";
+      delete covered.runId;
+      delete covered.failureReason;
+      covered.updatedAtMs = atMs;
+    }
   }
 
   private appQuitRecoveries(
@@ -2923,6 +2972,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         runs: new Map(),
         runLinks: new Map(),
         pauses: new Map(),
+        chainDepths: new Map(),
         scanHighWaterMs: -1,
       };
       this.workspaces.set(id, state);

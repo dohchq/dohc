@@ -5,8 +5,6 @@ import { cornerRadius, EditorTabs } from "./EditorTabs";
 import {
   CHATS_TAB_PATH,
   momentDiffTabPath,
-  pluginDetailsTabPath,
-  pluginPanelTabPath,
   siteTabPath,
   transactionalCollectionTabPath,
 } from "./workbenchState";
@@ -100,79 +98,6 @@ describe("EditorTabs strip scrolling", () => {
     );
 
     expect(screen.getByRole("tab", { name: "History change" })).toBeTruthy();
-  });
-
-  it("uses readable labels for plugin panel tabs", () => {
-    const path = pluginPanelTabPath("hello/plugin", "main panel");
-    render(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={[{ path }]}
-        activeTab={path}
-        activeTabDirty={false}
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-
-    const tab = screen.getByRole("tab", { name: "main panel" });
-    expect(tab.title).toBe("hello/plugin — main panel");
-  });
-
-  // The row and the page both head a plugin with the name its manifest
-  // declares. The tab is the third surface showing the same plugin, and it
-  // reads from the same map the web app tabs take their titles from.
-  it("names a plugin details tab with the display name the shell knows", () => {
-    const path = pluginDetailsTabPath("hello-plugin", "hello-plugin");
-    render(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={[{ path }]}
-        activeTab={path}
-        activeTabDirty={false}
-        tabLabels={new Map([[path, "Hello Plugin"]])}
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-
-    const tab = screen.getByRole("tab", { name: "Hello Plugin" });
-    // The tooltip stays the id: it is what tells a plugin's two tabs apart.
-    expect(tab.title, "ignore the label again: the tab falls back to 'hello-plugin'.").toBe("Plugin details: hello-plugin");
-  });
-
-  it("falls back to the plugin id until the shell knows a display name", () => {
-    const path = pluginDetailsTabPath("hello-plugin", "hello-plugin");
-    render(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={[{ path }]}
-        activeTab={path}
-        activeTabDirty={false}
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-
-    expect(screen.getByRole("tab", { name: "hello-plugin" })).toBeTruthy();
   });
 
   it("is a single horizontal row: overflow-x scrolls, overflow-y is locked", () => {
@@ -861,7 +786,6 @@ describe("EditorTabs overlay scrollbar", () => {
   it.each([
     ["Chats", CHATS_TAB_PATH],
     ["a site preview", siteTabPath("client-portal")],
-    ["a plugin panel", pluginPanelTabPath("hello-plugin", "main")],
   ])("disables Split Right when %s is the active tab", (_label, path) => {
     const onCreateGroupRight = vi.fn();
     render(

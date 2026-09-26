@@ -14,7 +14,9 @@ use dohc_engine_collab::Ydoc;
 use dohc_engine_domain::{VersionedTextStore, WriteText, reconcile_collections_in_tx};
 use dohc_engine_protocol::{
     error::ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
@@ -231,6 +233,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             .unwrap_or(since);
         return TestResponse::json(json!({
             "ops": rows,
+            "ownOriginId": "relay:share-member:authenticated-origin",
             "nextCursor": next,
             "hasMore": false,
         }));
@@ -621,8 +624,12 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
     );
 }
 
+// The document stays open and idle when sync turns on. Its last record came
+// before enrollment, so no record claimed it. The push that makes enrollment
+// ready claims it through its session and sends it, and the session's next
+// write then succeeds under that claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
+async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -656,7 +663,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     )
     .await;
     seed_sync_identity(&transport, &handle, &mut id).await;
-    call(
+    let first = call(
         &transport,
         &handle,
         &mut id,
@@ -664,6 +671,41 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
         json!({ "workspaceId": workspace_id }),
     )
     .await;
+    assert!(
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .pushed_workspace_ops
+            .iter()
+            .any(|op| op["opKind"] == "ydoc.update"),
+        "the first push must send the open document without another edit: {first}"
+    );
+
+    // The open session writes and saves again, with nothing refused as stale.
+    let next =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(24, " and after"));
+    let recorded = call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": next }),
+    )
+    .await;
+    assert!(recorded["lineageClaimId"].is_string());
+    let settled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(
+        settled["content"],
+        json!("edited before enrollment and after")
+    );
 
     let (origin_id, pushed) = {
         let state = relay.state.lock().expect("relay state");
@@ -726,8 +768,405 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     assert_eq!(
         peer_text.as_deref(),
         Some("edited before enrollment"),
-        "the first enrollment must replicate a live lineage before its first settle"
+        "the first push must replicate a live lineage before its first settle"
     );
+}
+
+/// Opens a relay workspace without the capture driver, so only the RPCs a
+/// test sends change the store.
+async fn open_uncaptured_workspace(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    relay: &FakeRelay,
+    workspace_id: &str,
+) -> WorkspaceHandle {
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none",
+                    "relay": {
+                        "baseUrl": relay.base_url,
+                        "bearerToken": BEARER,
+                        "allowInsecureLoopbackForTests": true,
+                    },
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
+}
+
+/// Moves what the source device pushed into the log other devices pull, with
+/// the blobs its operations name. The fake relay acknowledges a push without
+/// keeping it.
+fn publish_pushed_ops(relay: &FakeRelay, workspace_id: &str, source: &ScratchDir) {
+    let db =
+        Connection::open(engine_db_path(source).expect("source db path")).expect("open source db");
+    let mut state = relay.state.lock().expect("relay state");
+    let origin_id = state.local_origin_id.clone().expect("source origin id");
+    for op in std::mem::take(&mut state.pushed_workspace_ops) {
+        for (field, value) in op["payload"].as_object().into_iter().flatten() {
+            let Some(sha256) = value.as_str().filter(|_| field.ends_with("BlobSha256")) else {
+                continue;
+            };
+            let binary: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                    [sha256],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("read binary blob");
+            let bytes = match binary {
+                Some(bytes) => bytes,
+                None => db
+                    .query_row("SELECT text FROM blobs WHERE sha256=?1", [sha256], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .expect("read text blob")
+                    .into_bytes(),
+            };
+            state.workspace_blobs.insert(sha256.to_owned(), bytes);
+        }
+        let relay_seq = i64::try_from(state.workspace_ops.len()).expect("relay seq") + 1;
+        state.workspace_ops.push(json!({
+            "relaySeq": relay_seq,
+            "workspaceId": workspace_id,
+            "originId": origin_id,
+            "originSeq": op["originSeq"],
+            "opKind": op["opKind"],
+            "payload": op["payload"],
+            "recordedAtMs": op["recordedAtMs"],
+        }));
+    }
+}
+
+async fn pull_and_commit(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    workspace_id: &str,
+) {
+    let pull = call(
+        transport,
+        handle,
+        id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(pull["hasMore"], false, "one page holds this test's log");
+    if pull["pendingCursor"].is_object() {
+        call(
+            transport,
+            handle,
+            id,
+            "sync.commitCursor",
+            json!({ "workspaceId": workspace_id, "pendingCursor": pull["pendingCursor"] }),
+        )
+        .await;
+    }
+}
+
+fn resync_requests(
+    events: &mut tokio::sync::mpsc::Receiver<dohc_workspace_engine::EngineEventNotice>,
+) -> Vec<Value> {
+    std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|notice| notice.name == "ydoc.remoteUpdate")
+        .map(|notice| notice.payload)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_other_device_edit() {
+    let workspace_id = "rpc-relay-idle-editor";
+    let path = "notes/shared.md";
+    let relay = FakeRelay::start(RelayState::default());
+
+    // Device B is signed in and synced before it starts the document, as a
+    // desktop is. It then starts the document and pushes it.
+    let b_scratch = ScratchDir::new().expect("device B scratch");
+    let b_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let b = open_uncaptured_workspace(&b_transport, &b_scratch, &relay, workspace_id).await;
+    let mut b_id = 1;
+    seed_main(&b_transport, &b, &mut b_id, workspace_id).await;
+    seed_sync_identity(&b_transport, &b, &mut b_id).await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let b_session = call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await["sessionId"]
+        .as_str()
+        .expect("device B session id")
+        .to_owned();
+    let b_doc = Ydoc::wire();
+    let record = |update: Vec<u8>| {
+        json!({
+            "sessionId": b_session,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+        })
+    };
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.recordUpdate",
+        record(b_doc.plaintext_insert(0, "Starting together.")),
+    )
+    .await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+
+    // Device A pulls the document and opens it in an editor.
+    let a_scratch = ScratchDir::new().expect("device A scratch");
+    let a_service = Arc::new(EngineService::new());
+    let a_transport = InProcessTransport::new(Arc::clone(&a_service));
+    let a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace_id).await;
+    let mut a_id = 1;
+    seed_main(&a_transport, &a, &mut a_id, workspace_id).await;
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "chats.channels.create",
+        json!({
+            "channelId": "device-a-identity-channel",
+            "name": "Device A",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let a_session = call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await["sessionId"]
+        .as_str()
+        .expect("device A session id")
+        .to_owned();
+    let mut events = a_service.events().subscribe();
+
+    // A pull that parks nothing for the editor asks nothing of it.
+    push_unrelated_change(&b_transport, &b, &mut b_id, workspace_id, "before-edit").await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    assert_eq!(resync_requests(&mut events), Vec::<Value>::new());
+
+    // B types while A's editor sits idle. A's pull parks the edit under the
+    // editor's lease and asks that editor to resync.
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "ydoc.recordUpdate",
+        record(b_doc.plaintext_insert(18, " Typed on B.")),
+    )
+    .await;
+    call(
+        &b_transport,
+        &b,
+        &mut b_id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let asked = vec![json!({ "sessionId": a_session, "resyncRequired": true })];
+    assert_eq!(
+        resync_requests(&mut events),
+        asked,
+        "the pull must ask the idle editor for the edit it parked"
+    );
+
+    // The request is lost: with no receiver the engine drops events, as it
+    // does when the event queue is full. The next pull applies nothing and
+    // still asks, because the edit is still parked.
+    drop(events);
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    let mut events = a_service.events().subscribe();
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    assert_eq!(
+        resync_requests(&mut events),
+        asked,
+        "a pull that applies nothing must ask again while the edit stays parked"
+    );
+
+    // The resync the request asks for carries B's edit to the editor.
+    a_id += 1;
+    let resync = ProtocolEngineService::call(
+        a_service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            a_id,
+            "ydoc.resync",
+            Some(a.clone()),
+            json!({ "sessionId": a_session }),
+        ),
+    )
+    .await
+    .expect("resync the editor");
+    let shown = Ydoc::wire();
+    shown
+        .apply(&resync.blob_egress.expect("resync state").bytes)
+        .expect("apply resync state");
+    assert_eq!(shown.plaintext_string(), "Starting together. Typed on B.");
+
+    // The resync drained what was parked, so the next pull asks nothing.
+    pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
+    assert_eq!(resync_requests(&mut events), Vec::<Value>::new());
+}
+
+/// Creates a channel on the device and pushes it: an applied pull on the
+/// other device with no Y.Doc update in it.
+async fn push_unrelated_change(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    workspace_id: &str,
+    channel_id: &str,
+) {
+    call(
+        transport,
+        handle,
+        id,
+        "chats.channels.create",
+        json!({ "channelId": channel_id, "name": channel_id, "kind": "channel", "nowMs": 20 }),
+    )
+    .await;
+    call(
+        transport,
+        handle,
+        id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+}
+
+// The push that claims an idle open document can be dropped at any point:
+// the supervisor drops a request on cancellation or deadline. Wherever the
+// drop lands, the claim and its handover to the session happen together or
+// not at all, so the session's next write and settle still succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_working() {
+    let relay = FakeRelay::start(RelayState::default());
+    let drop_points: Vec<(u32, u64)> = [0, 1, 2, 4, 8, 16, 32, 64, 128]
+        .into_iter()
+        .map(|yields| (yields, 0))
+        .chain([1, 2, 5, 10, 20].into_iter().map(|ms| (0, ms)))
+        .collect();
+    for (round, (yields, sleep_ms)) in drop_points.into_iter().enumerate() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        let workspace_id = format!("rpc-relay-dropped-live-claim-{round}");
+        let handle = open_workspace(&transport, &scratch, &relay, 1, &workspace_id).await;
+        let mut id = 1;
+        seed_main(&transport, &handle, &mut id, &workspace_id).await;
+        let opened = call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "notes/idle.md",
+                "contentKind": "plaintext",
+            }),
+        )
+        .await;
+        let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+        let doc = Ydoc::wire();
+        let first_edit =
+            base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "idle"));
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.recordUpdate",
+            json!({ "sessionId": session_id, "updateBase64": first_edit }),
+        )
+        .await;
+        seed_sync_identity(&transport, &handle, &mut id).await;
+
+        id += 1;
+        let pushing = Arc::clone(&transport);
+        let push_request = request(
+            id,
+            "sync.push",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id }),
+        );
+        let push = tokio::spawn(async move {
+            pushing
+                .call(RequestContext::unbounded(), push_request)
+                .await
+        });
+        for _ in 0..yields {
+            tokio::task::yield_now().await;
+        }
+        if sleep_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        }
+        push.abort();
+        let _ = push.await;
+
+        let next_edit =
+            base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(4, " then"));
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.recordUpdate",
+            json!({ "sessionId": session_id, "updateBase64": next_edit }),
+        )
+        .await;
+        let settled = call(
+            &transport,
+            &handle,
+            &mut id,
+            "ydoc.settle",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+        assert_eq!(
+            settled["content"],
+            json!("idle then"),
+            "drop point {round}: yields {yields}, sleep {sleep_ms} ms"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1745,7 +2184,6 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
     .await;
     {
         let mut state = relay.state.lock().expect("relay state");
-        let origin = state.local_origin_id.clone().expect("local origin");
         let channel = state
             .pushed_workspace_ops
             .iter()
@@ -1763,7 +2201,7 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
             vec![
                 share_row(
                     1,
-                    &format!("share:shared-channel:{origin}"),
+                    "relay:share-member:authenticated-origin",
                     400,
                     channel["opKind"].as_str().expect("kind"),
                     channel["payload"].clone(),
@@ -2305,4 +2743,60 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         )
         .expect("read retried rename projection");
     assert_eq!(paths, (false, true));
+}
+
+/// `sync.remoteChanges` answers the engine's durable count of changes from
+/// elsewhere, with no relay configured, and the count survives reopening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_changes_answer_the_durable_count_without_a_relay() {
+    const WORKSPACE: &str = "ws-remote-changes";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    {
+        let db = engine_db_path(&scratch).expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        for _ in 0..2 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::count_remote_change_in_tx(tx, WORKSPACE)
+                })
+                .expect("count a change from elsewhere");
+        }
+    }
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 0;
+    for _ in 0..2 {
+        id += 1;
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE,
+                        "captureMode": "none",
+                    }),
+                ),
+            )
+            .await
+            .expect("open workspace");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+        assert_eq!(
+            call(
+                &transport,
+                &handle,
+                &mut id,
+                "sync.remoteChanges",
+                json!({})
+            )
+            .await,
+            json!({ "applied": 2 })
+        );
+        call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    }
 }

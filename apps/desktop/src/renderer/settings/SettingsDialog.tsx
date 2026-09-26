@@ -18,6 +18,7 @@ import {
   useState,
 } from "react";
 import {
+  DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
   type DesktopUserSettingsResult,
   MAX_ZOOM_LEVEL,
@@ -40,9 +41,11 @@ import { applyAppearanceSettings } from "../theme";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
+import { ScheduleHostRow } from "./ScheduleHostRow";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
+import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
   isSettingsSectionId,
@@ -84,7 +87,7 @@ function StatusPill(props: { state: SaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string) => void;
+  onError?: (message: string, cause?: unknown) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -248,7 +251,7 @@ export function SettingsDialog(props: {
       })
       .catch((cause) => {
         if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError(ipcErrorMessage(cause));
         }
       });
     return () => {
@@ -296,9 +299,10 @@ export function SettingsDialog(props: {
       setUserResult(previous);
       applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
     }
-  }, [markSaved, markSaving, userResult]);
+  }, [markSaved, markSaving, props.onError, userResult]);
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -352,10 +356,11 @@ export function SettingsDialog(props: {
         }
         setWorkspaceResult(previous);
         setSaveState("error");
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(ipcErrorMessage(cause));
+        props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
       }
     },
-    [markSaved, markSaving, onWorkspaceSettingsRead, props.workspaceId, workspaceResult],
+    [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
   );
 
   // Zoom goes through main's one serialized mutation instead of a full-file
@@ -375,7 +380,7 @@ export function SettingsDialog(props: {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       // The refusal names the file and the way out.
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
 
@@ -392,9 +397,10 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
     }
-  }, [markSaved, markSaving]);
+  }, [markSaved, markSaving, props.onError]);
 
   const resetWorkspaceSettings = useCallback(async () => {
     const requestId = workspaceSaveRequestRef.next();
@@ -422,9 +428,10 @@ export function SettingsDialog(props: {
         return;
       }
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
     }
-  }, [markSaved, markSaving, onWorkspaceSettingsRead, props.workspaceId]);
+  }, [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateBusy("check");
@@ -569,6 +576,29 @@ export function SettingsDialog(props: {
                   <Plus size={14} strokeWidth={1.9} />
                 </button>
               </div>
+            </SettingRow>
+            <SettingRow
+              title="Sidebar"
+              modified={
+                isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
+                isModified(userSettings.sidebar.hidden, DEFAULT_SIDEBAR_SETTINGS.hidden)
+              }
+              onReset={() =>
+                void saveUserSettings({
+                  ...userSettings,
+                  sidebar: {
+                    ...userSettings.sidebar,
+                    order: DEFAULT_SIDEBAR_SETTINGS.order,
+                    hidden: DEFAULT_SIDEBAR_SETTINGS.hidden,
+                  },
+                })
+              }
+              testId="settings-row-sidebar"
+            >
+              <SidebarViewsControl
+                sidebar={userSettings.sidebar}
+                onChange={(sidebar) => void saveUserSettings({ ...userSettings, sidebar })}
+              />
             </SettingRow>
           </div>
         );
@@ -843,6 +873,10 @@ export function SettingsDialog(props: {
       case "advanced":
         return (
           <div data-testid="settings-section-advanced">
+            <ScheduleHostRow
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
             <SettingRow
               title="Settings file"
               description="Changes apply when you save the file."

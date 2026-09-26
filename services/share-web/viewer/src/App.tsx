@@ -61,11 +61,12 @@ const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const VIEW_LOG_HOLD_MS = 30_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
-export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
+export const TEXT_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
   | { status: "loading" }
   | { status: "refused" }
+  | { status: "version-mismatch"; message: string }
   | {
       status: "ready";
       session: string;
@@ -92,6 +93,18 @@ class ViewResponseError extends Error {
   constructor(readonly status: number) {
     super("refused");
   }
+}
+
+// The server's share page and sync service run versions that disagree. The
+// server names which one needs the update.
+class VersionMismatchError extends Error {}
+
+async function versionMismatch(response: Response): Promise<VersionMismatchError | null> {
+  if (response.status !== 409) return null;
+  const body = await response.clone().json().catch(() => null) as { code?: unknown; error?: unknown } | null;
+  return (body?.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
+    ? new VersionMismatchError(body.error)
+    : null;
 }
 
 class EpochFloorChangedError extends Error {
@@ -149,9 +162,9 @@ export const dohcNavigation = {
   },
 };
 
-type MarkdownPreview =
-  | { status: "ready"; markdown: string }
-  | { status: "too-large" };
+type TextPreview =
+  | { status: "ready"; text: string }
+  | { status: "download" };
 
 async function api(
   session: string,
@@ -222,29 +235,58 @@ async function withBoundedRetry(
   }
 }
 
-async function readMarkdownPreview(response: Response): Promise<MarkdownPreview> {
-  if (!response.body) return { status: "ready", markdown: "" };
+// Bytes a text file does not contain. NUL marks binary data and BOM-less
+// UTF-16; a high share of other C0 controls marks binary data too. Tab, line
+// breaks, form feed, and escape (terminal colors) are ordinary text.
+function isStrayControlByte(byte: number): boolean {
+  return (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0b &&
+    byte !== 0x0c && byte !== 0x0d && byte !== 0x1b) || byte === 0x7f;
+}
+const MAX_STRAY_CONTROL_SHARE = 0.01;
+
+async function readTextPreview(response: Response): Promise<TextPreview> {
+  if (!response.body) return { status: "ready", text: "" };
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const textChunks: string[] = [];
   let bytesRead = 0;
+  let strayControlBytes = 0;
+  const stop = async (): Promise<TextPreview> => {
+    try {
+      await reader.cancel();
+    } catch {
+      // The preview stays a download even if the transport cannot cancel.
+    }
+    return { status: "download" };
+  };
+  // The fatal decoder refuses bytes that are not UTF-8.
+  const decode = (value?: Uint8Array): string | null => {
+    try {
+      return value ? decoder.decode(value, { stream: true }) : decoder.decode();
+    } catch {
+      return null;
+    }
+  };
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        textChunks.push(decoder.decode());
-        return { status: "ready", markdown: textChunks.join("") };
+        const tail = decode();
+        if (tail === null || strayControlBytes > bytesRead * MAX_STRAY_CONTROL_SHARE) {
+          return { status: "download" };
+        }
+        textChunks.push(tail);
+        return { status: "ready", text: textChunks.join("") };
       }
       bytesRead += value.byteLength;
-      if (bytesRead > MARKDOWN_PREVIEW_BYTE_CAP) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The preview remains too large even if the transport cannot cancel.
-        }
-        return { status: "too-large" };
+      if (bytesRead > TEXT_PREVIEW_BYTE_CAP) return await stop();
+      for (const byte of value) {
+        if (byte === 0) return await stop();
+        if (isStrayControlByte(byte)) strayControlBytes += 1;
       }
-      textChunks.push(decoder.decode(value, { stream: true }));
+      const text = decode(value);
+      if (text === null) return await stop();
+      textChunks.push(text);
     }
   } finally {
     reader.releaseLock();
@@ -272,7 +314,7 @@ export async function loadLog(
       }`,
       signal,
     );
-    if (!response.ok) throw new ViewResponseError(response.status);
+    if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
@@ -380,7 +422,7 @@ async function loadCurrentProjection(
   signal?: AbortSignal,
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
-  if (!response.ok) throw new ViewResponseError(response.status);
+  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const body = await response.json() as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
@@ -431,7 +473,7 @@ export async function loadCurrentState(
 
 async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
   const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
-  if (!response.ok) throw new ViewResponseError(response.status);
+  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const meta = viewMeta(await response.json());
   if (!meta) throw new Error("refused");
   return meta;
@@ -479,7 +521,7 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
     );
     scrubFragment();
     const response = await exchange;
-    if (!response.ok) throw new Error("refused");
+    if (!response.ok) throw (await versionMismatch(response)) ?? new Error("refused");
     const body = (await response.json()) as { session?: unknown };
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
@@ -619,14 +661,20 @@ function FileView(props: {
   onStaleBlob: (path: string, blobSha256: string) => Promise<boolean>;
 }) {
   const [previewText, setPreviewText] = useState<string | null>(null);
-  const [previewTooLarge, setPreviewTooLarge] = useState(false);
+  const [previewIsDownload, setPreviewIsDownload] = useState(false);
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const rendersExcalidraw =
     props.file.contentKind === "text" && isExcalidraw(props.file.path);
-  const rendersTextPreview = rendersMarkdown || rendersExcalidraw;
+  // Any other text file shows its source as plain text, never as markup.
+  const rendersSourceText =
+    props.file.contentKind === "text" &&
+    !rendersMarkdown &&
+    !rendersExcalidraw &&
+    !isRasterImage(props.file.path);
+  const rendersTextPreview = rendersMarkdown || rendersExcalidraw || rendersSourceText;
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
     [props.files],
@@ -634,7 +682,7 @@ function FileView(props: {
   useEffect(() => {
     let current = true;
     setPreviewText(null);
-    setPreviewTooLarge(false);
+    setPreviewIsDownload(false);
     setFileStatus("ready");
     if (!rendersTextPreview) return () => { current = false; };
     const abortController = new AbortController();
@@ -645,12 +693,12 @@ function FileView(props: {
     )
       .then(async (response) => {
         if (!response.ok) throw new ViewResponseError(response.status);
-        const preview = await readMarkdownPreview(response);
+        const preview = await readTextPreview(response);
         if (!current) return;
-        if (preview.status === "too-large") {
-          setPreviewTooLarge(true);
+        if (preview.status === "download") {
+          setPreviewIsDownload(true);
         } else {
-          setPreviewText(preview.markdown);
+          setPreviewText(preview.text);
         }
       })
       .catch(async (error: unknown) => {
@@ -690,7 +738,7 @@ function FileView(props: {
     );
   }
   if (rendersMarkdown) {
-    if (previewTooLarge) {
+    if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
     if (previewText === null) return <p className="muted">Loading file</p>;
@@ -708,7 +756,7 @@ function FileView(props: {
     );
   }
   if (rendersExcalidraw) {
-    if (previewTooLarge) {
+    if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
     if (previewText === null) return <p className="muted">Loading file</p>;
@@ -723,6 +771,17 @@ function FileView(props: {
           <ExcalidrawView scene={scene} />
         </Suspense>
       </ExcalidrawRenderBoundary>
+    );
+  }
+  if (rendersSourceText) {
+    if (previewIsDownload) {
+      return <DownloadCard file={props.file} session={props.session} />;
+    }
+    if (previewText === null) return <p className="muted">Loading file</p>;
+    return (
+      <pre className="source-text">
+        <code>{previewText}</code>
+      </pre>
     );
   }
   if (isRasterImage(props.file.path)) {
@@ -1047,8 +1106,12 @@ export function App() {
             epochLogFloor: log.epochLogFloor,
           });
         }
-      } catch {
-        if (current) setState({ status: "refused" });
+      } catch (error) {
+        if (current) {
+          setState(error instanceof VersionMismatchError
+            ? { status: "version-mismatch", message: error.message }
+            : { status: "refused" });
+        }
       }
     })();
     return () => {
@@ -1077,6 +1140,13 @@ export function App() {
     let followerController: AbortController | null = null;
     const sessionController = new AbortController();
     const refuseIfTerminal = (error: unknown): boolean => {
+      // A version mismatch lasts until the server is updated, so the open
+      // page stops following and says so.
+      if (current && error instanceof VersionMismatchError) {
+        readyStateRef.current = null;
+        setState({ status: "version-mismatch", message: error.message });
+        return true;
+      }
       if (
         current &&
         error instanceof ViewResponseError &&
@@ -1227,6 +1297,7 @@ export function App() {
       state.meta.effectiveSelector.versionId === null && state.files.some(file => file.path === editing.path)}
     onClose={() => setEditing(null)} />;
   if (state.status === "refused") return <Unavailable />;
+  if (state.status === "version-mismatch") return <main className="state"><p>{state.message}</p></main>;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
   const tree = fileTree(state.files);
@@ -1278,6 +1349,9 @@ export function App() {
         <main className="content">
           {selected ? (
             <FileView
+              // A new file starts with empty preview state, so one file's text
+              // never renders under another file's kind.
+              key={`${state.session}\n${selected.path}\n${selected.blobSha256}`}
               session={state.session}
               file={selected}
               files={state.files}

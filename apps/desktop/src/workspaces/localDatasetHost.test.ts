@@ -70,6 +70,42 @@ async function activate(host: LocalDatasetHost, fixture = sources()) {
 const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: string, idempotencyKey = "read", input = {}) =>
   ({datasetId: id(1), revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationId, idempotencyKey, input});
 
+it("reopens the same recovery archive after installation was interrupted before claim", async () => {
+  const sourceHost = await open(), approved = await activate(sourceHost.host);
+  await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
+  const archive = await sourceHost.host.prepareExport(id(1));
+  const sourcePath = join(sourceHost.workspaceRoot, "resume.dohc-recovery");
+  await writeDatasetRecoveryExport({ path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+  await archive.dispose(); await sourceHost.host.close();
+  let observer: DatabaseSync | undefined;
+  const target = await open({ assertCurrent() {
+    // Another connection observes only the committed installation, so no
+    // pre-commit authorization check or transaction rollback causes this failure.
+    if (observer?.prepare("SELECT 1 FROM dohc_dataset_imports WHERE phase='installed'").get()) throw Error("Interrupted before claim");
+  } });
+  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    const prepared = await target.host.prepareRecovery({ sourcePath });
+    await expect(target.host.claimRecovery({ ...prepared, oldHostStopped: true })).rejects.toThrow("Interrupted before claim");
+    expect(observer.prepare("SELECT active FROM dohc_dataset_journals WHERE dataset_id=?").get(id(1))!.active).toBe(0);
+    await target.host.close();
+    observer.close(); observer = undefined;
+    const restarted = await open({ workspaceRoot: target.workspaceRoot });
+    // This is the normal UI action after restart, with no saved transfer id.
+    const rebound = await restarted.host.prepareRecovery({ sourcePath });
+    expect(rebound.transferId).toBe(prepared.transferId);
+    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "datasets", "exports");
+    const stagedBefore = await readdir(stagingDirectory);
+    expect(await restarted.host.prepareRecovery({ sourcePath })).toEqual(rebound);
+    expect(await readdir(stagingDirectory)).toEqual(stagedBefore);
+    await expect(restarted.host.claimRecovery(rebound)).rejects.toThrow(/old host stopped/);
+    const receipt = await restarted.host.claimRecovery({ ...rebound, oldHostStopped: true });
+    expect(receipt.targetCursor).toBeDefined();
+    expect((await restarted.host.invoke(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Preserved" }]);
+    await expect(restarted.host.prepareRecovery({ sourcePath })).rejects.toThrow(/already exists/);
+  } finally { observer?.close(); }
+});
+
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
   const path = join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite");
@@ -262,7 +298,7 @@ describe("local dataset owner adapter", () => {
       } finally { await staged.dispose(); }
     } finally { await archive.dispose(); }
   });
-  it("restores a backup to local authority then transfers records and attachments to the relay through response loss", async () => {
+  it.each(["installed", "claimed"] as const)("restores a backup then resumes a relay transfer after response loss in the %s phase", async phase => {
     const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
     const compileOperations = relayCompileDatasetOperations;
     let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
@@ -273,9 +309,19 @@ describe("local dataset owner adapter", () => {
     const transport=async (_credentials:typeof credentials,path:string,init:RequestInit)=>{
       if(offline)throw Error("offline after response loss");
       const request=new Request(`https://relay${path}`,{...init,headers:{...Object.fromEntries(new Headers(init.headers)),authorization:"Bearer token"},...(init.body instanceof ReadableStream?{duplex:"half" as const}:{})});
+      if (phase === "installed" && path.includes("/imports/") && init.method === "POST" && posted === 0) {
+        const reader = request.body!.getReader();
+        const stream = (async function* () { try { while (true) { const next = await reader.read(); if (next.done) return; yield next.value; } } finally { reader.releaseLock(); } })();
+        await relayHost.importRecovery({ kind: "named", workspaceId: "w", userId: "owner" }, {
+          workspaceId: "w", datasetId: id(1), transferId: path.split("/").at(-1)!,
+          sourceCursor: JSON.parse(request.headers.get("x-dohc-dataset-source-cursor")!),
+          manifestSha256: request.headers.get("x-dohc-dataset-manifest-sha256")!, stream, activate: false,
+        });
+        posted++; offline = true; throw Error("lost import response");
+      }
       const response=await handler()(request),value=path.includes("/imports/")?await response.json():await readDatasetResponse(response,path.split("/").at(-1)!,controller.signal);
       if(!response.ok)throw Error(`Relay ${response.status}: ${JSON.stringify(value)}`);
-      if(path.includes("/imports/")&&init.method==="POST"){posted++;offline=true;throw Error("lost import response");}
+      if(path.includes("/imports/")&&init.method==="POST"){posted++;if(posted===1){offline=true;throw Error("lost import response");}}
       return value;
     };
     const target=()=>createRemoteDatasetTransferTarget({workspaceId:"w",datasetId:id(1),origin:"https://relay",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayStream:transport});
@@ -298,12 +344,12 @@ describe("local dataset owner adapter", () => {
       expect((await local.host.invoke(mutation)).replayed).toBe(true);
       await expect(local.host.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()})).rejects.toThrow("lost import response");
       expect(local.host.transferStatus(id(1))?.state).toBe("ready");
-      await expect(local.host.action(call(approved,id(6),"forbidden",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+      await expect(local.host.action(call(approved,id(6),"forbidden",{name:"forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
       await local.host.close();await relayHost.close();f.restart();
       relayHost=await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
       const restarted=(await open({workspaceRoot:local.workspaceRoot})).host;offline=false;
       const completed=await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()});
-      expect(completed.state).toBe("imported");expect(posted).toBe(1);
+      expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
       expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
       const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
@@ -312,7 +358,7 @@ describe("local dataset owner adapter", () => {
       expect(await routed.invoke(mutation)).toMatchObject({replayed:true});
       await routed.invoke(call(approved,id(6),"remote-write",{name:"Second"}));
       expect((await routed.invoke(call(approved,id(5)))).result).toHaveLength(2);
-      await expect(restarted.action(call(approved,id(6),"local-after",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+      await expect(restarted.action(call(approved,id(6),"local-after",{name:"forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
       const exported=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/export`,{headers:{authorization:"Bearer token"}}));
       expect(exported.status).toBe(200);expect(exported.headers.get("content-type")).toBe("application/octet-stream");
       const archive=await stageDatasetRecovery({stream:exported.body!,stagingParent:remoteDirectory,limits:{maxTotalBytes:64*1024*1024},expectedManifestSha256:exported.headers.get("x-dohc-dataset-manifest-sha256")!,authorize(){}});
@@ -362,7 +408,7 @@ describe("local dataset owner adapter", () => {
     } };
     await expect(host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target})).rejects.toThrow("Lost remote response");
     const pending = host.transferStatus(id(1)); expect(pending?.state).toBe("ready");
-    await expect(host.action(call(approved,id(6),"after-fence",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+    await expect(host.action(call(approved,id(6),"after-fence",{name:"Forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
     await host.close();
     const restarted = (await open({workspaceRoot})).host;
     const resumedTarget: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
@@ -373,7 +419,7 @@ describe("local dataset owner adapter", () => {
     const completed = await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example/",target:resumedTarget});
     expect(completed.state).toBe("imported");expect(completed.receipt).toEqual(saved);
     expect(restarted.approvedArtifacts(id(1)).active).toBe(false);
-    await expect(restarted.action(call(approved,id(6),"after-import",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+    await expect(restarted.action(call(approved,id(6),"after-import",{name:"Forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
     expect(await readdir(join(workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
     await expect(restarted.transferToShared({datasetId:id(1),targetOrigin:"https://other.example",target:resumedTarget})).rejects.toThrow("another server");
   },30_000);
@@ -386,7 +432,7 @@ describe("local dataset owner adapter", () => {
         targetCursor:{...input.sourceCursor,datasetId:id(99),hostEpoch:"remote",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
     }}})).rejects.toThrow("did not confirm");
     expect(host.transferStatus(id(1))?.state).toBe("ready");
-    await expect(host.action(call(approved,id(6),"after-bad-receipt",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+    await expect(host.action(call(approved,id(6),"after-bad-receipt",{name:"Forbidden"}))).rejects.toThrow("This host stopped accepting changes to this Collection.");
   });
 
   it("creates without an app or account, executes reviewed bytes, and preserves records and retries across restart", async () => {
@@ -414,6 +460,74 @@ describe("local dataset owner adapter", () => {
     ]);
   });
 
+  it("writes as an automation only through a context the host made, names it, and wakes the executor", async () => {
+    let wakes = 0;
+    const {host} = await open({onAutomationClaims: () => { wakes += 1; }}), approved = await activate(host);
+    const [own, other] = ["collection:items#welcome", "collection:items#tally"];
+    for (const automationId of [own, other]) host.automations.subscribe(id(1), {automationId, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(automationId)});
+    expect(host.automations.datasets()).toEqual({definitions: [approved.revision.definition], failures: []});
+    const context = host.automations.context({automationId: own, claimId: "claim", depth: 1});
+    const step = call(approved, id(6), "step", {name: "Pens"});
+    expect(await host.automations.invoke(context, step)).toMatchObject({replayed: false});
+    // The commit's claims are made and its wake has run by the time the step returns.
+    expect(wakes).toBe(1);
+    // Its own automation claims nothing; the other claims at the depth the write declared.
+    const claimed = host.automations.next();
+    expect(claimed).toMatchObject({automationId: other, depth: 1, actor: {kind: "automation", automationId: own, depth: 1}});
+    // A claim is found by its id, but only under its own automation.
+    expect(host.automations.claim(other, claimed!.claimId)).toMatchObject({claimId: claimed!.claimId, state: "running"});
+    expect(host.automations.claim(own, claimed!.claimId)).toBeNull();
+    expect(host.automations.next()).toBeNull();
+    // Its retries keep an identity derived from the workspace and automation, apart from the owner's.
+    const principal = digest(JSON.stringify(["dohc-dataset-automation-v1", "w", own]));
+    expect(host.history({datasetId: id(1)}).entries).toEqual([expect.objectContaining({
+      automation: {automationId: own, depth: 1}, callerReference: digest(JSON.stringify([principal, {kind: "data"}])),
+    })]);
+    expect(await host.automations.invoke(context, step)).toMatchObject({replayed: true});
+    expect(await host.action(step)).toMatchObject({replayed: false});
+    // An object shaped like a context is not one, and a chain past depth 4 writes nothing.
+    await expect(host.automations.invoke({automationId: own, claimId: "claim", depth: 1}, {...step, idempotencyKey: "forged"})).rejects.toThrow(/not permitted/);
+    await expect(host.automations.invoke(host.automations.context({automationId: own, claimId: "claim", depth: 5}), {...step, idempotencyKey: "deep"})).rejects.toThrow("You do not have access to this Collection.");
+    expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
+  });
+
+  it("claims an agent's change at its run's depth and a person's at 0, with the owner's authority", async () => {
+    const {host} = await open(), approved = await activate(host);
+    const watcher = "collection:items#tally";
+    host.automations.subscribe(id(1), {automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(watcher)});
+    // An agent run woken by an automation's message at depth 2 writes at depth 3.
+    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agentDepth: 3})).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 3, actor: {kind: "agent", depth: 3}});
+    expect(await host.action(call(approved, id(6), "person", {name: "Ink"}))).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "owner"}});
+    // The agent retries under the owner's identity, so its retry replays.
+    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agentDepth: 3})).toMatchObject({replayed: true});
+  });
+
+  it("tells the executor after each change to a dataset's approved rules or lifecycle", async () => {
+    let changes = 0;
+    const {host} = await open({onDatasetsChanged: () => { changes += 1; }}), approved = await activate(host);
+    expect(changes).toBe(1);
+    expect(host.automations.datasets().definitions).toEqual([approved.revision.definition]);
+    host.archive({datasetId: id(1)});
+    expect(changes).toBe(2);
+    expect(host.automations.datasets()).toEqual({definitions: [], failures: []});
+    host.restore({datasetId: id(1)});
+    expect(changes).toBe(3);
+    // A refused change tells nothing.
+    await expect(host.approve({preparationId: "gone", revisionSha256: approved.revision.revisionSha256})).rejects.toThrow(/expired/);
+    expect(changes).toBe(3);
+  });
+
+  it("lists every other dataset's rules when one dataset's rules cannot be read", async () => {
+    const {host, workspaceRoot} = await open(), approved = await activate(host);
+    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+    try { db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run("w", "0-broken", "{", "{}"); } finally { db.close(); }
+    const listed = host.automations.datasets();
+    expect(listed.definitions).toEqual([approved.revision.definition]);
+    expect(listed.failures).toEqual([{datasetId: "0-broken", error: expect.any(Error)}]);
+  });
+
   it("requires exact approval and revision, and separates queries from actions", async () => {
     const {host} = await open(), fixture = sources();
     const prepared = await host.prepare({descriptorPath:"items/dataset.json",adapter:fixture.adapter});
@@ -425,8 +539,8 @@ describe("local dataset owner adapter", () => {
     const approved = {prepared,revision,fixture};
     await expect(host.query(call(approved,id(6)))).rejects.toThrow(/approved Collection action/);
     await expect(host.action(call(approved,id(5)))).rejects.toThrow(/approved Collection action/);
-    await expect(host.invoke({...call(approved,id(6)),revisionSha256:"0".repeat(64)})).rejects.toThrow(/needs approval/);
-    await expect(host.invoke({...call(approved,id(6)),revision:2})).rejects.toThrow(/needs approval/);
+    await expect(host.invoke({...call(approved,id(6)),revisionSha256:"0".repeat(64)})).rejects.toThrow(/Its owner must approve this access again/);
+    await expect(host.invoke({...call(approved,id(6)),revision:2})).rejects.toThrow(/Its owner must approve this access again/);
     await expect(host.invoke({...call(approved,id(6)),operationId:"SELECT * FROM items"})).rejects.toThrow(/access/);
     expect((await host.query(call(approved,id(5)))).result).toEqual([]);
   });
@@ -480,7 +594,7 @@ describe("local dataset owner adapter", () => {
     const huge = Buffer.alloc(1024 * 1024,32);huge.write("%PDF-");
     await expect(host.upload({...input,bytesBase64:huge.toString("base64")})).rejects.toThrow(/storage is full/);
     await expect(host.upload({...input,datasetId:id(10)})).rejects.toThrow(/access/);
-    await expect(host.upload({...input,revisionSha256:"0".repeat(64)})).rejects.toThrow(/needs approval/);
+    await expect(host.upload({...input,revisionSha256:"0".repeat(64)})).rejects.toThrow(/Its owner must approve this access again/);
     const abort = new AbortController(); abort.abort();
     await expect(host.upload({...input,signal:abort.signal})).rejects.toThrow();
     expect((await host.upload(input)).replayed).toBe(false);

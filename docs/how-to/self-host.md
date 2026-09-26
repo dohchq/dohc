@@ -170,6 +170,10 @@ Start them again and check readiness:
 node tools/self-host/bootstrap.mjs start
 ```
 
+Each server release serves a range of relay API versions, and `GET /ready` on the relay reports it as `apiVersions`.
+A desktop newer than that range tells its user that the server runs an older version of dohc.
+Upgrade the server to serve that desktop again.
+
 For an upgrade, stop the deployment and save a snapshot and private archive.
 Replace the shipped Compose files, scripts, and documentation with the new release bundle.
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.

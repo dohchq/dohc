@@ -34,12 +34,19 @@ import {
 } from "../ipc/bridgeContract";
 
 import type {
+  SitePackageInfo,
   AgentRunStatusResult,
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  ReadCrashReportResult,
+  ListCollectionAutomationRunsResult,
+  ListCollectionAutomationsResult,
+  RetryCollectionAutomationResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
+  MountShareResult,
+  GetRelayReceivedShareResult,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -67,19 +74,16 @@ import type {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
+  PushShareDirectWritesResult,
+  ShareDirectWritesPushedEvent,
   WithdrawShareChangesResult,
   McpConfigResult,
-  PluginPanelOpenedEvent,
-  PluginStatusChangedEvent,
-  PluginStatusRecord,
-  PluginWebAppOpenedEvent,
+  NoticeRow,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
-  SetPluginWebAppBoundsPayload,
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
-  StartPluginPanelResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
   SyncDmsResult,
@@ -98,6 +102,7 @@ import type {
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import type { SentNotices } from "./shell/useSentNotices";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   type WorkspaceSettingsResult,
@@ -119,11 +124,8 @@ import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
-  pluginDetailsTabPath,
-  pluginViewId,
-  pluginPanelTabPath,
-  pluginWebAppTabPath,
   versionCompareTabPath,
+  VIEW_IDS,
 } from "./workbench/workbenchState";
 import {
   captureOrphanedDraft,
@@ -142,6 +144,7 @@ import {
   resetCollectionFieldWritesForTests,
 } from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
@@ -340,17 +343,13 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
+  const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
-  let pluginPanelOpenedCallback:
-    | ((event: PluginPanelOpenedEvent) => void)
-    | null = null;
-  let pluginWebAppOpenedCallback:
-    | ((event: PluginWebAppOpenedEvent) => void)
-    | null = null;
   return {
     platform,
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
@@ -358,10 +357,6 @@ function makeBaseBridge(
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
-      pluginPanelOpenedCallback?.(event),
-    emitPluginWebAppOpened: (event: PluginWebAppOpenedEvent) =>
-      pluginWebAppOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -414,6 +409,9 @@ function makeBaseBridge(
     ),
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
+    retryCloudSync: vi.fn(
+      async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
@@ -491,18 +489,6 @@ function makeBaseBridge(
       source: "stored" as const,
     })),
     detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
-    probeAgentDrivers: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    getAgentSessionState: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    answerAgentPermission: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
     readWorkspaceText: vi.fn(async (_payload: ReadWorkspaceTextPayload) => ({
       text: "# Doc\n",
       truncated: false as const,
@@ -622,8 +608,27 @@ function makeBaseBridge(
     withdrawShareChanges: vi.fn(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
+    pushShareDirectWrites: vi.fn(
+      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+    ),
+    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
+      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    },
+    onShareDirectWritesPushed: vi.fn(
+      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+        directWritesPushedCallbacks.add(listener);
+        return () => directWritesPushedCallbacks.delete(listener);
+      },
+    ),
     pickWorkspaceRoot: vi.fn(async () => null),
-    mountShare: vi.fn(async () => {
+    getRelayReceivedShare: vi.fn(
+      async (): Promise<GetRelayReceivedShareResult> => ({ found: false }),
+    ),
+    getDefaultShareRoot: vi.fn(
+      async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
+    ),
+    // Typed to the contract so a test that adds a share can answer it.
+    mountShare: vi.fn(async (): Promise<MountShareResult> => {
       throw new Error("not used in shell tests");
     }),
     openSharedView: vi.fn(async () => {
@@ -660,34 +665,6 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    onPluginPanelOpened: vi.fn(
-      (callback: (event: PluginPanelOpenedEvent) => void) => {
-        pluginPanelOpenedCallback = callback;
-        return () => {
-          pluginPanelOpenedCallback = null;
-        };
-      },
-    ),
-    onPluginWebAppOpened: vi.fn(
-      (callback: (event: PluginWebAppOpenedEvent) => void) => {
-        pluginWebAppOpenedCallback = callback;
-        return () => {
-          pluginWebAppOpenedCallback = null;
-        };
-      },
-    ),
-    listPlugins: vi.fn(async () => ({
-      ok: true as const,
-      plugins: [] as PluginStatusRecord[],
-    })),
-    // The details rail measures on mount. Without this the page crashes into
-    // the editor's error boundary a tick after it paints, so anything the
-    // page does later is a race the test can only lose.
-    pluginSizes: vi.fn(async () => ({
-      ok: true as const,
-      sizes: { installedBytes: null, dataBytes: null },
-    })),
-    onPluginStatusChanged: vi.fn(() => () => undefined),
     listAutomationFailures: vi.fn(
       async (
         _payload: ListAutomationFailuresPayload,
@@ -695,6 +672,24 @@ function makeBaseBridge(
     ),
     dismissAutomationFailure: vi.fn(
       async (_payload: DismissAutomationFailurePayload) => undefined,
+    ),
+    listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
+    resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
+    revealAutomationHolds: vi.fn(async () => undefined),
+    onAutomationRunSettled: vi.fn(() => () => undefined),
+    onAutomationRunWaiting: vi.fn(() => () => undefined),
+    listAutomationButtons: vi.fn(async () => ({ buttons: [] })),
+    listRecordButtons: vi.fn(async () => ({ record: null })),
+    onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+    listCollectionAutomations: vi.fn(
+      async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
+    ),
+    listCollectionAutomationRuns: vi.fn(
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
+    ),
+    retryCollectionAutomation: vi.fn(
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);
@@ -705,16 +700,21 @@ function makeBaseBridge(
         return () => automationFailuresCallbacks.delete(listener);
       },
     ),
-    startPluginWebApp: vi.fn(async () => ({
-      status: "ok" as const,
-      title: "T3 Code",
-      origin: "http://127.0.0.1:49161",
-    })),
-    setPluginWebAppBounds: vi.fn(
-      async (_payload: SetPluginWebAppBoundsPayload) => undefined,
+    readCrashReport: vi.fn(
+      async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
+        report: null,
+        sendTo: null,
+      }),
     ),
-    stopPluginWebApp: vi.fn(async () => undefined),
-    onPluginWebAppFailed: vi.fn(() => () => undefined),
+    dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
+    sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    emitCrashReportChanged: () => {
+      for (const callback of [...crashReportCallbacks]) callback();
+    },
+    onCrashReportChanged: vi.fn((listener: () => void) => {
+      crashReportCallbacks.add(listener);
+      return () => crashReportCallbacks.delete(listener);
+    }),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -728,16 +728,6 @@ function makeBaseBridge(
       status: "accepted" as const,
     })),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
-    startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
-      status: "ok" as const,
-      url: "http://127.0.0.1:49160/" as const,
-      title: "Hello panel",
-      surfaceId: 1,
-    })),
-    stopPluginPanel: vi.fn(async () => undefined),
-    invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
-    onPluginPanelSdkEvent: vi.fn(() => () => undefined),
-    onPluginPanelInvalidated: vi.fn(() => () => undefined),
   };
 }
 
@@ -981,6 +971,73 @@ describe("workspace share handoff placement", () => {
   });
 });
 
+describe("adding a share to this workspace", () => {
+  // The folder under shared-with-me is read-only at every level, so the
+  // message names the level only where it has somewhere else to go. An
+  // Edit code defaults to Open separately; this person chose Add.
+  it.each([
+    [
+      "edit",
+      "Added sam to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
+    ],
+    [
+      "view",
+      "Added sam to shared-with-me. Its files are read-only and stay up to date.",
+    ],
+  ] as const)(
+    "announces an added %s share in a toast and a Notices row, not a bar",
+    async (access, message) => {
+      const user = userEvent.setup();
+      const bridge = makeBridge(Promise.resolve(null));
+      bridge.mountShare.mockResolvedValue({
+        workspace: {
+          ...WORKSPACE,
+          shareMounts: [
+            { shareId: "share-1", label: "sam", granterEmail: "sam@dohc.test", access },
+          ],
+        },
+        mount: { shareId: "share-1", label: "sam", status: "updated", changedPaths: 1 },
+      });
+      bridge.getRelayReceivedShare.mockResolvedValue({
+        found: true,
+        share: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          genericChatWritable: false,
+          grantId: "grant-1",
+          generation: 1,
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-1:https://relay.dohc.test",
+          selector: { paths: ["docs"], versionId: null },
+          access,
+        },
+      });
+      renderShell(bridge);
+
+      await user.click(await screen.findByTestId("workspace-switcher"));
+      await user.click(screen.getByTestId("workspace-switcher-open-share"));
+      await user.type(
+        await screen.findByTestId("open-share-code"),
+        "dohc-share:share-1:https://relay.dohc.test",
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe(
+          access === "edit" ? "true" : "false",
+        ),
+      );
+      await user.click(screen.getByTestId("open-share-mode-mount"));
+      await user.click(screen.getByTestId("open-share-start"));
+
+      expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(
+        message,
+      );
+      expect(screen.queryByTestId("shell-notice")).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect((await screen.findByTestId("notice-center")).textContent).toContain(message);
+    },
+  );
+});
+
 describe("workspace manager route", () => {
   it("shows a failed manager open in the shell error with a retry", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -1174,802 +1231,9 @@ afterEach(async () => {
   // The collection write queue is module state on purpose too — a pending
   // head left by one test must not open sessions inside the next.
   resetCollectionFieldWritesForTests();
-});
-
-describe("plugin panel tabs", () => {
-  const path = pluginPanelTabPath("hello-plugin", "main");
-
-  it("opens a requested panel only in its workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: "ws-other",
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "main" }).dataset.active).toBe(
-      "true",
-    );
-  });
-
-  it("restores the panel tab, mounts its page, and stops it when closed", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "main" }).title).toBe(
-      "hello-plugin — main",
-    );
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-        placement: "editor",
-      }),
-    );
-
-    await user.click(screen.getByRole("button", { name: "Close main" }));
-    await waitFor(() =>
-      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      }),
-    );
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-  });
-
-  it("stops the old panel before mounting it for another workspace", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const view = renderShell(bridge);
-    await screen.findByTestId("plugin-panel-page");
-    const otherWorkspace: Workspace = {
-      ...WORKSPACE,
-      workspaceId: "ws-other",
-      rootPath: "/home/sam/dohc/other",
-    };
-
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={otherWorkspace}
-        workspaces={[otherWorkspace]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: otherWorkspace.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-        placement: "editor",
-      }),
-    );
-  });
-});
-
-describe("plugin web app tabs", () => {
-  const path = pluginWebAppTabPath("t3-code", "app");
-  const GUEST_RECT = {
-    x: 10,
-    y: 20,
-    width: 640,
-    height: 480,
-    top: 20,
-    left: 10,
-    right: 650,
-    bottom: 500,
-    toJSON: () => ({}),
-  } as DOMRect;
-  let rectSpy: { mockRestore: () => void } | null = null;
-
-  beforeEach(() => {
-    // The file's module-level stub is removed by the global afterEach's
-    // unstubAllGlobals, so every test after the first must stub it again.
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
-  });
-
-  afterEach(() => {
-    rectSpy?.mockRestore();
-    rectSpy = null;
-  });
-
-  function lastReportedVisibility(
-    bridge: ReturnType<typeof makeBridge>,
-  ): boolean | undefined {
-    const calls = bridge.setPluginWebAppBounds.mock.calls;
-    return calls.at(-1)?.[0]?.visible;
-  }
-
-  it("explains the 100 open-tab limit when the plugin's app cannot open", async () => {
-    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
-      id: `group-${index}`,
-      tabs: [`file-${index}.md`],
-      activeTab: `file-${index}.md`,
-      size: 0.01,
-    }));
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups,
-        activeEditorGroup: "group-0",
-      }),
-    );
-    // The files exist, so the listing does not prune the restored tabs.
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
-      files: editorGroups.map((group) => ({
-        path: group.activeTab,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    renderShell(bridge);
-    await screen.findByTestId("tab-file-0.md");
-
-    act(() => {
-      bridge.emitPluginWebAppOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "t3-code",
-        webAppId: "app",
-        instanceKey: null,
-      });
-    });
-
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-      "open the tab without reading the refusal: the user clicks Open in plugin settings, the dialog closes, and nothing appears — with nothing on screen naming the limit that refused it.",
-    ).toContain(
-      "This workspace has 100 open tabs; the limit is 100. Close a tab to open another tab.",
-    );
-    expect(screen.queryByTestId(`tab-${path}`)).toBeNull();
-  });
-
-  it("labels the tab with the title the plugin's manifest declares", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${path}`);
-    await waitFor(() => expect(tab.textContent, "label from the tab path: the tab reads 'app', the id, and the name the user installed never appears. The title arrives with the app's own start — no second trip to main, which racing the plugin's on-demand host start proved to break it (e2e, 4 of 6 runs).").toContain("T3 Code"));
-    await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
-  });
-
-  it("never carries one workspace's title onto another workspace's tab", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    const view = renderShell(bridge);
-    const tab = await screen.findByTestId(`tab-${path}`);
-    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
-
-    // The same plugin id can be installed at another title in another
-    // workspace, so the learned title is scoped to the workspace that
-    // answered — and the next workspace's own start is what relabels it.
-    const pending = deferred<{ status: "ok"; title: string; origin: string }>();
-    bridge.startPluginWebApp.mockReturnValueOnce(pending.promise);
-    const otherWorkspace: Workspace = {
-      ...WORKSPACE,
-      workspaceId: "ws-other",
-      rootPath: "/home/sam/dohc/other",
-    };
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={otherWorkspace}
-        workspaces={[otherWorkspace]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(screen.getByTestId(`tab-${path}`).textContent, "drop the workspace scope: the tab keeps showing the first workspace's title for an app that has not started here.").not.toContain(
-        "T3 Code",
-      ),
-    );
-
-    await act(async () => {
-      pending.resolve({
-        status: "ok",
-        title: "T3 Code (other)",
-        origin: "http://127.0.0.1:49162",
-      });
-      await Promise.resolve();
-    });
-    await waitFor(() =>
-      expect(screen.getByTestId(`tab-${path}`).textContent).toContain(
-        "T3 Code (other)",
-      ),
-    );
-  });
-
-  // A WebContentsView guest composites above the whole renderer. Nothing the
-  // shell paints can cover it, so an overlay that overlaps the editor area
-  // would take clicks meant for the dialog under the pointer.
-  it("hides the guest while the command palette is open", async () => {
-    rectSpy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockReturnValue(GUEST_RECT);
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-    await screen.findByTestId("plugin-web-app-frame");
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-
-    fireEvent(
-      window,
-      new KeyboardEvent("keydown", {
-        key: "K",
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    await screen.findByTestId("command-palette");
-
-    await waitFor(() => expect(lastReportedVisibility(bridge), "drop the overlay signal: the guest keeps painting over the palette and keeps its clicks.").toBe(false));
-  });
-
-  it("hides the guest while the settings dialog is open, and restores it after", async () => {
-    rectSpy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockReturnValue(GUEST_RECT);
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([path], path)),
-    );
-    renderShell(bridge);
-    await screen.findByTestId("plugin-web-app-frame");
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-
-    act(() => bridge.emitMenuCommand("settings"));
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
-
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
-  });
-});
-
-describe("plugin activity-bar views", () => {
-  const viewId = pluginViewId("hello-plugin", "hello-view");
-  const viewPanel = {
-    id: "hello-view",
-    title: "Hello view",
-    placement: "view" as const,
-    icon: "icon.svg",
-  };
-
-  function withViewPlugin(
-    bridge: ReturnType<typeof makeBridge>,
-    overrides: Partial<PluginStatusRecord> & {
-      commands?: { id: string; title: string }[];
-    } = {},
-  ) {
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        {
-          id: "hello-plugin",
-          directoryName: "hello-plugin",
-          rootPath: "/workspace/plugins/hello-plugin",
-          valid: true,
-          status: "ready",
-          disabledReason: null,
-          runtimeStatus: "ready",
-          sourceHash: "a".repeat(64),
-          approvedHash: "a".repeat(64),
-          installedBaselineHash: "a".repeat(64),
-          displayName: "Hello Plugin",
-          description: null,
-          publisher: null,
-          pluginVersion: null,
-          repository: null,
-          issues: null,
-          license: null,
-          icon: null,
-          settings: [],
-          commands: [],
-          panels: [
-            { id: "main", title: "Hello", placement: "editor", icon: null },
-            viewPanel,
-          ],
-          webApps: [],
-          diagnostics: [],
-          warnings: [],
-          error: null,
-          ...overrides,
-        },
-      ] as PluginStatusRecord[],
-    }));
-    return bridge;
-  }
-
-  it("invokes a plugin command from the command palette", async () => {
-    const invokePluginCommand = vi.fn(async () => ({
-      status: "ok" as const,
-    }));
-    const bridge = Object.assign(
-      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-        commands: [{ id: "hello.write", title: "Write hello note" }],
-      }),
-      { invokePluginCommand },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Hello Plugin: Write hello note",
-      ),
-    );
-
-    await waitFor(() =>
-      expect(invokePluginCommand).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        commandId: "hello.write",
-      }),
-    );
-  });
-
-  // reportShellError shows error.message and drops the fallback whenever
-  // the error carries one — a terse backend cause alone would name
-  // neither the command nor that a command failed (round-10 finding 4).
-  it("names the command and the cause when a plugin command fails with a terse outcome", async () => {
-    const invokePluginCommand = vi.fn(async () => ({
-      status: "command-failed" as const,
-      message: "timeout",
-    }));
-    const bridge = Object.assign(
-      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-        commands: [{ id: "hello.write", title: "Write hello note" }],
-      }),
-      { invokePluginCommand },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Hello Plugin: Write hello note",
-      ),
-    );
-
-    const banner = await screen.findByTestId("workspace-shell-error");
-    expect(banner.textContent).toContain("Write hello note");
-    expect(banner.textContent).toContain("timeout");
-  });
-
-  // assertWritableWorkspace refuses on the share's presence alone, so every
-  // invocation from a shared view was a dead click before this filter — the
-  // palette must not offer what it can never do (round-8 finding 2).
-  it("offers no plugin commands from a shared view", async () => {
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
-      commands: [{ id: "hello.write", title: "Write hello note" }],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: {
-        shareId: "share-1",
-        granterEmail: "granter@dohc.test",
-        access: "edit",
-      },
-    });
-
-    await user.keyboard("{Control>}k{/Control}");
-    const palette = await screen.findByTestId("command-palette");
-    // The palette itself renders and lists something, so an empty list
-    // here is the filter working, not the palette failing to open.
-    await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("Hello Plugin: Write hello note"))
-      .toBeNull();
-  });
-
-  it("lists contributed views after the workspace opens", async () => {
-    const workspaceOpen = deferred<SyncStatusResult>();
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
-    bridge.openWorkspace = vi.fn(() => workspaceOpen.promise);
-
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalled());
-    expect(bridge.listPlugins).not.toHaveBeenCalled();
-    expect(bridge.onPluginStatusChanged).not.toHaveBeenCalled();
-
-    await act(async () => {
-      workspaceOpen.resolve(SYNC_STATUS);
-    });
-
-    expect(await screen.findByTestId(`activity-${viewId}`)).toBeTruthy();
-    expect(bridge.onPluginStatusChanged).toHaveBeenCalled();
-  });
-
-  it("opens a contributed view's panel in the side panel", async () => {
-    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId(`activity-${viewId}`));
-
-    // The side panel names the view and mounts the panel behind it — the
-    // same panel machinery an editor tab uses, asked for by (plugin, panel).
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-    await waitFor(() =>
-      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "hello-view",
-        placement: "view",
-      }),
-    );
-    expect(
-      screen.getByTestId("side-panel").querySelector("header")?.textContent,
-    ).toBe("Hello view");
-  });
-
-  it("restores the plugin view the user left open before a restart", async () => {
-    const bridge = withViewPlugin(
-      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
-    );
-    renderShell(bridge);
-
-    const rail = await screen.findByTestId(`activity-${viewId}`);
-    await waitFor(() => expect(rail.getAttribute("aria-current")).toBe("page"));
-    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
-  });
-
-  it("names the plugin to turn back on when its view is off", async () => {
-    const bridge = withViewPlugin(
-      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
-      { status: "disabled", disabledReason: "user", runtimeStatus: "disabled" },
-    );
-    renderShell(bridge);
-
-    const off = await screen.findByTestId("plugin-view-off");
-    expect(off.textContent).toContain("Hello view is off");
-    expect(off.textContent).toContain("Hello Plugin is turned off");
-    // A turned-off plugin contributes no button, and no panel starts for it.
-    expect(screen.queryByTestId(`activity-${viewId}`)).toBeNull();
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-    expect(bridge.startPluginPanel).not.toHaveBeenCalled();
-
-    // The way back is on this surface: the empty state opens the list that
-    // can turn the plugin on again.
-    await userEvent.click(screen.getByTestId("plugin-view-off-open-plugins"));
-    expect(
-      screen.getByTestId("activity-plugins").getAttribute("aria-current"),
-    ).toBe("page");
-  });
-
-  it("says so when the plugin list will not load", async () => {
-    const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
-    );
-    bridge.listPlugins = vi.fn(async () => {
-      throw new Error("The plugin pipeline is unavailable.");
-    });
-    renderShell(bridge);
-
-    const unknown = await screen.findByTestId("plugin-view-unknown");
-    expect(unknown.textContent).toContain("Could not load plugins");
-    // The selection stands: a list dohc could not read is no evidence the
-    // plugin is gone.
-    expect(screen.queryByTestId("activity-explorer")?.getAttribute("aria-current"))
-      .toBeNull();
-  });
-
-  it("drops the selection once the plugin is gone", async () => {
-    const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
-    );
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [] as PluginStatusRecord[],
-    }));
-    renderShell(bridge);
-
-    const explorer = await screen.findByTestId("activity-explorer");
-    await waitFor(() =>
-      expect(explorer.getAttribute("aria-current")).toBe("page"),
-    );
-    expect(screen.queryByTestId("plugin-view-off")).toBeNull();
-    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
-  });
-});
-
-describe("plugin details tabs", () => {
-  const detailsPath = pluginDetailsTabPath("t3-code", "t3-code");
-
-  function withPlugins(
-    bridge: ReturnType<typeof makeBridge>,
-    displayName: string | null = null,
-  ) {
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        {
-          id: "t3-code",
-          directoryName: "t3-code",
-          rootPath: "/workspace/plugins/t3-code",
-          valid: true,
-          status: "ready",
-          disabledReason: null,
-          runtimeStatus: "ready",
-          sourceHash: "a".repeat(64),
-          approvedHash: "a".repeat(64),
-          installedBaselineHash: "a".repeat(64),
-          displayName,
-          description: null,
-          publisher: null,
-          pluginVersion: null,
-          repository: null,
-          issues: null,
-          license: null,
-          icon: null,
-          settings: [],
-          commands: [],
-          panels: [],
-          webApps: [],
-          hasFailedReplacement: false,
-          diagnostics: [],
-          warnings: [],
-          error: null,
-        },
-      ] as PluginStatusRecord[],
-    }));
-    return bridge;
-  }
-
-  it("opens a plugin's details tab from its row in the plugins list", async () => {
-    const bridge = withPlugins(makeBridge(Promise.resolve(STORED_STATE)));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId("activity-plugins"));
-    await userEvent.click(await screen.findByTestId("plugin-open-details"));
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    // This plugin declares no name of its own, so the id is its name. The
-    // tooltip is what says which of a plugin's tabs this one is.
-    expect(tab.textContent).toContain("t3-code");
-    expect(tab.title).toBe("Plugin details: t3-code");
-    // The row now reads as the selected one, like the explorer's open file.
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("plugin-row").getAttribute("data-selected"),
-      ).toBe("true"),
-    );
-  });
-
-  // A discovered row's id is only ever a broken manifest's directory-
-  // derived fallback, which can coincide with some other, unrelated
-  // plugin's real id — two rows sharing one id string is a real, reachable
-  // state, not a hypothetical. Before carrying directoryName through
-  // open-details and the tab path, clicking the second-sorting row always
-  // reopened whichever row `.find((entry) => entry.id === pluginId)` hit
-  // first.
-  it("opens the exact row clicked, not the first one sharing its id, when two rows collide", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const rowFields = {
-      rootPath: "/workspace/plugins/x",
-      valid: true,
-      status: "ready" as const,
-      disabledReason: null,
-      runtimeStatus: "ready" as const,
-      sourceHash: "a".repeat(64),
-      approvedHash: "a".repeat(64),
-      installedBaselineHash: "a".repeat(64),
-      description: null,
-      publisher: null,
-      pluginVersion: null,
-      repository: null,
-      issues: null,
-      license: null,
-      icon: null,
-      settings: [],
-      panels: [],
-      webApps: [],
-      commands: [],
-      hasFailedReplacement: false,
-      diagnostics: [],
-      warnings: [],
-      error: null,
-    };
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        { ...rowFields, id: "chat-plugin", directoryName: "chat-a", displayName: "Chat A" },
-        { ...rowFields, id: "chat-plugin", directoryName: "chat-b", displayName: "Chat B" },
-      ] as PluginStatusRecord[],
-    }));
-    renderShell(bridge);
-
-    await userEvent.click(await screen.findByTestId("activity-plugins"));
-    const rows = await screen.findAllByTestId("plugin-row");
-    expect(rows).toHaveLength(2);
-    const rowB = rows.find((row) => within(row).queryByText("Chat B"));
-    if (!rowB) throw new Error("Chat B row not found among the rendered rows.");
-    await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
-
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("chat-b");
-    expect(within(page).getByText("Chat B")).toBeTruthy();
-  });
-
-  it("restores a plugin's details tab and mounts its page", async () => {
-    const bridge = withPlugins(
-      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    expect(tab.title).toBe("Plugin details: t3-code");
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
-  });
-
-  // The row, the page header, and the tab are three views of one plugin. Once
-  // the page has read the manifest, all three say the name the user installed.
-  it("relabels the details tab with the plugin's name once its page reads it", async () => {
-    const bridge = withPlugins(
-      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
-      "T3 Code",
-    );
-    renderShell(bridge);
-
-    const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    await waitFor(() => expect(tab.textContent, "drop the label from the details branch: the tab keeps reading 't3-code' while the page header reads 'T3 Code'.").toContain("T3 Code"));
-    expect(
-      within(await screen.findByTestId("plugin-details-page")).getByRole(
-        "heading",
-        { name: "T3 Code" },
-      ),
-    ).toBeTruthy();
-    // The id still separates this tab from the plugin's app tab.
-    expect(tab.title).toBe("Plugin details: t3-code");
-  });
-
-  // A tab that follows a rename only tracked that in memory. A tab switch
-  // remounts the page, whose tracking reseeds from the tab's own virtual
-  // path — still the original, now-vacated directory, if nothing ever
-  // retargets that path. This pins the fix end to end: the tab's own path
-  // itself must move, so a remount reads the directory the plugin actually
-  // renamed to.
-  it("stays on the renamed plugin after switching tabs away and back", async () => {
-    const bridge = withPlugins(makeBridge(Promise.resolve(
-      storedStateWithTabs([detailsPath, "dohc://graph"], detailsPath),
-    )));
-    // Every subscriber, not the last one to subscribe: usePluginCatalog
-    // mounts once per surface that shows a plugin, and this shell can have
-    // more than one open at a time — a single tracked listener would only
-    // ever reach whichever happened to subscribe most recently.
-    const statusListeners = new Set<(event: PluginStatusChangedEvent) => void>();
-    bridge.onPluginStatusChanged = vi.fn(
-      (listener: (event: PluginStatusChangedEvent) => void) => {
-        statusListeners.add(listener);
-        return () => {
-          statusListeners.delete(listener);
-        };
-      },
-    ) as unknown as typeof bridge.onPluginStatusChanged;
-    const dispatchPluginStatusChanged = (event: PluginStatusChangedEvent) => {
-      for (const listener of statusListeners) listener(event);
-    };
-    renderShell(bridge);
-
-    const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("t3-code");
-
-    // The rename: same id, new directoryName, nothing left at the old one.
-    // Reported both live (the event a mounted page hears) and as the
-    // catalog's own new ground truth (what a fresh fetch — the remount
-    // below triggers one — reads back): a real rescan would settle to
-    // exactly this, not just notify of it.
-    const renamedRow = {
-      id: "t3-code",
-      directoryName: "t3-code-renamed",
-      rootPath: "/workspace/plugins/t3-code-renamed",
-      valid: true,
-      status: "ready",
-      disabledReason: null,
-      runtimeStatus: "ready",
-      sourceHash: "a".repeat(64),
-      approvedHash: "a".repeat(64),
-      installedBaselineHash: "a".repeat(64),
-      displayName: null,
-      description: null,
-      publisher: null,
-      pluginVersion: null,
-      repository: null,
-      issues: null,
-      license: null,
-      icon: null,
-      settings: [],
-      panels: [],
-      webApps: [],
-      commands: [],
-      hasFailedReplacement: false,
-      diagnostics: [],
-      warnings: [],
-      error: null,
-    } satisfies PluginStatusRecord;
-    bridge.listPlugins = vi.fn(async () => ({ ok: true as const, plugins: [renamedRow] }));
-    act(() => {
-      dispatchPluginStatusChanged({
-        kind: "renamed",
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "t3-code",
-        from: "t3-code",
-        to: "t3-code-renamed",
-      });
-      dispatchPluginStatusChanged({
-        kind: "changed",
-        workspaceId: WORKSPACE.workspaceId,
-        plugin: renamedRow,
-      });
-    });
-    await waitFor(() =>
-      expect(screen.getByTestId("plugin-details-page").getAttribute("data-directory-name"))
-        .toBe("t3-code-renamed"),
-    );
-
-    // The tab's own path retargeted: the renamed path's tab now exists, and
-    // the original, now-vacated one is gone.
-    const renamedPath = pluginDetailsTabPath("t3-code", "t3-code-renamed");
-    await screen.findByTestId(`tab-${renamedPath}`);
-    expect(screen.queryByTestId(`tab-${detailsPath}`)).toBeNull();
-
-    // Switch away — unmounts the details page — then back.
-    await userEvent.click(await screen.findByTestId("tab-dohc://graph"));
-    await waitFor(() =>
-      expect(screen.queryByTestId("plugin-details-page")).toBeNull(),
-    );
-    await userEvent.click(await screen.findByTestId(`tab-${renamedPath}`));
-
-    // Remounted from the tab's own (retargeted) path, not from stale, in-
-    // memory tracking a fresh mount never had — still the renamed plugin.
-    const remounted = await screen.findByTestId("plugin-details-page");
-    expect(remounted.getAttribute("data-directory-name")).toBe("t3-code-renamed");
-    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
-  });
+  // What a sync failure already showed is module state too, so it holds
+  // across the shell's remounts.
+  forgetSyncFailureNoticesForTests();
 });
 
 describe("global letter shortcut ownership", () => {
@@ -2414,8 +1678,7 @@ describe("collection folders", () => {
 
   // assertWritableWorkspace refuses createWorkspaceFile on the share's
   // presence alone, so New collection from a shared view is a dead click —
-  // the palette must not offer what it can never do, exactly as it already
-  // withholds plugin commands there.
+  // the palette must not offer what it can never do.
   it("does not offer New collection from a read-only shared view", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
@@ -2509,85 +1772,6 @@ describe("editor groups", () => {
 
     await waitFor(() =>
       expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
-    );
-    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
-  });
-
-  it("keeps a plugin panel selected when an older duplicate-file open finishes flushing", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const panelPath = pluginPanelTabPath("hello-plugin", "main");
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          {
-            id: "left",
-            tabs: ["race-a.md"],
-            activeTab: "race-a.md",
-            size: 0.5,
-          },
-          {
-            id: "right",
-            tabs: ["b.md"],
-            activeTab: "b.md",
-            size: 0.5,
-          },
-        ],
-        activeEditorGroup: "right",
-      }),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
-      files: ["race-a.md", "b.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    bridge.readWorkspaceText = vi.fn(async ({ relativePath }) => ({
-      text: relativePath === "race-a.md" ? "# Race\n" : "# B\n",
-      truncated: false as const,
-      contentHash: "a".repeat(64),
-    }));
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const left = await screen.findByTestId("editor-group-left");
-    const right = await screen.findByTestId("editor-group-right");
-    await user.type(
-      await enterMarkdownSource(user, left),
-      " dirty",
-    );
-
-    fireEvent.pointerDown(right);
-    await waitFor(() => expect(right.dataset.active).toBe("true"));
-    await user.click(fileTreeRow("race-a.md"));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
-
-    act(() => {
-      bridge.emitPluginPanelOpened({
-        workspaceId: WORKSPACE.workspaceId,
-        pluginId: "hello-plugin",
-        panelId: "main",
-      });
-    });
-    await waitFor(() =>
-      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
-        "true",
-      ),
-    );
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-
-    await waitFor(() =>
-      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
-        "true",
-      ),
     );
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
@@ -4833,7 +4017,9 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
-    expect((await screen.findByTestId("shell-notice")).textContent).toBe(
+    // A warning the person may need to act on: an error toast, then a row
+    // in Notices. Nothing is inserted above the workbench.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
     );
   });
@@ -4980,6 +4166,44 @@ describe("ui-state merge-on-load", () => {
     });
     expect(listCallsWhenReported).toBeGreaterThan(listCallsBeforeFailure);
     expect(readCallsWhenReported).toBeGreaterThan(readCallsBeforeFailure);
+  });
+
+  // A shared view has no recorder, so its refresh is what meets a store a
+  // newer dohc migrated. Main records the refusal; the workspace stops with
+  // the update actions, and the refresh adds no toast of its own.
+  it("stops a shared view whose store a newer build migrated", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const refused = {
+      ...SYNC_STATUS,
+      historyShareView: true,
+      historyCaptureFailed: true as const,
+      engineStoreRefused: "migrated-by-newer-build" as const,
+      engineStoreRefusedDetail:
+        "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
+    };
+    bridge.refreshSharedView = vi.fn(async () => {
+      bridge.getSyncStatus = vi.fn(async () => refused);
+      throw new Error("migrated-by-newer-build: a newer build ran migration 5");
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId });
+    });
+    const blocked = await screen.findByTestId("workspace-update-required");
+    expect(blocked.textContent).toContain(
+      "A newer version of dohc updated this workspace's data store.",
+    );
+    expect(within(blocked).getByRole("button", { name: "Check for updates" })).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("does not repaint a failed share pull when no paths changed", async () => {
@@ -5537,7 +4761,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
     });
     act(() => {
@@ -5630,7 +4854,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
     });
     act(() => {
@@ -5712,7 +4936,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
         expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
       },
     );
@@ -6757,7 +5981,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
     // Notifications subscribes immediately; the listing refresh listener is
     // the second live subscription and waits for workspace readiness.
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
     vi.useFakeTimers();
     try {
       act(() => {
@@ -6820,7 +6044,7 @@ describe("ui-state merge-on-load", () => {
     // A second listing is issued while the first is still in flight.
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       expect(screen.getByTestId("tab-live.md")).toBeTruthy();
     });
     act(() => {
@@ -7084,14 +6308,29 @@ describe("engine store recovery", () => {
     expect(dialog.textContent).not.toContain("not created by dohc");
   });
 
-  // A store this build could not migrate is intact and waits for a build
-  // that opens it. The workspace stops instead of offering a rebuild that
-  // would lose what the fixed build still opens.
-  it("stops the workspace on a migration failure instead of offering the rebuild", async () => {
+  // A store this build could not migrate, or one a newer build migrated, is
+  // intact and waits for a build that opens it. The workspace stops instead
+  // of offering a rebuild that would lose what that build still opens.
+  it.each([
+    {
+      cause: "migration-failed" as const,
+      detail: "migration v2-baseline was applied from a different definition than this build's",
+      sentence: "dohc could not update this workspace's data store to this version.",
+    },
+    {
+      cause: "migrated-by-newer-build" as const,
+      detail: "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
+      sentence: "A newer version of dohc updated this workspace's data store.",
+    },
+  ])("stops the workspace on $cause instead of offering the rebuild", async ({
+    cause,
+    detail,
+    sentence,
+  }) => {
     const status = {
       ...refusedStatus,
-      engineStoreRefused: "migration-failed" as const,
-      engineStoreRefusedDetail: "migration v2-baseline was applied from a different definition than this build's",
+      engineStoreRefused: cause,
+      engineStoreRefusedDetail: detail,
     };
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => status);
@@ -7105,8 +6344,9 @@ describe("engine store recovery", () => {
     const details = await screen.findByTestId("workspace-update-details");
     await user.click(within(details).getByRole("button", { name: "Copy" }));
     const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("Code: migration-failed");
-    expect(copied).toContain("Engine: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain(`Problem: ${sentence}`);
+    expect(copied).toContain(`Code: ${cause}`);
+    expect(copied).toContain(`Engine: ${detail}`);
     expect(copied).toContain("Workspace id: ");
     expect(copied).toContain("Folder: ");
     expect(copied).toContain("Platform: ");
@@ -7115,9 +6355,7 @@ describe("engine store recovery", () => {
       expect(within(details).getByText(label!)).toBeTruthy();
       expect(details.textContent).toContain(value!);
     }
-    expect(blocked.textContent).toContain(
-      "dohc could not update this workspace's data store to this version.",
-    );
+    expect(blocked.textContent).toContain(`${sentence} Your files are unchanged.`);
     expect(blocked.textContent).toContain("Update dohc to continue");
     // The check answers inside the stop state, where the user can see it.
     bridge.checkForUpdates = vi.fn(async () => ({
@@ -7555,18 +6793,27 @@ describe("engine store recovery", () => {
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => {
-      throw new Error("EACCES: permission denied");
+      throw new Error(
+        "Error invoking remote method 'desktop:rebuild-engine-store': Error [EACCES]: EACCES: permission denied",
+      );
     });
     const { user, dialog } = await openRebuildDialog(bridge);
 
     await user.click(
       within(dialog).getByRole("button", { name: "Move and rebuild" }),
     );
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-    ).toContain(
-      "dohc could not move this workspace's data store. EACCES: permission denied",
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
     );
+    expect(toast.textContent).not.toContain("EACCES");
+    // Copy keeps the error as it arrived, on its own line.
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied.split("\n").slice(0, 2)).toEqual([
+      "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
+      "Cause: Error [EACCES]: EACCES: permission denied",
+    ]);
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
@@ -7685,6 +6932,28 @@ describe("workspace shell errors", () => {
     );
     expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+  });
+
+  it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(
+      "dohc is still reading this workspace's files. Try again when it finishes.",
+    );
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|OVERLOADED|invoking remote method/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
+      "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ]);
   });
 
   it("retries a failed initial listing without reopening the workspace", async () => {
@@ -8370,9 +7639,10 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
+    // On a slow machine the 800 ms autosave can save a draft before close-all
+    // starts or retry one while it waits. The test does not count those writes.
     await user.type(await enterMarkdownSource(user, left), "Left draft");
     await user.type(await enterMarkdownSource(user, right), "Right draft");
-    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
     await user.click(screen.getByRole("button", { name: "Close all editors" }));
     await waitFor(() => expect(heldPath).not.toBeNull());
@@ -8384,14 +7654,17 @@ describe("dirty tab close boundaries", () => {
     await user.type(firstEditor, " changed again");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
+    const writesBeforeRelease = bridge.writeWorkspaceText.mock.calls.length;
     await act(async () => {
       heldSave.resolve({ status: "written", contentHash: "d".repeat(64) });
       await heldSave.promise;
     });
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
+    expect(
+      bridge.writeWorkspaceText.mock.calls.slice(writesBeforeRelease).at(-1)?.[0],
+    ).toMatchObject({ relativePath: firstPath, text: expect.stringContaining(" changed again") });
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(firstEditor.isConnected).toBe(true);
@@ -8867,6 +8140,37 @@ describe("shared view send changes", () => {
     );
   });
 
+  // After a save in an Edit share view, main pushes a Collection's own files
+  // straight to the owner. A write the relay refuses stays for Send changes,
+  // and its notice sends it.
+  it("shows a push main ran after a save and offers a refused write as a proposal", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: SHARE_VIEW.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-action"));
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+  });
+
+  it("pushes nothing from a share view that cannot write", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
+    await screen.findByTestId("shared-view-banner");
+    // It does not listen for pushes at all.
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
+  });
+
   // What a submit did not take. Both are things the recipient would otherwise
   // discover by their work simply not arriving.
   it("states the files a submit left outside the share", async () => {
@@ -9273,14 +8577,16 @@ describe("share changes review", () => {
 // re-raises anything unacknowledged.
 describe("automation failure notices", () => {
   const FAILURE = {
-    automationId: "hello-plugin/triage",
+    automationId: "collection:tasks#triage",
     claimId: "atc_failed",
     chainStopped: false,
+    name: null,
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,
+    datasetInstance: null,
   };
-  const NOTICE_ID = "notice-automation-failure-hello-plugin/triage";
+  const NOTICE_ID = "notice-automation-failure-collection:tasks#triage";
 
   it("raises the notice from the engine's failed claims and dismisses by the generation on screen", async () => {
     const user = userEvent.setup();
@@ -9290,11 +8596,8 @@ describe("automation failure notices", () => {
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId(NOTICE_ID);
-    expect(notice.textContent).toContain(
-      'Automation "hello-plugin/triage" failed',
-    );
+    expect(notice.textContent).toContain('Automation "triage" failed');
     expect(notice.textContent).toContain("handler exploded");
-    expect(notice.textContent).toContain("Open the plugin's source");
 
     // Dismiss sends the generation ON SCREEN — a failure recorded since
     // this render has a higher one, so a stale click cannot hide it — and
@@ -9306,8 +8609,9 @@ describe("automation failure notices", () => {
     });
     expect(bridge.dismissAutomationFailure).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      automationId: "hello-plugin/triage",
+      automationId: "collection:tasks#triage",
       generation: 1,
+      datasetInstance: null,
     });
   });
 
@@ -9347,6 +8651,100 @@ describe("automation failure notices", () => {
     expect(notice.textContent).toContain("2 failures so far.");
   });
 
+  it("tries a failed Collection automation again from its notice, and opens its runs", async () => {
+    const failure = {
+      automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
+      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
+    };
+    const noticeId = "notice-automation-failure-collection:tasks#stamp";
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
+    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [{
+      claimId: "atc_failed", state: "failed", error: failure.error, createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId(noticeId);
+    expect(notice.textContent).toContain('Automation "Stamp the finish date" failed');
+    const reads = bridge.listAutomationFailures.mock.calls.length;
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId, claimId: "atc_failed", startOver: false,
+    });
+    // A repeated retry sends no failure event, so the notice reads again itself.
+    await waitFor(() => expect(bridge.listAutomationFailures.mock.calls.length).toBe(reads + 1));
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("automation-run-atc_failed", undefined, { timeout: 15_000 })).toBeTruthy();
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId,
+    });
+  });
+
+  it("moves an open panel to the next automation a notice opens", async () => {
+    const failure = (id: string, claimId: string) => ({
+      automationId: `collection:tasks#${id}`, claimId, chainStopped: false,
+      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
+    });
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure("first", "atc_first"), failure("second", "atc_second")] });
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
+      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
+      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] }));
+    renderShell(bridge);
+
+    const open = async (id: string) => {
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(within(await screen.findByTestId(`notice-automation-failure-collection:tasks#${id}`))
+        .getByRole("button", { name: "Open automation" }));
+    };
+    await open("first");
+    expect(await screen.findByTestId("automation-run-atc_first", undefined, { timeout: 15_000 })).toBeTruthy();
+    // The page cleared the first ask; the second still reaches the open panel.
+    await open("second");
+    expect(await screen.findByTestId("automation-run-atc_second")).toBeTruthy();
+    expect(screen.queryByTestId("automation-run-atc_first")).toBeNull();
+  });
+
+  it("toasts a Collection automation failure that arrives while the window is open, but not the ones it opened with", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const old = {
+      automationId: "collection:tasks#old", claimId: "atc_old", chainStopped: false,
+      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1, datasetInstance: null,
+    };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old] });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalled());
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-automation-failure-collection:tasks#old");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("automation-failure-toast")).toBeNull();
+
+    const fresh = { ...old, automationId: "collection:tasks#stamp", claimId: "atc_new", name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 9_000 };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old, fresh] });
+    act(() => bridge.emitAutomationFailuresChanged({ workspaceId: WORKSPACE.workspaceId }));
+    const toast = await screen.findByTestId("automation-failure-toast");
+    expect(toast.textContent).toContain('Automation "Stamp" failed.');
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith(expect.objectContaining({ claimId: "atc_new" }));
+    await waitFor(() => expect(screen.queryByTestId("automation-failure-toast")).toBeNull());
+  });
+
   it("ignores a poke for another workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
@@ -9361,6 +8759,237 @@ describe("automation failure notices", () => {
       bridge.listAutomationFailures.mock.calls.length,
       "another workspace's failures repainting this one",
     ).toBe(reads);
+  });
+});
+
+describe("crash report notice", () => {
+  const REPORT = {
+    revision: 3,
+    through: 3,
+    source: "engine" as const,
+    problems: 1,
+    atMs: 5_000,
+    text: "dohc crash report\n\nTime: 1970-01-01T00:00:05.000Z\nProcess: workspace engine",
+  };
+
+  it("offers Copy report and no Send report when this build has no report server", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("crash-report-toast");
+    expect(toast.textContent).toContain("The workspace engine failed");
+    expect(screen.queryByTestId("crash-report-toast-send")).toBeNull();
+    expect(screen.getByTestId("crash-report-toast-copy").getAttribute("aria-label")).toBe("Copy report");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).not.toContain("Send report");
+    expect(screen.getByTestId("notice-crash-report-copy").getAttribute("aria-label")).toBe("Copy report");
+    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
+  });
+
+  it("hands Send report to main, which asks, and says Report sent only when it went", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    // The person cancelled main's dialog.
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: false });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
+    // No dialog of the renderer's own: main asks.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("crash-report-toast-send")).toBeTruthy());
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: true });
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: "reports.example.test" });
+    await user.click(screen.getByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
+  });
+
+  it("keeps the report and offers Try again when the send fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    bridge.sendCrashReport.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'desktop:send-crash-report': Error: The connection to the report server failed."),
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not send the crash report. The connection to the report server failed.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledTimes(2));
+  });
+
+  it("dismisses up to the problem on screen and shows a newer report on the poke", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
+    await user.click(await screen.findByTestId("notice-crash-report-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("notice-crash-report")).toBeNull());
+    expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ through: 3 });
+
+    bridge.readCrashReport.mockResolvedValue({
+      report: { ...REPORT, revision: 5, through: 4, source: "window", problems: 2 },
+      sendTo: null,
+    });
+    act(() => bridge.emitCrashReportChanged());
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).toContain("A dohc window stopped unexpectedly");
+    expect(row.textContent).toContain("This report holds 2 problems.");
+  });
+});
+
+describe("notices sent to you", () => {
+  function sentNotices(notices: NoticeRow[]): SentNotices {
+    return {
+      account: null,
+      notices,
+      settled: true,
+      listFailure: null,
+      relist: vi.fn(),
+      toast: null,
+      hideToast: vi.fn(),
+      read: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    };
+  }
+  const MENTION: NoticeRow = {
+    store: "account",
+    noticeId: "mention:1",
+    kind: "mention",
+    workspaceId: WORKSPACE.workspaceId,
+    recipientShareId: null,
+    senderKind: "person",
+    senderLabel: "Ana",
+    title: "Ana mentioned you in b.md",
+    body: "",
+    target: { path: "b.md" },
+    createdAtMs: 5_000,
+    readAtMs: null,
+  };
+
+  function renderWithNotices(
+    bridge: ReturnType<typeof makeBridge>,
+    extra: { sentNotices?: SentNotices; openPathOnReady?: string; onSwitchWorkspace?: (workspace: Workspace, openPath?: string) => void },
+    workspaces: Workspace[] = [WORKSPACE],
+  ) {
+    vi.stubGlobal("dohcDesktop", bridge);
+    return render(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={WORKSPACE}
+          workspaces={workspaces}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
+          {...(extra.sentNotices ? { sentNotices: extra.sentNotices } : {})}
+          {...(extra.openPathOnReady ? { openPathOnReady: extra.openPathOnReady } : {})}
+        />
+      </>,
+    );
+  }
+
+  it("opens a notice's file in this workspace and marks it read", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([MENTION]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    expect(toggle.getAttribute("aria-label")).toBe("Notices, 1 unread");
+    await user.click(toggle);
+    await user.click(within(await screen.findByTestId("sent-notice-mention:1")).getByRole("button", { name: "Open" }));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
+  });
+
+  it("switches to the workspace that holds a notice, with its file", async () => {
+    const user = userEvent.setup();
+    const trip: Workspace = { ...WORKSPACE, workspaceId: "ws-trip", rootPath: "/home/sam/dohc/trip" };
+    const onSwitchWorkspace = vi.fn();
+    renderWithNotices(
+      makeBridge(Promise.resolve(null)),
+      { sentNotices: sentNotices([{ ...MENTION, workspaceId: "ws-trip", target: { path: "Japan/day-1.md" } }]), onSwitchWorkspace },
+      [WORKSPACE, trip],
+    );
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("sent-notice-mention:1");
+    expect(row.textContent).toContain("Japan");
+    await user.click(within(row).getByRole("button", { name: "Open" }));
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+  });
+
+  it("opens the file a notice named once the workspace it switched to is ready", async () => {
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openPathOnReady: "b.md" });
+    await screen.findByTestId("tab-b.md");
+  });
+
+  describe("through a share this computer has not added", () => {
+    const THROUGH_SHARE: NoticeRow = {
+      ...MENTION,
+      kind: "automation-notify",
+      senderKind: "automation",
+      workspaceId: null,
+      recipientShareId: "share-1",
+      title: "Weekday report is ready",
+      target: { path: "Trips/Japan/report.md" },
+    };
+    const VIEW: Workspace = { ...WORKSPACE, workspaceId: "ws-owner-view", rootPath: "/home/sam/dohc/owner" };
+    function shareBridge(access: "view" | "edit") {
+      return Object.assign(makeBridge(Promise.resolve(null)), {
+        mountShare: vi.fn(async () => ({
+          workspace: WORKSPACE,
+          mount: { shareId: "share-1", label: "owner", status: "updated" as const, changedPaths: 1 },
+        })),
+        openSharedView: vi.fn(async () => ({ workspace: VIEW })),
+        getRelayReceivedShare: vi.fn(async () => ({
+          found: true as const,
+          share: {
+            shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantId: "g1",
+            generation: 1, createdAtMs: 1, shareCode: "code-1", selector: { paths: ["Trips"], versionId: null }, access,
+          },
+        })),
+        getDefaultShareRoot: vi.fn(async () => "/home/sam/dohc/owner"),
+      });
+    }
+
+    it("adds it to shared-with-me and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("view");
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]) });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("open-share-start"));
+      expect(bridge.mountShare).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, shareCode: "code-1" });
+      await screen.findByTestId("tab-shared-with-me/owner/Trips/Japan/report.md");
+    });
+
+    it("opens it as its own workspace and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("edit");
+      const onSwitchWorkspace = vi.fn();
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]), onSwitchWorkspace });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      const start = await screen.findByTestId("open-share-start");
+      await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+      await user.click(start);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+    });
   });
 });
 
@@ -9616,24 +9245,6 @@ describe("content search", () => {
     const reopenedInclude = await screen.findByTestId("search-include");
     expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
-  });
-
-  // Plugins moved out of the settings dialog and onto the rail.
-  it("opens the plugin browser from the Plugins rail item", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("activity-bar");
-    expect(screen.queryByTestId("plugins-view")).toBeNull();
-
-    await user.click(screen.getByTestId("activity-plugins"));
-
-    expect(await screen.findByTestId("plugins-view")).toBeTruthy();
-    expect(screen.getByTestId("plugins-filter")).toBeTruthy();
-    await waitFor(() => expect(bridge.listPlugins).toHaveBeenCalled());
-    // The panel header names the view the rail selected.
-    expect(screen.getByTestId("side-panel").textContent).toContain("Plugins");
   });
 });
 
@@ -15232,6 +14843,291 @@ describe("file transfers", () => {
     });
   });
 
+  it("reports an import as a toast and a Notices row, and a newer import replaces the row", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain("Imported 1 file.");
+    expect(screen.getByTestId("notice-toasts").contains(toast)).toBe(true);
+
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["one.md", "two.md"],
+      skipped: 0,
+    });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
+        "Imported 2 files.",
+      ),
+    );
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Imported 2 files.");
+    expect(notices.textContent).not.toContain("Imported 1 file.");
+  });
+
+  // Every file was skipped for its name or kind, so the same files would be
+  // skipped again: the notice names the count and offers no Try again.
+  it("offers no Try again when an import brings nothing", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 2 });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  function sharedViewBridge(refreshOk: boolean[]) {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.refreshSharedView = vi.fn(async () =>
+      refreshOk.shift() === false
+        ? {
+            ok: false as const,
+            changedPaths: 0,
+            errorMessage: "The relay did not answer.",
+          }
+        : {
+            ok: true as const,
+            status: "unchanged" as const,
+            changedPaths: 0,
+            excludedPaths: [],
+            unjournalablePaths: [],
+            collisionRecordQuarantined: false,
+            refusedOps: 0,
+            refusedDetail: null,
+          },
+    );
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md", "notes/two.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    return bridge;
+  }
+
+  async function importIntoNotes(bridge: ReturnType<typeof makeBridge>) {
+    const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
+    if (!folder) throw new Error("notes folder row missing");
+    fireEvent.contextMenu(folder);
+    await waitFor(() =>
+      expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
+    );
+  }
+
+  const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
+
+  // Picking the same files again would land second copies under collision
+  // names, so the notice names what landed; Try again refreshes the shared
+  // view, then asks for files for the same folder.
+  it("names what an interrupted import landed, and Try again refreshes before it asks for files for the same folder", async () => {
+    const bridge = sharedViewBridge([true, true]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "Imported one.md and two.md before the import stopped. Import only the files that are still missing.",
+    );
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+    expect(bridge.refreshSharedView.mock.invocationCallOrder[1]).toBeLessThan(
+      bridge.importWorkspaceFiles.mock.invocationCallOrder[1]!,
+    );
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+      stop: {
+        file: "two.md",
+        code: "EACCES",
+        detail: "EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
+      },
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "Imported one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
+    );
+    expect(toast.textContent).not.toContain("EACCES");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(
+      "Cause: EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
+    );
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  // A notice's message is cut at 500 characters. Long names must not cut off
+  // the failure or the instruction; the report still lists every file.
+  it("keeps the failure and the instruction whole with long file names, and lists every file in Copy details", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const imported = ["notes/" + long("one"), "notes/" + long("two"), "notes/" + long("three")];
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported,
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("four"), code: "EACCES", detail: "EACCES: permission denied" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toMatch(/Imported one-n+…? and 2 more before the import stopped\./);
+    expect(toast.textContent).toContain("or write to this folder. Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    for (const path of imported) expect(copied).toContain(`Imported: ${path}`);
+  });
+
+  // A dangling link's refusal names the link too. With long names, the
+  // instruction must still survive, and Copy keeps every path whole.
+  it("keeps the instruction whole when a long-named dangling link stops an import into a deep folder", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const deep = `${"nested-folder/".repeat(40)}${long("one")}`;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [deep, `notes/${long("two")}`],
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("link"), refusal: "dangling-link", detail: "The symbolic link points to a missing file." },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("a symbolic link to a missing file. Restore that file, then import it instead.");
+    expect(toast.textContent).toContain(" Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
+  });
+
+  it("keeps the skipped count when the first copy fails", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 2,
+      stop: { file: "three.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'three.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files (2 skipped). The disk is full.",
+    );
+  });
+
+  // Try again removes the row before it runs. When the shared view cannot
+  // refresh first, the person still learns why no file picker opened.
+  it("says why no file picker opened when the shared view does not refresh before Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", damaged: true as const },
+    });
+    const user = userEvent.setup();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not start the import. Refresh the shared view before you import",
+      ),
+    );
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("words a failed first copy the same way, with the raw error only in Copy details", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      stop: { file: "one.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'one.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not import files. The disk is full.");
+    expect(toast.textContent).not.toContain("ENOSPC");
+    expect(within(toast).getByTestId("workspace-shell-error-retry")).toBeTruthy();
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain("Cause: ENOSPC: no space left on device");
+  });
+
+  // The refresh reports its own cause; the toast after it says why no file
+  // picker opened and what to do next.
+  it("asks for no files when the refresh before Try again fails", async () => {
+    const bridge = sharedViewBridge([true, false]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not start the import. Refresh the shared view before you import",
+      ),
+    );
+    expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-center")).textContent).toContain(
+      "Couldn't refresh the shared view. The relay did not answer.",
+    );
+  });
+
   it("reports an interrupted shared import separately from ordinary skips", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
@@ -15245,7 +15141,7 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
 
-    await screen.findByText(/Imported 2 files before the import stopped/);
+    await screen.findByText(/Imported one.md and two.md before the import stopped/);
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(1),
     );
@@ -15568,6 +15464,151 @@ describe("owner live documents", () => {
       expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
       }),
+    );
+  });
+
+  // edges-05, share-09: a relay outage read "Saving…" for its whole length,
+  // and the row that came three failures later named no cause and offered
+  // nothing to do. Codex on #1233: the first failed pass toasts, and later
+  // passes of the same failure only update the row.
+  it("toasts a failed sync at once, only once per failure, and clears it on recovery", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing = (attempts: number): SyncStatusResult => ({
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: `RelayUnreachableError: attempt ${attempts}`,
+        sinceMs: 1000,
+        attempts,
+      },
+    });
+    let status = failing(1);
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    // The first Try again meets the same outage; the second gets through.
+    bridge.retryCloudSync = vi
+      .fn(async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => failing(3))
+      .mockImplementationOnce(async () => {
+        status = failing(3);
+        return status;
+      })
+      .mockImplementationOnce(async () => {
+        status = SYNC_STATUS;
+        return SYNC_STATUS;
+      });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    // One failed pass: the title bar, a toast with Try again and copy, and a
+    // Notices row.
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
+    );
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not reach the server.",
+    );
+    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("notice-center").textContent).toContain(
+        "dohc could not reach the server.",
+      ),
+    );
+    await user.click(screen.getByTestId("notice-center-toggle"));
+
+    // The automatic retry fails too: the same failure, so no second toast.
+    await user.click(await screen.findByRole("button", { name: "Dismiss workspace error" }));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const readsBefore = vi.mocked(bridge.getSyncStatus).mock.calls.length;
+    status = failing(2);
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(vi.mocked(bridge.getSyncStatus).mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => undefined);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).toContain(
+      "dohc could not reach the server.",
+    );
+
+    // Try again from the row, then close Notices so the toast can show.
+    await user.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),
+    );
+    if (screen.queryByTestId("notice-center")) {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+    }
+
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(1));
+    // Still failing: the person asked, so the answer interrupts again.
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("dohc could not reach the server.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(2));
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("synced"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
+    );
+  });
+
+  // The shell remounts on every workspace switch, with its status unknown
+  // until the workspace answers. Coming back to the same outage must not
+  // bring back a toast, or a row the person dismissed.
+  it("keeps a sync failure quiet across a remount once shown and dismissed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing: SyncStatusResult = {
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: down",
+        sinceMs: 1000,
+        attempts: 2,
+      },
+    };
+    // The status answers only when released, so the remount starts loading.
+    let answer: ((status: SyncStatusResult) => void) | null = null;
+    bridge.openWorkspace = vi.fn(async () => failing);
+    bridge.getSyncStatus = vi.fn(async () => failing);
+    const user = userEvent.setup();
+    const first = renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByText("dohc could not reach the server.");
+    const dismiss = row.closest("li")?.querySelector("[aria-label=\"Dismiss notice\"]");
+    if (!(dismiss instanceof HTMLElement)) throw new Error("no dismiss control on the row");
+    await user.click(dismiss);
+    first.unmount();
+
+    bridge.openWorkspace = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    bridge.getSyncStatus = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    renderShell(bridge);
+    await waitFor(() => expect(answer).not.toBeNull());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    act(() => answer?.(failing));
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
     );
   });
 
@@ -16538,7 +16579,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16576,7 +16617,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16607,7 +16648,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16643,7 +16684,7 @@ describe("workbench render cost", () => {
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
 
     vi.useFakeTimers();
     try {
@@ -16682,7 +16723,7 @@ describe("workbench render cost", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
       },
     );
 
@@ -16912,5 +16953,173 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("apps pinned to the sidebar", () => {
+  it("opens a view hidden from the rail from a command, and moves off it only when the rail changes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const withSidebar = (hidden: typeof VIEW_IDS[number][], zoomLevel = 0) => ({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
+        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden },
+      },
+      source: "stored" as const,
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shellWith = (userSettings: ReturnType<typeof withSidebar>) => (
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={userSettings}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shellWith(withSidebar(["history"])));
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-history")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("View: History"));
+    const panel = await screen.findByTestId("side-panel");
+    expect(within(panel).getByText("History")).toBeTruthy();
+
+    // Another settings change, or hiding another view, leaves it open.
+    view.rerender(shellWith(withSidebar(["history"], 1)));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+    view.rerender(shellWith(withSidebar(["history", "explorer"])));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+
+    // Hiding the selected view is what moves the selection, to the first
+    // view on the rail.
+    await user.click(screen.getByTestId("activity-search"));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
+    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
+  });
+
+  it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: [...VIEW_IDS] },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.queryByTestId("file-tree")).toBeNull();
+  });
+
+  it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
+    const user = userEvent.setup();
+    const site: SitePackageInfo = {
+      root: "apps/trip",
+      title: "Trip planner",
+      kind: "static",
+      confidence: "high",
+      entryPath: "apps/trip/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredPreviewMode: null,
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: ["apps/trip/index.html"],
+      shareManifest: { ok: true, manifest: { entryPath: "apps/trip/index.html", assets: [] } },
+      diagnostics: [],
+      authority: { kind: "workspace" },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      getSitePackage: vi.fn(async () => site),
+      startSitePreview: vi.fn(async () => ({
+        siteRoot: "apps/trip",
+        mode: "static" as const,
+        url: "http://127.0.0.1:49152/",
+        logs: [],
+        exited: false,
+        generation: 1,
+      })),
+      stopSitePreview: vi.fn(async () => undefined),
+      onSitePreviewReplaced: vi.fn(() => () => undefined),
+      getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
+      setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
+    });
+    bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: {
+        ...DEFAULT_USER_SETTINGS.sidebar,
+        hidden: ["graph" as const],
+        pinnedApps: { [WORKSPACE.workspaceId]: ["apps/trip"] },
+      },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-graph")).toBeNull();
+    // The pin carries its app's title once dohc has read the app.
+    const pinned = await screen.findByRole("button", { name: "Trip planner" });
+    await user.click(pinned);
+
+    const panel = screen.getByTestId("side-panel");
+    const frame = await within(panel).findByTestId("site-preview-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
+    expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(bridge.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      siteRoot: "apps/trip",
+      mode: "static",
+      holderId: expect.any(String),
+      restart: false,
+    });
+
+    fireEvent.contextMenu(pinned);
+    await waitFor(() =>
+      expect(bridge.setAppPinned).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        appRoot: "apps/trip",
+        pinned: false,
+      }),
+    );
+    expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      context: "pinned-app",
+      path: "apps/trip",
+    });
   });
 });

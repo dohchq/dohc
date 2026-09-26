@@ -1,5 +1,6 @@
 import { EMOJI_DATA } from "../editor/emojiData";
 import { AgentBadge } from "./AgentBadge";
+import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
@@ -70,7 +71,7 @@ export interface ReactionToggleContext {
   reactionSeq: MutableRefObject<Map<string, number>>;
   setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>>;
   setViewerAuthorId: Dispatch<SetStateAction<string>>;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
 }
 
 export function runReactionToggle(
@@ -140,7 +141,7 @@ export function runReactionToggle(
       // so a superseded failure never clobbers a newer toggle's state.
       if (isCurrent()) ctx.setReactions((current) => setCell(current, !present));
       if (token === ctx.liveToken.current) {
-        ctx.onError(ipcErrorMessage(error, "Could not update that reaction."));
+        ctx.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
       }
     });
 }
@@ -837,7 +838,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             ) : (
               <ChatAvatar
                 name={message.authorDisplayName}
-                kind={isAgent ? "agent" : "human"}
+                kind={message.authorKind}
                 size="comment"
               />
             )}
@@ -855,6 +856,14 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   {chatAuthorLabel(message)}
                 </span>
                 {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
+                {message.authorKind === "automation" ? (
+                  <AutomationBadge
+                    testIdPrefix={props.testIdPrefix}
+                    author={message}
+                    viewerAuthorId={props.reactionControls?.viewerAuthorId}
+                    onOpenPath={props.onOpenPath}
+                  />
+                ) : null}
                 <time
                   dateTime={time.iso}
                   title={time.iso}

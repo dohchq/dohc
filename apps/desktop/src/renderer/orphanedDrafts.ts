@@ -3,6 +3,7 @@ import {
   clearStoredDrafts,
   forgetStoredDraft,
   loadStoredDrafts,
+  isStoredDraftCurrent,
   remapStoredDraftPaths,
   replaceStoredDraft,
   storeDraft,
@@ -78,6 +79,8 @@ function keyFor(workspaceId: string, path: string): string {
 
 // Deferred because some captures still run during document-view render. A
 // synchronous notification there would schedule subscriber renders mid-render.
+if (typeof window !== "undefined") window.addEventListener("storage", scheduleNotify);
+
 function scheduleNotify(): void {
   // Every caller just mutated the map; the bump invalidates snapshot caches.
   storeVersion += 1;
@@ -182,9 +185,8 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
       { id: row.id, text: row.text, capturedAtMs: row.capturedAtMs },
     ]);
     storedIds.add(row.id);
-    // Ids stay stable across restarts so a dismissal reaches the right stored
-    // row. Claiming them is what keeps this run's captures clear of them —
-    // the storage load already guaranteed they are unique and countable from.
+    // Storage maps each local handle to its durable key. Reserve restored
+    // handles so this renderer's new captures cannot reuse them.
     claimedIds.add(row.id);
   }
 }
@@ -296,7 +298,7 @@ export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> 
 export function atRiskOrphanedDraftIds(): readonly number[] {
   const ids: number[] = [];
   for (const kept of drafts.values()) {
-    for (const draft of kept) if (!storedIds.has(draft.id)) ids.push(draft.id);
+    for (const draft of kept) if ((!storedIds.has(draft.id) || !isStoredDraftCurrent(draft.id))) ids.push(draft.id);
   }
   return ids;
 }
@@ -348,7 +350,7 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
           workspaceLabel,
           path,
           draft,
-          persisted: storedIds.has(draft.id),
+          persisted: storedIds.has(draft.id) && isStoredDraftCurrent(draft.id),
         });
       }
     }

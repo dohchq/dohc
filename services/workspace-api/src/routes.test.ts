@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ACCOUNT_CSS_PATH, ACCOUNT_JS_PATH } from "./assets";
 import type { ServerDescriptor } from "./config";
+import { createCrashReportIntake } from "./crashReports";
 import type { ReadinessReport } from "./readiness";
 import { createRouter, type AuthGateway, type RouterOptions } from "./routes";
 
@@ -340,5 +341,51 @@ describe("unknown routes", () => {
     const response = await router()(get("/nope"));
     expect(response.status).toBe(404);
     expect(response.headers.get("content-type")).toContain("text/html");
+  });
+});
+
+describe("crash reports", () => {
+  const REPORT = "dohc crash report\n\nProcess: main\nError: TypeError: a secret-looking message";
+  function send(headers: Record<string, string> = {}): Request {
+    return new Request(`${ORIGIN}/api/crash-reports`, {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8", ...headers },
+      body: REPORT,
+    });
+  }
+
+  it("is not a route unless the operator turned crash reports on", async () => {
+    const response = await router()(send());
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ ok: false, error: "route not found" });
+  });
+
+  it("stores a report when crash reports are on", async () => {
+    const stored: string[] = [];
+    const crashReports = createCrashReportIntake({
+      store: { insert: async ({ body }) => (stored.push(body), true), deleteExpired: async () => 0 },
+    });
+    const response = await router({ crashReports })(send());
+    expect(response.status).toBe(201);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ ok: true, id: expect.any(String) });
+    expect(stored).toEqual([REPORT]);
+
+    const read = await router({ crashReports })(get("/api/crash-reports"));
+    expect(read.status).toBe(405);
+    expect(read.headers.get("allow")).toBe("POST");
+  });
+
+  it("never logs a report, even when storing it fails", async () => {
+    const logged: unknown[] = [];
+    const spies = (["log", "info", "warn", "error"] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void logged.push(args)));
+    const crashReports = createCrashReportIntake({
+      store: { insert: async () => { throw new Error(`insert failed for ${REPORT}`); }, deleteExpired: async () => 0 },
+    });
+    const response = await router({ crashReports })(send());
+    for (const spy of spies) spy.mockRestore();
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(logged)).not.toContain("secret-looking");
   });
 });

@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import {
   ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalRecovery,
   type RebuildEngineStoreResult,
 } from "../ipc/bridgeContract";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -492,6 +493,7 @@ export async function moveEngineStoreAside(
 
 type EngineStoreRebuildRequestFailure =
   | "not-refused"
+  | "update-required"
   | "agent-run-active"
   | "close-failed";
 
@@ -501,6 +503,8 @@ const engineStoreRebuildRequestMessages: Record<
 > = {
   "not-refused":
     "dohc can read this workspace's current data store. Nothing moved.",
+  "update-required":
+    "This workspace's data store needs a newer version of dohc. Nothing moved. Update dohc to continue.",
   "agent-run-active":
     "An agent is working in this workspace. Wait for it to finish, then try again.",
   "close-failed":
@@ -544,8 +548,14 @@ export async function rebuildEngineStore(
   let reopenError: unknown;
 
   try {
-    if ((await deps.probeStoreRefusal()) === null) {
+    // The status that admitted this request can be stale. Another build may
+    // have replaced the store since, so the fresh answer decides the move.
+    const refusal = await deps.probeStoreRefusal();
+    if (refusal === null) {
       throw new EngineStoreRebuildRequestError("not-refused");
+    }
+    if (engineStoreRefusalRecovery(refusal) !== "rebuild") {
+      throw new EngineStoreRebuildRequestError("update-required");
     }
     moveAttempted = true;
     deps.rebuildGate.begin();

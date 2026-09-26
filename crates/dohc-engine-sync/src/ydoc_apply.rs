@@ -453,7 +453,7 @@ fn apply_deferred_base(
             // the base claim's snapshot insert alone.
             tx.execute(
                 "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0, \
-                    seed_source_sha256=NULL, \
+                    settled_update_seq=NULL,seed_source_sha256=NULL, \
                     lineage_claim_status='unclaimed',lineage_claim_id=NULL, \
                     base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL, \
                     base_relay_confirmed_absent=0 \
@@ -476,6 +476,17 @@ fn apply_deferred_base(
         .map_err(|error| {
             map_collab_payload_error(error, "parked Y.Doc base could not be claimed")
         })?;
+        // A base this drain installs is a document from elsewhere. A resumed
+        // claim was installed by an earlier attempt, and one another base
+        // already won installs nothing.
+        if matches!(
+            claim,
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+                | dohc_engine_collab::ClaimOutcome::Replaced { .. }
+        ) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)
+                .map_err(SyncError::Storage)?;
+        }
         let (winner, losing_claim_id) = match claim {
             dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
                 // A winner/fresh replica cannot recover this incoming loser:
@@ -687,6 +698,44 @@ pub fn drain_deferred_ydoc_for_live_session(
         faults,
     )?;
     complete_drain(store, drained, cleanup, faults)
+}
+
+/// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
+/// an open editor bound to `lineage_claim_id`: the replicated lineage is still
+/// the one the editor opened, and the first deferred coordinate in relay order
+/// belongs to it. A queue that starts with another claim waits for the session
+/// to end, so it answers false.
+pub fn live_session_has_drainable_deferred_ydoc(
+    store: &EngineStore,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> Result<bool, SyncError> {
+    let marker = dohc_engine_collab::read_marker(store, key).map_err(map_collab_hard_error)?;
+    if !marker.is_some_and(|marker| {
+        marker.regime == dohc_engine_collab::Regime::Replicated
+            && marker.lineage_claim_id.as_deref() == Some(lineage_claim_id)
+    }) {
+        return Ok(false);
+    }
+    let first: Option<Option<String>> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT deferred.lineage_claim_id \
+             FROM ydoc_deferred_updates AS deferred \
+             JOIN replication_log AS log \
+               ON log.workspace_id = deferred.workspace_id \
+              AND log.origin_id = deferred.origin_id \
+              AND log.origin_seq = deferred.origin_seq \
+             WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2 \
+               AND deferred.object_id = ?3 AND log.op_kind = 'ydoc.update' \
+             ORDER BY deferred.relay_seq,log.origin_id,log.origin_seq \
+             LIMIT 1",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })?;
+    Ok(first.flatten().as_deref() == Some(lineage_claim_id))
 }
 
 #[derive(Clone, Copy)]
@@ -1627,16 +1676,27 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 ) -> Result<(), SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
-        }
+        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+            tx,
+            &complete,
+            path,
+            text,
+            LineageFoldAuthor::default(),
+            now_ms,
+            false,
+        )
+        .map(|_| ()),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
 }
 
 /// Reconcile a locally-originated file mutation with its closed Y.Doc
 /// lineage. The generated CRDT update is journaled before the mutation's
-/// artifact operation, so every peer applies one canonical rewrite.
+/// artifact operation, so every peer applies one canonical rewrite. Returns
+/// the collection record fields the mutation changed, if it wrote a bound
+/// record's frontmatter: from the lineage's fold, or, when the lineage holds
+/// no content, from the record's index against the written text.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_local_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -1644,25 +1704,61 @@ pub fn reconcile_local_resulting_head_in_tx(
     object_id: &str,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let key =
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
             text,
-            actor_origin_id,
+            LineageFoldAuthor {
+                actor_origin_id,
+                attribution,
+            },
             now_ms,
             true,
-        ),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded(facts) => Ok(facts),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                workspace_id,
+                version_id,
+                object_id,
+                path,
+                text,
+                actor_origin_id,
+                attribution,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
+}
+
+/// Who wrote the text a fold folds in.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LineageFoldAuthor<'a> {
+    pub(crate) actor_origin_id: Option<&'a str>,
+    pub(crate) attribution: Option<&'a dohc_engine_domain::ChangeAttribution>,
+}
+
+/// What folding a file's text into its Y.Doc lineage did.
+pub(crate) enum LineageFold {
+    /// The lineage holds no content: the file alone carries the text.
+    NoContent,
+    /// The lineage holds the text now, with the record fields its append
+    /// changed, if any.
+    Folded(Option<dohc_engine_domain::CollectionRecordApplyFacts>),
 }
 
 /// Finalize an imported file mutation without creating a second CRDT edit.
@@ -1780,7 +1876,16 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
-    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
+    fold_complete_ydoc_lineage_in_tx(
+        tx,
+        &complete,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+        true,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1788,15 +1893,19 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
     path: &str,
     chosen_text: &str,
-    actor_origin_id: Option<&str>,
+    author: LineageFoldAuthor<'_>,
     now_ms: i64,
     journal: bool,
-) -> Result<(), SyncError> {
+) -> Result<LineageFold, SyncError> {
+    let LineageFoldAuthor {
+        actor_origin_id,
+        attribution,
+    } = author;
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     };
     let has_content = marker.lineage_claim_status.has_claimed_base()
         || marker.head_update_seq > 0
@@ -1814,8 +1923,9 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             ],
         )
         .map_err(SyncError::persist)?;
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     }
+    let mut record_facts = None;
     let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
     if projection.content != chosen_text {
         if marker.content_kind == ContentKind::Scene {
@@ -1826,7 +1936,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             // scene. The durable file head is canonical: retire the lineage
             // and let the next open seed a fresh scene from the artifact,
             // exactly like a first open.
-            return retire_complete_ydoc_lineage_in_tx(tx, complete);
+            return retire_complete_ydoc_lineage_in_tx(tx, complete)
+                .map(|()| LineageFold::Folded(None));
         }
         let canonical_projection = doc
             .project(marker.content_kind)
@@ -1879,7 +1990,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             key,
             &update,
             actor_origin_id,
-            None,
+            attribution,
             now_ms,
         )
         .map_err(|error| {
@@ -1909,17 +2020,19 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
                     actor_origin_id,
-                    None,
+                    attribution,
                     false,
                 ),
                 now_ms,
             )?;
         }
+        record_facts = outcome.record_facts;
     }
     // The resolution's head IS the settled artifact now: align the settle
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
-    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)
+    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)?;
+    Ok(LineageFold::Folded(record_facts))
 }
 
 fn settle_ydoc_marker_to_text(
@@ -1929,8 +2042,11 @@ fn settle_ydoc_marker_to_text(
     text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
+    // The lineage at its current head projects to `text`, the head it settles
+    // to here, so it covers every update up to that head.
     tx.execute(
-        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6 \
+        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6, \
+         settled_update_seq=head_update_seq \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![
             key.workspace_id,
@@ -2043,6 +2159,21 @@ pub fn validate_scene_asset_with_store(
     authorize_scene_asset_with_store(conn, key, asset).map(|_| ())
 }
 
+/// The text of the object's current snapshot in its version: the file the
+/// last settle or capture left on disk.
+fn local_snapshot_text(conn: &Connection, key: &DocKey) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+           AND s.content_kind = 'text'",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
 /// Project one canonical live document through authoritative versioned state.
 /// Scene bytes never enter the Y.Doc; they resolve from the same workspace and
 /// version as its lineage and are injected only into the portable artifact.
@@ -2057,7 +2188,8 @@ pub fn project_ydoc_with_store(
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && let Some(source) = doc.preserved_markdown_source(&projection.content)
+            && let Some(source) =
+                doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
         {
             projection.content = source;
         }
@@ -2263,7 +2395,9 @@ pub fn project_and_write_in_tx(
         .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
         tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6, \
+             settled_update_seq = head_update_seq \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
                 key.version_id,
@@ -2321,7 +2455,9 @@ pub fn project_and_write_in_tx(
     // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
-        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, path = ?7          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
+         path = ?7, settled_update_seq = head_update_seq \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![
             key.workspace_id,
             key.version_id,
@@ -2806,7 +2942,7 @@ pub fn apply_ydoc_envelope(
                 // replacement on the base claim's snapshot insert alone.
                 tx.execute(
                     "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,
-                        seed_source_sha256=NULL,
+                        settled_update_seq=NULL,seed_source_sha256=NULL,
                         lineage_claim_status='unclaimed',lineage_claim_id=NULL,
                         base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL,
                         base_relay_confirmed_absent=0
@@ -3802,10 +3938,25 @@ pub(crate) fn map_domain_hard_error(error: DomainError) -> SyncError {
 mod tests {
     use super::*;
 
+    /// A receiver that holds no local snapshot or blob for the document.
+    fn receiver_database() -> Connection {
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        connection
+            .execute_batch(
+                "CREATE TABLE snapshots (workspace_id TEXT, version_id TEXT, object_id TEXT, \
+                 blob_sha256 TEXT, content_kind TEXT); \
+                 CREATE TABLE blobs (sha256 TEXT, text TEXT);",
+            )
+            .expect("create empty snapshot tables");
+        connection
+    }
+
     #[test]
     fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
+        // The settle keeps the blank lines under frontmatter, so the lexical
+        // variant the projector changes sits between two body blocks.
         const ORIGINAL: &str =
-            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
 
         let sender = dohc_engine_collab::Ydoc::wire();
@@ -3830,7 +3981,7 @@ mod tests {
         receiver
             .apply(&adoption)
             .expect("apply adoption on receiver");
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let projection =
             project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
@@ -3853,7 +4004,9 @@ mod tests {
         remote
             .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &injected_source)
             .expect("plant source metadata");
-        remote.frontmatter_set("status", "current canonical value");
+        remote
+            .frontmatter_set("status", "current canonical value")
+            .unwrap();
 
         let receiver = dohc_engine_collab::Ydoc::wire();
         receiver
@@ -3871,7 +4024,7 @@ mod tests {
             "the regression requires a projection witness stale against the document it rides in"
         );
 
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
             .expect("settle receiver");
@@ -3885,7 +4038,7 @@ mod tests {
         const ORIGINAL: &str =
             "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
-        const PLANTED: &str = "# bytes the canonical document never represented\n";
+        const PLANTED: &str = "---\nid: 01j00000000000000000000000\n---\n\n# bytes the canonical document never represented\n";
 
         let remote = dohc_engine_collab::Ydoc::wire();
         remote
@@ -3920,7 +4073,7 @@ mod tests {
             "the attack requires a source digest matching the planted bytes"
         );
 
-        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let connection = receiver_database();
         let key = DocKey::new("workspace", "main", "record").expect("receiver key");
         let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
             .expect("settle receiver");

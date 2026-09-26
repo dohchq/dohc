@@ -213,7 +213,7 @@ fn seed_recovery_decision_conflict(
     );
     assert_eq!(
         apply_chat_envelope(engine, &peer_operation, &NoFaults).expect("apply peer decision"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     let local_seq = journal_test_op(
         engine,
@@ -712,7 +712,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
     );
 
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_200, 0)
+        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_200, 0)
         .expect("push recovered suffix");
     client
         .pull_chat_workspace(
@@ -838,12 +838,12 @@ fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
     let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased losing decision"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
@@ -876,12 +876,12 @@ fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
     let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased winning decision"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }

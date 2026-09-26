@@ -37,7 +37,8 @@ type Override = Pick<NamedLiveBrowserState, "status" | "reason">;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value: unknown, keys: string): value is Record<string, unknown> => record(value) && Object.keys(value).sort().join(",") === keys;
 class Refused extends Error {}
-class Unavailable extends Error {}
+/** The server answered and would not authorize this document. The connection works. */
+export class LiveAuthorityUnavailableError extends Error {}
 
 export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
   if (!exact(value, "connectTimeoutMs,drainPollMs,maxHttpResponseBytes,maxSocketBufferedBytes,provider,sendTimeoutMs") ||
@@ -103,7 +104,7 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
             headers: { accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
             ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
           signal.throwIfAborted();
-          if ([401, 403, 404].includes(response.status)) throw new Unavailable();
+          if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError();
           if (response.status !== 200 || response.redirected || !response.body ||
               response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw new Error("Invalid response.");
           const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
@@ -225,7 +226,7 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
           await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
         } catch (error) {
           fail(held, error instanceof Refused ? (provider.state().pendingUpdates ? "quarantined" : "refused") : "disconnected",
-            error instanceof Refused ? "account-changed" : error instanceof Unavailable ? "authority-unavailable" : "connection-failed");
+            error instanceof Refused ? "account-changed" : error instanceof LiveAuthorityUnavailableError ? "authority-unavailable" : "connection-failed");
         }
       },
       disconnect() {

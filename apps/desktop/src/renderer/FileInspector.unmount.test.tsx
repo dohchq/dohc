@@ -29,6 +29,7 @@ import {
   stubEditorGlobals,
   stubScrollSpy,
   findSourceEditor,
+  findEnabledMarkdownEditToggle,
   toggleSourceOnce,
 } from "./FileInspector.editor-fixture";
 import {
@@ -37,6 +38,9 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+import { deferred } from "../testing/deferred";
+import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { loadStoredDrafts } from "./orphanedDraftStorage";
 
 setupFileInspectorTests();
 
@@ -88,23 +92,6 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // surfaces carry it: the source CodeMirror host in FileInspector and the
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
-// The edit toggle is `disabled={readOnly || opening}`, and a click on a
-// disabled button does nothing and does not retry. A click fired the moment the
-// button exists is therefore dropped whenever the open has not answered yet,
-// and the wait for the source surface then times out on a toggle that never
-// happened. Clicking a mode toggle more than once is not a fix — the modes
-// cycle — so the enabled button is the thing to wait for.
-async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
-  return await waitFor(() => {
-    const toggle = screen.getByTestId("markdown-edit-toggle");
-    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
-    }
-    return toggle;
-  });
-}
 
 // The P1 trap: typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to
@@ -171,6 +158,61 @@ describe("markdown editor unmount flush", () => {
     );
     return { user, view };
   }
+
+  it.each([false, true])("captures the latest local Markdown edit when its exit writer stalls (edit after capture: %s)", async (editAfterCapture) => {
+    const held = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    const latest = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    bridgeMock.writeWorkspaceText.mockReturnValueOnce(held.promise).mockReturnValueOnce(latest.promise);
+    const user = userEvent.setup();
+    const onSaveStateChange = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />);
+    await screen.findByTestId("view-markdown");
+    const richEditor = await screen.findByTestId("markdown-editor");
+    expect(richEditor.classList.contains("dohc-code-editor")).toBe(false);
+    await typeInMarkdownEditor(user, richEditor, "Draft!");
+    vi.useFakeTimers();
+    try {
+      let drained = false;
+      const drain = settlePendingEditorDrafts().then(result => { drained = result; });
+      await act(async () => { await Promise.resolve(); });
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledOnce();
+      await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Newest!"));
+      expect(drained).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(EDITOR_WRITE_STALL_MS); });
+      await drain;
+      expect(drained).toBe(true);
+      expect(hasPendingEditorDrafts()).toBe(false);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ path: "a.md", text: expect.stringContaining("Newest!") }),
+      ]);
+      const newestText = editAfterCapture ? "Later!" : "Newest!";
+      if (editAfterCapture) {
+        await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), newestText));
+        expect(hasPendingEditorDrafts()).toBe(true);
+      }
+      await act(async () => { held.resolve({ status: "written", contentHash: "late-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving");
+      expect(screen.getByTestId("markdown-save-state").dataset.state).not.toBe("saved");
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(newestText);
+      expect(screen.getByTestId("markdown-editor").textContent).toContain(newestText);
+      vi.useRealTimers();
+      fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      await act(async () => { latest.resolve({ status: "written", contentHash: "latest-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("Newest!") }),
+      ]);
+    } finally {
+      await act(async () => {
+        held.resolve({ status: "written", contentHash: "late-save" });
+        latest.resolve({ status: "written", contentHash: "latest-save" });
+      });
+      vi.useRealTimers();
+    }
+  });
 
   it("retains the local buffer through StrictMode without a blank committed view", () => {
     const path = "assets/identity.png";
@@ -1320,7 +1362,7 @@ describe("markdown editor unmount flush", () => {
       ),
     );
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Retitled" } });
     fireEvent.blur(title);
@@ -1362,7 +1404,7 @@ describe("markdown editor unmount flush", () => {
     // No pending save yet, so the save-state chip is hidden in read mode.
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     await user.click(title);
     await user.type(title, "!");
 
@@ -2594,7 +2636,6 @@ describe("markdown editor unmount flush", () => {
     });
     const toggles: Array<(() => void) | null> = [null, null];
     const flushes: DraftFlush[] = [];
-    const user = userEvent.setup();
     render(
       <>
         {[0, 1].map((index) => (
@@ -2615,21 +2656,27 @@ describe("markdown editor unmount flush", () => {
     const editors = await screen.findAllByTestId("markdown-editor");
     await waitFor(() => expect(flushes).toHaveLength(2));
     await toggleSourceOnce(() => toggles[1]);
-    const sourceEditor = screen
-      .getAllByTestId("markdown-editor")
-      .find((editor) => editor.classList.contains("dohc-code-editor"));
-    expect(sourceEditor).toBeDefined();
+    const sourceEditor = await waitFor(() => {
+      const source = screen.getAllByTestId("markdown-editor")
+        .find((editor) => editor.classList.contains("dohc-code-editor"));
+      expect(source).toBeDefined();
+      return source!;
+    });
     const sourceContent = await textEditorContent(sourceEditor!);
 
-    await user.click(editors[0]!);
-    await user.type(editors[0]!, "Body A");
+    // Keep the body pending throughout the handoff, even on a busy renderer.
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await settleUserEventAction(user.click(editors[0]!));
+    await settleUserEventAction(user.type(editors[0]!, "Body A"));
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-    await user.click(sourceContent);
+    await settleUserEventAction(user.click(sourceContent));
     codeEditorView(sourceEditor!).dispatch({
       selection: { anchor: codeEditorText(sourceEditor!).length },
     });
-    await user.keyboard("Source B");
+    await settleUserEventAction(user.keyboard("Source B"));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -3176,9 +3223,7 @@ describe("markdown editor unmount flush", () => {
         }
         const surface = markdown
           ? screen.getByTestId("markdown-editor")
-          : (await screen.findByTestId("view-text-editor")).querySelector(
-              ".cm-content",
-            )!;
+          : await findTextEditorContent();
 
         if (markdown) {
           appendCodeEditorText(surface as HTMLElement, " first");
@@ -4581,6 +4626,147 @@ describe("markdown editor unmount flush", () => {
     } finally {
       parse.mockRestore();
       serialize.mockRestore();
+    }
+  });
+
+  // A busy renderer can deliver the first cell edit before the effects of the
+  // render that showed the table. The table must still recognize its own
+  // output (one serialize, no reparse, later edits keep the row offsets), and
+  // the draft must still save against the read it was built on.
+  it("saves an edit that lands before the table's effects, serializing it once", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42\n2026-06-11,43",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const expectedText = delimitedTextCodec.serialize(
+      [["date", "amount"], ["2026-06-10", "420"], ["2026-06-11", "430"]],
+      ",",
+    );
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A MutationObserver callback runs as a microtask right after the commit
+      // that adds the cells, before the task that runs that commit's effects.
+      // The wait is bounded like the suite's other waits, inside the 30 s test.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The table's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = screen.queryByLabelText("Row 1 column 2");
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          parse.mockClear();
+          serialize.mockClear();
+          fireEvent.change(cell, { target: { value: "420" } });
+          fireEvent.change(screen.getByLabelText("Row 2 column 2"), {
+            target: { value: "430" },
+          });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+      await edited;
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+      expect(
+        (screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value,
+      ).toBe("420");
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "data/table.csv",
+        text: expectedText,
+        expectedContentHash: TEST_CONTENT_HASH,
+      });
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
+  // The same early edit in a duplicate pane whose read answered after a newer
+  // one. The shared document refuses the older read, so saving the edit would
+  // put text built on the older read under the newer content hash.
+  it("sets aside an early edit built on a read the document already moved past", async () => {
+    type ReadResult = { text: string; truncated: false; contentHash: string };
+    const newerHash = "2".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<ReadResult>((resolve) => { resolveNewer = resolve; });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    const capture = vi.spyOn(orphanedDraftsModule, "captureOrphanedDraft");
+    const olderCell = () =>
+      (screen.queryAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+        .find((input) => input.value === "1");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const view = render(
+        <>
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+        </>,
+      );
+      await waitFor(() =>
+        expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+      );
+      await act(async () => {
+        resolveNewer({ text: "a\n2", truncated: false, contentHash: newerHash });
+        await newer;
+      });
+      const buffer = getSharedLocalDocument(
+        documentVersionKey("ws-1", "data/table.csv", undefined),
+      );
+      await waitFor(() => expect(buffer.getSnapshot().body).toBe("a\n2"));
+
+      // Edit the older pane the moment its cells appear, before its effects.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The older pane's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = olderCell();
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          fireEvent.change(cell, { target: { value: "10" } });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      // Outside act, so React commits the table and runs its effects in
+      // separate tasks, as it does in the app.
+      resolveOlder({ text: "a\n1", truncated: false, contentHash: "1".repeat(64) });
+      await edited;
+
+      expect(capture).toHaveBeenCalledWith("ws-1", "data/table.csv", "a\n10");
+      expect(buffer.getSnapshot()).toMatchObject({ body: "a\n2", contentHash: newerHash });
+      await waitFor(() =>
+        expect(
+          (screen.getAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+            .map((input) => input.value),
+        ).toEqual(["2", "2"]),
+      );
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      capture.mockRestore();
     }
   });
 

@@ -47,6 +47,7 @@ pub(crate) fn prepare_exports(
     store: &mut EngineStore,
     workspace: &str,
     faults: &dyn FaultInjector,
+    leases: &dyn crate::LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     if !store.read_with(|conn| pending_in_tx(conn, workspace))? {
@@ -76,7 +77,7 @@ pub(crate) fn prepare_exports(
             }
             tx.execute(&format!("DELETE FROM live_audit_pending_exports WHERE {SCOPE}"),p).map_err(SyncError::persist)?;
             let declined=if !pending_in_tx(tx,workspace)? {
-                crate::enrolment::finish_live_history_enrolment_in_tx(tx,workspace,now_ms)?
+                crate::enrolment::finish_live_history_enrolment_in_tx(tx,workspace,leases,now_ms)?
             }else{Vec::new()};
             Ok(Some((0,declined)))
         })?;

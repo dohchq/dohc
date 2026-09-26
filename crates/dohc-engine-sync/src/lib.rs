@@ -14,6 +14,7 @@ mod conflict_apply;
 mod conflict_outbox;
 mod conflict_resolve_v1;
 mod cursor;
+mod deferred;
 mod enrolment;
 mod error;
 mod file_search;
@@ -52,6 +53,7 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
+pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{
@@ -62,7 +64,7 @@ pub use journal::{
     adopt_join_identity, journal_local_op_in_tx, journal_local_replication_op,
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
     record_share_view_identity, workspace_journals_file_moments_in_tx,
-    workspace_replicates_with_relay_in_tx,
+    workspace_replicates_with_relay, workspace_replicates_with_relay_in_tx,
 };
 pub use live_audit::{
     journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
@@ -84,14 +86,16 @@ pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
     BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
-    KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
-    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
-    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, EpochRequest, EpochResponse,
+    KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
+    ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse,
+    RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
+    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
@@ -108,12 +112,14 @@ pub use ydoc_apply::{
     complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
     drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
     ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
-    open_sync_conflict_for_object, project_and_write_in_tx, project_ydoc_with_store,
-    reconcile_imported_resulting_head_in_tx, reconcile_local_resulting_head_in_tx,
-    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    live_session_has_drainable_deferred_ydoc, open_sync_conflict_for_object,
+    project_and_write_in_tx, project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
+    validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
-    BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
+    BaseOrigination, SharingDeclined, lineage_originated_here, originate_ydoc_base_in_tx,
+    ydoc_update_payload,
 };
 pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
 

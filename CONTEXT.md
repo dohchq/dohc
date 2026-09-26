@@ -46,7 +46,7 @@ _Avoid_: notification (for the item), inbox, alert
 
 **Automation**:
 A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of those people can reach.
-_Avoid_: workflow, zap, plugin automation
+_Avoid_: workflow, zap
 
 **Personal step**:
 A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
@@ -86,7 +86,7 @@ _Avoid_: public link, web share, share URL
 
 **Link holder**:
 A person using a share link without a dohc identity. Known by a link principal and an optional self-claimed, unverified name.
-_Avoid_: guest (means an embedded web view in the desktop app), anonymous user, visitor
+_Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
 The server-minted identity for one browser holding one share link. It carries provenance on everything the link holder does; it never carries authority beyond the grant.

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { PropertiesPanel } from "./PropertiesPanel";
 
 function ControlledPropertiesPanel(props: { initialBody: string }) {
@@ -20,6 +21,22 @@ function ControlledPropertiesPanel(props: { initialBody: string }) {
 describe("PropertiesPanel", () => {
   afterEach(() => {
     cleanup();
+  });
+
+  it.each([false, true])("refuses removing an anchor before mutation (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody";
+    const doc = markdownToYDoc(initialBody);
+    const before = Y.encodeStateAsUpdate(doc);
+    const onChange = vi.fn();
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Remove property a"));
+      expect(screen.getByTestId("properties-locked").getAttribute("title")).toContain("without rewriting the others");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      expect(yDocToMarkdown(doc)).toBe(initialBody);
+    } finally { doc.destroy(); }
   });
 
   it("preserves system fields while editing user properties", async () => {
@@ -132,6 +149,31 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it("marks each property an automation sets, and names the automations to keyboard and screen reader users", async () => {
+    const user = userEvent.setup();
+    render(
+      <PropertiesPanel
+        body={"---\nid: rec-1\nStatus: Done\nFinished on: 2026-09-25\n---\n"}
+        onChange={vi.fn()}
+        fieldMarks={new Map([["Finished on", ["Stamp the finish date", "Tidy"]]])}
+      />,
+    );
+    const marks = screen.getAllByTestId("automation-field-mark");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest('[data-testid="property-row"]')?.querySelector("input")?.value).toBe("Finished on");
+    const mark = screen.getByRole("img", { name: "Automation" });
+    const words = document.getElementById(mark.getAttribute("aria-describedby") ?? "")!;
+    expect(words.textContent).toBe('"Stamp the finish date" and "Tidy" set this field');
+    expect(words.hidden).toBe(true);
+    // The mark follows its property's name in the tab order, and its words show on focus.
+    await user.click(screen.getByDisplayValue("Finished on"));
+    await user.tab();
+    expect(document.activeElement).toBe(mark);
+    expect(words.hidden).toBe(false);
+    await user.keyboard("{Escape}");
+    expect(words.hidden).toBe(true);
+  });
+
   it("hides the reserved icon key from the user property rows", () => {
     render(
       <PropertiesPanel
@@ -225,6 +267,23 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it.each([
+    '{status: draft, score: .nan}',
+    '&root {status: draft, score: .nan}',
+    '!!map &root {status: draft, score: .nan}',
+    ': note\nstatus: draft\nscore: .nan',
+  ])("refuses edits without changing the file: %s", async (yaml) => {
+    const user = userEvent.setup();
+    const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    expect(screen.getByTestId("properties-locked")).toBeTruthy();
+    await user.type(screen.getByLabelText("Property status value"), "x");
+    await user.click(screen.getByLabelText("Remove property score"));
+
+    expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
+  });
+
   it("writes shared properties into the Y.Doc frontmatter map", async () => {
     const user = userEvent.setup();
     const doc = new Y.Doc();
@@ -240,6 +299,22 @@ describe("PropertiesPanel", () => {
     expect(frontmatter.get("id")).toBe("note-1");
     expect(frontmatter.get("title")).toBe("Plan");
     expect(frontmatter.get("status")).toBe("ready");
+  });
+
+  it("keeps an edited shared property's comment and never brings back a removed one's", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc(
+      "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody",
+    );
+
+    render(<PropertiesPanel ydoc={doc} />);
+    await user.clear(screen.getByDisplayValue("100"));
+    await user.type(screen.getByLabelText("Property budget value"), "200");
+    await user.click(screen.getByLabelText("Remove property wifi"));
+    doc.getMap("frontmatter").set("wifi", "new");
+
+    expect(yDocToMarkdown(doc)).toBe("---\nwifi: new\n# Monthly\nbudget: '200'\n---\n\nBody");
+    doc.destroy();
   });
 
   it("does not rewrite unrelated shared frontmatter keys", async () => {

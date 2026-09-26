@@ -6,8 +6,10 @@ import {
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import { recordNeverSynced, recordSynced } from "./syncHistory";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -25,12 +27,13 @@ type ManifestState =
   | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] }
   | { kind: "blocked"; reason: string };
 
-async function inspectManifest(rootPath: string): Promise<ManifestState> {
+async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   let raw: string;
   try {
-    raw = await readFile(join(rootPath, ".dohc", "manifest.json"), "utf8");
-  } catch {
-    return { kind: "absent" };
+    raw = await readFile(join(metadataDir, "manifest.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    throw error;
   }
   let parsed: unknown;
   try {
@@ -60,23 +63,6 @@ async function inspectManifest(rootPath: string): Promise<ManifestState> {
   return { kind: "blocked", reason: `this folder has an invalid .dohc/manifest.json: ${reason}` };
 }
 
-// Rolls a failed join back to an empty folder (0P-C gate fix). The join
-// handler verified the folder was empty before creating anything, so every
-// entry inside it was produced by this join attempt — identity scaffolding
-// (.dohc, shared-with-me), the engine store, and any partially materialized
-// pull output (all of which still lives on the relay). Removing them restores
-// the pre-join state so a retry sees an empty folder again; leaving them
-// would strand a half-joined workspace the empty-folder check then rejects.
-export async function resetFailedJoinFolder(rootPath: string): Promise<void> {
-  const entries = await readdir(rootPath).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  });
-  for (const entry of entries) {
-    await rm(join(rootPath, entry), { recursive: true, force: true });
-  }
-}
-
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
@@ -92,7 +78,9 @@ export async function createWorkspaceFolder(input: {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
   }
 
-  const state = await inspectManifest(input.rootPath);
+  await mkdir(input.rootPath, { recursive: true });
+  const metadataDir = await resolveWorkspaceMetadataDir(input.rootPath);
+  const state = await inspectManifest(metadataDir);
   if (state.kind === "blocked") {
     throw new Error(state.reason);
   }
@@ -112,14 +100,17 @@ export async function createWorkspaceFolder(input: {
     kind: input.kind,
   });
 
-  await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
   // an unexpected file that appeared between the check and the write.
   await writeFile(
-    join(input.rootPath, ".dohc", "manifest.json"),
+    join(metadataDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: "wx" },
   );
+  // A folder that had no manifest was never a dohc workspace. A join names
+  // the synced workspace's id, and its folder records that it synced.
+  if (input.workspaceId === undefined) await recordNeverSynced(input.rootPath);
+  else recordSynced(input.rootPath);
   return {
     workspaceId: manifest.workspaceId,
     rootPath: input.rootPath,

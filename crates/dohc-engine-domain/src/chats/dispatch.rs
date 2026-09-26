@@ -321,6 +321,7 @@ impl<'a> LinkedChatStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             let next_attempt_count = attempt_count.saturating_add(1);
+            let chain_depth = run_chain_depth(tx, &ws, &thread_id, &run)?;
             Ok(Some(DispatchClaim {
                 dispatch: DispatchRecord {
                     workspace_id: ws.clone(),
@@ -346,6 +347,7 @@ impl<'a> LinkedChatStore<'a> {
                     log_path: log.clone(),
                     failure_note_posted: false,
                 },
+                chain_depth,
             }))
         })?;
         committed(outcome)
@@ -455,7 +457,10 @@ impl<'a> LinkedChatStore<'a> {
                     map_dispatch_claim_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;
-            collect(rows)
+            collect(rows)?
+                .into_iter()
+                .map(|(dispatch, run)| dispatch_claim(conn, dispatch, run))
+                .collect()
         })
     }
 
@@ -866,6 +871,9 @@ impl<'a> LinkedChatStore<'a> {
                     params![workspace_id, trigger_message_id, run_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
+            if changed == 1 {
+                requeue_covered_triggers(tx, &workspace_id, &run_id, 2, now_ms)?;
+            }
             Ok(changed == 1)
         })?;
         committed(outcome)
@@ -1122,6 +1130,9 @@ impl<'a> LinkedChatStore<'a> {
                         params![ws, trigger, now_ms],
                     )
                     .map_err(DomainError::sql_persist)?;
+                    if let Some(run) = &run_id {
+                        requeue_covered_triggers(tx, &ws, run, max_attempts, now_ms)?;
+                    }
                     requeued.push(trigger);
                 } else {
                     tx.execute(
@@ -1155,6 +1166,89 @@ impl DispatchOutcomeKind {
     }
 }
 
+/// Give the triggers an interrupted run covered back to the queue with its
+/// first trigger. The run never answered them, and the next run must cover
+/// them again, so it keeps their chain depth whichever trigger it starts
+/// from. A trigger that has used its attempts stays done, as a first trigger
+/// would.
+fn requeue_covered_triggers(
+    conn: &Connection,
+    workspace_id: &str,
+    run_id: &str,
+    max_attempts: i64,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    conn.execute(
+        "UPDATE chat_dispatch_ledger SET state = 'pending', run_id = NULL, \
+           failure_reason = NULL, updated_at_ms = ?3 \
+         WHERE workspace_id = ?1 AND run_id = ?2 AND state = 'done' AND attempt_count < ?4",
+        params![workspace_id, run_id, now_ms, max_attempts],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// The chain depth a run's writes declare: one more than the deepest
+/// automation message among the triggers the run covers, or 0 when only
+/// people's messages started it. A run a restart interrupted gives all its
+/// triggers back to the queue, so the next run covers them again. A run
+/// covers triggers in its own thread, so the read stays within that thread's
+/// messages.
+fn run_chain_depth(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    run_id: &str,
+) -> Result<u32, DomainError> {
+    let deepest: Option<u32> = conn
+        .query_row(
+            "SELECT MAX(m.chain_depth) FROM chat_messages m \
+             WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.chain_depth IS NOT NULL \
+               AND EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
+                 WHERE l.workspace_id = m.workspace_id \
+                   AND l.trigger_message_id = m.message_id AND l.run_id = ?3)",
+            params![workspace_id, thread_id, run_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(deepest.map_or(0, |depth| depth.saturating_add(1)))
+}
+
+/// The chain depth of the agent run in progress in this workspace, when one
+/// is: the depth an agent's message written now declares. The dispatch runs
+/// one agent run per workspace at a time.
+pub(crate) fn running_run_chain_depth(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Option<u32>, DomainError> {
+    let running: Option<(String, String)> = conn
+        .query_row(
+            "SELECT thread_id, run_id FROM chat_dispatch_ledger \
+             WHERE workspace_id = ?1 AND state = 'running' AND run_id IS NOT NULL \
+             ORDER BY created_at_ms, trigger_message_id LIMIT 1",
+            params![workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    running
+        .map(|(thread_id, run_id)| run_chain_depth(conn, workspace_id, &thread_id, &run_id))
+        .transpose()
+}
+
+fn dispatch_claim(
+    conn: &Connection,
+    dispatch: DispatchRecord,
+    run: AgentRunRecord,
+) -> Result<DispatchClaim, DomainError> {
+    let chain_depth = run_chain_depth(conn, &run.workspace_id, &run.thread_id, &run.run_id)?;
+    Ok(DispatchClaim {
+        dispatch,
+        run,
+        chain_depth,
+    })
+}
+
 /// Rehydrate a lost-response retry from the one running ledger row and its
 /// still-open run record. The join also makes a half-persisted pair fail closed
 /// as no retry claim; the workspace guard will then surface the wedged row.
@@ -1163,8 +1257,9 @@ fn running_dispatch_claim(
     workspace_id: &str,
     run_id: &str,
 ) -> Result<Option<DispatchClaim>, DomainError> {
-    conn.query_row(
-        "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, l.run_id, \
+    let claim = conn
+        .query_row(
+            "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, l.run_id, \
                 l.failure_reason, l.attempt_count, l.created_at_ms, l.updated_at_ms, \
                 r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, r.command, \
                 r.started_at_ms, r.ended_at_ms, r.exit_code, r.failure_reason, r.log_path, \
@@ -1174,38 +1269,41 @@ fn running_dispatch_claim(
            ON r.workspace_id = l.workspace_id AND r.run_id = l.run_id \
          WHERE l.workspace_id = ?1 AND l.run_id = ?2 AND l.state = 'running' \
            AND r.ended_at_ms IS NULL",
-        params![workspace_id, run_id],
-        |row| {
-            Ok(DispatchClaim {
-                dispatch: DispatchRecord {
-                    workspace_id: row.get(0)?,
-                    trigger_message_id: row.get(1)?,
-                    thread_id: row.get(2)?,
-                    state: row.get(3)?,
-                    run_id: row.get(4)?,
-                    failure_reason: row.get(5)?,
-                    attempt_count: row.get(6)?,
-                    created_at_ms: row.get(7)?,
-                    updated_at_ms: row.get(8)?,
-                },
-                run: AgentRunRecord {
-                    workspace_id: row.get(9)?,
-                    run_id: row.get(10)?,
-                    thread_id: row.get(11)?,
-                    trigger_message_id: row.get(12)?,
-                    command: row.get(13)?,
-                    started_at_ms: row.get(14)?,
-                    ended_at_ms: row.get(15)?,
-                    exit_code: row.get(16)?,
-                    failure_reason: row.get(17)?,
-                    log_path: row.get(18)?,
-                    failure_note_posted: row.get(19)?,
-                },
-            })
-        },
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)
+            params![workspace_id, run_id],
+            |row| {
+                Ok((
+                    DispatchRecord {
+                        workspace_id: row.get(0)?,
+                        trigger_message_id: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        state: row.get(3)?,
+                        run_id: row.get(4)?,
+                        failure_reason: row.get(5)?,
+                        attempt_count: row.get(6)?,
+                        created_at_ms: row.get(7)?,
+                        updated_at_ms: row.get(8)?,
+                    },
+                    AgentRunRecord {
+                        workspace_id: row.get(9)?,
+                        run_id: row.get(10)?,
+                        thread_id: row.get(11)?,
+                        trigger_message_id: row.get(12)?,
+                        command: row.get(13)?,
+                        started_at_ms: row.get(14)?,
+                        ended_at_ms: row.get(15)?,
+                        exit_code: row.get(16)?,
+                        failure_reason: row.get(17)?,
+                        log_path: row.get(18)?,
+                        failure_note_posted: row.get(19)?,
+                    },
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    claim
+        .map(|(dispatch, run)| dispatch_claim(conn, dispatch, run))
+        .transpose()
 }
 
 fn run_rows_by_global_id(
@@ -1346,7 +1444,7 @@ fn map_run_row(
 
 fn map_dispatch_claim_row(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Result<DispatchClaim, DomainError>> {
+) -> rusqlite::Result<Result<(DispatchRecord, AgentRunRecord), DomainError>> {
     let dispatch = map_dispatch_row(row, 0)?;
     let run = map_run_row(row, 9)?;
     Ok(match (dispatch, run) {
@@ -1358,7 +1456,7 @@ fn map_dispatch_claim_row(
                 && dispatch.state == "running"
                 && run.ended_at_ms.is_none() =>
         {
-            Ok(DispatchClaim { dispatch, run })
+            Ok((dispatch, run))
         }
         (Err(error), _) | (_, Err(error)) => Err(error),
         _ => Err(dispatch_corrupt()),

@@ -55,6 +55,12 @@ describe("main bundle config", () => {
     );
   });
 
+  it("emits the document projection worker beside main", () => {
+    expect(mainBuildEntries["document-projection-worker"]).toBe(
+      "src/workspaces/documentProjectionThread.ts",
+    );
+  });
+
   it("bundles every workspace package the main process imports", () => {
     const imported = new Set<string>();
     for (const file of mainProcessSourceFiles(MAIN_SOURCE_ROOT)) {

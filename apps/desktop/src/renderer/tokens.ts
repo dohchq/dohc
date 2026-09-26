@@ -79,9 +79,8 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
 };
 
 /**
- * tokens.ts key → the custom property name styles.css spells it with. One
- * map, so the sync test and the plugin panel theme bridge name these tokens
- * the same way and cannot drift apart.
+ * tokens.ts key → the custom property name styles.css spells it with, so the
+ * sync test names each token the way the stylesheet does.
  */
 export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   bg: "--dohc-bg",
@@ -101,8 +100,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
 };
 
 // Identity hues for human avatars. ChatAvatar hashes a stable key into this
-// list, so one person keeps one hue across every surface. Not part of the
-// plugin panel payload: a panel styles its own people.
+// list, so one person keeps one hue across every surface.
 export const IDENTITY_HUES = [
   "rust",
   "amber",
@@ -142,9 +140,8 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
  * The type stacks, which do not change with theme. Same duplication guard as
  * the palette: tokens.test.ts asserts these against styles.css :root.
  *
- * Both stacks name bundled families first. A surface that cannot load dohc's
- * fonts — a plugin panel on its own origin — falls through to the system
- * families here rather than to the browser default.
+ * Both stacks name bundled families first and fall through to the system
+ * families rather than to the browser default.
  */
 export const fonts = {
   "--font-sans": '"Inter Variable", system-ui, "Segoe UI", sans-serif',

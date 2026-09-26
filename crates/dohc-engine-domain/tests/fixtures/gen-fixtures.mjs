@@ -415,6 +415,80 @@ views:
 `,
   },
   {
+    name: "button-field-is-visible-but-never-sorts-groups-or-dates",
+    yaml: `fields:
+  title:
+    type: text
+  Mark paid:
+    type: button
+views:
+  - name: All
+    kind: table
+    visibleFields: [title, Mark paid]
+  - name: By button
+    kind: calendar
+    groupBy: Mark paid
+    sort:
+      - field: Mark paid
+        direction: asc
+      - field: title
+        direction: desc
+    dateField: Mark paid
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "Mark paid", type: "button" },
+        ],
+        views: [
+          {
+            name: "All",
+            kind: "table",
+            groupBy: null,
+            sort: [],
+            visibleFields: ["title", "Mark paid"],
+            dateField: null,
+          },
+          {
+            name: "By button",
+            kind: "calendar",
+            groupBy: null,
+            sort: [{ field: "title", direction: "desc" }],
+            visibleFields: null,
+            dateField: null,
+          },
+        ],
+      },
+      reasons: [
+        { code: "unsupported-field-reference", path: "/views/1/groupBy" },
+        { code: "unsupported-field-reference", path: "/views/1/sort/0/field" },
+        { code: "unsupported-field-reference", path: "/views/1/dateField" },
+      ],
+    },
+  },
+  {
+    name: "button-field-takes-no-other-properties",
+    yaml: `fields:
+  Mark paid:
+    type: button
+    options: [Paid]
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "Mark paid", type: "button" }],
+        views: [],
+      },
+      reasons: [{ code: "unknown-property", path: "/fields/Mark paid/options" }],
+    },
+  },
+  {
     name: "view-sort-one-over-query-limit-flags-and-keeps-first-eight",
     yaml: `fields:
   title:
@@ -555,6 +629,9 @@ const fieldValues = [
   ["url-valid", { name: "website", type: "url" }, "https://dohc.dev/path"],
   ["url-flagged", { name: "website", type: "url" }, "dohc.dev/path"],
   ["null-valid-for-every-field", { name: "title", type: "text" }, "null"],
+  ["button-null-valid", { name: "Mark paid", type: "button" }, "null"],
+  ["button-flagged", { name: "Mark paid", type: "button" }, "true"],
+  ["button-flagged-empty-text", { name: "Mark paid", type: "button" }, '""'],
 ].map(([name, field, valueYaml]) => {
   const value = loadFixtureYamlValue(valueYaml);
   return { name, field, valueYaml, expected: validateFieldValue(field, value) };
@@ -852,6 +929,176 @@ const frontmatter = [
   {
     name: "unsupported-explicit-tag-keeps-raw-value",
     markdown: "---\npriority: !custom high\n---\n\n# Body",
+  },
+  // What each loader reads where YAML and the value model disagree. A value
+  // the model cannot hold keeps its text; a block the desktop's js-yaml
+  // loader refuses is refused by the engine too.
+  {
+    name: "non-finite-floats-keep-their-text",
+    markdown: "---\nnan: .nan\nnamed: .NaN\ninf: .inf\nneg: -.Inf\nplus: +.inf\n---",
+  },
+  {
+    name: "integers-outside-int64-keep-their-text",
+    markdown:
+      "---\nbig: 9223372036854775808\nsmall: -9223372036854775809\nhuge: 99999999999999999999\nmax: 9223372036854775807\n---",
+  },
+  {
+    name: "negative-zero-integer-is-zero",
+    markdown: "---\nzero: -0\n---",
+  },
+  {
+    name: "explicit-core-tags-resolve-like-plain-scalars",
+    markdown:
+      '---\ntagged: !!int 7\noctal: !!int 0o7\nbinary: !!int 0b101\nsigned: !!int -0x1F\nquoted: !!int "12"\nfloat: !!float 1.5\ntext: !!str 7\n---',
+  },
+  {
+    name: "verbatim-core-tags-resolve-like-shorthand-tags",
+    markdown:
+      "---\nint: !<tag:yaml.org,2002:int> 7\ntext: !<tag:yaml.org,2002:str> 7\nlist: !<tag:yaml.org,2002:seq> [a]\n---",
+  },
+  {
+    name: "explicit-tags-that-cannot-resolve-keep-their-text",
+    markdown: "---\nflag: !!bool yes\ncount: !!int many\nnothing: !!null nope\n---",
+  },
+  {
+    name: "binary-and-signed-radix-integers-stay-text",
+    markdown: "---\nbin: 0b1010_1010\nplain: 0b101\nsigned: -0x1F\nhex: 0x_1F\nseparated: 0x1_F\n---",
+  },
+  {
+    name: "custom-tagged-scalars-keep-their-text",
+    markdown: "---\ncount: !custom 7\nflag: !custom true\n---",
+  },
+  {
+    name: "kept-block-scalar-keeps-its-last-blank-line",
+    markdown: "---\nb: |+\n  keeps\n\n---",
+  },
+  {
+    name: "number-keys-read-as-javascript-spells-them",
+    markdown: "---\n1e21: a\n1e-7: b\n-0.0: c\n1.0: d\n1.5: e\n.nan: f\n---",
+  },
+  {
+    name: "alias-keys-and-values-expand",
+    markdown: "---\nlist: &list [1, 2]\ncopy: *list\nname: &name key\n*name : value\n---",
+  },
+  {
+    name: "quoted-value-continued-past-its-sequence-reads",
+    markdown: '---\na:\n- "x\n y"\n---',
+  },
+  {
+    name: "quoted-value-continued-at-its-sequence-column-is-rejected",
+    markdown: '---\na:\n- "x\ny"\n---',
+    expected: null,
+  },
+  {
+    name: "quoted-value-continued-at-its-mapping-column-is-rejected",
+    markdown: '---\na:\n  b: "x\n  y"\n---',
+    expected: null,
+  },
+  {
+    name: "collection-key-is-rejected",
+    markdown: "---\n? [a, b]\n: 1\n---",
+    expected: null,
+  },
+  {
+    name: "nested-collection-key-is-rejected",
+    markdown: "---\nouter:\n  ? {a: 1}\n  : 1\n---",
+    expected: null,
+  },
+  {
+    name: "collection-key-under-a-custom-tag-is-rejected",
+    markdown: "---\nx: !custom\n  ? [a]\n  : 1\n---",
+    expected: null,
+  },
+  {
+    name: "alias-to-an-unknown-anchor-is-rejected",
+    markdown: "---\na: *x\n---",
+    expected: null,
+  },
+  {
+    name: "alias-inside-its-own-anchor-is-rejected",
+    markdown: "---\na: &x [*x]\n---",
+    expected: null,
+  },
+  {
+    name: "second-document-is-rejected",
+    markdown: "---\na: 1\n...\nb: 2\n---",
+    expected: null,
+  },
+  {
+    name: "flow-nesting-past-the-depth-limit-is-rejected",
+    markdown: `---\nvalue: ${"[".repeat(130)}x${"]".repeat(130)}\n---`,
+    expected: null,
+  },
+  {
+    name: "block-nesting-past-the-depth-limit-is-rejected",
+    markdown: `---\nvalue:\n${Array.from({ length: 130 }, (_, index) => `${"  ".repeat(index + 1)}-`).join("\n")} x\n---`,
+    expected: null,
+  },
+  {
+    name: "aliases-at-the-alias-limit-read",
+    markdown: `---\nx: &x 1\nlist: [${Array(256).fill("*x").join(", ")}]\n---`,
+  },
+  {
+    name: "aliases-past-the-alias-limit-are-rejected",
+    markdown: `---\nx: &x 1\nlist: [${Array(257).fill("*x").join(", ")}]\n---`,
+    expected: null,
+  },
+  {
+    name: "alias-ladder-past-the-node-budget-is-rejected",
+    markdown: `---\n${Array.from({ length: 6 }, (_, level) => `l${level}: &l${level} [${
+      Array(10).fill(level === 0 ? "x" : `*l${level - 1}`).join(", ")
+    }]`).join("\n")}\n---`,
+    expected: null,
+  },
+  {
+    name: "separated-floats-stay-text",
+    markdown: "---\na: 1_0.5\nb: 1_000.5\nc: !!float 1_0.5\n---",
+  },
+  {
+    name: "scalars-tagged-as-collections-keep-their-text",
+    markdown: "---\nseq: !!seq x\nmap: !!map x\nempty: !!seq\n---",
+  },
+  {
+    name: "yaml-directive-without-a-document-start-is-rejected",
+    markdown: "---\n%YAML 1.2\na: 1\n---",
+    expected: null,
+  },
+  {
+    name: "tag-directive-is-rejected",
+    markdown: "---\n%TAG !e! tag:example.com,2026:\na: !e!x 1\n---",
+    expected: null,
+  },
+  {
+    name: "second-document-start-inside-the-block-is-rejected",
+    markdown: "---\n--- # x\na: 1\n---",
+    expected: null,
+  },
+  {
+    name: "carriage-return-inside-a-line-is-rejected",
+    markdown: '---\na: "x\ry"\n---',
+    expected: null,
+  },
+  {
+    name: "closing-delimiter-with-a-bare-carriage-return-does-not-close",
+    markdown: "---\na: 1\n---\r",
+    expected: null,
+  },
+  {
+    name: "opening-delimiter-with-two-carriage-returns-does-not-open",
+    markdown: "---\r\r\na: 1\n---",
+  },
+  {
+    name: "empty-key-reads-as-null",
+    markdown: "---\n: note\ntitle: A\n---",
+  },
+  {
+    name: "nested-anchors-read",
+    markdown: "---\ns: &s x\nv: &a [&b [*s, *s], *b]\n---",
+  },
+  {
+    name: "aliases-past-the-string-byte-budget-are-rejected",
+    markdown: `---\ns: &s "${"x".repeat(1024)}"\nl1: &l1 [${Array(100).fill("*s").join(", ")}]\nl2: &l2 [${Array(100).fill("*l1").join(", ")}]\nl3: [*l2, *l2]\n---`,
+    expected: null,
   },
   {
     name: "duplicate-floating-point-key-is-rejected",

@@ -177,7 +177,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
@@ -1254,6 +1254,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const knownVersion = state.versions.get(versionId);
     if (knownVersion === undefined && versionId !== "main") {
       this.version(state, versionId);
+    }
+    if (params.createOnly !== undefined && typeof params.createOnly !== "boolean") {
+      throw new Error("invalid-params");
+    }
+    if (params.createOnly === true && knownVersion?.files.has(path) &&
+        !(parsed.requestId !== undefined && state.replays.has(parsed.requestId))) {
+      throw new Error("target-path-exists");
     }
     const requestId = parsed.requestId;
     const restoreBeforeMomentId = serdeOptionalParamString(params, "restoreBeforeMomentId");
@@ -2782,6 +2789,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       versionId: params.versionId,
       path: params.path,
       text: params.text,
+      createOnly: params.createOnly === true,
       momentId,
       objectId,
       metadataOrigin: origin,
@@ -2970,14 +2978,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
-    const { kind, agentId, onBehalfOf, agentRunId } = value;
+    const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
     if (
       kind !== "agent" ||
       typeof agentId !== "string" ||
       agentId.length === 0 ||
       typeof onBehalfOf !== "string" ||
       onBehalfOf.length === 0 ||
-      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0))
+      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0)) ||
+      (depth !== undefined && (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 64))
     ) {
       throw new Error("invalid-metadata");
     }
@@ -2986,6 +2995,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       agentId,
       onBehalfOf,
       ...(agentRunId === undefined ? {} : { agentRunId }),
+      ...(depth === undefined ? {} : { depth }),
     };
   }
 

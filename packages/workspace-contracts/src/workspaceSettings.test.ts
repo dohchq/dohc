@@ -21,7 +21,7 @@ describe("WorkspaceSettings", () => {
   it("decodes the current settings and defaults old optional groups", () => {
     const oldShape = {
       version: 1,
-      agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+      agents: { mcpAutoStart: false },
       sites: { defaultPreviewMode: "auto" },
       privacy: { confirmExternalLinks: true },
     };
@@ -56,35 +56,7 @@ describe("WorkspaceSettings", () => {
     expect(decoded.files.attachmentFolderName).toBe("attachments");
   });
 
-  it("reports string bounds with their limits and units", () => {
-    expectFailureMessage(
-      {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultDriverId: "" },
-      },
-      "String must contain at least 1 character.",
-    );
-    expectFailureMessage(
-      {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultModel: "" },
-      },
-      "String must contain at least 1 character.",
-    );
-    expectFailureMessage(
-      {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultDriverId: "x".repeat(121) },
-      },
-      "Default driver IDs must contain 120 characters or fewer.",
-    );
-    expectFailureMessage(
-      {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultModel: "x".repeat(201) },
-      },
-      "Default models must contain 200 characters or fewer.",
-    );
+  it("reports the attachment folder bound with its limit and unit", () => {
     expectFailureMessage(
       {
         ...DEFAULT_WORKSPACE_SETTINGS,

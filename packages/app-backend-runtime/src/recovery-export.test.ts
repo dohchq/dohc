@@ -48,7 +48,7 @@ it("pins events while later writes continue and refuses revoked stream disclosur
 });
 it("does not label an export complete when a committed attachment is absent",async()=>{
   const f=await fixture();f.journal.commitOperation({expected:f.cursor,proposalId:"attachment",operation:"create",callerKey:"owner",idempotencyKey:"attachment",payloadSha256:hash("attachment"),resultJson:"{}",changeset:new Uint8Array(),changesetSha256:hash(new Uint8Array()),attachedFileIds:["receipt_file_0001"],authorize:f.authorize,accountAndAttach(){}});
-  await expect(prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits:{maxTotalBytes:10*1024*1024}})).rejects.toThrow("attachment inventory");
+  await expect(prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits:{maxTotalBytes:10*1024*1024}})).rejects.toThrow("files do not match its history");
   expect(await readdir(join(f.directory,"exports"))).toEqual([]);
 });
 it("rejects tombstone-only changes during export before fencing the source", async () => {

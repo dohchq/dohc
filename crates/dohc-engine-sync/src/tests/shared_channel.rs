@@ -259,6 +259,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 0,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 1,
                     has_more: true,
@@ -268,6 +269,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 1,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 2,
                     has_more: false,
@@ -343,6 +345,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 0,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: vec![rejected],
                     next_cursor: 1,
                     has_more: true,
@@ -352,6 +355,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 1,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: vec![admitted],
                     next_cursor: 2,
                     has_more: false,
@@ -587,5 +591,134 @@ fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
     assert_eq!(
         pushes[0].ops[0].origin_seq, 1,
         "the migrated physical cursor must bootstrap its matching dense coordinate"
+    );
+}
+
+fn share_op(
+    origin_seq: i64,
+    op_kind: &str,
+    payload: serde_json::Value,
+) -> ShareReplicationEnvelope {
+    ShareReplicationEnvelope {
+        origin_id: "member".to_owned(),
+        origin_seq,
+        op_kind: op_kind.to_owned(),
+        payload,
+        recorded_at_ms: 2_000,
+    }
+}
+
+/// A message a share lane delivers claims in the transaction that applies
+/// it, and the pull hands the claim to the service for the wake.
+#[test]
+fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
+    let (_scratch, _path, mut engine) = open_store();
+    let message = |seq: i64, message_id: &str, body: &str| {
+        share_op(
+            seq,
+            "chat.message.append",
+            json!({
+                "messageId": message_id,
+                "threadId": "t-shared",
+                "authorKind": "human",
+                "authorDisplayName": "Ana",
+                "authorUserId": "ana",
+                "body": body,
+                "createdAtMs": 10 + seq
+            }),
+        )
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![
+                        share_op(
+                            0,
+                            "chat.channel.create",
+                            json!({
+                                "channelId": "c-shared",
+                                "name": "Trip",
+                                "slug": "trip",
+                                "kind": "channel",
+                                "createdAtMs": 1,
+                                "wireId": "channel-wire"
+                            }),
+                        ),
+                        share_op(
+                            1,
+                            "chat.thread.create",
+                            json!({
+                                "threadId": "t-shared",
+                                "title": "Plans",
+                                "createdAtMs": 2,
+                                "channelWireId": "channel-wire"
+                            }),
+                        ),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+            (
+                2,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![message(2, "m-task", "/task Book"), message(3, "m-hi", "Hi")],
+                    next_cursor: 4,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+    let first = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the Group arrives");
+    assert_eq!(first.applied, 2);
+    assert!(client.take_automation_claims().is_empty());
+    let channel_id: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads WHERE thread_id = 't-shared'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("shared Group");
+    dohc_engine_domain::watch_automation_groups(
+        &mut engine,
+        "ws",
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
+        },
+        3,
+        &NoFaults,
+    )
+    .expect("watch");
+
+    let second = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the messages arrive");
+    assert_eq!(second.applied, 2);
+    assert_eq!(
+        client
+            .take_automation_claims()
+            .iter()
+            .map(|claim| claim.trigger.clone())
+            .collect::<Vec<_>>(),
+        vec![dohc_engine_domain::AutomationTrigger::Key {
+            key: "message:m-task".to_owned()
+        }]
     );
 }

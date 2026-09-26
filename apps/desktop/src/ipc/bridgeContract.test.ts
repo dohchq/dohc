@@ -7,9 +7,6 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_STATUSES } from "../updates/updateMachine";
-import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
-import { DohcPluginManifest } from "../plugins/pluginManifestSchema";
-import { pluginViewId } from "../renderer/workbench/workbenchState";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -46,16 +43,11 @@ import {
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
-  InvokePluginPanelSdkPayload,
-  PluginPanelSdkEvent,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   WorkspaceSummary,
   ListFileChatsPayload,
   PRESENCE_STATE_MAX_BYTES,
-  SDK_PARAMS_MAX_BYTES,
-  SDK_PARAMS_MAX_DEPTH,
-  SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
   PresencePublishRequestPayload,
   presenceStateWithinCap,
@@ -74,12 +66,13 @@ import {
   StartDmPayload,
   SyncDmsResult,
   SyncStatusResult,
+  engineStoreRefusalCopy,
+  engineStoreRefusalRecovery,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
   TryInVersionRunState,
   TryInVersionStateResult,
-  AgentPanelSnapshotResult,
   TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
@@ -90,16 +83,10 @@ import {
   GetSitePreviewLogsResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
+  SitePreviewReplacedEvent,
   StopSitePreviewPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
-  OpenPluginPanelPayload,
-  OpenPluginPanelResult,
-  PluginPanelOpenedEvent,
-  PluginPanelInvalidatedEvent,
-  StartPluginPanelPayload,
-  StartPluginPanelResult,
-  StopPluginPanelPayload,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -114,9 +101,6 @@ import {
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
-  parseInvokePluginPanelSdkPayloadForIpc,
-  parsePluginPanelInvalidatedEventForIpc,
-  parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
   AddRelayShareLinkPayload,
   AddRelayShareLinkResult,
@@ -185,7 +169,6 @@ import {
   CHATS_TAB_PATH,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
-  pluginPanelTabPath,
   siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -242,7 +225,7 @@ describe("owner relay share link IPC contract", () => {
         },
         {
           ...damaged,
-          selectorKind: "chat-channel",
+          selectorKind: "chat",
           url: "https://share.example.test/s/#must-not-cross",
           secret: "must-not-cross",
           credentialId: "must-not-cross",
@@ -1612,6 +1595,22 @@ describe("chat IPC contract", () => {
     ).toBe(false);
   });
 
+  it("carries an automation author and its local automation on a post preview", () => {
+    const preview = {
+      id: "thread-1", title: "Launch", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
+      messageCount: 1, lastReadSequence: 0, unreadCount: 1,
+      openingMessage: {
+        id: "message-1", authorKind: "automation", authorDisplayName: "Stamp the finish date",
+        authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel", reactions: [],
+        automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+      },
+    };
+    expect(ChannelThreadRecord.parse(preview).openingMessage?.automation?.collectionPath).toBe("Trip/Tasks");
+    expect(ChannelThreadRecord.safeParse({
+      ...preview, openingMessage: { ...preview.openingMessage, automation: { automationId: "x", collectionPath: "../escape" } },
+    }).success).toBe(false);
+  });
+
   it("accepts additive channel-feed previews and batched run records", () => {
     expect(
       ChannelThreadRecord.parse({
@@ -1746,6 +1745,7 @@ describe("collection IPC contracts", () => {
           { name: "title", type: "text" },
           { name: "status", type: "select", options: ["open", "done"] },
           { name: "blocks", type: "relation", collection: "projects", many: true },
+          { name: "Mark paid", type: "button" },
         ],
         views: [
           {
@@ -1760,7 +1760,7 @@ describe("collection IPC contracts", () => {
       },
       recordCount: 3,
     });
-    expect(details.schema.fields).toHaveLength(3);
+    expect(details.schema.fields).toHaveLength(4);
     expect(details.schema.views[0]?.kind).toBe("board");
   });
 
@@ -2048,7 +2048,7 @@ describe("settings IPC contract", () => {
           ...DEFAULT_WORKSPACE_SETTINGS,
           agents: {
             ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            defaultModel: "x".repeat(201),
+            mcpAutoStart: "yes",
           },
         },
       }).success,
@@ -2164,26 +2164,9 @@ describe("workspace UI state IPC contract", () => {
     expect(parsed.editorGroups).toEqual(validState.editorGroups);
   });
 
-  it("carries a plugin-contributed view across the persistence boundary", () => {
-    const activeView = pluginViewId("dohc-sites", "sites");
-    expect(
-      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
-    ).toBe(activeView);
-  });
-
   it.each([
-    ["a bare prefix", "plugin-view:"],
-    ["a missing panel segment", "plugin-view:dohc-sites"],
-    ["an over-long id", `plugin-view:${"a".repeat(4096)}/sites`],
-    ["a NUL byte in either segment", "plugin-view:%00/%00"],
-    [
-      "a segment past the plugin id cap",
-      `plugin-view:${encodeURIComponent("a".repeat(215))}/sites`,
-    ],
-    [
-      "a segment past the panel id cap",
-      `plugin-view:dohc-sites/${encodeURIComponent("a".repeat(121))}`,
-    ],
+    ["a removed plugin view", "plugin-view:dohc-sites/sites"],
+    ["the removed plugins view", "plugins"],
   ])("falls back to Explorer for %s", (_case, activeView) => {
     expect(
       WorkspaceUiState.parse({ ...validState, activeView }).activeView,
@@ -2266,11 +2249,6 @@ describe("workspace UI state IPC contract", () => {
 
   it.each([
     ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
-    [
-      "plugin panel",
-      pluginPanelTabPath("hello-plugin", "main"),
-      "dohc://plugin-panel/%68ello-plugin/main",
-    ],
   ])("rejects one %s path in several editor groups", (_label, path, alias) => {
     const result = WorkspaceUiState.safeParse({
       ...validState,
@@ -2746,6 +2724,22 @@ describe("update IPC contract", () => {
 });
 
 describe("site IPC contract", () => {
+  it("tells one surface what preview it follows, or that none runs", () => {
+    const event = {
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId: "tab",
+      generation: 3,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:4173/", logs: [], exited: false, generation: 3 },
+    };
+    expect(SitePreviewReplacedEvent.parse(event)).toEqual(event);
+    expect(SitePreviewReplacedEvent.parse({ ...event, preview: null }).preview).toBeNull();
+    expect(SitePreviewReplacedEvent.safeParse({
+      ...event,
+      preview: { ...event.preview, url: "https://example.com/" },
+    }).success).toBe(false);
+  });
+
   it("accepts detected normal website metadata", () => {
     expect(
       ListSitesResult.parse({
@@ -2964,12 +2958,20 @@ describe("site IPC contract", () => {
         workspaceId: "ws-sites",
         siteRoot: ".",
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).toEqual({
       workspaceId: "ws-sites",
       siteRoot: ".",
       mode: "static",
+      holderId: "tab",
+      restart: false,
     });
+    // A start names the surface that shows the preview.
+    expect(
+      StartSitePreviewPayload.safeParse({ workspaceId: "ws-sites", siteRoot: ".", mode: "static", restart: false }).success,
+    ).toBe(false);
 
     expect(
       StartSitePreviewResult.parse({
@@ -2978,6 +2980,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1:4173/",
         logs: [{ stream: "stdout", text: "built", at: 1 }],
         exited: false,
+        generation: 1,
         build: {
           ok: true,
           command: "pnpm",
@@ -2994,14 +2997,16 @@ describe("site IPC contract", () => {
         url: "http://localhost:4173/",
         logs: [],
         exited: false,
+        generation: 1,
       }).logs,
     ).toEqual([]);
     expect(
       StopSitePreviewPayload.parse({
         workspaceId: "ws-sites",
         siteRoot: ".",
+        holderId: "tab",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: ".", holderId: "tab" });
     expect(
       GetSitePreviewLogsPayload.parse({
         workspaceId: "ws-sites",
@@ -3070,6 +3075,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1:43210",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3079,6 +3085,7 @@ describe("site IPC contract", () => {
         url: "http://[::1]:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3088,6 +3095,7 @@ describe("site IPC contract", () => {
         url: "http://[::ffff:127.0.0.1]:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3097,6 +3105,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3106,6 +3115,7 @@ describe("site IPC contract", () => {
         url: "http://127.42.0.7:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     for (const url of [
@@ -3126,325 +3136,10 @@ describe("site IPC contract", () => {
           url,
           logs: [],
           exited: false,
+          generation: 1,
         }).success,
       ).toBe(false);
     }
-  });
-});
-
-describe("plugin guest SDK IPC contract", () => {
-  it("accepts realistic JSON-safe SDK params at the preload IPC boundary", () => {
-    const text = "x".repeat(2 * 1024 * 1024);
-    expect(
-      parseInvokePluginPanelSdkPayloadForIpc({
-        workspaceId: "ws-plugins",
-        pluginId: "hello-plugin",
-        panelId: "main",
-        method: "files.write",
-        params: {
-          path: "exports/report.txt",
-          text,
-          overwrite: true,
-          metadata: { tags: ["quarterly", "approved"], score: 0.95 },
-        },
-      }).params,
-    ).toMatchObject({ path: "exports/report.txt", overwrite: true });
-  });
-
-  it("rejects oversized, excessively deep, and over-populated SDK params", () => {
-    const base = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-      method: "files.write",
-    };
-    const oversized = {
-      ...base,
-      params: { text: "x".repeat(SDK_PARAMS_MAX_BYTES + 1) },
-    };
-    expect(() => parseInvokePluginPanelSdkPayloadForIpc(oversized)).toThrow(/JSON-safe/);
-    expect(
-      InvokePluginPanelSdkPayload.safeParse({
-        ...base,
-        params: oversized.params,
-      }).success,
-    ).toBe(false);
-
-    let deep: Record<string, unknown> = {};
-    const root = deep;
-    for (let depth = 0; depth <= SDK_PARAMS_MAX_DEPTH; depth += 1) {
-      const child: Record<string, unknown> = {};
-      deep.child = child;
-      deep = child;
-    }
-    expect(InvokePluginPanelSdkPayload.safeParse({ ...base, params: root }).success).toBe(
-      false,
-    );
-
-    expect(
-      InvokePluginPanelSdkPayload.safeParse({
-        ...base,
-        params: Array.from({ length: SDK_PARAMS_MAX_VALUES }, () => null),
-      }).success,
-    ).toBe(false);
-  });
-
-  it("rejects SDK params that are not a finite, acyclic JSON data tree", () => {
-    const base = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-      method: "databases.edit",
-    };
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-
-    for (const params of [
-      cyclic,
-      { value: Number.POSITIVE_INFINITY },
-      { value: BigInt(1) },
-      { value: new Uint8Array([1, 2, 3]) },
-      ["first", , "third"],
-    ]) {
-      expect(InvokePluginPanelSdkPayload.safeParse({ ...base, params }).success).toBe(
-        false,
-      );
-    }
-  });
-
-  it("accepts strict plugin panel open, start, and stop payloads", () => {
-    const identity = {
-      workspaceId: "ws-plugins",
-      pluginId: "@dohc/reports",
-      panelId: "main",
-    };
-    expect(
-      OpenPluginPanelPayload.parse({
-        ...identity,
-        pluginRoot: "plugins/reports",
-      }),
-    ).toEqual({ ...identity, pluginRoot: "plugins/reports" });
-    const panelIdentity = {
-      pluginId: identity.pluginId,
-      panelId: identity.panelId,
-    };
-    expect(OpenPluginPanelResult.parse(panelIdentity)).toEqual(panelIdentity);
-    expect(PluginPanelOpenedEvent.parse(identity)).toEqual(identity);
-    // Starting names where the panel is mounted; stopping names only the
-    // running panel, which is keyed without placement.
-    const startPayload = { ...identity, placement: "view" as const };
-    expect(StartPluginPanelPayload.parse(startPayload)).toEqual(startPayload);
-    expect(StartPluginPanelPayload.safeParse(identity).success).toBe(false);
-    expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
-    expect(StopPluginPanelPayload.safeParse(startPayload).success).toBe(false);
-    expect(
-      StartPluginPanelResult.parse({
-        status: "ok",
-        url: "http://127.0.0.1:43123/",
-        title: "Reports",
-        surfaceId: 1,
-      }),
-    ).toEqual({
-      status: "ok",
-      url: "http://127.0.0.1:43123/",
-      title: "Reports",
-      surfaceId: 1,
-    });
-    expect(
-      StartPluginPanelResult.parse({ status: "not-registered" }),
-    ).toEqual({ status: "not-registered" });
-    const invalidated = { ...identity, surfaceId: 1 };
-    expect(PluginPanelInvalidatedEvent.parse(invalidated)).toEqual(invalidated);
-    expect(parsePluginPanelInvalidatedEventForIpc(invalidated)).toEqual(
-      invalidated,
-    );
-    expect(
-      parsePluginPanelInvalidatedEventForIpc({ ...invalidated, extra: true }),
-    ).toBeNull();
-
-    expect(
-      StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
-    ).toBe(false);
-    expect(
-      OpenPluginPanelPayload.safeParse({
-        ...identity,
-        pluginRoot: "plugins/reports\0escape",
-      }).success,
-    ).toBe(false);
-  });
-
-  it("rejects malformed plugin panel identities and non-loopback results", () => {
-    const base = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-    };
-    for (const patch of [
-      { workspaceId: "WS-PLUGINS" },
-      { pluginId: "" },
-      { pluginId: "hello\0main" },
-      { panelId: "" },
-      { panelId: "main\0alias" },
-      { panelId: "x".repeat(121) },
-    ]) {
-      expect(StartPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
-        false,
-      );
-      expect(StopPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
-        false,
-      );
-    }
-    expect(
-      StartPluginPanelResult.safeParse({
-        status: "ok",
-        url: "https://127.0.0.1:43123/",
-        title: "Reports",
-        surfaceId: 1,
-      }).success,
-    ).toBe(false);
-  });
-
-  it("bounds SDK params on the plugin panel payload", () => {
-    const payload = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-      method: "files.write",
-      params: { path: "output.txt", text: "hello" },
-    };
-    expect(parseInvokePluginPanelSdkPayloadForIpc(payload)).toEqual(payload);
-    expect(
-      InvokePluginPanelSdkPayload.safeParse({
-        ...payload,
-        params: { text: "x".repeat(SDK_PARAMS_MAX_BYTES + 1) },
-      }).success,
-    ).toBe(false);
-    expect(
-      InvokePluginPanelSdkPayload.safeParse({ ...payload, method: "" }).success,
-    ).toBe(false);
-    expect(
-      InvokePluginPanelSdkPayload.safeParse({ ...payload, extra: true }).success,
-    ).toBe(false);
-  });
-
-  it("accepts a strict plugin-panel SDK event and rejects excess data or an empty event name", () => {
-    const event = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-      subscriptionId: "subscription-1",
-      event: "change",
-      data: {
-        path: "docs/index.md",
-        operation: "update" as const,
-        sha256: "aaa",
-      },
-    };
-
-    expect(PluginPanelSdkEvent.parse(event)).toEqual(event);
-    expect(parsePluginPanelSdkEventForIpc(event)).toEqual(event);
-    expect(parsePluginPanelSdkEventForIpc({ ...event, extra: true })).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...event,
-        data: { ...event.data, extra: true },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({ ...event, event: "" }),
-    ).toBeNull();
-  });
-
-  it("accepts collection record event data and rejects shapes outside the union", () => {
-    const base = {
-      workspaceId: "ws-plugins",
-      pluginId: "hello-plugin",
-      panelId: "main",
-      subscriptionId: "subscription-1",
-    };
-    const created = {
-      ...base,
-      event: "record.created",
-      data: {
-        collectionPath: "collections/people",
-        recordId: "rec-1",
-        author: null,
-        timestamp: 1_756_000_000_000,
-        actorKind: null,
-        onBehalfOf: null,
-        depth: null,
-        source: null,
-      },
-    };
-    const fieldChanged = {
-      ...base,
-      event: "record.field.changed",
-      data: {
-        collectionPath: "collections/people",
-        recordId: "rec-1",
-        field: "notes",
-        previous: { tags: ["a", "b"] },
-        // The engine's oversized-value marker is an ordinary JSON object.
-        next: { truncated: true, bytes: 9_000 },
-        author: "agent:sites",
-        timestamp: 1_756_000_000_000,
-        historyId: 7,
-        actorKind: "agent",
-        onBehalfOf: "automation:sites",
-        depth: 1,
-        source: { originId: "origin-a", originSeq: 12 },
-      },
-    };
-
-    expect(parsePluginPanelSdkEventForIpc(created)).toEqual(created);
-    expect(parsePluginPanelSdkEventForIpc(fieldChanged)).toEqual(fieldChanged);
-
-    // Not a passthrough: a shape matching none of the union members is
-    // dropped, and so is a member shape with excess or mistyped fields.
-    expect(
-      parsePluginPanelSdkEventForIpc({ ...created, data: { anything: true } }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...created,
-        data: { ...created.data, recordId: "" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...created,
-        data: { ...created.data, timestamp: "yesterday" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...created,
-        data: { ...created.data, extra: true },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...fieldChanged,
-        data: { ...fieldChanged.data, historyId: "7" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...fieldChanged,
-        data: { ...fieldChanged.data, actorKind: "robot" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePluginPanelSdkEventForIpc({
-        ...fieldChanged,
-        data: { ...fieldChanged.data, source: { originId: "" , originSeq: 1 } },
-      }),
-    ).toBeNull();
-    const withoutNext: Record<string, unknown> = { ...fieldChanged.data };
-    delete withoutNext.next;
-    expect(
-      parsePluginPanelSdkEventForIpc({ ...fieldChanged, data: withoutNext }),
-    ).toBeNull();
   });
 });
 
@@ -3542,13 +3237,6 @@ describe("try-in-version IPC contract", () => {
         task: "tidy the notes",
       }).task,
     ).toBe("tidy the notes");
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: "codex",
-      }).driverId,
-    ).toBe("codex");
     expect(
       TryInVersionStateResult.parse({ state: null }).state,
     ).toBeNull();
@@ -3688,6 +3376,28 @@ describe("sync status IPC contract", () => {
       SyncStatusResult.safeParse({ ...status, engineStoreRefused: undefined })
         .success,
     ).toBe(false);
+  });
+
+  // The engine refuses a store a newer build migrated and leaves it intact.
+  // Rebuild would move that store aside, so the only recovery is an update.
+  it("asks for an update when a newer build migrated the store", () => {
+    const refused = SyncStatusResult.parse({
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      liveSessionsGeneration: 0,
+      historyCaptureFailed: true,
+      engineStoreRefused: "migrated-by-newer-build",
+      engineStoreRefusedDetail:
+        "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
+    });
+    expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
+    expect(engineStoreRefusalRecovery("migrated-by-newer-build")).toBe("update");
+    expect(engineStoreRefusalCopy("migrated-by-newer-build")).toBe(
+      "A newer version of dohc updated this workspace's data store. Update dohc to continue. Your files are unchanged.",
+    );
   });
 });
 
@@ -4651,93 +4361,5 @@ describe("share changes IPC contract", () => {
     expect(() =>
       WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "p".repeat(129) }),
     ).toThrow();
-  });
-});
-
-describe("one driver id, every contract on its path", () => {
-  // A driver id is declared in a manifest, stored in workspace settings,
-  // listed in the agent panel, and then handed back to main with the task it
-  // is meant to run. One tighter bound anywhere on that path refuses a driver
-  // dohc itself offered, chose, and probed — which is what the try-in-version
-  // payload used to do at 100 characters while every other layer took 120.
-  const atCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH);
-  const overCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH + 1);
-
-  function panelWith(driverId: string) {
-    return {
-      drivers: [
-        {
-          id: driverId,
-          displayName: "Fixture Harness",
-          installed: true,
-          auth: { status: "unknown" as const },
-          models: [],
-        },
-      ],
-      session: null,
-      selectedDriverId: driverId,
-    };
-  }
-
-  function manifestWith(driverId: string) {
-    return {
-      version: 1,
-      name: "driver-plugin",
-      entry: "plugin.mjs",
-      drivers: [{ id: driverId, displayName: "Fixture Harness" }],
-    };
-  }
-
-  it("carries an id at the cap through every contract on the path", () => {
-    expect(DohcPluginManifest.safeParse(manifestWith(atCap)).success).toBe(true);
-    expect(AgentPanelSnapshotResult.parse(panelWith(atCap)).selectedDriverId)
-      .toBe(atCap);
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: atCap,
-      }).driverId,
-      "the try payload keeps a tighter bound: the panel offers this driver, the dialog posts it, and this one boundary refuses it.",
-    ).toBe(atCap);
-  });
-
-  it("refuses an id past the cap in every contract on the path", () => {
-    expect(DohcPluginManifest.safeParse(manifestWith(overCap)).success).toBe(false);
-    expect(AgentPanelSnapshotResult.safeParse(panelWith(overCap)).success)
-      .toBe(false);
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-        driverId: overCap,
-      }).success,
-    ).toBe(false);
-  });
-
-  it("carries a driver display name at its bound to the renderer", () => {
-    const name = "n".repeat(120);
-    expect(DohcPluginManifest.safeParse({
-      version: 1,
-      name: "driver-plugin",
-      entry: "plugin.mjs",
-      drivers: [{ id: "fixture-harness", displayName: name }],
-    }).success).toBe(true);
-    expect(
-      AgentPanelSnapshotResult.parse({
-        drivers: [
-          {
-            id: "fixture-harness",
-            displayName: name,
-            installed: true,
-            auth: { status: "unknown" as const },
-            models: [],
-          },
-        ],
-        session: null,
-        selectedDriverId: "fixture-harness",
-      }).drivers[0]?.displayName,
-      "the two display-name bounds drift apart: a manifest dohc accepts names a driver the panel cannot describe.",
-    ).toBe(name);
   });
 });

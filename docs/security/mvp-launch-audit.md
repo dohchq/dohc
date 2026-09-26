@@ -16,6 +16,8 @@ The original static review reported no critical or high findings in the code it 
 
 The original review reported no backdoor, malicious code, production secret leak, authentication bypass, SQL injection, path traversal, renderer XSS, sandbox escape, or undisclosed egress in its sampled code and history. These negative findings apply to the stated scope and method.
 
+Follow-up, 2026-09-26: dohc removed its plugin system after this audit: the plugin guests, the child-process broker, and plugin installation. This document no longer describes them.
+
 Follow-up by Codex, 2026-09-20: this is a scoped static review, not launch clearance. The original audit did not check current dependency advisories. A follow-up scan found 41 advisory records, including one critical dependency advisory. Patched JavaScript dependencies now return zero known advisories. Advisory counts do not establish exploitability in dohc.
 
 The follow-up fixes signing-workflow access, preview Host validation, and production database configuration. Release testing and the external controls listed below still determine launch readiness. Original line references refer to commit `7a2d7029`.
@@ -64,13 +66,13 @@ Follow-up: the tracked pair is deleted. `services/share-web/src/testing/device-c
 
 ### 5. LOW — Loopback preview servers accept any Host header
 
-Location: `apps/desktop/src/security/staticDirectoryPreview.ts:123-251` (the request handler); the same pattern serves plugin panels and site previews.
+Location: `apps/desktop/src/security/staticDirectoryPreview.ts:123-251` (the request handler); the same pattern serves site previews.
 
 Evidence: the server binds `127.0.0.1` on a random port, validates the path, realpath-contains the target, and sets `x-content-type-options`. It never reads the `Host` header.
 
 Attack: a website that rebinds its DNS to `127.0.0.1` could, after discovering the random port, fetch workspace content through the preview origin without CORS stopping it. Random ports and browser protections can limit this attack but do not establish server-side access control. Exposure of the user's workspace content is the confidentiality risk. The CLI server authenticates requests with a timing-compared token.
 
-Follow-up: the shared static server rejects Host values other than its bound `127.0.0.1:<port>` before reading files. Socket tests cover normal access, hostile authorities, and missing HTTP/1.1 Host headers. Owner file-source tests verify that rejected requests do not invoke the reader. This covers static site previews and plugin panels; independently authored dev servers retain their own Host policy.
+Follow-up: the shared static server rejects Host values other than its bound `127.0.0.1:<port>` before reading files. Socket tests cover normal access, hostile authorities, and missing HTTP/1.1 Host headers. Owner file-source tests verify that rejected requests do not invoke the reader. This covers static site previews; independently authored dev servers retain their own Host policy.
 
 ## Open questions
 
@@ -82,12 +84,12 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 
 ### Electron main process
 
-- Every window runs `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true` (`apps/desktop/src/security/electronSecurity.ts:11-26`). Plugin guest views add `webviewTag: false` and no preload (`apps/desktop/src/plugins/pluginWebAppGuest.ts:66-84`). The PDF export window is preload-less (`apps/desktop/src/window/documentPdfExport.ts:43-50`).
+- Every window runs `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true` (`apps/desktop/src/security/electronSecurity.ts:11-26`). The PDF export window is preload-less (`apps/desktop/src/window/documentPdfExport.ts:43-50`).
 - Navigation policy: exact-origin compare, never prefix; `file:` allowed only inside the packaged renderer bundle; unparseable URLs denied (`electronSecurity.ts:44-64`). `will-navigate`, `will-redirect`, and `will-frame-navigate` are all hooked (`createMainWindow.ts:312-322`). `window.open` is a pure deny (`createMainWindow.ts:308`).
 - Every IPC handler the audit read validates the sender frame against the navigation policy (`assertTrustedSender`, `main.ts:3806-3811`) and parses its payload with zod. Workspace-scoped handlers additionally capture a workspace reference and re-assert it after every await, so a slow response for one workspace cannot act on another (`nativeMenusIpc.ts:147-166`, `workspaceFilesIpc.ts:642-667`).
 - `shell.openExternal` has one entry point, and it admits only `http:`, `https:`, and `mailto:` (`windowIpc.ts:59-66`, `isSafeExternalUrl`). `shell.openPath` and `shell.showItemInFolder` only receive paths that passed lexical validation plus realpath containment inside the workspace root (`nativeMenusIpc.ts:152-163`, `workspaceFilesIpc.ts:650-663`).
 - Path containment: the lexical validators reject traversal, absolute paths, NUL bytes, percent-encoded traversal decoded to a fixpoint, Windows trailing-dot aliases, reserved device names, ADS colons, and 8.3-shaped names (`packages/workspace-core/src/paths.ts:226-289`). `realRelativeInRoot` then realpaths the deepest existing ancestor and requires the result to sit under the canonical root, refusing dangling symlinks, unresolvable links, and unreadable paths (`packages/workspace-core/src/realPath.ts:62-132`). Delete and move operations resolve the parent chain and hold back the entry itself (`noFollow`).
-- Process execution: agent prompts ride stdin, never argv (`chatRunnerProcess.ts:14-18`). ripgrep gets an argv array with `--` before the query and hardcoded exclusions last (`workspaceSearch.ts:114-140`). The Windows compiler supervisor builds its PowerShell command from absolute app paths through a strict single-quote escaper, carries no inherited credential env, and frames input on stdin (`compilerProcessSupervisor.ts:45-58`). Plugin child processes run as full-trust code by documented decision, but the broker refuses shells, contains every `modulePath` and `cwd` inside the plugin or workspace root via realpath, caps args, env, and env bytes, and owns the whole process tree for teardown (`pluginChildProcessBroker.ts:234-267, 1229-1272`).
+- Process execution: agent prompts ride stdin, never argv (`chatRunnerProcess.ts:14-18`). ripgrep gets an argv array with `--` before the query and hardcoded exclusions last (`workspaceSearch.ts:114-140`). The Windows compiler supervisor builds its PowerShell command from absolute app paths through a strict single-quote escaper, carries no inherited credential env, and frames input on stdin (`compilerProcessSupervisor.ts:45-58`).
 - The CLI server: UDS or a random-named Windows pipe, a 32-byte token written `0600`, and a timing-safe token compare (`cliServer.ts:304-311, 2676-2700`).
 - The engine daemon: spawned as a child process and spoken to over stdio, with a fresh 32-byte handshake token per launch (`engineDaemonLifecycle.ts:303-309, 599-624`). No port, no pipe, no socket a website or another process can connect to.
 - Deep links: the `dohc://` scheme accepts exactly one URL shape, a 43-character code and a canonically encoded relay URL, and nothing else reaches the app from argv (`shareHandoffIngress.ts:5-6, 58-86`).
@@ -101,10 +103,8 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - Every HTML sink the audit found is static or sanitized: callout and wikilink icons are fixed SVG strings; mermaid runs at `securityLevel: 'strict'` and only its sanitized SVG is inserted (`mermaidRender.ts:254-267, 353-371`); KaTeX runs with default trust settings and `throwOnError: false`; the export path strips image srcs that could leave the export directory (`documentExport.ts:220-247`). Chat messages render as escaped text nodes (`PostCard.tsx:229-232`).
 - No `dangerouslySetInnerHTML` exists in production renderer code. The renderer stores UI layout state in `localStorage` only; no session token or secret is stored there.
 
-### Plugin, app, and preview hosting
+### App and preview hosting
 
-- Plugin guests are main-process-owned `WebContentsView`s, never webview tags or bare iframes, with a per-workspace per-plugin hashed storage partition, no preload, no node, sandbox on, navigation and redirect locked to the exact spawned loopback origin, downloads denied, and every permission request denied (`pluginWebAppGuest.ts` throughout).
-- The credential that pairs a plugin web app rides a one-time URL fragment that is passed to `loadURL` and never to the registry, the renderer, or a log (`pluginWebAppGuest.ts:169-210`, `pluginWebAppGuest.test.ts:42-44`).
 - The static preview server refuses escape: request paths are validated, realpath-contained against the containment root, opened with `O_NOFOLLOW` where the platform has it, and served with `nosniff` (`staticDirectoryPreview.ts:123-251`). Its own comment names the two residuals this audit confirms: Windows has no `O_NOFOLLOW`, and Node exposes no `openat`, so a path component swapped in a narrow window is followed. Those residuals are documented in the code and accepted.
 - Site dev servers are spawned only when the command statically proves a loopback-only host binding; commands dohc cannot decompose, including wrapped `env` payloads, are refused (`siteRunner.ts:345-762`).
 
@@ -114,7 +114,7 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - SQL: every production query in the reviewed services and packages is parameterized through `prepare()` or the Postgres tagged helpers. The only string interpolation into SQL lives in test files building their own schemas. The sqlite worker and Postgres pool both sit behind bounded request readers.
 - The sync relay resolves named-route actors from verified sessions, hashes link bearers with HMAC-SHA256 under a server-held link key, gates every live route behind configured admission limits, validates the request Host against an allowlist, and refuses to start when a security-relevant config value is missing (`sync-relay/src/main.ts`, `linkSecurity.ts:55-86`).
 - share-web answers unknown Hosts with a refusal, sets `default-src 'none'` with `frame-ancestors 'none'` and `no-store`, rate-limits the exchange, and binds every session to a grant with an expiry (`share-web/src/server.ts:20-48, 1009-1015`). Link secrets are 32-byte base64url values matched against a fixed pattern (`packages/security-contract/src/wirePatterns.ts:4-5`). The relay URL it fetches is from configuration, so no client input becomes a fetch target: no SSRF from requests.
-- The original review found no telemetry, crash-reporting, analytics, or hidden-beacon path in its sampled code. GitHub updates and npm plugin installation are not an exhaustive egress inventory: configured relays, auth services, agents, and author-controlled apps have their own network behavior.
+- The original review found no telemetry, crash-reporting, analytics, or hidden-beacon path in its sampled code. GitHub updates are not an exhaustive egress inventory: configured relays, auth services, agents, and author-controlled apps have their own network behavior.
 
 ### Rust engine
 
@@ -129,7 +129,7 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - No install-time lifecycle scripts anywhere in 27 workspace packages; pnpm's build allowlist covers only electron, electron-winstaller, and esbuild. No lockfile deps from git or URLs.
 - The three pnpm patches cover list rendering, file watching, and editor behavior. The vendored crates (`file-guard`, `yrs`) are verified by SHA-256 with documented upstream commits and change notes.
 - No backdoor patterns: no remote-code eval, no `curl`-to-shell, no magic auth tokens, no time or date triggers, no origin-based bypasses.
-- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`, PR checks dispatch-only on self-hosted runners.
+- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`. Blacksmith PR checks stay off behind `BLACKSMITH_ENABLED`; manual checks use self-hosted runners while off.
 - No secrets in the tree or in the scanned history beyond the test PEM in finding 4. `.gitignore` covers `.env*`; the example env file holds placeholders and honest disclosures.
 - `deny.toml` restricts sources to crates.io and has an empty advisory ignore list. Separately, `.cargo/audit.toml` ignores `RUSTSEC-2026-0009` and documents the claimed unreachable dependency path.
 - Electron fuses hardened with a smoke gate; no source maps ship in production; the mock update server is unreachable from app code.
@@ -150,13 +150,12 @@ Items the audit noticed and chose to record rather than fix, each already a docu
 
 1. The shared static preview server now validates Host. Inventory independently spawned app dev servers separately; this change does not claim to secure arbitrary author code.
 2. `staticDirectoryPreview`'s Windows `O_NOFOLLOW` gap and Node's missing `openat`: the code names both residuals. If Node ever exposes openat-style traversal, adopt it there.
-3. The plugin broker's documented residual: a POSIX descendant forked after teardown capture, whose ancestors all exit, survives the kill round. Closing it needs a process group utilityProcess.fork cannot create.
-4. The update feed env override (finding 2): consider requiring a config-file trust flag instead of a bare env var.
-5. Keep the share-web test TLS pair as a fixture. No production use was found; generating it per run does not close a demonstrated exposure.
+3. The update feed env override (finding 2): consider requiring a config-file trust flag instead of a bare env var.
+4. Keep the share-web test TLS pair as a fixture. No production use was found; generating it per run does not close a demonstrated exposure.
 
 ## Method
 
-Recon of the monorepo, then six area audits: Electron main process, renderer sinks, plugin and app hosting, services, Rust engine, and supply chain including git history. Each area was verified by reading the actual implementation of the security primitive at that boundary, tracing attacker-controlled data from entry point to sink, and checking the repo's own tests where they encode a security contract. Findings were severity-rated by who can exploit them and what they get.
+Recon of the monorepo, then six area audits: Electron main process, renderer sinks, app hosting, services, Rust engine, and supply chain including git history. Each area was verified by reading the actual implementation of the security primitive at that boundary, tracing attacker-controlled data from entry point to sink, and checking the repo's own tests where they encode a security contract. Findings were severity-rated by who can exploit them and what they get.
 
 ## Follow-up evidence and launch checks
 

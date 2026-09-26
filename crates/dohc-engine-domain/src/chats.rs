@@ -48,6 +48,7 @@ pub use pending_replay::{
 pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
 pub use thread_projection::{linked_chat_projection_path, render_chat_thread_projection};
 
+use crate::automations::claim_group_message_in_tx;
 use crate::error::DomainError;
 use crate::store::hash_fields;
 use base64::Engine as _;
@@ -216,11 +217,14 @@ pub struct ChannelGroup {
     pub folder_path: Option<String>,
 }
 
-/// A chat message author kind.
+/// A chat message author kind. An automation writes only through the
+/// automation executor, which names itself with [`ChatMessageAutomation`].
+/// Reactions stay human or agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatActorKind {
     Human,
     Agent,
+    Automation,
 }
 
 impl ChatActorKind {
@@ -228,12 +232,14 @@ impl ChatActorKind {
         match self {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
+            ChatActorKind::Automation => "automation",
         }
     }
     fn from_db(raw: &str) -> Result<Self, DomainError> {
         match raw {
             "human" => Ok(ChatActorKind::Human),
             "agent" => Ok(ChatActorKind::Agent),
+            "automation" => Ok(ChatActorKind::Automation),
             _ => Err(DomainError::StateCorrupt {
                 reason: "chat message has an unknown author kind",
             }),
@@ -308,6 +314,25 @@ pub struct ChatThread {
     pub linked_at_ms: Option<i64>,
 }
 
+/// Which automation wrote a message on this computer, and the chain depth of
+/// that write. It never leaves this computer: a message another computer's
+/// automation wrote arrives without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessageAutomation {
+    /// `collection:<collection path>#<automation id>`.
+    pub automation_id: String,
+    /// One more than the depth of the change that triggered the automation.
+    pub chain_depth: u32,
+}
+
+impl ChatMessageAutomation {
+    /// The Collection the automation belongs to. Writes validate the id, so a
+    /// stored one always has a path.
+    pub fn collection_path(&self) -> &str {
+        crate::automations::collection_automation_path(&self.automation_id).unwrap_or_default()
+    }
+}
+
 /// A durable chat message row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -323,6 +348,8 @@ pub struct ChatMessage {
     pub origin: Option<String>,
     pub body: String,
     pub created_at_ms: i64,
+    /// Set on a message this computer's automation wrote.
+    pub automation: Option<ChatMessageAutomation>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -596,6 +623,8 @@ pub struct ChannelOpeningMessage {
     pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
     pub created_at_ms: i64,
+    /// Set when this computer's automation wrote the message.
+    pub automation: Option<ChatMessageAutomation>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -712,6 +741,11 @@ pub struct PendingBookmarkRow {
 pub struct DispatchClaim {
     pub dispatch: DispatchRecord,
     pub run: AgentRunRecord,
+    /// The chain depth the run's writes declare: one more than the deepest
+    /// automation message among the triggers it covers, or 0 when only
+    /// people's messages started it. Agent runs and automations share one
+    /// counter, so a chain of them stops at the cap.
+    pub chain_depth: u32,
 }
 
 /// A durable dispatch-ledger row.
@@ -796,6 +830,8 @@ pub struct StartChannelThread {
     /// A poll's choices. Implies `needs_decision`.
     pub options: Vec<String>,
     pub attachments: Vec<LocalAttachmentInput>,
+    /// Required for, and only for, an automation author.
+    pub automation: Option<ChatMessageAutomation>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
     /// the same key + payload replays the recorded result exactly-once instead of
@@ -820,6 +856,8 @@ pub struct SendMessage {
     /// A poll's choices. Implies `needs_decision`.
     pub options: Vec<String>,
     pub attachments: Vec<LocalAttachmentInput>,
+    /// Required for, and only for, an automation author.
+    pub automation: Option<ChatMessageAutomation>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
     pub request_id: Option<String>,
@@ -1249,13 +1287,14 @@ fn opening_message_body_snippet(body: &str) -> String {
     format!("{prefix}\u{2026}")
 }
 
-/// Indexed message text (`chatIndexText`): author, optional agent marker, body.
-pub fn chat_message_search_text(display_name: &str, is_agent: bool, body: &str) -> String {
+/// Indexed message text (`chatIndexText`): author, the author's kind for an
+/// agent or automation, body. `author_kind` is the stored kind.
+pub fn chat_message_search_text(display_name: &str, author_kind: &str, body: &str) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if !display_name.is_empty() {
         parts.push(display_name.to_owned());
-        if is_agent {
-            parts.push(format!("{display_name} (agent)"));
+        if matches!(author_kind, "agent" | "automation") {
+            parts.push(format!("{display_name} ({author_kind})"));
         }
     }
     if !body.is_empty() {
@@ -1295,7 +1334,7 @@ pub fn index_replicated_chat_message_search_rows(
     thread_id: &str,
     message_id: &str,
     author_display_name: &str,
-    is_agent: bool,
+    author_kind: &str,
     body: &str,
 ) -> Result<(), DomainError> {
     let (stored_title, first_message_id): (String, Option<String>) = conn
@@ -1319,7 +1358,7 @@ pub fn index_replicated_chat_message_search_rows(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    let message_search_text = chat_message_search_text(author_display_name, is_agent, body);
+    let message_search_text = chat_message_search_text(author_display_name, author_kind, body);
     upsert_chat_search_index_row(
         conn,
         workspace_id,
@@ -1552,17 +1591,55 @@ pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError>
     Ok(normalized.to_owned())
 }
 
+/// The person an agent or automation message acts for. A human message
+/// carries none.
 pub fn normalize_agent_owner_name(
-    is_agent: bool,
+    names_owner: bool,
     value: Option<&str>,
 ) -> Result<Option<String>, DomainError> {
     match value {
         None => Ok(None),
-        Some(value) if is_agent => normalize_display_name(value).map(Some),
+        Some(value) if names_owner => normalize_display_name(value).map(Some),
         Some(_) => Err(DomainError::InvalidInput {
-            reason: "only agent messages carry an owner display name",
+            reason: "only agent and automation messages carry an owner display name",
         }),
     }
+}
+
+/// An automation message must name its Collection automation and chain
+/// depth, and no other message may. The id is `collection:<path>#<id>`, and
+/// the depth is bounded like a record change's declared depth.
+fn normalize_message_automation(
+    author_kind: ChatActorKind,
+    automation: Option<&ChatMessageAutomation>,
+) -> Result<Option<ChatMessageAutomation>, DomainError> {
+    let automation = match (author_kind, automation) {
+        (ChatActorKind::Automation, Some(automation)) => automation,
+        (ChatActorKind::Automation, None) => {
+            return Err(DomainError::InvalidInput {
+                reason: "an automation message must name its automation",
+            });
+        }
+        (_, Some(_)) => {
+            return Err(DomainError::InvalidInput {
+                reason: "only an automation message names an automation",
+            });
+        }
+        (_, None) => return Ok(None),
+    };
+    if crate::automations::collection_automation_path(&automation.automation_id).is_none() {
+        return Err(DomainError::InvalidInput {
+            reason: "automation id must be collection:<path>#<id>",
+        });
+    }
+    if automation.chain_depth == 0
+        || automation.chain_depth > crate::collections::MAX_CHANGE_ATTRIBUTION_DEPTH
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "automation chain depth is invalid",
+        });
+    }
+    Ok(Some(automation.clone()))
 }
 
 /// Trim and validate an optional opaque relay author identity.
@@ -1773,6 +1850,63 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
     handles
 }
 
+/// The chain depth a message this computer writes declares, which travels
+/// with it so a chain of automations and agent runs stops at the cap across
+/// computers: an automation's own depth, or, for an agent's message in a
+/// Group while an agent run is in progress, that run's depth past 0. Only a
+/// Group's messages claim, so an agent's other messages skip the read.
+fn written_message_chain_depth(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    author_kind: ChatActorKind,
+    automation: Option<&ChatMessageAutomation>,
+) -> Result<Option<u32>, DomainError> {
+    if let Some(automation) = automation {
+        return Ok(Some(automation.chain_depth));
+    }
+    if author_kind != ChatActorKind::Agent {
+        return Ok(None);
+    }
+    let in_group: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_threads t JOIN chat_channels c \
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+             WHERE t.workspace_id = ?1 AND t.thread_id = ?2 AND c.kind = 'channel')",
+            params![workspace_id, thread_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !in_group {
+        return Ok(None);
+    }
+    Ok(dispatch::running_run_chain_depth(conn, workspace_id)?.filter(|depth| *depth > 0))
+}
+
+/// A message this computer wrote, as a Group automation's claim sees it, at
+/// the chain depth its write declares.
+fn group_message(
+    message: &ChatMessage,
+    chain_depth: Option<u32>,
+) -> crate::AutomationGroupMessage<'_> {
+    crate::AutomationGroupMessage {
+        message_id: &message.message_id,
+        thread_id: &message.thread_id,
+        parent_message_id: message.parent_message_id.as_deref(),
+        author_kind: message.author_kind.as_str(),
+        author_display_name: &message.author_display_name,
+        author_owner_display_name: message.author_owner_display_name.as_deref(),
+        author_user_id: message.author_user_id.as_deref(),
+        body: &message.body,
+        created_at_ms: message.created_at_ms,
+        automation_id: message
+            .automation
+            .as_ref()
+            .map(|automation| automation.automation_id.as_str()),
+        chain_depth,
+    }
+}
+
 /// Insert the complete derived mention set for one authoritative message.
 /// The caller owns the surrounding message transaction.
 pub fn index_message_mentions_in_tx(
@@ -1816,12 +1950,25 @@ fn normalize_mention_handle(handle: &str) -> Result<String, DomainError> {
 /// holds only a mutable borrow of the writer.
 pub struct LinkedChatStore<'a> {
     store: &'a mut EngineStore,
+    /// Group automation claims this handle's committed writes took, for the
+    /// caller to announce after commit.
+    automation_claims: Vec<crate::AutomationClaim>,
 }
 
 impl<'a> LinkedChatStore<'a> {
     /// Bind the domain to a storage writer.
     pub fn new(store: &'a mut EngineStore) -> Self {
-        LinkedChatStore { store }
+        LinkedChatStore {
+            store,
+            automation_claims: Vec::new(),
+        }
+    }
+
+    /// The Group automation claims committed writes took since the last call.
+    /// A message this computer stores, written here or replayed from a parked
+    /// coordinate, is claimed in the transaction that stores it.
+    pub fn take_automation_claims(&mut self) -> Vec<crate::AutomationClaim> {
+        std::mem::take(&mut self.automation_claims)
     }
 
     fn write_with_pending_chat_replay<T>(
@@ -1830,11 +1977,37 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
         mutation: impl FnOnce(&Transaction<'_>) -> Result<T, DomainError>,
     ) -> Result<TxnOutcome<T>, DomainError> {
+        self.write_chat_with_claims(workspace_id, faults, |tx, _| mutation(tx))
+    }
+
+    /// Run one chat write, then replay the parked coordinates it made ready.
+    /// The mutation adds the Group automation claims its own messages and
+    /// journaled ops took; after commit this handle keeps them with the
+    /// replay's.
+    fn write_chat_with_claims<T>(
+        &mut self,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        mutation: impl FnOnce(
+            &Transaction<'_>,
+            &mut Vec<crate::AutomationClaim>,
+        ) -> Result<T, DomainError>,
+    ) -> Result<TxnOutcome<T>, DomainError> {
         let workspace_id = workspace_id.to_owned();
-        self.store.write_with(faults, |tx| {
-            let value = mutation(tx)?;
-            replay_ready_pending_chat_coordinates(tx, &workspace_id)?;
-            Ok(value)
+        let outcome = self.store.write_with(faults, |tx| {
+            let mut claims = Vec::new();
+            let value = mutation(tx, &mut claims)?;
+            claims.extend(
+                replay_ready_pending_chat_coordinates(tx, &workspace_id)?.automation_claims,
+            );
+            Ok::<_, DomainError>((value, claims))
+        })?;
+        Ok(match outcome {
+            TxnOutcome::Committed((value, claims)) => {
+                self.automation_claims.extend(claims);
+                TxnOutcome::Committed(value)
+            }
+            TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
         })
     }
 
@@ -1917,7 +2090,7 @@ impl<'a> LinkedChatStore<'a> {
         let slug_c = slug.clone();
         let name_c = name.clone();
         let group_c = group.clone();
-        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+        let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
             if channel_by_slug(tx, &ws, &slug_c)?.is_some() {
                 return Err(DomainError::chat(
                     "channel-exists",
@@ -1936,6 +2109,7 @@ impl<'a> LinkedChatStore<'a> {
                 "chat.channel.create",
                 &channel_create_payload(&cid, &name_c, &slug_c, kind, &group_c, now_ms, &cid),
                 now_ms,
+                claims,
             )?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
@@ -2028,7 +2202,7 @@ impl<'a> LinkedChatStore<'a> {
         let slug_c = slug.clone();
         let name_c = name.to_owned();
         let wire = wire_id.to_owned();
-        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+        let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
             if let Some(existing) = channel_by_slug(tx, &ws, &slug_c)? {
                 // Backfill the well-known wire mapping so imported rows converge.
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
@@ -2051,6 +2225,7 @@ impl<'a> LinkedChatStore<'a> {
                 "chat.channel.create",
                 &channel_create_payload(&cid, &name_c, &slug_c, kind, &group, now_ms, &wire),
                 now_ms,
+                claims,
             )?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
@@ -2234,7 +2409,7 @@ impl<'a> LinkedChatStore<'a> {
         let title_c = title.clone();
         let object_id_c = object_id.clone();
         let path_hint_c = path_hint.clone();
-        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+        let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
             tx.execute(
                 "INSERT INTO chat_threads \
                  (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
@@ -2277,6 +2452,7 @@ impl<'a> LinkedChatStore<'a> {
                 "chat.thread.create",
                 &payload,
                 input.now_ms,
+                claims,
             )?;
             record_request(tx, Some(&input.request_id), &payload_hash, input.now_ms)?;
             Ok::<_, DomainError>(ChatThread {
@@ -2323,9 +2499,15 @@ impl<'a> LinkedChatStore<'a> {
         let options_fingerprint = options_c.join("\u{0}");
         let display_name = normalize_display_name(&input.author_display_name)?;
         let owner_name = normalize_agent_owner_name(
-            input.author_kind == ChatActorKind::Agent,
+            input.author_kind != ChatActorKind::Human,
             input.author_owner_display_name.as_deref(),
         )?;
+        let automation =
+            normalize_message_automation(input.author_kind, input.automation.as_ref())?;
+        let automation_depth = automation
+            .as_ref()
+            .map(|automation| automation.chain_depth.to_string())
+            .unwrap_or_default();
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
         let body = normalize_body(&input.body)?;
@@ -2353,6 +2535,11 @@ impl<'a> LinkedChatStore<'a> {
             if input.needs_decision { b"1" } else { b"0" },
             options_fingerprint.as_bytes(),
             attachment_fingerprint.as_slice(),
+            automation
+                .as_ref()
+                .map_or("", |automation| automation.automation_id.as_str())
+                .as_bytes(),
+            automation_depth.as_bytes(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
@@ -2375,8 +2562,7 @@ impl<'a> LinkedChatStore<'a> {
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
         let attachments_c = attachments.clone();
-        let outcome =
-            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+        let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             let channel_wire_id =
                 wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
@@ -2424,8 +2610,9 @@ impl<'a> LinkedChatStore<'a> {
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
-                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11)",
+                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
+                  automation_id, chain_depth) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -2438,6 +2625,8 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                     order,
                     owner_name,
+                    automation.as_ref().map(|automation| &automation.automation_id),
+                    automation.as_ref().map(|automation| automation.chain_depth),
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2468,11 +2657,8 @@ impl<'a> LinkedChatStore<'a> {
                 display_title,
             )
             .map_err(DomainError::sql_persist)?;
-            let message_search_text = chat_message_search_text(
-                &display_c,
-                input.author_kind == ChatActorKind::Agent,
-                &body_c,
-            );
+            let message_search_text =
+                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
@@ -2481,6 +2667,13 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let chain_depth = written_message_chain_depth(
+                tx,
+                &input.workspace_id,
+                thread_id,
+                input.author_kind,
+                automation.as_ref(),
+            )?;
             let mut message_payload = serde_json::json!({
                 "messageId": input.message_id,
                 "threadId": thread_id,
@@ -2495,6 +2688,12 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(owner_name) = &owner_name {
                 message_payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
             }
+            // The depth travels so a chain of automations and agent runs
+            // stops at the cap across computers. The automation and its
+            // Collection stay here.
+            if let Some(chain_depth) = chain_depth {
+                message_payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
+            }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
@@ -2508,6 +2707,7 @@ impl<'a> LinkedChatStore<'a> {
                     &input.workspace_id,
                     thread_id,
                     now,
+                    claims,
                 )?;
                 journal_local_op_in_tx(
                     tx,
@@ -2515,6 +2715,7 @@ impl<'a> LinkedChatStore<'a> {
                     "chat.message.append",
                     &serde_json::Value::Object(message_payload.clone()),
                     now,
+                    claims,
                 )?;
             }
             if let Some(author_user_id) = &author_user_c
@@ -2549,6 +2750,7 @@ impl<'a> LinkedChatStore<'a> {
                 &attachments_c,
                 now,
                 replicate,
+                claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
@@ -2565,8 +2767,10 @@ impl<'a> LinkedChatStore<'a> {
                 origin: origin_c.clone(),
                 body: body_c.clone(),
                 created_at_ms: now,
+                automation: automation.clone(),
                 attachments: message_attachments,
             };
+            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>((thread, message))
         })?;
         committed(outcome)
@@ -2599,9 +2803,15 @@ impl<'a> LinkedChatStore<'a> {
         }
         let display_name = normalize_display_name(&input.author_display_name)?;
         let owner_name = normalize_agent_owner_name(
-            input.author_kind == ChatActorKind::Agent,
+            input.author_kind != ChatActorKind::Human,
             input.author_owner_display_name.as_deref(),
         )?;
+        let automation =
+            normalize_message_automation(input.author_kind, input.automation.as_ref())?;
+        let automation_depth = automation
+            .as_ref()
+            .map(|automation| automation.chain_depth.to_string())
+            .unwrap_or_default();
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
         let parent = match &input.parent_message_id {
@@ -2634,6 +2844,11 @@ impl<'a> LinkedChatStore<'a> {
             if input.needs_decision { b"1" } else { b"0" },
             options_fingerprint.as_bytes(),
             attachment_fingerprint.as_slice(),
+            automation
+                .as_ref()
+                .map_or("", |automation| automation.automation_id.as_str())
+                .as_bytes(),
+            automation_depth.as_bytes(),
         ]);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
@@ -2653,8 +2868,7 @@ impl<'a> LinkedChatStore<'a> {
         let body_c = body.clone();
         let parent_c = parent.clone();
         let attachments_c = attachments.clone();
-        let outcome =
-            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+        let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
                 && !thread_has_message(tx, &input.workspace_id, &input.thread_id, parent_id)?
@@ -2668,8 +2882,9 @@ impl<'a> LinkedChatStore<'a> {
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
-                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
+                  automation_id, chain_depth) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -2683,6 +2898,8 @@ impl<'a> LinkedChatStore<'a> {
                     body_c,
                     now,
                     owner_name,
+                    automation.as_ref().map(|automation| &automation.automation_id),
+                    automation.as_ref().map(|automation| automation.chain_depth),
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2717,11 +2934,8 @@ impl<'a> LinkedChatStore<'a> {
                     None,
                 )?;
             }
-            let message_search_text = chat_message_search_text(
-                &display_c,
-                input.author_kind == ChatActorKind::Agent,
-                &body_c,
-            );
+            let message_search_text =
+                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
@@ -2730,6 +2944,13 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let chain_depth = written_message_chain_depth(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                input.author_kind,
+                automation.as_ref(),
+            )?;
             let mut payload = serde_json::json!({
                 "messageId": input.message_id,
                 "threadId": input.thread_id,
@@ -2743,6 +2964,9 @@ impl<'a> LinkedChatStore<'a> {
                 .expect("message payload is an object");
             if let Some(owner_name) = &owner_name {
                 payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
+            }
+            if let Some(chain_depth) = chain_depth {
+                payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -2774,6 +2998,7 @@ impl<'a> LinkedChatStore<'a> {
                     &input.workspace_id,
                     &input.thread_id,
                     now,
+                    claims,
                 )?;
                 journal_local_op_in_tx(
                     tx,
@@ -2781,6 +3006,7 @@ impl<'a> LinkedChatStore<'a> {
                     "chat.message.append",
                     &serde_json::Value::Object(payload.clone()),
                     now,
+                    claims,
                 )?;
             }
             if let Some(author_user_id) = &author_user_c
@@ -2815,10 +3041,11 @@ impl<'a> LinkedChatStore<'a> {
                 &attachments_c,
                 now,
                 replicate,
+                claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
-            Ok::<_, DomainError>(ChatMessage {
+            let message = ChatMessage {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: input.thread_id.clone(),
                 message_id: input.message_id.clone(),
@@ -2831,8 +3058,11 @@ impl<'a> LinkedChatStore<'a> {
                 origin: origin_c.clone(),
                 body: body_c.clone(),
                 created_at_ms: now,
+                automation: automation.clone(),
                 attachments: message_attachments,
-            })
+            };
+            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
+            Ok::<_, DomainError>(message)
         })?;
         committed(outcome)
     }
@@ -2993,6 +3223,16 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<ChatMessage, DomainError> {
         self.store
             .read_with(|conn| require_message(conn, workspace_id, message_id))
+    }
+
+    /// One message with its attachments. A Group automation reads a message
+    /// whose body its claim carried truncated.
+    pub fn get_message(
+        &self,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Result<ChatMessage, DomainError> {
+        self.reconstruct_message(workspace_id, message_id)
     }
 
     /// List threads in the workspace, ordered by `(created_at_ms, thread_id)`.
@@ -3163,7 +3403,7 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
-                         created_at_ms, author_owner_display_name \
+                         created_at_ms, author_owner_display_name, automation_id, chain_depth \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3194,6 +3434,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_owner_display_name: message.author_owner_display_name,
                         author_user_id: message.author_user_id,
                         created_at_ms: message.created_at_ms,
+                        automation: message.automation,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,
@@ -3662,7 +3903,8 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-                     author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
+                     author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
+                     automation_id, chain_depth \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -4303,20 +4545,23 @@ impl<'a> LinkedChatStore<'a> {
                     None => None,
                 };
                 let mut matched_by = Vec::new();
-                if let Some(author_user_id) = &message.author_user_id {
-                    let kind = match message.author_kind {
-                        ChatActorKind::Agent => FollowTargetKind::Agent,
-                        ChatActorKind::Human => FollowTargetKind::Person,
-                    };
-                    if active_follow_exists(
+                // An automation is neither a person nor an agent, so only its
+                // Group or thread follows can match it.
+                let author_kind = match message.author_kind {
+                    ChatActorKind::Agent => Some(FollowTargetKind::Agent),
+                    ChatActorKind::Human => Some(FollowTargetKind::Person),
+                    ChatActorKind::Automation => None,
+                };
+                if let (Some(author_user_id), Some(kind)) = (&message.author_user_id, author_kind)
+                    && active_follow_exists(
                         conn,
                         workspace_id,
                         &owner_user_id,
                         kind,
                         author_user_id,
-                    )? {
-                        matched_by.push(kind);
-                    }
+                    )?
+                {
+                    matched_by.push(kind);
                 }
                 if active_follow_exists(
                     conn,
@@ -4977,7 +5222,7 @@ WHERE m.workspace_id = ?1
   AND (
     EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
-      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' ELSE 'person' END
+      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' WHEN 'human' THEN 'person' END
       AND f.target_id = m.author_user_id)
     OR EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
@@ -5014,7 +5259,7 @@ WHERE m.workspace_id = ?1 AND m.message_id = ?3 AND m.created_at_ms = ?4
   AND (
     EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
-      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' ELSE 'person' END
+      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' WHEN 'human' THEN 'person' END
       AND f.target_id = m.author_user_id)
     OR EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
@@ -5121,6 +5366,7 @@ fn insert_attachment(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_local_attachments(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -5129,6 +5375,7 @@ fn add_local_attachments(
     attachments: &[LocalAttachmentInput],
     created_at_ms: i64,
     replicate: bool,
+    claims: &mut Vec<crate::AutomationClaim>,
 ) -> Result<Vec<ChatAttachment>, DomainError> {
     let mut stored = Vec::with_capacity(attachments.len());
     for input in attachments {
@@ -5185,6 +5432,7 @@ fn add_local_attachments(
                 "chat.attachment.add",
                 &serde_json::Value::Object(payload.clone()),
                 created_at_ms,
+                claims,
             )?;
         }
         stored.push(attachment);
@@ -5506,6 +5754,14 @@ pub struct PendingChatRefusal {
     pub origin_seq: i64,
     pub op_kind: String,
     pub reason: &'static str,
+}
+
+/// What replaying parked chat coordinates did: the ones it refused, and the
+/// Group automation claims the messages it stored took.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PendingChatReplay {
+    pub refusals: Vec<PendingChatRefusal>,
+    pub automation_claims: Vec<crate::AutomationClaim>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6300,6 +6556,7 @@ fn ensure_thread_structure_exported(
     workspace_id: &str,
     thread_id: &str,
     recorded_at_ms: i64,
+    claims: &mut Vec<crate::AutomationClaim>,
 ) -> Result<(), DomainError> {
     // Imported refusals remain in replication_log, and imported valid rows
     // carry another origin. Mint this structure once on the current local
@@ -6382,6 +6639,7 @@ fn ensure_thread_structure_exported(
         "chat.thread.create",
         &payload,
         recorded_at_ms,
+        claims,
     )
 }
 
@@ -6461,13 +6719,15 @@ fn insert_local_replication_op(
 
 /// Allocate and insert an ordinary relay-visible local op in the caller's
 /// transaction. Unlike the receiver-private follow/read registers, core chat
-/// creates are always exported.
+/// creates are always exported. A parked message the op releases adds its
+/// Group automation claims to `claims`.
 fn journal_local_op_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     op_kind: &str,
     payload: &serde_json::Value,
     recorded_at_ms: i64,
+    claims: &mut Vec<crate::AutomationClaim>,
 ) -> Result<(), DomainError> {
     let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, recorded_at_ms)?;
     insert_local_replication_op(
@@ -6479,7 +6739,9 @@ fn journal_local_op_in_tx(
         payload,
         recorded_at_ms,
     )?;
-    replay_pending_chat_coordinates_for_change(tx, workspace_id, op_kind, payload).map(|_| ())
+    let replay = replay_pending_chat_coordinates_for_change(tx, workspace_id, op_kind, payload)?;
+    claims.extend(replay.automation_claims);
+    Ok(())
 }
 
 fn require_feed_read_state(
@@ -6671,7 +6933,8 @@ fn message_by_id(
 ) -> Result<Option<ChatMessage>, DomainError> {
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
+         automation_id, chain_depth \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -6690,7 +6953,8 @@ fn first_message_for_thread(
 ) -> Result<Option<ChatMessage>, DomainError> {
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
+         automation_id, chain_depth \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -6896,6 +7160,15 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let body: String = row.get(9)?;
     let created_at_ms: i64 = row.get(10)?;
     let author_owner_display_name: Option<String> = row.get(11)?;
+    let automation_id: Option<String> = row.get(12)?;
+    let chain_depth: Option<u32> = row.get(13)?;
+    let automation = match (automation_id, chain_depth) {
+        (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
+            automation_id,
+            chain_depth,
+        }),
+        _ => None,
+    };
     Ok(
         ChatActorKind::from_db(&author_kind_str).map(|author_kind| ChatMessage {
             workspace_id,
@@ -6910,6 +7183,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             origin,
             body,
             created_at_ms,
+            automation,
             attachments: Vec::new(),
         }),
     )

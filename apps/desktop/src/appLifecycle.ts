@@ -81,6 +81,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     reportCliFailure(error: unknown): void;
     dispatch: { start(): void; stop(): Promise<void> };
     refreshTray(): Promise<boolean>;
+    /** dohc stays in the tray: close workspaces nothing uses any more. */
+    releaseIdleWorkspaces(): Promise<void>;
     reportTrayFailure(error: unknown): void;
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
@@ -101,8 +103,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     budgetMs: number;
     beginEngineShutdown(): void;
     stopSearch(): Promise<void>;
-    stopPlugins(): Promise<void>;
-    stopAgentSessions(): Promise<void>;
+    stopSitePreviews(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
     closeWorkspaces(): Promise<void>;
@@ -131,8 +132,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // writes keep retrying until settlement or the overall shutdown budget.
     shutdown.beginEngineShutdown();
     const searchStop = shutdown.stopSearch().catch(() => undefined);
-    const pluginStop = shutdown.stopPlugins();
-    const agentSessionStop = shutdown.stopAgentSessions().catch(() => undefined);
+    const sitePreviewStop = shutdown.stopSitePreviews();
     const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
     const cliServerStop = chatDispatchStop.then(() =>
       (cliServerStartup ?? Promise.resolve(cliServer))
@@ -140,18 +140,15 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         .catch(() => undefined),
     );
     const engineYDocStop = shutdown.settleYDocs();
-    const agentIntegrationStop = agentSessionStop
-      .then(() => shutdown.stopAgentIntegration())
-      .catch(() => undefined);
+    const agentIntegrationStop = shutdown.stopAgentIntegration().catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       engineYDocStop,
-      agentSessionStop,
       chatDispatchStop,
       cliServerStop,
       searchStop,
       agentIntegrationStop,
-      pluginStop,
+      sitePreviewStop,
     ])
       .then(() => shutdown.closeWorkspaces())
       .catch(() => undefined);
@@ -291,6 +288,15 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
   return {
     isQuitting: () => quitting,
+    /**
+     * A reason to run without windows changed, as when the last schedule
+     * was switched off. With no window and no reason left, dohc quits, as
+     * closing the last window would have.
+     */
+    async backgroundReasonsChanged(): Promise<void> {
+      const keep = await services.refreshTray();
+      if (!keep && !quitting && runtime.platform !== "darwin" && !windows.hasAny()) app.quit();
+    },
     start(): Promise<void> {
       if (!app.requestSingleInstanceLock()) {
         app.quit();
@@ -355,6 +361,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         void services.refreshTray()
           .then((enabled) => {
             if (!enabled && !quitting) app.quit();
+            // A failed close leaves the workspace open; it never quits dohc.
+            else if (enabled && !quitting) return services.releaseIdleWorkspaces().catch(() => undefined);
           })
           .catch(() => {
             if (!quitting) app.quit();

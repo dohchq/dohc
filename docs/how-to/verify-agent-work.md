@@ -58,7 +58,10 @@ Record the operator's result with the session evidence. The automated picker sea
 
 ## Verify a pull request
 
-One verification owner runs the full selected gates locally and records the evidence in the PR.
+One verification owner records passing evidence for every selected gate in the PR.
+While Blacksmith is off, run the gates locally.
+When enabled, reuse passing CI evidence that covers the change instead of repeating full gates locally.
+Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change activation.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
 For platform-specific changes, add focused checks on that platform.
@@ -67,10 +70,15 @@ Use the canonical runner below. Other agents reuse its evidence instead of recon
 
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
+The plan also lists selected JavaScript packages, integration proofs, and required services.
+JavaScript selection follows workspace dependencies and declared external test inputs.
+Shared configuration and unclassified code inputs select the full JavaScript suite.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
-The JavaScript gate uses a dedicated Postgres container and requires the normally optional integration suites.
-It also runs the native self-host editing proof with the prepared engine and verifies its complete delivery evidence.
+The JavaScript gate typechecks the whole workspace and runs repository checks before selected package tests.
+It starts a dedicated Postgres container when selected tests or proofs need one.
+Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
+The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
 The runner removes its Postgres container by the recorded container ID.
 
@@ -78,11 +86,27 @@ To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` a
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.
+For a forced JavaScript job with no matching changes, the runner selects the complete JavaScript suite.
+
+Run `pnpm verify:pr --base <target-ref> --full` for comprehensive verification before a release or when impact is uncertain.
+This runs both gates, every package, and every mandatory integration proof, including when the diff is empty.
+Combine `--full` with `--job js` or `--job rust` to run one complete job.
+Use `pnpm verify:plan --base <target-ref> --full` to inspect the full selection.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.
+Include its JavaScript package and proof selection when reusing evidence for a narrower run.
 After review fixes or integration changes, rerun affected checks and record why the remaining evidence still applies.
 Keep each receipt's tested commit and target unchanged; document reuse in the PR.
 Use the report's `steps[].seconds` when recording verification delays.
+Use its top-level `seconds` for the complete run, including preparation and cleanup.
+The `timings` rows record source checks, preparation, and database setup and cleanup, including failed phases.
+Rows can overlap during failed startup cleanup. Do not add them to estimate elapsed time.
+
+`pnpm test` builds the SDK and app runtime before testing packages.
+It runs repository tests first, then at most two packages concurrently, then desktop packaging tests.
+Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
+Package results and durations are in the JS test report referenced by `result.json`.
+The canonical verifier supplies the prerequisites once before running this test schedule.
 
 ## Measure performance
 

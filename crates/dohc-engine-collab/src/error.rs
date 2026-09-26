@@ -8,6 +8,10 @@ use dohc_engine_storage::StorageError;
 /// Errors from the durable Y.Doc layer.
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
+    #[error(
+        "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
+    )]
+    FrontmatterEditRefused,
     /// An update failed to decode/apply (truncated or malformed). The doc is
     /// state-unchanged and the bytes are never journaled (binding constraint 5).
     #[error("malformed Y.Doc update: {reason}")]
@@ -172,6 +176,11 @@ pub enum CollabError {
     #[error("cannot seed onto an existing Y.Doc lineage")]
     SeedOntoExistingLineage,
 
+    /// A write reused an idempotency key that already recorded different
+    /// content. Nothing of this write was recorded.
+    #[error("idempotency key was reused with different content")]
+    IdempotencyKeyReused,
+
     /// A local-only close would prune CRDT state whose edits no durable settle
     /// covers (the current head is not reflected in the materialized artifact).
     /// Settle first. The workspace file must contain the artifact before the
@@ -199,6 +208,7 @@ impl CollabError {
     /// A stable machine-readable code.
     pub fn code(&self) -> &'static str {
         match self {
+            CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
@@ -227,6 +237,7 @@ impl CollabError {
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",
             CollabError::ObjectAliasCollision => "object-alias-collision",
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
+            CollabError::IdempotencyKeyReused => "idempotency-key-reuse-mismatch",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::OwnerOutboxFrozen => "owner-outbox-frozen",
             CollabError::RestoreFenced => "restore-fenced",

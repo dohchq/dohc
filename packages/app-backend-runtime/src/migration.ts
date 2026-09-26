@@ -1,6 +1,7 @@
 import { DatabaseSync, constants } from "node:sqlite";
 import { authorize, insertsImplicitRowid, sqlTokens } from "./guest.js";
-import { reject } from "./persistent-protocol.js";
+import { databaseBytes, reject, unbudgeted } from "./persistent-protocol.js";
+import type { CpuBudgets } from "./persistent-protocol.js";
 import type { RuntimeLimits } from "./protocol.js";
 
 export const datasetSchema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name != 'dohc_applied' ORDER BY type,name";
@@ -28,37 +29,42 @@ function predicatesReadRowid(sql:string):boolean {
 export function assertReplayableSchema(schemaSql:string):void {
   // Ignore quoted identifiers, literals, and comments when finding the SQL keyword.
   const code=schemaSql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g," ");
-  if (/\bAUTOINCREMENT\b/i.test(code)) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
+  if (/\bAUTOINCREMENT\b/i.test(code)) reject("invalid_schema","Collections cannot use AUTOINCREMENT. Use an INTEGER PRIMARY KEY or an explicit ID.");
 }
 
-export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false):void {
-  assertReplayableSchema(schemaSql);
+// The app's schema text and SQL run under the app's CPU budget. The integrity
+// and foreign-key checks run the app's indexes, generated columns, and CHECK
+// constraints over every row, so they run under the dataset check budget.
+export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false,
+  {appCode,datasetCheck}:CpuBudgets=unbudgeted):void {
+  appCode(()=>assertReplayableSchema(schemaSql));
   const expected=new DatabaseSync(":memory:",options);
   try {
     expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA ignore_check_constraints=ON; PRAGMA max_page_count=${Math.floor(limits.databaseBytes/4096)}`);
     authorize(expected,{tables},{initializing:true});
-    expected.exec(schemaSql);expected.setAuthorizer(null);
-    if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
+    appCode(()=>expected.exec(schemaSql));expected.setAuthorizer(null);
+    if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","Collections cannot use AUTOINCREMENT. Use an INTEGER PRIMARY KEY or an explicit ID.");
     const schema=expected.prepare(datasetSchema).all();
     const declaredTables=schema.filter(row=>row.type==="table");
-    if (declaredTables.length!==tables.length || declaredTables.some(row=>!tables.includes(String(row.name))) || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","Invalid dataset schema.");
+    if (declaredTables.length!==tables.length || declaredTables.some(row=>!tables.includes(String(row.name))) || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","The Collection schema must create exactly its declared tables, with only indexes and triggers besides.");
     const capturedRowidTables=new Set<string>();
     for (const table of tables) {
       const columns=expected.prepare(`PRAGMA table_info("${table}")`).all();
       const primary=columns.filter(column=>Number(column.pk)>0);
       const rowid=primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !expected.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk");
-      if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Dataset tables require non-null primary keys.");
+      if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Every Collection table needs a NOT NULL primary key.");
       if(rowid) capturedRowidTables.add(table.toLowerCase());
-      if(!rowid && predicatesReadRowid(String(declaredTables.find(row=>row.name===table)!.sql))) reject("invalid_schema","Dataset predicates must use a declared primary key, not an implicit rowid.");
+      if(!rowid && predicatesReadRowid(String(declaredTables.find(row=>row.name===table)!.sql))) reject("invalid_schema","Collection checks and indexes must use the declared primary key, not the implicit rowid.");
       if(columns.some(column=>/^(rowid|oid|_rowid_)$/i.test(String(column.name)) && !(rowid && column.name===primary[0].name))) reject("invalid_schema","Rowid aliases are reserved unless they name the INTEGER PRIMARY KEY.");
     }
-    if(schema.some(row=>row.type==="trigger" && insertsImplicitRowid(String(row.sql),capturedRowidTables))) reject("invalid_schema","Triggers cannot insert implicit rowid values into journaled datasets.");
-    if (JSON.stringify(db.prepare(datasetSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","Checkpoint schema does not match the approved dataset.");
+    if(schema.some(row=>row.type==="trigger" && insertsImplicitRowid(String(row.sql),capturedRowidTables))) reject("invalid_schema","Collection triggers cannot insert implicit rowid values.");
+    if (JSON.stringify(db.prepare(datasetSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","The saved records do not match the Collection's approved schema.");
   } finally {expected.close();}
   // Trusted host checkpoints contain previously accepted predicates, including time-dependent CHECKs.
   db.exec(validateNewPredicates ? "PRAGMA ignore_check_constraints=OFF" : "PRAGMA ignore_check_constraints=ON");
   try {
-    if (db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check!=="ok" || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_checkpoint","Checkpoint integrity check failed.");
+    const intact=datasetCheck(databaseBytes(db),()=>db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check==="ok" && db.prepare("PRAGMA foreign_key_check").iterate().next().done);
+    if (!intact) reject("invalid_checkpoint","This Collection's saved records are damaged.");
   } finally {db.exec("PRAGMA ignore_check_constraints=OFF");}
 }
 

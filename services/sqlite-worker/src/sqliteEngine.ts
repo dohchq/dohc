@@ -72,7 +72,8 @@ function sqliteType(type: string): string {
 }
 
 function bindValue(value: unknown): unknown {
-  if (value === null || typeof value === 'string' || typeof value === 'number') return value
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string' || typeof value === 'number') return value
   if (typeof value === 'boolean') return value ? 1 : 0
   return JSON.stringify(value ?? null)
 }
@@ -109,12 +110,17 @@ function createTables(db: SQLiteDatabase, snapshot: DatabaseSnapshot) {
       db.exec(`CREATE TABLE ${quoteIdent(tableName)} (${columns.join(', ')})`)
       if (table.rows.length === 0) continue
       const columnNames = table.columns.map((column) => column.name)
+      const columnTypes = table.columns.map((column) => sqliteType(column.type))
       const placeholders = columnNames.map(() => '?').join(', ')
       const statement = db.prepare(
         `INSERT INTO ${quoteIdent(tableName)} (${columnNames.map(quoteIdent).join(', ')}) VALUES (${placeholders})`,
       )
       for (const row of table.rows) {
-        statement.run(...columnNames.map((column) => bindValue(row[column])))
+        statement.run(...columnNames.map((column, index) => {
+          const value = bindValue(row[column])
+          // Node binds numbers as doubles; SQLite's TEXT conversion can round them.
+          return columnTypes[index] === 'TEXT' && typeof value === 'number' ? String(value) : value
+        }))
       }
     }
     db.exec('COMMIT')
@@ -169,12 +175,17 @@ function columnNamesForRows(rows: Array<Record<string, unknown>>): string[] {
 }
 
 function inferColumnType(rows: Array<Record<string, unknown>>, column: string): string {
+  let type = 'INTEGER'
+  let present = false
   for (const row of rows) {
     const value = row[column]
-    if (typeof value === 'number') return Number.isInteger(value) ? 'INTEGER' : 'REAL'
-    if (typeof value === 'boolean') return 'INTEGER'
+    if (value === null || value === undefined) continue
+    present = true
+    if (typeof value === 'number') {
+      if (!Number.isInteger(value)) type = 'REAL'
+    } else if (typeof value !== 'boolean') return 'TEXT'
   }
-  return 'TEXT'
+  return present ? type : 'TEXT'
 }
 
 function sqliteTypeForSchemaType(type: string): string {
@@ -200,13 +211,29 @@ function safeIdentifier(raw: string, fallback: string): string {
 }
 
 function uniqueIdentifiers(values: string[]): string[] {
-  const seen = new Map<string, number>()
-  return values.map((value, index) => {
-    const base = safeIdentifier(value, `column_${index + 1}`)
-    const count = seen.get(base) ?? 0
-    seen.set(base, count + 1)
-    return count === 0 ? base : `${base}_${count + 1}`
+  const bases = values.map((value, index) => safeIdentifier(value, `column_${index + 1}`))
+  const reserved = new Set(['id', ...bases.map(base => base.toLowerCase())])
+  const used = new Set<string>()
+  const suffixes = new Map<string, number>()
+  return bases.map(base => {
+    const key = base.toLowerCase()
+    let name = base
+    if (used.has(key) || (key === 'id' && base !== 'id')) {
+      let suffix = suffixes.get(key) ?? 2
+      do { name = `${base}_${suffix++}` } while (reserved.has(name.toLowerCase()) || used.has(name.toLowerCase()))
+      suffixes.set(key, suffix)
+    }
+    used.add(name.toLowerCase())
+    return name
   })
+}
+
+const NUMERIC_TEXT = /^-?(?:\d+|\d+\.\d+|\d+e[+-]?\d+|\d+\.\d+e[+-]?\d+)$/i
+
+function unsafeNumericText(value: unknown): boolean {
+  if (typeof value !== 'string' || !NUMERIC_TEXT.test(value)) return false
+  const number = Number(value)
+  return !Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number))
 }
 
 function parseScalar(value: unknown, columnName?: string): unknown {
@@ -215,10 +242,7 @@ function parseScalar(value: unknown, columnName?: string): unknown {
   if (columnName === 'id') return trimmed
   if (trimmed === '') return null
   if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed)
-  if (/^-?\d+$/.test(trimmed)) return Number(trimmed)
-  if (/^-?(?:\d+\.\d+|\d+e[+-]?\d+|\d+\.\d+e[+-]?\d+)$/i.test(trimmed)) {
-    return Number(trimmed)
-  }
+  if (NUMERIC_TEXT.test(trimmed) && !unsafeNumericText(trimmed)) return Number(trimmed)
   return trimmed
 }
 
@@ -281,7 +305,7 @@ function parseCsv(body: string): Array<Record<string, unknown>> {
 
 function parseJsonArray(body: string): Array<Record<string, unknown>> | null {
   try {
-    const value = JSON.parse(body)
+    const value = parseImportJson(body)
     if (!Array.isArray(value)) return null
     return normalizeImportedRows(value)
   } catch {
@@ -296,11 +320,17 @@ function parseJsonl(body: string): Array<Record<string, unknown>> | null {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean)
-        .map((line) => JSON.parse(line)),
+        .map((line) => parseImportJson(line)),
     )
   } catch {
     return null
   }
+}
+
+function parseImportJson(body: string): unknown {
+  // The reviver's source token survives precision lost before the callback runs.
+  return JSON.parse(body, (_key: string, value: unknown, context?: { source?: string }) =>
+    typeof value === 'number' && context?.source && unsafeNumericText(context.source) ? context.source : value)
 }
 
 function splitMarkdownRow(line: string): string[] {
@@ -338,15 +368,15 @@ function parseMarkdownTable(body: string): Array<Record<string, unknown>> | null
 }
 
 function normalizeImportedRows(values: unknown[]): Array<Record<string, unknown>> {
-  return values.map((value, index) => {
-    const source =
-      value && typeof value === 'object' && !Array.isArray(value)
-        ? value as Record<string, unknown>
-        : { value }
+  const sources = values.map(value => value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : { value })
+  const keys = [...new Set(sources.flatMap(source => Object.keys(source)))]
+  const names = uniqueIdentifiers(keys)
+  const columns = new Map(keys.map((key, index) => [key, names[index]]))
+  return sources.map((source, index) => {
     const row: Record<string, unknown> = {}
-    const keys = uniqueIdentifiers(Object.keys(source))
-    Object.entries(source).forEach(([key, item], keyIndex) => {
-      const column = keys[keyIndex] ?? safeIdentifier(key, `column_${keyIndex + 1}`)
+    Object.entries(source).forEach(([key, item]) => {
+      const column = columns.get(key)!
       row[column] = parseScalar(item, column)
     })
     if (row.id === undefined || row.id === null || String(row.id).trim() === '') {
@@ -387,6 +417,11 @@ function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, un
   quoteIdent(tableName)
   const columns = columnNamesForRows(rows)
   const schema = input.schema ?? {}
+  for (const column of columns) {
+    if (schema[column] && sqliteTypeForSchemaType(schema[column]) !== 'TEXT' && rows.some(row => unsafeNumericText(row[column]))) {
+      throw new Error(`Column ${column} requires text storage to preserve its numeric values.`)
+    }
+  }
   return {
     [tableName]: {
       columns: columns.map((name) => ({

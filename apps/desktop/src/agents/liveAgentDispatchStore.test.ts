@@ -80,7 +80,7 @@ function dispatchResult(request: Request): JsonValue {
     case "chats.dispatch.enqueue":
       return { enqueued: true };
     case "chats.dispatch.claimNextPending":
-      return { dispatch, run };
+      return { dispatch, run, chainDepth: 0 };
     case "chats.dispatch.failPendingForThread":
       return 1;
     case "chats.dispatch.complete":
@@ -90,7 +90,7 @@ function dispatchResult(request: Request): JsonValue {
     case "chats.dispatch.listPending":
       return { dispatches: [dispatch], nextCursor: null };
     case "chats.dispatch.openRuns":
-      return { claims: [{ dispatch, run }], nextCursor: null };
+      return { claims: [{ dispatch, run, chainDepth: 0 }], nextCursor: null };
     case "chats.dispatch.markFailureNotePosted":
       return { ...run, failureNotePosted: true };
     case "chats.dispatch.recentCount":
@@ -276,7 +276,7 @@ describe("live agent dispatch store", () => {
         command: "codex",
         logPath: "logs/{runId}/{runId}.log",
       }),
-    ).resolves.toEqual({ dispatch, run });
+    ).resolves.toEqual({ dispatch, run, chainDepth: 0 });
     await expect(
       store.failPendingForThread({
         workspaceId: WORKSPACE.workspaceId,
@@ -294,7 +294,7 @@ describe("live agent dispatch store", () => {
       dispatch,
     ]);
     await expect(store.openRuns(WORKSPACE.workspaceId)).resolves.toEqual([
-      { dispatch, run },
+      { dispatch, run, chainDepth: 0 },
     ]);
     await expect(
       store.markFailureNotePosted(run.runId, { deadlineMs: 432 }),
@@ -471,7 +471,7 @@ describe("live agent dispatch store", () => {
           message: "claim response was lost",
         };
       }
-      return { dispatch, run };
+      return { dispatch, run, chainDepth: 0 };
     });
     const sessions = new EngineWorkspaceSessions(
       { currentClient: () => client },
@@ -497,7 +497,7 @@ describe("live agent dispatch store", () => {
         command: "codex",
         logPath: "logs/{runId}.log",
       }),
-    ).resolves.toEqual({ dispatch, run });
+    ).resolves.toEqual({ dispatch, run, chainDepth: 0 });
 
     const claims = client.requests.filter(
       ({ method }) => method === "chats.dispatch.claimNextPending",

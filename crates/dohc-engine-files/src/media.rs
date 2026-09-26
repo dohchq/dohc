@@ -30,6 +30,11 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
     }
 }
 
+/// The Collection files that dohc reads and writes as text. The media table
+/// maps `.yaml` to binary, so these names are text by rule. Ports
+/// `COLLECTION_TEXT_FILENAMES` (`packages/workspace-fs/src/metadata.ts`).
+const COLLECTION_TEXT_FILENAMES: [&str; 2] = ["collection.yaml", "automations.yaml"];
+
 /// The text/binary routing decision the capture pipeline makes before any
 /// UTF-8 sniffing. Ports `isTextMediaType` (`packages/workspace-fs/src/metadata.ts`)
 /// byte-for-byte, including its quirks (a `.ts` file outside a site source
@@ -39,8 +44,10 @@ pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
     if is_sqlite_media_type(media_type, rel_path) {
         return false;
     }
+    let basename = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
     let lower = format!("{media_type} {rel_path}").to_lowercase();
-    lower.contains("text/")
+    COLLECTION_TEXT_FILENAMES.contains(&basename)
+        || lower.contains("text/")
         || lower.contains("json")
         || lower.contains("csv")
         || is_site_source_path(rel_path)
@@ -111,37 +118,31 @@ fn is_site_source_path(rel_path: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TextMediaCase {
+        media_type: String,
+        path: String,
+        text: bool,
+    }
+
+    /// The TS oracle's test reads the same cases, so the two rules cannot
+    /// drift apart.
     #[test]
-    fn text_media_matches_the_ts_oracle_table() {
-        let text: &[(&str, &str)] = &[
-            ("text/markdown", "notes/a.md"),
-            ("text/plain", "notes.txt"),
-            ("text/javascript", "app.js"),
-            ("application/json", "x.json"),
-            ("application/json", "drawings/board.excalidraw"),
-            ("application/x-ndjson", "x.jsonl"),
-            ("text/csv", "d.csv"),
-            ("text/html", "page.html"),
-            ("application/octet-stream", "README.markdown"),
-            ("application/octet-stream", "run.sh"),
-            ("application/typescript", "sites/mysite/src/x.ts"),
-        ];
-        for (media, path) in text {
-            assert!(is_text_media_type(media, path), "{media} {path}");
-        }
-        let binary: &[(&str, &str)] = &[
-            ("image/png", "x.png"),
-            ("application/pdf", "x.pdf"),
-            ("application/vnd.sqlite3", "x.db"),
-            ("application/vnd.sqlite3", "x.sqlite3"),
-            ("application/octet-stream", "Makefile"),
-            ("application/octet-stream", "x.bin"),
-            ("application/typescript", "x.ts"),
-            ("application/typescript", "sites/x.ts"),
-            ("audio/mp4", "song.m4a"),
-        ];
-        for (media, path) in binary {
-            assert!(!is_text_media_type(media, path), "{media} {path}");
+    fn text_media_matches_the_shared_cases() {
+        let cases: Vec<TextMediaCase> = serde_json::from_str(include_str!(
+            "../../../packages/workspace-fs/text-media-cases.json"
+        ))
+        .expect("text media cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            assert_eq!(
+                is_text_media_type(&case.media_type, &case.path),
+                case.text,
+                "{} {}",
+                case.media_type,
+                case.path
+            );
         }
     }
 

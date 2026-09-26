@@ -7,12 +7,12 @@
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
-    ChatChannelKind, ChatChannelType, ChatDecisionState, ChatReactionState, ChatThreadLane,
-    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
-    LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
+    ChatThreadLane, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
+    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput, NoFaults,
+    PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
+    channel_slug_for_name, decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -35,6 +35,7 @@ fn start_thread(
     now: i64,
 ) -> StartChannelThread {
     StartChannelThread {
+        automation: None,
         workspace_id: WS.to_owned(),
         channel_id: channel_id.to_owned(),
         thread_id: thread_id.to_owned(),
@@ -63,6 +64,7 @@ fn send_msg(
     now: i64,
 ) -> SendMessage {
     SendMessage {
+        automation: None,
         workspace_id: WS.to_owned(),
         thread_id: thread_id.to_owned(),
         message_id: message_id.to_owned(),
@@ -848,6 +850,332 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
 }
 
 // ------------------------------------------- atomic thread + first message
+
+#[test]
+fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    let stamp = ChatMessageAutomation {
+        automation_id: "collection:Trip/Tasks#stamp".to_owned(),
+        chain_depth: 1,
+    };
+    let automated =
+        |message_id: &str, automation: Option<ChatMessageAutomation>| StartChannelThread {
+            author_display_name: "Stamp the finish date".to_owned(),
+            author_owner_display_name: Some("Ice".to_owned()),
+            automation,
+            ..start_thread(
+                "gen-1",
+                &format!("t-{message_id}"),
+                message_id,
+                "Done @ana",
+                ChatActorKind::Automation,
+                20,
+            )
+        };
+    let named = |automation_id: &str, chain_depth: u32| {
+        Some(ChatMessageAutomation {
+            automation_id: automation_id.to_owned(),
+            chain_depth,
+        })
+    };
+    let refusals = [
+        (
+            automated("m0", None),
+            "an automation message must name its automation",
+        ),
+        (
+            StartChannelThread {
+                automation: Some(stamp.clone()),
+                ..start_thread("gen-1", "t-h", "m-h", "Hi", ChatActorKind::Human, 20)
+            },
+            "only an automation message names an automation",
+        ),
+        (
+            StartChannelThread {
+                automation: Some(stamp.clone()),
+                ..start_thread("gen-1", "t-a", "m-a", "Hi", ChatActorKind::Agent, 20)
+            },
+            "only an automation message names an automation",
+        ),
+        (
+            automated("m1", named("other:hello/triage", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip/Tasks", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip/Tasks#", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named(" collection:Trip/Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip/Tasks#stamp", 0)),
+            "automation chain depth is invalid",
+        ),
+        (
+            automated("m1", named("collection:../Secrets#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip/../../etc#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:/etc/Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:C:/Users/Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:c:Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip\\Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip//Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:./Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
+            automated("m1", named("collection:Trip/Tasks#stamp", 65)),
+            "automation chain depth is invalid",
+        ),
+    ];
+    for (input, expected) in refusals {
+        match chats.start_channel_thread(&input, &NO_FAULTS) {
+            Err(DomainError::InvalidInput { reason }) => assert_eq!(reason, expected),
+            other => panic!("expected {expected:?}, got {other:?}"),
+        }
+    }
+    let human_owner = start_thread("gen-1", "t-o", "m-o", "Hi", ChatActorKind::Human, 20);
+    let human_owner = StartChannelThread {
+        author_owner_display_name: Some("Ice".to_owned()),
+        ..human_owner
+    };
+    assert!(
+        chats
+            .start_channel_thread(&human_owner, &NO_FAULTS)
+            .is_err(),
+        "a human message names no owner"
+    );
+
+    let (_, opening) = chats
+        .start_channel_thread(&automated("m1", Some(stamp.clone())), &NO_FAULTS)
+        .expect("the executor posts");
+    assert_eq!(opening.author_kind, ChatActorKind::Automation);
+    assert_eq!(opening.author_owner_display_name.as_deref(), Some("Ice"));
+    assert_eq!(opening.automation, Some(stamp.clone()));
+    assert_eq!(stamp.collection_path(), "Trip/Tasks");
+    // Like an agent's message, it stays unread for the person.
+    assert_eq!(
+        chats
+            .read_state(WS, "t-m1")
+            .expect("read state")
+            .last_read_sequence,
+        0
+    );
+
+    let deeper = ChatMessageAutomation {
+        chain_depth: 2,
+        ..stamp.clone()
+    };
+    let reply = SendMessage {
+        author_kind: ChatActorKind::Automation,
+        author_display_name: "Stamp the finish date".to_owned(),
+        author_owner_display_name: Some("Ice".to_owned()),
+        automation: Some(deeper.clone()),
+        ..send_msg("t-m1", "m2", Some("m1"), "Again", 30)
+    };
+    assert_eq!(
+        chats
+            .send_message(&reply, &NO_FAULTS)
+            .expect("reply")
+            .automation,
+        Some(deeper.clone())
+    );
+    let unnamed = SendMessage {
+        automation: None,
+        ..reply.clone()
+    };
+    assert!(matches!(
+        chats.send_message(&unnamed, &NO_FAULTS),
+        Err(DomainError::InvalidInput {
+            reason: "an automation message must name its automation"
+        })
+    ));
+    let page = chats.list_messages(WS, "t-m1", 10, None).expect("messages");
+    let read: Vec<_> = page
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.message_id.as_str(),
+                message.author_kind,
+                message.automation.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("m1", ChatActorKind::Automation, Some(stamp.clone())),
+            ("m2", ChatActorKind::Automation, Some(deeper))
+        ]
+    );
+    let mentions = chats
+        .list_mentions_for_handle(WS, "ana", false, None, 10)
+        .expect("mentions");
+    assert_eq!(
+        mentions
+            .iter()
+            .map(|mention| (mention.message_id.as_str(), mention.author_kind))
+            .collect::<Vec<_>>(),
+        vec![("m1", ChatActorKind::Automation)]
+    );
+
+    // Following Ada the person does not follow automations that ran for her.
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t-ada", "m-ada", "Hi", ChatActorKind::Human, 35),
+            &NO_FAULTS,
+        )
+        .expect("ada posts");
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "reader".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Person,
+                target_id: "user-ada".to_owned(),
+                state: FollowState::Following,
+                now_ms: 40,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow ada");
+    let feed = chats
+        .list_personal_feed(WS, "reader", Some(10), None)
+        .expect("feed");
+    assert_eq!(
+        feed.items
+            .iter()
+            .map(|item| item.message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m-ada"]
+    );
+
+    // A retry with the same key must name the same automation and depth.
+    let keyed = StartChannelThread {
+        request_id: Some("post-1".to_owned()),
+        ..automated("m3", Some(stamp.clone()))
+    };
+    chats
+        .start_channel_thread(&keyed, &NO_FAULTS)
+        .expect("keyed post");
+    chats
+        .start_channel_thread(&keyed, &NO_FAULTS)
+        .expect("the same retry replays");
+    let changed = StartChannelThread {
+        automation: Some(ChatMessageAutomation {
+            chain_depth: 3,
+            ..stamp.clone()
+        }),
+        ..keyed
+    };
+    assert!(matches!(
+        chats.start_channel_thread(&changed, &NO_FAULTS),
+        Err(DomainError::IdempotencyKeyReuseMismatch)
+    ));
+
+    // Search labels an automation as the projection does.
+    let indexed: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id = ?1 AND message_id = 'm1'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("indexed automation message");
+    assert_eq!(
+        indexed,
+        "Stamp the finish date\nStamp the finish date (automation)\nDone @ana"
+    );
+
+    // Other computers get the author kind, the person, and the chain depth,
+    // never the automation.
+    let payloads: Vec<serde_json::Value> = store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' \
+                     AND json_extract(payload_json, '$.authorKind') = 'automation' ORDER BY origin_seq",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(0))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled messages")
+        .iter()
+        .map(|payload| serde_json::from_str(payload).expect("json"))
+        .collect();
+    assert_eq!(
+        payloads
+            .iter()
+            .map(|payload| payload["chainDepth"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(2), json!(1)],
+        "the depth travels so a chain of automations stops across computers"
+    );
+    for payload in payloads {
+        assert_eq!(payload["authorKind"], "automation");
+        assert_eq!(payload["authorOwnerDisplayName"], "Ice");
+        assert_eq!(payload["authorUserId"], "user-ada");
+        assert!(
+            payload.get("automation").is_none() && payload.get("automationId").is_none(),
+            "{payload}"
+        );
+    }
+
+    // Only a leading drive letter is refused: a folder name may hold a colon.
+    let colon = StartChannelThread {
+        body: "Hi".to_owned(),
+        ..automated("m-colon", named("collection:Trip/Budget: Q3#stamp", 1))
+    };
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(&colon, &NO_FAULTS)
+        .expect("a folder name may hold a colon");
+}
 
 #[test]
 fn start_channel_thread_creates_thread_and_first_message_atomically() {

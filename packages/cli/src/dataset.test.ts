@@ -39,6 +39,15 @@ describe("dataset CLI", () => {
     expect(DatasetRequest.parse(prepare)).toEqual(prepare);
     expect(() => DatasetRequest.parse({ ...prepare, access: "owner" })).toThrow();
   });
+  it("prepares a button as a name on a table, with no column, type or operation", () => {
+    const request = { action: "prepareSchemaChange", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+      change: { kind: "addButton", tableId: id(2), name: "Send receipt" } };
+    expect(DatasetRequest.parse(request)).toEqual(request);
+    for (const extra of [{ sqlColumn: "send_receipt" }, { type: "button" }, { fieldIds: [id(3)] }, { operationId: id(4) }]) {
+      expect(() => DatasetRequest.parse({ ...request, change: { ...request.change, ...extra } })).toThrow();
+    }
+    expect(() => DatasetRequest.parse({ ...request, change: { ...request.change, name: " " } })).toThrow();
+  });
   it.each(["describe", "invoke", "helper", "export", "restore"])("rejects the retired private app %s command before transport", async action => {
     const send = vi.fn();
     const result = await executeCli({ argv: ["app", action, JSON.stringify({ workspaceId: "workspace", publicationId: "a".repeat(64) })], request: send });
@@ -73,11 +82,16 @@ describe("dataset CLI", () => {
   });
   it("explains creation and approval without requiring a running desktop", async () => {
     const send = vi.fn();
-    const result = await executeCli({argv:["dataset","--help"],request:send});
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("create: definition");
-    expect(result.stdout).toContain("revisionSha256");
-    expect(result.stdout).toContain("same input and idempotencyKey");
+    const help = async (...argv: string[]) => {
+      const result = await executeCli({argv:["dataset",...argv,"--help"],request:send});
+      expect(result.exitCode).toBe(0);
+      return result.stdout.replace(/\s+/g," ");
+    };
+    expect(await help()).toContain("create Write source for a new Collection, ready to approve.");
+    expect(await help("create")).toContain("Fields: workspaceId, definition");
+    expect(await help("approve")).toContain("Fields: workspaceId, preparationId, revisionSha256");
+    expect(await help("invoke")).toContain("same input and idempotencyKey");
+    expect(await help("export")).toContain("Fields: workspaceId, datasetId, savePath Optional fields: overwrite");
     expect(send).not.toHaveBeenCalled();
   });
   it("requires a chosen export destination and returns no private archive bytes", async () => {

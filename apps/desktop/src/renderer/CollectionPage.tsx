@@ -1,4 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
+import { Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -10,6 +11,7 @@ import {
   BoardView,
   CalendarView,
   createCollectionStore,
+  recordLabel,
   TableView,
   useCollectionStore,
   type CollectionCellChange,
@@ -19,6 +21,7 @@ import type {
   CollectionQueryParams,
   CollectionRecord,
   CollectionSchema,
+  FieldDefinition,
   ViewDefinition,
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
@@ -34,6 +37,15 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
+import { withErrorWords } from "../ipc/errorWords";
+import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
+import {
+  AUTOMATIONS_FILE,
+  AutomationsPanel,
+  useCollectionAutomations,
+} from "./collections/AutomationsPanel";
+import { RecordButton } from "./collections/RecordButton";
+import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -62,6 +74,21 @@ export interface CollectionPageProps {
   // The md file IS the record: opening one goes through the shell's normal
   // file tab machinery, which composes PropertiesPanel and the live editor.
   onOpenRecord: (recordPath: string) => void;
+  // Opens any workspace file in a tab, such as automations.yaml.
+  onOpenFile: (path: string) => void;
+  // Opens the setting where the owner chooses which computer runs schedules.
+  onOpenScheduleSettings: () => void;
+  // The shell's error hook and success notices: a toast, then a row in
+  // Notices. A success notice can carry an Undo.
+  onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
+  onNotice: (message: string, undo?: () => void) => void;
+  // A notice asked to open one automation's runs here; `seq` rises with
+  // each ask. The page reports when it has taken the ask.
+  automationFocus: { automationId: string; seq: number } | null;
+  onAutomationFocused: () => void;
+  // Opens the automation builder with the trigger set to this button. Absent
+  // until the builder ships, so the Fields dialog offers nothing.
+  onChooseButtonAutomation?: (field: string) => void;
 }
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
@@ -83,6 +110,13 @@ export function CollectionPage({
   onActiveViewChange,
   onNewRecord,
   onOpenRecord,
+  onOpenFile,
+  onOpenScheduleSettings,
+  onError,
+  onNotice,
+  automationFocus,
+  onAutomationFocused,
+  onChooseButtonAutomation,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -106,7 +140,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(error instanceof Error ? error.message : String(error));
+      setLoadError(withErrorWords("dohc could not load this collection.", error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {
@@ -153,6 +187,9 @@ export function CollectionPage({
     [collectionPath, executor],
   );
   const state = useCollectionStore(store);
+  // The ⚡ on each field an automation sets: one read per Collection, again
+  // only when main's automations change.
+  const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(collectionPath));
 
   const views = details?.schema.views ?? [];
   const activeView: ViewDefinition | null =
@@ -182,18 +219,69 @@ export function CollectionPage({
     });
   }, [store, detailsLoaded, activeViewKey]);
 
+  // The ⚡ panel and the header's count read the Collection's automations.
+  // A notice's ask to open one automation is kept here, so it survives the
+  // panel mounting after it.
+  const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
+  const [panelFocus, setPanelFocus] = useState<{ automationId: string; seq: number } | null>(null);
+  useEffect(() => {
+    if (!automationFocus) return;
+    setPanelFocus(automationFocus);
+    setAutomationsOpen(true);
+    onAutomationFocused();
+  }, [automationFocus?.seq]);
+  // With the panel closed, only a change to automations.yaml re-reads them;
+  // with it open, any change here may be a run, so the last-run marks read
+  // again too.
+  const automationsOpenRef = useRef(automationsOpen);
+  automationsOpenRef.current = automationsOpen;
+  const automationsTouched = useRef(false);
+  const reloadAutomations = automations.reload;
+  // Opening the panel reads the list again: runs and missing fields change
+  // without touching automations.yaml.
+  useEffect(() => {
+    if (automationsOpen) void reloadAutomations();
+  }, [automationsOpen]);
+  // Closing forgets a notice's ask, so the next open shows the list.
+  // The header's button asks the panel to close, so a draft with changes
+  // asks first; `seq` rises with each ask.
+  const [closeAsk, setCloseAsk] = useState(0);
+  const closeAutomations = useCallback(() => {
+    setAutomationsOpen(false);
+    setPanelFocus(null);
+  }, []);
+
   // Invalidation: refresh when a settled batch touches this collection's
   // folder (or arrives without path detail), on the shell's trailing-edge
   // coalescing cadence. The store's token makes the refresh latest-wins.
+  // Button fields: what each shows, and presses in flight from this window.
+  // Their states follow the Collection's files, automations.yaml included.
+  const buttons = useAutomationButtons({ workspaceId, of: { collectionPath }, onError, onNotice });
+  useEffect(() => {
+    void buttons?.refresh();
+  }, [buttons]);
   const refreshCoalescer = useMemo(
     () => createActivityCoalescer(() => {
       void store.refresh();
       void refreshDetails();
+      if (automationsOpenRef.current || automationsTouched.current) void reloadAutomations();
+      automationsTouched.current = false;
+      void buttons?.refresh();
     }),
-    [store, refreshDetails],
+    [store, refreshDetails, reloadAutomations, buttons],
+  );
+  // Stable while the store is, so the table keeps each cell's element.
+  const renderButton = useCallback(
+    (field: FieldDefinition, record: CollectionRecord) =>
+      buttons === null ? null : (
+        <RecordButton buttons={buttons} field={field.name} recordId={record.id} recordLabel={recordLabel(record)} />
+      ),
+    [buttons],
   );
   useEffect(() => {
     const prefix = `${collectionPath}/`;
+    const automationsPath = `${prefix}${AUTOMATIONS_FILE}`;
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
         // Another workspace's activity is never this collection's; a
@@ -208,6 +296,9 @@ export function CollectionPage({
           )
         ) {
           return;
+        }
+        if (!event.paths?.length || event.paths.includes(automationsPath)) {
+          automationsTouched.current = true;
         }
         refreshCoalescer.schedule();
       },
@@ -290,6 +381,9 @@ export function CollectionPage({
   // user-facing sentence on failure, null on success, so both dialogs
   // share one contract.
   const [fieldsOpen, setFieldsOpen] = useState(false);
+  // The Fields dialog shows what each button does; the page follows the
+  // store only while it is open, so a press re-renders just its button.
+  const buttonStates = useButtonStates(fieldsOpen ? buttons : null);
   const [viewsOpen, setViewsOpen] = useState(false);
   const applySchemaChange = useCallback(
     async (
@@ -362,7 +456,7 @@ export function CollectionPage({
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
       >
         <span className="text-sm text-muted">
-          dohc could not load this collection. {loadError}
+          {loadError}
         </span>
         <SecondaryButton
           type="button"
@@ -399,18 +493,91 @@ export function CollectionPage({
     (state.groups === null ||
       state.groups.every((group) => group.records.length === 0));
 
-  // Settled 2026-08-31: a collection with no records shows one line and the
-  // New record action, nothing else.
+  // The ⚡ panel docks at the right of whatever the page shows.
+  const automationsPanel = automationsOpen ? (
+    <AutomationsPanel
+      workspaceId={workspaceId}
+      collectionPath={collectionPath}
+      automations={automations}
+      fields={schema.fields}
+      focus={panelFocus}
+      closeAsk={closeAsk}
+      onClose={closeAutomations}
+      onOpenFile={onOpenFile}
+      onOpenScheduleSettings={onOpenScheduleSettings}
+      onError={onError}
+      onNotice={onNotice}
+    />
+  ) : null;
+
+  const automationCount =
+    automations.file?.status === "read" ? automations.file.automations.length : 0;
+  // Automations and Fields set up a Collection, so they stay in the header
+  // even before it has records.
+  const collectionName = (
+    <span className="min-w-0 truncate text-sm font-semibold text-ink">
+      {schema.name ?? collectionPath.split("/").at(-1)}
+    </span>
+  );
+  const setupButtons = (
+    <>
+      <SecondaryButton
+        data-testid="collection-automations-button"
+        aria-pressed={automationsOpen}
+        onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
+        className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
+      >
+        <Zap size={12} aria-hidden />
+        Automations
+        {automationCount > 0 ? (
+          <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
+            {automationCount}
+          </span>
+        ) : null}
+      </SecondaryButton>
+      <SecondaryButton
+        data-testid="collection-fields-button"
+        onClick={() => setFieldsOpen(true)}
+      >
+        Fields
+      </SecondaryButton>
+    </>
+  );
+  const fieldsDialog = fieldsOpen ? (
+    <FieldsDialog
+      schema={schema}
+      relationTargets={relationTargets}
+      apply={applySchemaChange}
+      buttonStates={buttonStates}
+      onChooseButtonAutomation={onChooseButtonAutomation}
+      onClose={() => setFieldsOpen(false)}
+    />
+  ) : null;
+
+  // Settled 2026-08-31, amended for automations on 2026-09-25: a collection
+  // with no records shows one line and the New record action, under a
+  // header that keeps only what sets the Collection up.
   if (empty) {
     return (
-      <div
-        data-testid="collection-empty"
-        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
-      >
-        <span className="text-sm text-muted">
-          No records in this collection yet.
-        </span>
-        <NewRecordButton onClick={newRecord} />
+      <div className="flex min-h-0 flex-1 flex-col bg-bg">
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+          {collectionName}
+          <span className="flex-1" />
+          {setupButtons}
+        </div>
+        <div className="flex min-h-0 flex-1">
+          <div
+            data-testid="collection-empty"
+            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
+          >
+            <span className="text-sm text-muted">
+              No records in this collection yet.
+            </span>
+            <NewRecordButton onClick={newRecord} />
+          </div>
+          {automationsPanel}
+        </div>
+        {fieldsDialog}
       </div>
     );
   }
@@ -426,9 +593,7 @@ export function CollectionPage({
       className="flex min-h-0 flex-1 flex-col bg-bg"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-        <span className="min-w-0 truncate text-sm font-semibold text-ink">
-          {schema.name ?? collectionPath.split("/").at(-1)}
-        </span>
+        {collectionName}
         {views.length > 1 ? (
           <div
             data-testid="collection-view-switcher"
@@ -472,12 +637,7 @@ export function CollectionPage({
             {writeError}
           </span>
         ) : null}
-        <SecondaryButton
-          data-testid="collection-fields-button"
-          onClick={() => setFieldsOpen(true)}
-        >
-          Fields
-        </SecondaryButton>
+        {setupButtons}
         <SecondaryButton
           data-testid="collection-views-button"
           onClick={() => setViewsOpen(true)}
@@ -494,7 +654,8 @@ export function CollectionPage({
           This view shows only the first {state.records.length} records.
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="flex min-h-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {boardReady ? (
           <BoardView
             schema={schema}
@@ -527,18 +688,15 @@ export function CollectionPage({
             onCreateOption={createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
+            fieldMarks={tableFieldMarks}
+            renderButton={renderButton}
             onNearEnd={loadNextPage}
           />
         )}
       </div>
-      {fieldsOpen ? (
-        <FieldsDialog
-          schema={schema}
-          relationTargets={relationTargets}
-          apply={applySchemaChange}
-          onClose={() => setFieldsOpen(false)}
-        />
-      ) : null}
+      {automationsPanel}
+      </div>
+      {fieldsDialog}
       {viewsOpen ? (
         <ViewsDialog
           schema={schema}

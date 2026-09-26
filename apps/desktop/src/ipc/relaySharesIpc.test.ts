@@ -567,8 +567,8 @@ describe("registered account share handlers", () => {
       createdAtMs: 1, revokedAtMs: null, selector: null, damaged: true, access: "unknown",
     };
     h.accountRequest.mockResolvedValue({
-      granted: [damaged, { selector: { kind: "chat-channel" } }],
-      received: [received, { selector: { kind: "chat-channel" } }],
+      granted: [damaged, { selector: { kind: "chat" } }],
+      received: [received, { selector: { kind: "chat" } }],
     });
     await expect(h.invoke(CHANNELS.listRelayShares)).resolves.toEqual({
       granted: [{ ...damaged, shareCode: buildShareCode({

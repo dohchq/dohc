@@ -1,12 +1,15 @@
+import { datasetColumnFields } from "@dohc/security-contract/dataset";
 import { test, expect } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
 import { createLocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
-import { prepareLocalAppPublication, type AppPublicationPreparationDependencies } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
+import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
+import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
 import { dataset as agentDataset, type ToolContext } from "../../../packages/mcp/src/tools";
 import { DatasetRequest } from "../../../packages/cli/src/dataset";
 
@@ -17,23 +20,18 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
   const host = await createLocalDatasetHost({workspaceId:"stock-workspace",workspaceRoot:directory});
   const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
   const context = await browser.newContext();
+  const root = fileURLToPath(new URL("../../../examples/stock-orders",import.meta.url));
   const sources = new Map<string,Uint8Array>();
-  const adapter: AppPublicationPreparationDependencies["adapter"] = {
-    async captureSourceMetadata({workspaceId,versionId,paths}) {
-      const files = await Promise.all([...paths].sort().map(async path => {
-        const bytes = await readFile(new URL(`../../../examples/${path}`,import.meta.url));sources.set(path,bytes);
-        return {path,objectId:path,contentKind:"text" as const,sha256:sha(bytes),byteLength:bytes.byteLength,latestMomentId:"source"};
-      }));
-      return {workspaceId,versionId,files,totalBytes:files.reduce((total,file)=>total+file.byteLength,0),sourceDigest:sha(JSON.stringify(["dohc-source-capture-v1",workspaceId,versionId,files]))};
-    },
-    async hydrateCapturedSources(capture) { return capture.files.map(file=>({path:file.path,sha256:file.sha256,bytes:sources.get(file.path)!})); },
-  };
+  for (const entry of await readdir(root,{recursive:true,withFileTypes:true})) {
+    if (entry.isFile()) sources.set(`stock-orders/${relative(root,join(entry.parentPath,entry.name)).replaceAll("\\","/")}`, await readFile(join(entry.parentPath,entry.name)));
+  }
+  const adapter = sourceCaptureAdapter(sources,{workspaceId:"stock-workspace"});
   try {
     const prepared = await host.prepare({descriptorPath:"stock-orders/dataset.json",adapter});
     const revision = await host.approve({preparationId:prepared.preparationId,revisionSha256:prepared.revision.revisionSha256});
     const selection = {datasetId:revision.datasetId,revision:revision.revision,revisionSha256:revision.revisionSha256};
     const operation = (name:string)=>revision.definition.operations.find(operation=>operation.name===name)!.operationId;
-    const field = (table:string,column:string)=>revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId;
+    const field = (table:string,column:string)=>datasetColumnFields(revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!).find(field=>field.sqlColumn===column)!.fieldId;
     const ownerRead = (name:string,input:Record<string,any>={})=>host.query({...selection,operationId:operation(name),input,idempotencyKey:randomUUID()});
     const publish = async (appRoot:string) => {
       const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
@@ -72,7 +70,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     const lines = (await ownerRead("tableOrderItems")).result as any;
     expect(lines.rows).toHaveLength(2);
     expect(lines.rows.every((line:any)=>line.values[field("order_items","order_id")]===orderId)).toBe(true);
-    expect(revision.definition.tables.find(table=>table.sqlName==="order_items")!.fields.find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
+    expect(datasetColumnFields(revision.definition.tables.find(table=>table.sqlName==="order_items")!).find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
     expect(Buffer.from((await host.file({...selection,fileId:receiptId})).bytesBase64,"base64")).toEqual(receipt);
     const request = {action:"invoke",workspaceId:"stock-workspace",...selection,operationId:operation("tableOrders"),input:{},idempotencyKey:"agent-stock-read"};
     const agentContext: ToolContext = {root:directory,home:directory,request:async envelope=>{

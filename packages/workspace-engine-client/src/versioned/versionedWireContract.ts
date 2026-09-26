@@ -62,12 +62,22 @@ export type AgentAuthor = JsonObject & {
   agentId: string;
   onBehalfOf: string;
   agentRunId?: string;
+  /** The run's chain depth when an automation started it. */
+  depth?: number;
 };
+
+/**
+ * Who a file write names on its moment: an agent run, or an automation with
+ * its chain depth, so the claims the write causes carry the automation on.
+ */
+export type WriteAuthor =
+  | AgentAuthor
+  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf: string; depth: number });
 
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
-  author?: AgentAuthor;
+  author?: WriteAuthor;
   requestId?: string;
   nowMs?: number;
   summary?: string;
@@ -79,6 +89,7 @@ type VersionedTextWriteParams = MutationMetadata & {
   objectId?: string;
   path: string;
   text: string;
+  createOnly?: boolean;
   restoreBeforeMomentId?: string;
   momentId?: string;
 };
@@ -598,8 +609,10 @@ const BinaryWriteSnapshotWireSchema = mutableStruct({
 const AgentAuthorSchema = mutableStruct({
   kind: Schema.Literal("agent"),
   agentId: Schema.String,
-  onBehalfOf: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
   agentRunId: Schema.optionalKey(Schema.String),
+  // Named only past 0, by a run an automation started.
+  depth: Schema.optionalKey(Schema.Int),
 });
 const PublicAuthorSchema = mutableStruct({
   kind: Schema.Literal("public"),
@@ -612,9 +625,21 @@ const NamedAuthorSchema = mutableStruct({
   grantId: Schema.String,
   grantGeneration: Schema.Int,
 });
+const AutomationAuthorSchema = mutableStruct({
+  kind: Schema.Literal("automation"),
+  automationId: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
+  depth: Schema.Int,
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([AgentAuthorSchema, PublicAuthorSchema, NamedAuthorSchema, CorruptAuthorSchema]),
+  Schema.Union([
+    AgentAuthorSchema,
+    PublicAuthorSchema,
+    NamedAuthorSchema,
+    AutomationAuthorSchema,
+    CorruptAuthorSchema,
+  ]),
 );
 
 const MomentRecordSchema = mutableStruct({

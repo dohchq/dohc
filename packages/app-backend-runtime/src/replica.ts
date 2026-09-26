@@ -70,7 +70,7 @@ export async function createDatasetReplica(options: {
   }
   function revision(checkpoint: Checkpoint): DatasetRevision {
     const value = parseDatasetRevision(JSON.parse(checkpoint.definitionJson));
-    if (value.datasetId !== options.scope.datasetId || value.revisionSha256 !== checkpoint.cursor.approvedRevisionHash) throw Error("The Collection copy rules do not match its checkpoint.");
+    if (value.datasetId !== options.scope.datasetId || value.revisionSha256 !== checkpoint.cursor.approvedRevisionHash) throw Error("The Collection copy's rules do not match its records. Download it again.");
     return value;
   }
   async function worker(checkpoint: Checkpoint, cursor: DatasetCursor, path: string, directory: string) {
@@ -123,7 +123,7 @@ export async function createDatasetReplica(options: {
       return enqueue(async()=>{
         authorize(signal); const capture=await source.capture(signal); authorize(signal);
         const through=parseRecoveryCursor(capture.head), initial=parseRecoveryJournalRecord(capture.checkpoint);
-        if(!sameScope(through,options.scope)||initial.kind!=="checkpoint"||!sameEpoch(initial.cursor,through)||initial.cursor.revision>through.revision||initial.byteLength>maximum) throw Error("The server returned another Collection checkpoint.");
+        if(!sameScope(through,options.scope)||initial.kind!=="checkpoint"||!sameEpoch(initial.cursor,through)||initial.cursor.revision>through.revision||initial.byteLength>maximum) throw Error("The server sent records for another Collection copy. Download it again.");
         let saved=read();
         if(saved && saved.cursor.revision>through.revision) throw Error("The sharing server is behind this Collection copy.");
         if(saved && equalRecoveryCursor(saved.cursor,through)) return {cursor:saved.cursor,checkpoint:saved.checkpoint,savedAtMs:saved.savedAtMs};
@@ -145,13 +145,13 @@ export async function createDatasetReplica(options: {
               const record=parseRecoveryJournalRecord(raw);
               if(!sameScope(record.cursor,options.scope)||record.cursor.revision!==cursor.revision+1||record.cursor.revision>through.revision) throw Error("The Collection history is out of order.");
               if(record.kind==="checkpoint") {
-                if(!record.previous||!equalRecoveryCursor(record.previous,cursor)||record.byteLength>maximum) throw Error("The Collection checkpoint does not continue this copy.");
+                if(!record.previous||!equalRecoveryCursor(record.previous,cursor)||record.byteLength>maximum) throw Error("The server's records do not continue this Collection copy. Download it again.");
                 const path=await download(source,record,scratch,signal),directory=await mkdtemp(join(scratch,"worker-"));
                 const next=await worker(record,record.cursor,path,directory);await rm(path,{force:true});await active.close();
                 const previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
                 if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});
               } else {
-                if(!sameEpoch(record.cursor,cursor)||record.previousDigest!==cursor.digest) throw Error("The Collection writer changed without a checkpoint.");
+                if(!sameEpoch(record.cursor,cursor)||record.previousDigest!==cursor.digest) throw Error("The Collection moved to another host. Download it again.");
                 const bytes=new Uint8Array(record.byteLength);let offset=0;
                 while(offset<bytes.length){authorize(signal);const length=Math.min(CHUNK,bytes.length-offset),chunk=await source.blob({record,offset,length,signal});authorize(signal);
                   if(!(chunk instanceof Uint8Array)||chunk.length!==length)throw Error("The Collection download was interrupted. Retry it.");bytes.set(chunk,offset);offset+=length;}

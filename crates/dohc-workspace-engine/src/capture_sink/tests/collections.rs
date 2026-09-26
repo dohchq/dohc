@@ -34,7 +34,7 @@ fn set_richdoc_frontmatter_and_settle(
             let doc = Ydoc::wire();
             doc.apply(&state.initial_update)
                 .expect("apply existing rich-document state");
-            let update = doc.frontmatter_set(&field, &value);
+            let update = doc.frontmatter_set(&field, &value).unwrap();
             let append = actor
                 .ydoc_record_update(
                     state.key.clone(),
@@ -575,10 +575,11 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
     sink.reconcile_collections().expect("first adoption pass");
     let canonical_padding = "x".repeat(MAX_TEXT_BYTES - 64);
+    // Canonical trailing newlines avoid retaining a second copy of the padding.
     seed_captured_richdoc_lineage_from_markdown(
         &sink,
         "tasks/oversized.md",
-        format!("---\npadding: {canonical_padding}\n---"),
+        format!("---\npadding: {canonical_padding}\n---\n\n"),
     );
     let moments_before = moment_count(&db, "tasks/oversized.md");
     let updates_before = ydoc_update_count_for_object(&db, "tasks/oversized.md");
@@ -1820,6 +1821,165 @@ fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
     adopted_record_id(&db, "tasks/blocked.md");
     assert_eq!(moment_count(&db, "tasks/blocked.md"), 2);
     assert_eq!(ydoc_update_count(&db, "tasks/blocked.md"), 2);
+
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// The path agents use (commitment 5): a record written, edited, and
+/// deleted on disk claims on this computer, once per change. The record has
+/// no Y.Doc lineage, so capture itself indexes its frontmatter; a body-only
+/// edit changes no field and claims nothing.
+#[test]
+fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
+    use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription, AutomationTrigger};
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        dohc_engine_domain::subscribe_automation(
+            &mut store,
+            WORKSPACE_ID,
+            &AutomationSubscription {
+                automation_id: "collection:tasks#watch".to_owned(),
+                prefix: "tasks".to_owned(),
+                kinds: vec![
+                    AutomationChangeKind::Added,
+                    AutomationChangeKind::Changed,
+                    AutomationChangeKind::Removed,
+                ],
+                fields: None,
+            },
+            1,
+            &FilesNoFaults,
+        )
+        .expect("subscribe");
+    }
+    let kinds = |sink: &StoreCaptureSink| -> Vec<AutomationChangeKind> {
+        sink.take_automation_claims()
+            .iter()
+            .map(|claim| {
+                assert_eq!(claim.record_id.as_deref(), Some(RECORD_ID));
+                claim.change.kind
+            })
+            .collect()
+    };
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+    let record =
+        |status: &str, body: &str| format!("---\nid: {RECORD_ID}\nstatus: {status}\n---\n\n{body}");
+    write_file(
+        scratch.path(),
+        "tasks/alpha.md",
+        record("todo", "Body").as_bytes(),
+    );
+    ingest(&mut sink, "tasks/alpha.md").expect("capture new record");
+    assert!(kinds(&sink).is_empty(), "an unbound file claims nothing");
+    sink.reconcile_collections().expect("bind the record");
+    assert_eq!(kinds(&sink), vec![AutomationChangeKind::Added]);
+    sink.reconcile_collections().expect("reconcile again");
+    assert!(kinds(&sink).is_empty(), "a second pass adds nothing");
+
+    write_file(
+        scratch.path(),
+        "tasks/alpha.md",
+        record("done", "Body").as_bytes(),
+    );
+    ingest(&mut sink, "tasks/alpha.md").expect("capture a field edit");
+    let claims = sink.take_automation_claims();
+    assert_eq!(claims.len(), 1, "{claims:?}");
+    assert_eq!(claims[0].change.kind, AutomationChangeKind::Changed);
+    assert!(matches!(
+        claims[0].trigger,
+        AutomationTrigger::History { .. }
+    ));
+    assert_eq!(
+        indexed_collection_field(&db, "tasks/alpha.md", "status").map(|(value, _, _)| value),
+        Some("\"done\"".to_owned()),
+        "capture indexes the edit of a record with no lineage"
+    );
+
+    write_file(
+        scratch.path(),
+        "tasks/alpha.md",
+        record("done", "New body").as_bytes(),
+    );
+    ingest(&mut sink, "tasks/alpha.md").expect("capture a body edit");
+    assert!(kinds(&sink).is_empty(), "a body-only edit claims nothing");
+
+    std::fs::remove_file(scratch.path().join("tasks/alpha.md")).expect("delete record");
+    sink.retire("tasks/alpha.md").expect("retire record");
+    sink.reconcile_collections().expect("unbind the record");
+    assert_eq!(kinds(&sink), vec![AutomationChangeKind::Removed]);
+
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+}
+
+/// A record whose Y.Doc lineage holds content folds a disk edit into the
+/// lineage, and the fold's field changes claim in the capture transaction.
+#[test]
+fn a_disk_edit_folded_into_a_record_lineage_claims_once() {
+    use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription};
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    write_file(
+        scratch.path(),
+        "tasks/imported.md",
+        format!("---\nid: {RECORD_ID}\nstatus: todo\n---\n\nImported").as_bytes(),
+    );
+    ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+    ingest(&mut sink, "tasks/imported.md").expect("capture record");
+    seed_captured_richdoc_lineage(&sink, "tasks/imported.md");
+    sink.reconcile_collections().expect("adopt record");
+    assert_eq!(adopted_record_id(&db, "tasks/imported.md"), RECORD_ID);
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        dohc_engine_domain::subscribe_automation(
+            &mut store,
+            WORKSPACE_ID,
+            &AutomationSubscription {
+                automation_id: "collection:tasks#status".to_owned(),
+                prefix: "tasks".to_owned(),
+                kinds: vec![AutomationChangeKind::Changed],
+                fields: Some(vec!["status".to_owned()]),
+            },
+            1,
+            &FilesNoFaults,
+        )
+        .expect("subscribe");
+    }
+    sink.take_automation_claims();
+
+    let adopted = std::fs::read_to_string(scratch.path().join("tasks/imported.md"))
+        .expect("read adopted record");
+    write_file(
+        scratch.path(),
+        "tasks/imported.md",
+        adopted.replace("status: todo", "status: done").as_bytes(),
+    );
+    ingest(&mut sink, "tasks/imported.md").expect("capture the edit");
+    let claims = sink.take_automation_claims();
+    assert_eq!(claims.len(), 1, "{claims:?}");
+    assert_eq!(claims[0].automation_id, "collection:tasks#status");
+    assert_eq!(claims[0].change.kind, AutomationChangeKind::Changed);
+    assert!(
+        ydoc_update_count(&db, "tasks/imported.md") > 0,
+        "the edit folded into the record's lineage"
+    );
 
     drop(sink);
     supervisor.close(&db).expect("close actor");

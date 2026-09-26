@@ -1,5 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
@@ -13,24 +16,38 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_create_directory",
   "dohc_move_path",
   "dohc_delete_path",
-  "dohc_create_site",
+  "dohc_create_app",
   "dohc_import_data",
   // Collection writes change the granter's records, so they sit in the
   // document tier: a shared view never sees them.
   "dohc_set_record_fields",
   "dohc_create_record",
+  "dohc_edit_document",
+  "dohc_create_document",
 ];
 
-const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_reply_to_chat"];
+const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
 
 const READ_TOOLS = [
   "dohc_list_files",
   "dohc_read_file",
+  "dohc_read_document",
   "dohc_search_files",
   "dohc_workspace_status",
   "dohc_query_collection",
   "dohc_read_record",
 ];
+
+const roots: string[] = [];
+// Document tools resolve their path inside a real workspace folder.
+async function workspaceRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-mcp-documents-"));
+  roots.push(root);
+  return root;
+}
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
 
 const connections: Array<{ client: Client; server: ReturnType<typeof createDohcMcpServer> }> = [];
 afterEach(async () => {
@@ -40,10 +57,13 @@ afterEach(async () => {
   }));
 });
 
-async function connectedToolNames(ctx: ToolContext): Promise<{ names: string[]; client: Client }> {
+async function connectedToolNames(
+  ctx: ToolContext,
+  clientName = "test",
+): Promise<{ names: string[]; client: Client }> {
   const server = createDohcMcpServer(ctx);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test", version: "0.0.0" });
+  const client = new Client({ name: clientName, version: "0.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   connections.push({ client, server });
   const listed = await client.listTools();
@@ -153,7 +173,7 @@ describe("parseArgs", () => {
 describe("MCP tool results", () => {
   it("omits tools that cannot perform the advertised action", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
-    for (const name of ["build_site", "preview_site", "publish_site", "share", "open_in_dohc", "resolve_conflict"]) {
+    for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {
       expect(names).not.toContain(`dohc_${name}`);
     }
   });
@@ -178,6 +198,20 @@ describe("MCP tool results", () => {
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.structuredContent, null, 2) }]);
   });
 
+  it("forwards a file path to list one file's history", async () => {
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        requests.push(request.args);
+        return { changes: [], count: 0, totalAvailable: 0, hasMore: false, cursorMs: 0 };
+      },
+    });
+    const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
+  });
+
   it("reports authorization refusals as tool errors", async () => {
     const { client } = await connectedToolNames({
       root: "/workspace", home: "/home",
@@ -188,6 +222,80 @@ describe("MCP tool results", () => {
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual({ ok: false, reason: "This group is read-only." });
+  });
+
+  it("reads a document through the desktop", async () => {
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        expect(request).toMatchObject({
+          verb: "documentRead",
+          args: { cwd: root, actor: "agent", path: "notes/plan.md" },
+        });
+        return { ok: true, path: "notes/plan.md", markdown: "# Plan" };
+      },
+    });
+    const result = await client.callTool({ name: "dohc_read_document", arguments: { path: "notes/plan.md" } });
+    expect(result.structuredContent).toEqual({ ok: true, path: "notes/plan.md", markdown: "# Plan" });
+  });
+
+  it("names the agent from its handshake on a document edit, and invents no name", async () => {
+    const root = await workspaceRoot();
+    const edits: unknown[] = [];
+    const request: ToolContext["request"] = async (sent) => {
+      edits.push(sent.args);
+      return { ok: true, path: "notes/plan.md", changed: true };
+    };
+    const edit = { path: "notes/plan.md", find: "Draft", replacement: "Final", requestId: "plan-1" };
+    for (const clientName of ["claude-code", "a/b"]) {
+      const { client } = await connectedToolNames({ root, home: "/home", request }, clientName);
+      const result = await client.callTool({ name: "dohc_edit_document", arguments: edit });
+      expect(result.structuredContent).toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    }
+    expect(edits).toEqual([
+      { cwd: root, actor: "agent", agent: "claude-code", ...edit },
+      { cwd: root, actor: "agent", ...edit },
+    ]);
+  });
+
+  it("creates a document under the agent name from the handshake", async () => {
+    const root = await workspaceRoot();
+    const sent: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        sent.push(request);
+        return { ok: true, path: "notes/new.md" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({ name: "dohc_create_document", arguments: { path: "notes/new.md", markdown: "# New" } });
+    expect(result.structuredContent).toEqual({ ok: true, path: "notes/new.md" });
+    expect(sent).toMatchObject([{
+      verb: "documentCreate",
+      args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" },
+    }]);
+  });
+
+  it("comments on a file by starting its chat", async () => {
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({
+      root, home: "/home",
+      request: async (request) => {
+        expect(request).toMatchObject({
+          verb: "fileChatStart",
+          args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+        });
+        return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
+      },
+    }, "claude-code");
+    const result = await client.callTool({
+      name: "dohc_start_file_chat",
+      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+    });
+    expect(result.structuredContent).toEqual({
+      ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",
+    });
   });
 
   it("turns poll options into a decision even without needsDecision", async () => {

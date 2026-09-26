@@ -77,7 +77,7 @@ async function harness() {
       finalize, removeBinding: () => { steps.push("remove"); registry.delete(binding.workspaceId); },
     }),
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
-    cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
+    closeRelay: cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
   });
   const setView = vi.fn<Dependencies["setWorkspaceShareView"]>((id, shareView) => { steps.push("pin"); registry.get(id)!.shareView = shareView; });
   const recordIdentity = vi.fn<EngineRelayWorkspaceClient["recordShareViewIdentity"]>(async () => { steps.push("identity"); return { identity: "recorded" }; });
@@ -86,6 +86,7 @@ async function harness() {
   const storeFor = vi.fn<Dependencies["receivedShareEngine"]["storeFor"]>(() => ({ watcherStatus: status } as unknown as ReturnType<Dependencies["receivedShareEngine"]["storeFor"]>));
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async () => { steps.push("reconcile"); return { kind: "refresh", outcome }; });
   const open = vi.fn<Dependencies["openWorkspaceActivity"]>(async () => { steps.push("open"); });
+  const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -100,13 +101,14 @@ async function harness() {
     },
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile }, receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open, requireWorkspace: id => registry.get(id)!, notifyRenderer: notify,
+    recordShareViewStoreRefusal: recordRefusal,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
     mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
-    open, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
+    open, recordRefusal, handlers, invoke, openPayload, steps, retireRenderer: () => { rendererCurrent = false; } };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -166,15 +168,28 @@ describe("registered received-view handlers", () => {
 
   it("rolls back a failed first refresh before opening activity", async () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("ended before it could be opened");
-    expect(h.cleanup).toHaveBeenCalledWith(expect.any(String), h.openPayload.rootPath);
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow("ended before it could be opened");
+    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose another empty folder");
+    expect(h.cleanup).toHaveBeenCalledWith(expect.any(String));
     expect(h.registry.size).toBe(1); expect(h.open).not.toHaveBeenCalled();
     expect(h.steps.indexOf("cleanup")).toBeLessThan(h.steps.indexOf("remove"));
   });
 
+  it("names the preserved folder and another empty folder when the share download fails", async () => {
+    const h = await harness(); h.reconcile.mockRejectedValue(new Error("download interrupted"));
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose another empty folder");
+    expect(h.registry.size).toBe(1);
+  });
+
   it("retains the registered view and reports the recovery path if rollback cleanup fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("pull failed")); h.cleanup.mockRejectedValue(new Error("folder busy"));
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("folder was left in place");
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow("Files remain in");
+    await expect(result).rejects.toThrow("choose Forget from its menu before opening the share again");
     expect(h.registry.size).toBe(2); expect(h.open).not.toHaveBeenCalled();
   });
 
@@ -240,6 +255,28 @@ describe("registered received-view handlers", () => {
     const result = h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" });
     await started.promise; h.retireRenderer(); held.resolve({ kind: "refresh", outcome });
     await expect(result).rejects.toThrow("changed workspaces"); expect(h.notify).not.toHaveBeenCalled();
+  });
+
+  // A shared view has no recorder, so the refresh is what meets a store a
+  // newer dohc migrated. It puts that refusal on the workspace status and
+  // clears it once the store answers. A rebuild refusal stays a refresh
+  // error, because a shared view cannot rebuild its store.
+  it("records a store refusal that needs an update on the workspace status", async () => {
+    const h = await harness();
+    const refusal = (message: string) =>
+      Object.assign(new Error(message), { wireError: { code: "INTERNAL", message, retry: "no" } });
+    h.status.mockRejectedValueOnce(refusal("migrated-by-newer-build: a newer build ran migration 5 (next)"));
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("migrated-by-newer-build");
+    expect(h.recordRefusal).toHaveBeenCalledWith("existing", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    expect(h.reconcile).not.toHaveBeenCalled();
+
+    h.recordRefusal.mockClear();
+    h.status.mockRejectedValueOnce(refusal("foreign-database"));
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).rejects.toThrow("foreign-database");
+    expect(h.recordRefusal).not.toHaveBeenCalled();
+
+    await expect(h.invoke(CHANNELS.refreshSharedView, { workspaceId: "existing" })).resolves.toEqual(outcome);
+    expect(h.recordRefusal).toHaveBeenCalledWith("existing", null, null);
   });
 
   it("notifies about partial pull work and preserves damaged-pin and ended outcomes", async () => {

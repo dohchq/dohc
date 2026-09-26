@@ -11,7 +11,7 @@ import {
   DaemonRefusalError,
   isYdocUnsettledCloseRefusal,
 } from "../live/daemonLiveAdapter";
-import type { JsonValue, Request } from "../protocol";
+import type { JsonValue, Request, Response } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
@@ -215,6 +215,101 @@ it("shares one pending native resync between concurrent callers", async () => {
   release(); expect(await first).toEqual(await second);
   await session.resync(); expect(resyncs).toBe(2);
   await session.close(); adapter.dispose();
+});
+
+// The daemon asks an open editor to resync after every pull that parked an
+// edit for it, so a person can be typing at that moment.
+function resyncRequestTransport(
+  engine: YdocLoopbackEngine,
+  onResync: () => Promise<void>,
+): EngineTransport {
+  return {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}}
+      : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) await onResync();
+      return engine.sendRequest(request);
+    },
+  };
+}
+
+it("journals what a person types while a resync is pending, without failing the session", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void, resyncs = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const localEditErrors: unknown[] = [], sessionErrors: unknown[] = [];
+  const provider = await openEngineYdocProviderSession({
+    transport: resyncRequestTransport(engine, async () => {resyncs++; await held;}), workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, scheduleSettle: settleScheduler().schedule,
+    onLocalEditError: error => localEditErrors.push(error), onSessionError: error => sessionErrors.push(error),
+  });
+  const sessionId = provider.nativeOwner!.sessionId;
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(resyncs).toBe(1);
+
+  // Two keystrokes while the resync waits: the second queues behind the first.
+  const first = provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(4, " one")));
+  const second = provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(8, " two")));
+  await Promise.all([first, second]);
+  expect(engine.sessionText(sessionId)).toBe("remote seed one two");
+
+  release(); await drain();
+  expect(provider.doc.getText("plainText").toString()).toBe("remote seed one two");
+  await expect(provider.settleNow()).resolves.toMatchObject({materialized: true});
+  expect(localEditErrors).toEqual([]);
+  expect(sessionErrors).toEqual([]);
+  peer.destroy(); await provider.close();
+});
+
+it("waits out a pending resync before it saves, instead of failing the save", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const adapter = new YdocLiveAdapter(resyncRequestTransport(engine, () => held));
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+
+  const saved = session.settle();
+  await drain();
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(0);
+  release();
+  await expect(saved).resolves.toMatchObject({materialized: true});
+  expect(session.doc.getText("plainText").toString()).toBe("remote seed");
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
+it("retries a failed resync when the next resync request arrives", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let resyncs = 0;
+  const adapter = new YdocLiveAdapter(resyncRequestTransport(engine, async () => {
+    if (++resyncs === 1) throw new Error("resync failed");
+  }));
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const errors: unknown[] = []; session.onSessionError(error => errors.push(error));
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const remoteEdit = (text: string) => {
+    const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, text);
+    engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  };
+  remoteEdit("first ");
+  await drain();
+  expect(resyncs).toBe(1);
+  expect(errors).toHaveLength(1);
+  expect(session.doc.getText("plainText").toString()).toBe("seed");
+
+  remoteEdit("second ");
+  await drain();
+  expect(resyncs).toBe(2);
+  expect(session.doc.getText("plainText").toString()).toBe("second first seed");
+  peer.destroy(); await session.close(); adapter.dispose();
 });
 
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
@@ -803,7 +898,8 @@ describe("YdocLiveAdapter", () => {
       code: "seed-not-permitted",
       message: "The session already has existing lineage.",
     });
-    expect(session.lineage).toBe("existing");
+    // The daemon resumed nothing: this session seeded its own lineage.
+    expect(session.lineage).toBe("absent");
 
     await expect(
       session.applyLocalUpdate(
@@ -1251,6 +1347,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
             },
@@ -1294,6 +1391,215 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  // The engine claims an unclaimed lineage inside the record that turns sync
+  // on for it. When that record's response is lost, the session is still
+  // unclaimed and the engine holds a claim it made from this very history.
+  // Sync turned on while this editor sat idle. The engine claimed the
+  // lineage from its own history and asks the session to resync. The
+  // session learns the claim without a record and keeps its document.
+  it("learns a claim the engine made while it was idle", async () => {
+    const engine = seedPlaintextEngine("idle");
+    let claimed = false;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync || !claimed) return response;
+        return {
+          ...response,
+          result: {
+            ...(response.result as Record<string, JsonValue>),
+            lineageClaimId: "own-claim",
+            lineageOriginatedHere: true,
+          },
+        };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const openedDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+
+    claimed = true;
+    engine.emitEvent({
+      name: YDOC_EVENT.remoteUpdate,
+      seq: 100,
+      sessionGeneration: 1,
+      payload: { sessionId: session.sessionId, resyncRequired: true },
+    });
+
+    await vi.waitFor(() => expect(session.lineageClaimId).toBe("own-claim"));
+    expect(session.doc).toBe(openedDoc);
+    expect(replacements).toEqual([]);
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  // Owner registration can arrive between the resync request and its
+  // result. It waits on the provider's native owner, not on a timer.
+  it("lets the provider's owner wait for the resync that brings the claim", async () => {
+    const engine = seedPlaintextEngine("idle");
+    let claimed = false;
+    const resynced = Promise.withResolvers<void>();
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync || !claimed) return response;
+        await resynced.promise;
+        return {
+          ...response,
+          result: {
+            ...(response.result as Record<string, JsonValue>),
+            lineageClaimId: "own-claim",
+            lineageOriginatedHere: true,
+          },
+        };
+      },
+    };
+    const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION,
+      path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined});
+    const owner = provider.nativeOwner!;
+    await owner.resyncIfNeeded();
+    expect(provider.lineageClaimId).toBeNull();
+
+    claimed = true;
+    engine.emitEvent({
+      name: YDOC_EVENT.remoteUpdate,
+      seq: 100,
+      sessionGeneration: 1,
+      payload: { sessionId: owner.sessionId, resyncRequired: true },
+    });
+    let learned = false;
+    const waiting = owner.resyncIfNeeded().then(() => { learned = provider.lineageClaimId === "own-claim"; });
+    expect(provider.lineageClaimId).toBeNull();
+    resynced.resolve();
+    await waiting;
+    expect(learned).toBe(true);
+    await provider.close();
+  });
+
+  it("takes the claim its own lost record made and keeps its document", async () => {
+    const engine = seedPlaintextEngine("local");
+    let claimed = false;
+    let loseResponse = false;
+    const withClaim = (response: Response): Response =>
+      claimed
+        ? {
+            ...response,
+            result: {
+              ...(response.result as Record<string, JsonValue>),
+              lineageClaimId: "own-claim",
+              lineageOriginatedHere: true,
+            },
+          }
+        : response;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          const response = await engine.sendRequest(request);
+          if (loseResponse) {
+            loseResponse = false;
+            claimed = true;
+            throw new Error("daemon response lost");
+          }
+          return withClaim(response);
+        }
+        if (request.method === YDOC_METHOD.resync) {
+          return withClaim(await engine.sendRequest(request));
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const openedDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+    loseResponse = true;
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: "local".length,
+      insert: " claimed",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: "local claimed".length,
+      insert: " after",
+    });
+
+    expect(session.doc).toBe(openedDoc);
+    expect(replacements).toEqual([]);
+    expect(session.lineageClaimId).toBe("own-claim");
+    await expect(session.settle()).resolves.toMatchObject({
+      content: "local claimed after",
+    });
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("treats a claim this device did not make from its history as another lineage", async () => {
+    const engine = seedPlaintextEngine("local");
+    let foreign = false;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && foreign) {
+          throw new Error("ydoc-lineage-stale");
+        }
+        if (request.method === YDOC_METHOD.resync && foreign) {
+          const response = await engine.sendRequest(request);
+          return {
+            ...response,
+            result: {
+              ...(response.result as Record<string, JsonValue>),
+              lineageClaimId: "relay-claim",
+              lineageOriginatedHere: false,
+            },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    foreign = true;
+
+    await expect(
+      session.applyLocalTextEdit({
+        root: "plainText",
+        index: "local".length,
+        insert: " kept here",
+      }),
+    ).rejects.toMatchObject({ code: "lineage-changed" });
+    expect(session.lineageClaimId).toBeNull();
+    expect(session.doc.getText("plainText").toString()).toBe("local kept here");
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("never replays a refused losing-lineage edit into the winner", async () => {
     const engine = seedPlaintextEngine("losing root");
     const winner = new Y.Doc();
@@ -1322,6 +1628,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
             },
@@ -1421,6 +1728,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              lineageOriginatedHere: false,
               recoveredPaths: [],
               artifactAssets: [],
             },
@@ -3137,9 +3445,6 @@ describe("YdocLiveAdapter", () => {
     expect(resyncErrors).toHaveLength(1);
     expect(resyncErrors[0]?.reason).toBe("event-sequence-gap");
     expect(session.doc.getText("plainText").toString()).toBe("A");
-    expect(() =>
-      session.applyLocalTextEdit({ root: "plainText", index: 1, insert: "C" }),
-    ).toThrow(YdocResyncNeededError);
 
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(engine.requests.map((request) => request.method)).toContain(
@@ -3720,7 +4025,7 @@ describe("the ydoc.open deadline", () => {
     // close prunes those rows, so the next open reseeds from the file.
     await resurrected.close({ settle: false });
     const reseeded = await open();
-    expect(reseeded.lineage).toBe("existing");
+    expect(reseeded.lineage).toBe("absent");
     expect(reseeded.doc.getText("plainText").toString()).toBe("on disk");
     await reseeded.close({ settle: false });
   });
@@ -3876,7 +4181,7 @@ describe("the ydoc.open deadline", () => {
       path: OLD_PATH,
       contentKind: "plaintext",
     });
-    expect(reusedPath.lineage).toBe("existing");
+    expect(reusedPath.lineage).toBe("absent");
     expect(reusedPath.doc.getText("plainText").toString()).toBe(
       "a completely different file",
     );
@@ -4075,9 +4380,9 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    // The implicit settle pruned the old lineage. Reopening records a new
-    // captured-file seed, so the session immediately has existing lineage.
-    expect(reopened.lineage).toBe("existing");
+    // The implicit settle pruned the old lineage. Reopening resumes nothing;
+    // the open seeds a new lineage from the captured file.
+    expect(reopened.lineage).toBe("absent");
     await reopened.close({ settle: false });
     adapter.dispose();
   });
@@ -4106,7 +4411,7 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("existing");
+    expect(session.lineage).toBe("absent");
 
     // Two edits that net back to exactly the seeded object's own bytes, so
     // the lineage exists (an update was recorded) but nothing settled it.
@@ -4193,7 +4498,7 @@ describe("the ydoc.open deadline", () => {
       contentKind: "plaintext",
     });
     expect(recaptured.objectId).not.toBe(aObjectId);
-    expect(recaptured.lineage).toBe("existing");
+    expect(recaptured.lineage).toBe("absent");
     expect(recaptured.doc.getText("plainText").toString()).toBe(
       "a completely unrelated new file",
     );
@@ -4514,7 +4819,7 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("existing");
+    expect(session.lineage).toBe("absent");
     expect(session.doc.getText("plainText").toString()).toBe(
       "captured content",
     );

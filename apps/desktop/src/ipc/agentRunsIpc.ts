@@ -2,21 +2,20 @@ import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload,
+  ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload, type AutomationFailureNotice,
   ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
-  AgentPanelSnapshotResult, AgentPermissionResponsePayload, StopAgentRunPayload,
+  StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
   ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
-import { unacknowledgedAutomationFailures } from "../workspaces/registryStore";
+import { automationFailureAckKey, unacknowledgedAutomationFailures } from "../workspaces/registryStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { AgentIntegration, AgentRunRecord } from "../agents/AgentIntegration";
-import type { AgentSessionManager } from "../agents/AgentSessionManager";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 
@@ -35,7 +34,11 @@ export function createAgentRunsIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
   withEngineAdapter<Result>(workspace: EngineWorkspace, work: (adapter: Pick<VersionedLiveAdapter, "listAutomationFailures">) => Promise<Result>): Promise<Result | null>;
   acknowledgeWorkspaceAutomationFailure(workspaceId: string, automationId: string, generation: number): void;
+  /** Dataset automations' failures, from the dataset host's ledger while it is open. */
+  datasetAutomationFailures(workspaceId: string): Promise<Array<Omit<AutomationFailureNotice, "name">>>;
   notifyAutomationFailuresChanged(workspaceId: string): void;
+  /** A Collection automation's name in its automations.yaml, or null. */
+  automationNameOf(workspaceId: string, automationId: string): string | null;
   requireEngineCapture(workspaceId: string, feature: "Chats"): Promise<{ workspace: Workspace }>;
   linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore, "ensureOpen">;
   agentDispatchStoreHandleFor(workspace: Workspace): { store: Pick<LiveAgentDispatchStoreHandle["store"], "runRecordsForThread"> };
@@ -43,13 +46,9 @@ export function createAgentRunsIpc<
   assertAgentRunnableWorkspace(workspaceId: string): void;
   assertChatRunnerIdle(workspaceId: string): void;
   startAgentRunWithWorkspaceActivity(workspace: Workspace): Promise<AgentRunRecord>;
-  readonly cachedAgentSessions: Pick<AgentSessionManager, "panelSnapshot" | "stopSession"> | null;
   agentIntegration: Pick<AgentIntegration, "endAgentRun" | "getAgentRunStatus">;
   mcpShareAccessOf(shareView: unknown): ShareAccess | null;
   mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): McpConfigResult;
-  sharedViewOf(workspaceId: string): unknown;
-  pluginWorkspaceRuntimes: { ensure(workspace: Workspace): Promise<unknown> };
-  agentSessionManager(): Promise<Pick<AgentSessionManager, "probeDrivers" | "panelSnapshot" | "answerPermission">>;
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
@@ -60,18 +59,30 @@ export function createAgentRunsIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged,
+    withEngineAdapter, acknowledgeWorkspaceAutomationFailure, datasetAutomationFailures, notifyAutomationFailuresChanged,
     requireEngineCapture, linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace,
     assertAgentRunnableWorkspace, assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
-    agentIntegration, mcpShareAccessOf, mcpConfigFor, sharedViewOf, pluginWorkspaceRuntimes,
-    agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
+    agentIntegration, mcpShareAccessOf, mcpConfigFor,
+    senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   } = dependencies;
 
   function registerAutomationFailures(): void {
-    // Automation failures (ADR 0008): the engine's failed claim rows — one
-    // row per automation with the newest error and a counting generation —
-    // minus what the owner has acknowledged in the registry.
+    // Automation failures (ADR 0008): the engine's failed claim rows and the
+    // dataset ledger's — one row per automation with the newest error and a
+    // counting generation — minus what the owner has acknowledged in the
+    // registry.
+    const failuresOf = async (operation: Operation): Promise<Array<Omit<AutomationFailureNotice, "name">> | null> => {
+      const engine = await withEngineAdapter(
+        receivedShareEngine.workspaceForRegistered(operation.workspace),
+        async (adapter) => await adapter.listAutomationFailures(),
+      );
+      if (engine === null) return null;
+      return [
+        ...engine.failures.map((failure) => ({ ...failure, datasetInstance: null })),
+        ...await datasetAutomationFailures(operation.workspace.workspaceId),
+      ];
+    };
     registerHandler(CHANNELS.listAutomationFailures, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListAutomationFailuresPayload.parse(payload);
@@ -80,15 +91,15 @@ export function createAgentRunsIpc<
         input.workspaceId,
         "Automation notice read stopped because this window changed workspaces.",
         async (operation) => {
-          const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.listAutomationFailures(),
-          );
+          const failures = await failuresOf(operation);
           return ListAutomationFailuresResult.parse({
             failures: unacknowledgedAutomationFailures(
-              result?.failures ?? [],
+              failures ?? [],
               operation.workspace.automationFailureAcks,
-            ),
+            ).map((failure) => ({
+              ...failure,
+              name: dependencies.automationNameOf(input.workspaceId, failure.automationId),
+            })),
           });
         },
       );
@@ -108,22 +119,20 @@ export function createAgentRunsIpc<
         input.workspaceId,
         "Automation notice update stopped because this window changed workspaces.",
         async (operation) => {
-          const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.listAutomationFailures(),
-          );
-          if (!result) {
+          const failures = await failuresOf(operation);
+          if (!failures) {
             throw new Error("The workspace engine is not running.");
           }
-          const current = result.failures.find(
+          const current = failures.find(
             (failure) => failure.automationId === input.automationId,
           );
-          // No failed claims for that automation: nothing to acknowledge.
-          if (!current) return;
+          // No failed claims for that automation, or a notice about a
+          // dataset instance that is gone: nothing to acknowledge.
+          if (!current || current.datasetInstance !== input.datasetInstance) return;
           operation.assertCurrent();
           acknowledgeWorkspaceAutomationFailure(
             input.workspaceId,
-            input.automationId,
+            automationFailureAckKey(current),
             Math.min(input.generation, current.generation),
           );
           notifyAutomationFailuresChanged(input.workspaceId);
@@ -197,23 +206,6 @@ export function createAgentRunsIpc<
       assertTrustedSender(event);
       const input = EndAgentRunPayload.parse(payload);
       requireWorkspace(input.workspaceId);
-      // A driver-backed run owns a live session (a child process). Ending such
-      // a run must go through the session manager so the child is actually
-      // stopped and disposed — not just the run record closed (this stop used
-      // to live on the retired Agent panel; Settings' stop lands here now).
-      // stopSession finalizes the run through agentIntegration.endAgentRun
-      // exactly once, so onRunEnded fires as before. No cached manager means
-      // no session ever started — plain run-record end.
-      const session = dependencies.cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
-      if (
-        dependencies.cachedAgentSessions &&
-        session?.runId === input.runId &&
-        ["starting", "ready", "running", "waiting-permission"].includes(session.status)
-      ) {
-        // Keep the caller's explicit outcome (e.g. "failed") on the record.
-        await dependencies.cachedAgentSessions.stopSession(input.workspaceId, input.status);
-        return;
-      }
       await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
     });
 
@@ -234,37 +226,6 @@ export function createAgentRunsIpc<
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
       return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
-    });
-
-    registerHandler(CHANNELS.probeAgentDrivers, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentRunPayload.parse(payload);
-      const workspace = requireWorkspace(input.workspaceId);
-      // Every driver is plugin-contributed, and workspace open only warms the
-      // plugin runtime in the background. A probe that ran ahead of it would
-      // answer "no drivers" and the caller would cache that for its lifetime.
-      if (!sharedViewOf(workspace.workspaceId)) {
-        await pluginWorkspaceRuntimes.ensure(workspace);
-      }
-      const sessions = await agentSessionManager();
-      await sessions.probeDrivers(input.workspaceId);
-      return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-    });
-
-    registerHandler(CHANNELS.getAgentSessionState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentRunPayload.parse(payload);
-      requireWorkspace(input.workspaceId);
-      const sessions = await agentSessionManager();
-      return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-    });
-
-    registerHandler(CHANNELS.answerAgentPermission, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = AgentPermissionResponsePayload.parse(payload);
-      requireWorkspace(input.workspaceId);
-      const sessions = await agentSessionManager();
-      return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
     });
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {

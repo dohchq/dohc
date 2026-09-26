@@ -579,11 +579,56 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
-    // The capture path declares no attribution: every column reads null, so
-    // an unattributed write is distinguishable from a defaulted one.
-    assert_eq!(authored_edit["actorKind"], json!(null));
-    assert_eq!(authored_edit["onBehalfOf"], json!(null));
-    assert_eq!(authored_edit["depth"], json!(null));
+    // Capture preserves the declared agent author at depth zero.
+    assert_eq!(authored_edit["actorKind"], json!("agent"));
+    assert_eq!(authored_edit["onBehalfOf"], json!("local"));
+    assert_eq!(authored_edit["depth"], json!(0));
+
+    // A run an automation started names its chain depth, and capture records
+    // the agent's edit at that depth.
+    call(
+        &transport,
+        &handle,
+        71,
+        "capture.setAuthor",
+        json!({
+            "author": {
+                "kind": "agent",
+                "agentId": agent_id,
+                "onBehalfOf": "local",
+                "agentRunId": "run-woken",
+                "depth": 3,
+            }
+        }),
+    )
+    .await;
+    let edited = std::fs::read_to_string(&record_path)
+        .expect("read edited record")
+        .replace("status: done", "status: shipped");
+    std::fs::write(&record_path, edited).expect("woken agent edits record file");
+    reconcile_capture(&transport, &handle, 72).await;
+    let record = call(
+        &transport,
+        &handle,
+        101,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": record_id,
+            "historyLimit": 20,
+        }),
+    )
+    .await;
+    let woken_edit = record["history"]
+        .as_array()
+        .expect("field history")
+        .iter()
+        .find(|entry| {
+            entry["field"] == json!("status") && entry["next"]["value"] == json!("shipped")
+        })
+        .expect("the woken agent's edit in history");
+    assert_eq!(woken_edit["actorKind"], json!("agent"));
+    assert_eq!(woken_edit["depth"], json!(3));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -696,7 +741,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         json!({
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
-                .encode(edited.frontmatter_set("id", EDITED_ID)),
+                .encode(edited.frontmatter_set("id", EDITED_ID).unwrap()),
         }),
     )
     .await;
@@ -710,7 +755,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         json!({
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
-                .encode(edited.frontmatter_set("status", "done")),
+                .encode(edited.frontmatter_set("status", "done").unwrap()),
             "actorOriginId": "agent-live-editor",
             "attribution": {
                 "actorKind": "agent",
@@ -971,8 +1016,8 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             let remote = Ydoc::wire();
             remote.apply(&initial_update).expect("load shared base");
             vec![
-                remote.frontmatter_set("id", EDITED_ID),
-                remote.frontmatter_set("status", "remote"),
+                remote.frontmatter_set("id", EDITED_ID).unwrap(),
+                remote.frontmatter_set("status", "remote").unwrap(),
             ]
         });
         let object_id = live["objectId"].as_str().expect("object id");
@@ -2543,7 +2588,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     .await;
     let remote = Ydoc::wire();
     remote.apply(&initial_update).expect("load shared base");
-    let update = remote.frontmatter_set("status", "remote");
+    let update = remote.frontmatter_set("status", "remote").unwrap();
     let lineage_claim_id = live["lineageClaimId"]
         .as_str()
         .expect("replicated lineage claim")
@@ -2588,7 +2633,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
                 tx,
                 WORKSPACE_ID,
                 &AutomationSubscription {
-                    automation_id: "plugin:triage".to_owned(),
+                    automation_id: "collection:tasks#triage".to_owned(),
                     prefix: "tasks".to_owned(),
                     kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
                     fields: None,

@@ -56,6 +56,11 @@ describe("engineOriginLabel", () => {
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("engineMomentSourceLabel", () => {
+  it("names a person the owner shared with, not the sync that carried their change", () => {
+    expect(engineMomentSourceLabel(moment({ id: "named", origin: "sync", namedAuthor: { userId: "user_ana", label: "ana@example.com (Edit)" } })))
+      .toBe("ana@example.com (Edit)");
+    expect(engineMomentSourceLabel(moment({ id: "served", origin: "sync" }))).toBe("Sync");
+  });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });
@@ -76,6 +81,12 @@ describe("engineMomentSourceLabel", () => {
     ).toBe(
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam Rivera" }),
     );
+  });
+
+  it("names an automation-authored moment by the automation's name and Collection", () => {
+    expect(
+      engineMomentSourceLabel(moment({ id: "m1", origin: "api", automationAuthor: { name: "Stamp the finish date", collection: "Tasks" } })),
+    ).toBe("Stamp the finish date in Tasks");
   });
 
   it("keeps unattributed moments on their actor-neutral origin label", () => {

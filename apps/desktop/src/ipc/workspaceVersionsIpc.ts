@@ -141,11 +141,7 @@ export function workspaceVersionHandlers(dependencies: {
     async tryInWorkspaceVersion(input) {
       await requireVersionOperations(input.workspaceId);
       desktopMarks.mark("try-in-version-start");
-      const result = await tryInVersionSessions.start(
-        input.workspaceId,
-        input.task,
-        input.driverId,
-      );
+      const result = await tryInVersionSessions.start(input.workspaceId, input.task);
       // Gesture latency evidence (create+switch+run-start, excluding any agent
       // process startup on the bare-run path), read via the test-gated marks.
       desktopMarks.measureSince("try-in-version-gesture", "try-in-version-start");

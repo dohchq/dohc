@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
@@ -43,6 +43,10 @@ interface Relay {
   outdated: boolean;
   // Posts of notices fail in transit; marks still go.
   failPosts: boolean;
+  // Posts of notices are refused, as the relay refuses a settled skipped notice.
+  refusePosts?: boolean;
+  // Posts of notices reach the relay, and their answer is lost.
+  losePostReplies?: boolean;
   failPulls: boolean;
   // Runs, and is awaited, as each request leaves.
   onRequest?: (request: Request) => void | Promise<void>;
@@ -73,10 +77,15 @@ function account(server: Relay, userId: string): NoticeAccount {
         const path = new URL(request.url).pathname;
         const failing = request.method === "POST" ? server.failPosts && path === "/sync/notices" : server.failPulls;
         if (!server.online || failing) throw new TypeError("fetch failed");
+        if (server.refusePosts && request.method === "POST" && path === "/sync/notices") {
+          return Response.json({ ok: false, error: "refused", code: "notice_refused" }, { status: 403 });
+        }
         if (server.outdated && path.startsWith("/sync/notices")) {
           return Response.json({ ok: false, error: "not found", code: "not_found" }, { status: 404 });
         }
-        return await server.handler(request);
+        const answer = await server.handler(request);
+        if (server.losePostReplies && request.method === "POST" && path === "/sync/notices") throw new TypeError("fetch failed");
+        return answer;
       },
     },
   };
@@ -104,7 +113,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -132,7 +141,7 @@ async function computer(
         },
       };
     },
-    installId: () => "install-a",
+    installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
@@ -152,7 +161,18 @@ function notice(overrides: Partial<PostNoticeInput> = {}): PostNoticeInput {
 }
 
 async function titles(computer: Computer): Promise<string[]> {
-  return (await computer.store.list()).map((row) => `${row.store}:${row.title}${row.readAtMs === null ? "" : " (read)"}`);
+  return (await computer.store.list()).notices.map((row) => `${row.store}:${row.title}${row.readAtMs === null ? "" : " (read)"}`);
+}
+
+function shareNotice(shareId: string) {
+  return expect.objectContaining({
+    store: "account",
+    noticeId: "from:owner:share-received:grant-0",
+    kind: "share-received",
+    recipientShareId: shareId,
+    target: { share: shareId },
+    readAtMs: null,
+  });
 }
 
 async function file(computer: Computer, name: "local" | "account"): Promise<Record<string, unknown[]>> {
@@ -172,7 +192,7 @@ describe("notices on one person's computers", () => {
     expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
     await laptop.store.sync();
     await desktop.store.sync();
-    expect(await desktop.store.list()).toEqual([expect.objectContaining({
+    expect((await desktop.store.list()).notices).toEqual([expect.objectContaining({
       store: "account",
       noticeId: "agent-run:1",
       kind: "agent-run",
@@ -188,17 +208,119 @@ describe("notices on one person's computers", () => {
     expect(desktop.changes).toBe(1);
 
     clock = 11_000;
-    await desktop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await desktop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", desktop.signedIn?.key ?? null);
     expect(await titles(desktop)).toEqual(["account:Your agent finished (read)"]);
     await desktop.store.sync();
     await laptop.store.sync();
     expect(await titles(laptop)).toEqual(["account:Your agent finished (read)"]);
 
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "dismissed");
-    expect(await laptop.store.list()).toEqual([]);
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "dismissed", laptop.signedIn?.key ?? null);
+    expect((await laptop.store.list()).notices).toEqual([]);
     await laptop.store.sync();
     await desktop.store.sync();
-    expect(await desktop.store.list()).toEqual([]);
+    expect((await desktop.store.list()).notices).toEqual([]);
+  });
+
+  it("tells only the first computer to dismiss a notice that it did", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    const ref = { store: "account" as const, noticeId: "agent-run:1" };
+    await laptop.store.postNotice(notice());
+    // The post has not left yet: the dismissal sends it first.
+    expect(await laptop.store.dismissFirst(ref, laptop.signedIn?.key ?? null)).toBe("first");
+    expect(await laptop.store.dismissFirst(ref, laptop.signedIn?.key ?? null), "asked again after a lost answer").toBe("first");
+    await desktop.store.sync();
+    expect(await desktop.store.dismissFirst(ref, desktop.signedIn?.key ?? null)).toBe("not-first");
+    expect((await laptop.store.list()).notices, "dismissed rows leave the list").toEqual([]);
+
+    server.online = false;
+    expect(await laptop.store.dismissFirst({ store: "account", noticeId: "other" }, laptop.signedIn?.key ?? null)).toBe("unanswered");
+    expect(await laptop.store.dismissFirst(ref, "another account")).toBe("unanswered");
+  });
+
+  it("lets this computer's own dismissal decide for a notice only it holds", async () => {
+    const signedOut = await computer(null);
+    await signedOut.store.postNotice(notice());
+    const ref = { store: "local" as const, noticeId: "agent-run:1" };
+    expect(await signedOut.store.dismissFirst(ref, null)).toBe("first");
+    expect(await signedOut.store.dismissFirst(ref, null), "asked again after a crash").toBe("first");
+    expect(await signedOut.store.dismissFirst({ store: "local", noticeId: "gone" }, null)).toBe("not-first");
+  });
+
+  it("drops a skipped schedule's notice the relay refuses, and never keeps it here", async () => {
+    const server = await relay();
+    server.refusePosts = true;
+    const laptop = await computer(account(server, "ana"));
+    const skipped = notice({ noticeId: "schedule-skipped:ws:collection:T#r:1000", kind: "schedule-skipped", title: "Report skipped once", body: "" });
+    await laptop.store.postNotice(skipped);
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    expect((await laptop.store.list()).notices.map((row) => [row.store, row.noticeId]), "only the other notice moved here")
+      .toEqual([["local", "agent-run:1"]]);
+  });
+
+  it("never drops a waiting skipped schedule's notice to make room", async () => {
+    const server = await relay();
+    server.online = false;
+    const laptop = await computer(account(server, "ana"), { outboxPostLimit: 2 });
+    await laptop.store.postNotice(notice({ noticeId: "schedule-skipped:ws:collection:T#r:1000", kind: "schedule-skipped", title: "Report skipped once", body: "" }));
+    for (const id of ["agent-run:1", "agent-run:2", "agent-run:3"]) await laptop.store.postNotice(notice({ noticeId: id }));
+    const ids = (await laptop.store.list()).notices.map((row) => row.noticeId);
+    expect(ids).toContain("schedule-skipped:ws:collection:T#r:1000");
+    expect(ids).not.toContain("agent-run:1");
+  });
+
+  it("dismisses a withdrawn notice whose post was already on its way", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.onRequest = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices") return;
+      server.onRequest = undefined;
+      await laptop.store.withdraw("agent-run:1");
+    };
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    await laptop.store.sync();
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    await desktop.store.sync();
+    expect((await desktop.store.list()).notices, "the relay holds it dismissed").toEqual([]);
+    expect((await laptop.store.list()).notices).toEqual([]);
+  });
+
+  it("dismisses a withdrawn notice the relay took although its answer was lost", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.losePostReplies = true;
+    server.onRequest = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices") return;
+      server.onRequest = undefined;
+      await laptop.store.withdraw("agent-run:1");
+    };
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    // The next pass confirms the post before its dismissal goes.
+    server.losePostReplies = false;
+    await laptop.store.sync();
+    await laptop.store.sync();
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    await desktop.store.sync();
+    expect((await desktop.store.list()).notices, "held and dismissed on the relay").toEqual([]);
+  });
+
+  it("takes back a notice it posted", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.online = false;
+    await laptop.store.postNotice(notice());
+    await laptop.store.withdraw("agent-run:1");
+    expect((await laptop.store.list()).notices, "an unsent post goes").toEqual([]);
+    server.online = true;
+    await laptop.store.postNotice(notice({ noticeId: "agent-run:2" }));
+    await laptop.store.sync();
+    await laptop.store.withdraw("agent-run:2");
+    await laptop.store.sync();
+    expect((await laptop.store.list()).notices, "a sent one is dismissed").toEqual([]);
   });
 
   it("posts a notice id once", async () => {
@@ -220,7 +342,7 @@ describe("notices on one person's computers", () => {
     server.online = false;
 
     await laptop.store.postNotice(notice());
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
     expect(await titles(laptop)).toEqual(["account:Your agent finished (read)"]);
 
@@ -237,9 +359,9 @@ describe("notices on one person's computers", () => {
     await laptop.store.sync();
     server.online = false;
 
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "dismissed");
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "dismissed", laptop.signedIn?.key ?? null);
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
     expect((await file(laptop, "account")).marks).toEqual([
       { noticeId: "agent-run:1", mark: "dismissed", atMs: clock },
@@ -250,7 +372,52 @@ describe("notices on one person's computers", () => {
     expect((await file(laptop, "account")).marks).toEqual([]);
     const other = await computer(account(server, "ana"));
     await other.store.sync();
-    expect(await other.store.list()).toEqual([]);
+    expect((await other.store.list()).notices).toEqual([]);
+  });
+
+  it("marks a whole list read in one write and one relay call", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice({ noticeId: "a", title: "A" }));
+    await laptop.store.postNotice(notice({ noticeId: "b", title: "B" }));
+    laptop.reach.clear();
+    await laptop.store.postNotice(notice({ noticeId: "c", title: "C" }));
+    await laptop.store.sync();
+    const markRequests: string[] = [];
+    server.onRequest = (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/sync/notices/marks") markRequests.push(path);
+    };
+    const changes = laptop.changes;
+
+    const { account: shown, notices } = await laptop.store.list();
+    await laptop.store.mark(notices.map(({ store, noticeId }) => ({ store, noticeId })), "read", shown);
+    expect((await titles(laptop)).sort()).toEqual(["account:A (read)", "account:B (read)", "local:C (read)"]);
+    expect(laptop.changes).toBe(changes + 1);
+    await laptop.store.sync();
+    expect(markRequests).toHaveLength(1);
+    expect((await file(laptop, "account")).marks).toEqual([]);
+  });
+
+  it("marks nothing in the account signed in now for a list shown for another", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    laptop.reach.clear();
+    await laptop.store.postNotice(notice({ noticeId: "here", title: "Here" }));
+    await laptop.store.sync();
+    const shown = await laptop.store.list();
+    expect(shown.account).toBe(laptop.signedIn?.key);
+
+    // Ben signs in on this computer and has a notice with the same id.
+    switchTo(laptop, account(server, "ben"));
+    laptop.reach.set(WORKSPACE, { workspaceId: WORKSPACE });
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    await laptop.store.mark(shown.notices.map(({ store, noticeId }) => ({ store, noticeId })), "read", shown.account);
+
+    expect((await titles(laptop)).sort()).toEqual(["account:Your agent finished", "local:Here (read)"]);
+    expect((await laptop.store.list()).account).toBe(laptop.signedIn?.key);
   });
 
   it("shows your notice after the relay accepts it until a pull settles it", async () => {
@@ -264,7 +431,7 @@ describe("notices on one person's computers", () => {
 
     server.failPulls = false;
     await laptop.store.sync();
-    expect(await laptop.store.list()).toEqual([expect.objectContaining({ senderLabel: "Name ana" })]);
+    expect((await laptop.store.list()).notices).toEqual([expect.objectContaining({ senderLabel: "Name ana" })]);
     expect((await file(laptop, "account")).posts).toEqual([]);
   });
 
@@ -280,7 +447,7 @@ describe("notices on one person's computers", () => {
 
     // The laptop dismisses one; the relay drops it after its retention while
     // the desktop is away.
-    await laptop.store.mark({ store: "account", noticeId: "gone" }, "dismissed");
+    await laptop.store.mark([{ store: "account", noticeId: "gone" }], "dismissed", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
     clock += NOTICE_DISMISSED_RETENTION_MS;
     await laptop.store.postNotice(notice({ noticeId: "sweeps", title: "Sweeps" }));
@@ -289,7 +456,7 @@ describe("notices on one person's computers", () => {
     // The desktop cannot send, but still pulls the whole list.
     server.failPosts = true;
     await desktop.store.postNotice(notice({ noticeId: "waiting", title: "Waiting" }));
-    await desktop.store.mark({ store: "account", noticeId: "kept" }, "read");
+    await desktop.store.mark([{ store: "account", noticeId: "kept" }], "read", desktop.signedIn?.key ?? null);
     await desktop.store.sync();
     expect((await titles(desktop)).sort()).toEqual(["account:Kept (read)", "account:Sweeps", "account:Waiting"]);
 
@@ -297,6 +464,26 @@ describe("notices on one person's computers", () => {
     await desktop.store.sync();
     await laptop.store.sync();
     expect((await titles(laptop)).sort()).toEqual(["account:Kept (read)", "account:Sweeps", "account:Waiting"]);
+  });
+
+  it("keeps a notice whose save failed out of the list, so a retry saves it", async () => {
+    const server = await relay();
+    server.online = false;
+    for (const signedIn of [null, account(server, "ana")]) {
+      const laptop = await computer(signedIn);
+      await laptop.store.postNotice(notice({ noticeId: "first", title: "First" }));
+      const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
+      const where = signedIn ? "account" : "local";
+      // A folder where the save writes its temporary file makes the save fail.
+      await mkdir(join(laptop.directory, `${name}.tmp`));
+      await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow();
+      expect(await titles(laptop)).toEqual([`${where}:First`]);
+
+      await rmdir(join(laptop.directory, `${name}.tmp`));
+      await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
+      const restarted = await computer(signedIn, { directory: laptop.directory });
+      expect(await titles(restarted)).toEqual([`${where}:First`, `${where}:Second`]);
+    }
   });
 
   it("keeps the list, cursor, and outbox across a restart", async () => {
@@ -322,7 +509,7 @@ describe("notices on one person's computers", () => {
     const signedIn = laptop.signedIn;
 
     switchTo(laptop, null);
-    expect(await laptop.store.list()).toEqual([]);
+    expect((await laptop.store.list()).notices).toEqual([]);
     switchTo(laptop, signedIn);
     expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
   });
@@ -337,9 +524,9 @@ describe("notices on one person's computers", () => {
 
     const desktop = await computer(account(server, "ana"));
     await desktop.store.sync();
-    expect(await desktop.store.list()).toEqual([expect.objectContaining({
+    expect((await desktop.store.list()).notices).toEqual([expect.objectContaining({
       workspaceId: null, recipientShareId: shareId, target: { path: "trip/day-1" },
-    })]);
+    }), shareNotice(shareId)]);
   });
 
   it("keeps your notice on this computer when the relay refuses it", async () => {
@@ -350,7 +537,7 @@ describe("notices on one person's computers", () => {
     server.online = false;
     await laptop.store.postNotice(notice({ workspaceId: "ana-trip" }));
     const readAtMs = clock;
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
 
     // The share ends before the notice leaves, so the relay refuses it.
     expect(server.storage.revokeShare(shareId, clock)).toBe(true);
@@ -358,7 +545,7 @@ describe("notices on one person's computers", () => {
     clock += 1;
     await laptop.store.sync();
     await laptop.store.sync();
-    expect(await laptop.store.list()).toEqual([expect.objectContaining({
+    expect((await laptop.store.list()).notices).toEqual([expect.objectContaining({
       store: "local", noticeId: "agent-run:1", workspaceId: "ana-trip", title: "Your agent finished", readAtMs,
     })]);
     const outbox = await file(laptop, "account");
@@ -376,11 +563,11 @@ describe("notices on one person's computers", () => {
     for (let index = 0; index < NOTICE_ROWS_PER_SENDER; index += 1) fromOwner(index);
     const laptop = await computer(account(server, "ana"));
     await laptop.store.sync();
-    expect(await laptop.store.list()).toHaveLength(NOTICE_ROWS_PER_SENDER);
+    expect((await laptop.store.list()).notices).toHaveLength(NOTICE_ROWS_PER_SENDER);
 
     fromOwner(NOTICE_ROWS_PER_SENDER);
     await laptop.store.sync();
-    const titlesNow = (await laptop.store.list()).map((row) => row.title);
+    const titlesNow = (await laptop.store.list()).notices.map((row) => row.title);
     expect(titlesNow).toHaveLength(NOTICE_ROWS_PER_SENDER);
     expect(titlesNow).not.toContain("Failure 0");
     expect(titlesNow).toContain(`Failure ${NOTICE_ROWS_PER_SENDER}`);
@@ -392,16 +579,16 @@ describe("notices on one person's computers", () => {
     const laptop = await computer(account(server, "ana"));
     await laptop.store.postNotice(notice());
     await laptop.store.sync();
-    const notices = await laptop.store.list();
-    expect(notices.map((row) => row.senderLabel)).toEqual([label]);
-    expect(ListNoticesResult.parse({ notices }).notices).toHaveLength(1);
+    const listed = await laptop.store.list();
+    expect(listed.notices.map((row) => row.senderLabel)).toEqual([label]);
+    expect(ListNoticesResult.parse(listed).notices).toHaveLength(1);
   });
 
   it("drops cached rows past retention on a sync that brings nothing new", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));
     await laptop.store.postNotice(notice());
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
     expect((await file(laptop, "account")).rows).toHaveLength(1);
 
@@ -410,6 +597,23 @@ describe("notices on one person's computers", () => {
     await laptop.store.sync();
     expect((await file(laptop, "account")).rows).toEqual([]);
     expect(laptop.changes).toBe(changes + 1);
+  });
+});
+
+describe("a notice whose sender stopped", () => {
+  it("sends nothing and keeps nothing once its signal ends", async () => {
+    const server = await relay();
+    const signedIn = await computer(account(server, "owner"));
+    const stopped = AbortSignal.abort();
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:1", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:2", recipientUserId: "ana", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await signedIn.store.sync();
+    expect((await signedIn.store.list()).notices).toEqual([]);
+    const ana = await computer(account(server, "ana"));
+    await ana.store.sync();
+    expect((await ana.store.list()).notices).toEqual([]);
   });
 });
 
@@ -429,15 +633,15 @@ describe("notices that stay on this computer", () => {
     expect(await titles(elsewhere)).toEqual(["local:Your agent finished", "local:Your agent finished"]);
     const other = await computer(account(server, "ana"));
     await other.store.sync();
-    expect(await other.store.list()).toEqual([]);
+    expect((await other.store.list()).notices).toEqual([]);
 
-    await signedOut.store.mark({ store: "local", noticeId: "agent-run:1" }, "read");
+    await signedOut.store.mark([{ store: "local", noticeId: "agent-run:1" }], "read", signedOut.signedIn?.key ?? null);
     expect(await titles(signedOut)).toEqual(["local:Your agent finished (read)"]);
-    await signedOut.store.mark({ store: "local", noticeId: "agent-run:1" }, "dismissed");
-    expect(await signedOut.store.list()).toEqual([]);
+    await signedOut.store.mark([{ store: "local", noticeId: "agent-run:1" }], "dismissed", signedOut.signedIn?.key ?? null);
+    expect((await signedOut.store.list()).notices).toEqual([]);
     // A dismissed local notice is not posted again.
     await signedOut.store.postNotice(notice());
-    expect(await signedOut.store.list()).toEqual([]);
+    expect((await signedOut.store.list()).notices).toEqual([]);
   });
 
   it("keeps a local notice local after signing in", async () => {
@@ -450,7 +654,7 @@ describe("notices that stay on this computer", () => {
     expect(await titles(laptop)).toEqual(["local:Your agent finished"]);
     const other = await computer(account(server, "ana"));
     await other.store.sync();
-    expect(await other.store.list()).toEqual([]);
+    expect((await other.store.list()).notices).toEqual([]);
   });
 
   it("keeps notices local and says so once when the server has no notice list", async () => {
@@ -462,7 +666,7 @@ describe("notices that stay on this computer", () => {
     await laptop.store.sync();
     await laptop.store.sync();
     await laptop.store.postNotice(notice({ noticeId: "agent-run:2", title: "Your agent finished again" }));
-    const rows = await laptop.store.list();
+    const rows = (await laptop.store.list()).notices;
     expect(rows.map((row) => `${row.store}:${row.kind}:${row.title}`).sort()).toEqual([
       "local:agent-run:Your agent finished",
       "local:agent-run:Your agent finished again",
@@ -474,16 +678,16 @@ describe("notices that stay on this computer", () => {
     await laptop.store.sync();
     await laptop.store.postNotice(notice({ noticeId: "agent-run:3", title: "Third run" }));
     await laptop.store.sync();
-    expect((await laptop.store.list()).filter((row) => row.store === "account").map((row) => row.title))
+    expect((await laptop.store.list()).notices.filter((row) => row.store === "account").map((row) => row.title))
       .toEqual(["Third run"]);
   });
 
   it("drops local rows past retention when listing", async () => {
     const laptop = await computer(null);
     await laptop.store.postNotice(notice());
-    await laptop.store.mark({ store: "local", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "local", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     clock += NOTICE_READ_RETENTION_MS;
-    expect(await laptop.store.list()).toEqual([]);
+    expect((await laptop.store.list()).notices).toEqual([]);
     expect((await file(laptop, "local")).rows).toEqual([]);
     expect(await readdir(laptop.directory)).toEqual(["local.json"]);
   });
@@ -499,7 +703,7 @@ describe("notices that stay on this computer", () => {
     ]) {
       await expect(laptop.store.postNotice(invalid)).rejects.toThrow();
     }
-    expect(await laptop.store.list()).toEqual([]);
+    expect((await laptop.store.list()).notices).toEqual([]);
   });
 });
 
@@ -519,7 +723,7 @@ describe("notices while the signed-in account changes", () => {
     const ben = await computer(account(server, "ben"));
     await ana.store.sync();
     await ben.store.sync();
-    expect(await ana.store.list()).toEqual([]);
+    expect((await ana.store.list()).notices).toEqual([]);
     expect(await titles(ben)).toEqual(["account:Your agent finished"]);
   });
 
@@ -538,7 +742,7 @@ describe("notices while the signed-in account changes", () => {
     const ben = await computer(account(server, "ben"));
     await ana.store.sync();
     await ben.store.sync();
-    expect(await ana.store.list()).toEqual([]);
+    expect((await ana.store.list()).notices).toEqual([]);
     expect(await titles(ben)).toEqual(["account:Your agent finished"]);
   });
 
@@ -559,7 +763,7 @@ describe("notices while the signed-in account changes", () => {
     await laptop.store.sync();
     const other = await computer(account(server, "ana"));
     await other.store.sync();
-    expect((await other.store.list()).map((row) => row.noticeId)).toEqual(["one"]);
+    expect((await other.store.list()).notices.map((row) => row.noticeId)).toEqual(["one"]);
   });
 });
 
@@ -569,7 +773,7 @@ describe("the outbox", () => {
     const laptop = await computer(account(server, "ana"));
     server.failPosts = true;
     await laptop.store.postNotice(notice());
-    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.sync();
     expect((await file(laptop, "account")).marks).toEqual([
       { noticeId: "agent-run:1", mark: "read", atMs: clock },
@@ -600,7 +804,7 @@ describe("the outbox", () => {
           server.onRequest = undefined;
           // Ana marks the notice while the post is on its way; for a
           // refusal, the share ends before the relay reads the post.
-          await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, mark);
+          await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], mark, laptop.signedIn?.key ?? null);
           if (answer === "refuses") expect(server.storage.revokeShare(shareId, clock)).toBe(true);
           clock += 1;
         };
@@ -608,13 +812,16 @@ describe("the outbox", () => {
         await laptop.store.sync();
         // The relay stamps a read with its own clock when the mark arrives.
         const readAtMs = answer === "accepts" ? expect.any(Number) : markedAtMs;
+        // A grant revoked before the first pull never delivers its share notice.
+        const expectedNotices = [
+          ...(mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : []),
+          ...(answer === "accepts" ? [shareNotice(shareId)] : []),
+        ];
 
         if (answer === "accepts") {
           const other = await computer(account(server, "ana"));
           await other.store.sync();
-          expect(await other.store.list()).toEqual(
-            mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
-          );
+          expect((await other.store.list()).notices).toEqual(expectedNotices);
         } else {
           const local = (await file(laptop, "local")).rows;
           expect(local).toEqual([expect.objectContaining({
@@ -624,9 +831,7 @@ describe("the outbox", () => {
             dismissedAtMs: mark === "dismissed" ? markedAtMs : null,
           })]);
         }
-        expect(await laptop.store.list()).toEqual(
-          mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
-        );
+        expect((await laptop.store.list()).notices).toEqual(expectedNotices);
         const outbox = await file(laptop, "account");
         expect([outbox.posts, outbox.marks]).toEqual([[], []]);
       });
@@ -638,8 +843,8 @@ describe("the outbox", () => {
     const laptop = await computer(account(server, "ana"), { outboxPostLimit: 3 });
     server.online = false;
     for (const id of ["a", "b", "c"]) await laptop.store.postNotice(notice({ noticeId: id, title: id }));
-    await laptop.store.mark({ store: "account", noticeId: "a" }, "read");
-    await laptop.store.mark({ store: "account", noticeId: "b" }, "read");
+    await laptop.store.mark([{ store: "account", noticeId: "a" }], "read", laptop.signedIn?.key ?? null);
+    await laptop.store.mark([{ store: "account", noticeId: "b" }], "read", laptop.signedIn?.key ?? null);
     await laptop.store.postNotice(notice({ noticeId: "d", title: "d" }));
     await laptop.store.sync();
 
@@ -670,7 +875,7 @@ describe("notices for another person", () => {
 
     await owner.store.postNotice(failed);
     await ana.store.sync();
-    expect(await ana.store.list()).toEqual([expect.objectContaining({
+    expect((await ana.store.list()).notices).toEqual([expect.objectContaining({
       store: "account",
       noticeId: "from:owner:automation-failed:run-1",
       workspaceId: null,
@@ -678,12 +883,15 @@ describe("notices for another person", () => {
       senderLabel: "Name owner",
       senderKind: "automation",
       target: { path: "trip/tasks" },
-    })]);
-    expect(await owner.store.list()).toEqual([]);
+    }), shareNotice(shareId)]);
+    expect((await owner.store.list()).notices).toEqual([]);
 
-    await ana.store.mark({ store: "account", noticeId: "from:owner:automation-failed:run-1" }, "read");
+    await ana.store.mark([{ store: "account", noticeId: "from:owner:automation-failed:run-1" }], "read", ana.signedIn?.key ?? null);
     await ana.store.sync();
-    expect(await titles(ana)).toEqual(["account:Stamp the finish date failed (read)"]);
+    expect(await titles(ana)).toEqual([
+      "account:Stamp the finish date failed (read)",
+      "account:Name owner shared trip with you",
+    ]);
 
     await expect(owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }))
       .rejects.toThrow(new NoticeNotSentError("This person can't open what the notice points to."));
@@ -695,7 +903,12 @@ describe("notices for another person", () => {
     // When Ana loses the share, the notice stays and its target goes.
     expect(server.storage.revokeShare(shareId, clock)).toBe(true);
     await ana.store.sync();
-    expect(await ana.store.list()).toEqual([expect.objectContaining({ title: "Stamp the finish date failed", target: null })]);
+    expect((await ana.store.list()).notices).toEqual([
+      expect.objectContaining({ title: "Stamp the finish date failed", target: null }),
+      expect.objectContaining({
+        noticeId: "from:owner:share-received:grant-0", kind: "share-received", target: null, readAtMs: null,
+      }),
+    ]);
   });
 
   it("says when a person's notices are full of unread ones", async () => {

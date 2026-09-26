@@ -60,7 +60,7 @@ pub async fn fixture() -> (
         }).unwrap();
     drop(store);
     let service = Arc::new(EngineService::new());
-    let response = service.call(RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
+    let response = service.call(RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, progress: false, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
     let workspace = response.response.result["workspace"]
         .as_str()
         .unwrap()
@@ -96,6 +96,7 @@ pub async fn fixture() -> (
                 )),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: json!({ "binding": binding }),
             },
         )
@@ -131,6 +132,7 @@ pub fn request(
         )),
         deadline_ms: Some(30_000),
         idempotency_key: None,
+        progress: false,
         params: json!({
             "accepted": { "receipt": { "deliveryId": "delivery", "updateDigest": hex_sha256(bytes), "journalCursor": 1, "acceptingHostEpoch": 1 }, "binding": binding, "authority": { "principalKind": "owner", "principalId": "owner", "grantId": null, "grantGeneration": null }, "receivedAtMs": 0 },
             "registrationId": registration, "rangeCount": ranges.len()/16, "rangeStreamId": 2, "rangeDigest": hex_sha256(ranges), "updateStreamId": 1, "updateByteLength": bytes.len(),

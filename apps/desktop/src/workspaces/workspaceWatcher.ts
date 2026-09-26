@@ -28,6 +28,9 @@ export interface ActiveAgentRun {
   agentId: string;
   onBehalfOf: string;
   agentRunId: string;
+  // The chain depth the run's writes declare: 0 unless an automation woke
+  // the agent, then one more than the automation's message.
+  depth: number;
 }
 
 async function sha256OrUndefined(absolute: string): Promise<string | undefined> {
@@ -88,9 +91,9 @@ export function startWorkspaceWatch(
   options: {
     settleMs?: number;
     onRecorded?: (events: readonly WatcherEvent[]) => void;
-    // Internal consumers that need path detail (for example, the plugin
-    // pipeline) receive the same settled batch before onRecorded triggers the
-    // renderer activity notification. This adds no debounce.
+    // Internal consumers that need path detail (for example, Collection
+    // automations) receive the same settled batch before onRecorded triggers
+    // the renderer activity notification. This adds no debounce.
     onSettledBatch?: (events: WatcherEvent[]) => void;
     // Read at the moment a batch settles: a non-null capture records the
     // batch as engine moments. Null (a shared view, or a failed capture

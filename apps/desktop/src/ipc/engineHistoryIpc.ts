@@ -1,6 +1,6 @@
 // Pure engine-history -> IPC record mappers, extracted from main.ts so the
 // per-side content-kind rules are unit-testable (WS-G1 review fix). main
-// injects the display-name rule for agent authors; nothing here touches
+// injects how agent, named, and automation authors read; nothing here touches
 // Electron or process state.
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
@@ -17,22 +17,28 @@ import type {
 import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
-// Main supplies the same display-name rule the chat rail uses
-// (onBehalfOf "local" -> the cloud email or "You"; anything else is already
-// a user-facing label).
-export type EngineMomentAuthorNamer = (
-  author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>,
-) => string;
+type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
+
+// Main supplies how an author reads. An agent follows the display-name rule
+// the chat rail uses (onBehalfOf "local" -> the cloud email or "You";
+// anything else is already a user-facing label). A Collection automation
+// reads as its name and the Collection it belongs to; null leaves any other
+// automation on the moment's origin label.
+export interface EngineMomentAuthorNames {
+  agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
+  automation(automationId: string): { name: string; collection: string } | null;
+  named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+}
 
 export async function listEngineMomentsForIpc(
   read: () => ReturnType<WorkspaceEngineCapture["listMoments"]>,
-  agentAuthorDisplayName: EngineMomentAuthorNamer,
+  names: EngineMomentAuthorNames,
 ): Promise<ListEngineMomentsResponse> {
   try {
     const page = await read();
     return ListEngineMomentsResponseSchema.parse({
       moments: page.moments.map((moment) =>
-        engineMomentForIpc(moment, agentAuthorDisplayName),
+        engineMomentForIpc(moment, names),
       ),
       nextBeforeMomentOrder: page.nextBeforeMomentOrder,
       latestMomentOrder: page.latestMomentOrder,
@@ -54,8 +60,9 @@ function engineMomentBaseForIpc(
     WorkspaceEngineMomentSummary,
     "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
   >,
-  agentAuthorDisplayName: EngineMomentAuthorNamer,
+  names: EngineMomentAuthorNames,
 ) {
+  const agentAuthorName = moment.author?.kind === "agent" ? names.agent(moment.author) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -63,10 +70,14 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
-    ...(moment.author?.kind === "agent"
-      ? { agentAuthorName: agentAuthorDisplayName(moment.author) }
+    ...(agentAuthorName !== undefined
+      ? { agentAuthorName }
       : {}),
     ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
+    ...automationAuthorOf(moment.author, names),
+    ...(moment.author?.kind === "named"
+      ? { namedAuthor: { userId: moment.author.userId, label: names.named(moment.author) } }
+      : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),
@@ -76,12 +87,17 @@ function engineMomentBaseForIpc(
   };
 }
 
+function automationAuthorOf(author: MomentAuthor | undefined, names: EngineMomentAuthorNames) {
+  const automationAuthor = author?.kind === "automation" ? names.automation(author.automationId) : null;
+  return automationAuthor === null ? {} : { automationAuthor };
+}
+
 function engineMomentForIpc(
   moment: WorkspaceEngineMomentSummary,
-  agentAuthorDisplayName: EngineMomentAuthorNamer,
+  names: EngineMomentAuthorNames,
 ): EngineMomentRecord {
   return {
-    ...engineMomentBaseForIpc(moment, agentAuthorDisplayName),
+    ...engineMomentBaseForIpc(moment, names),
     momentOrder: moment.momentOrder,
     // Only stamped for protected (secret-backed) moments so ordinary rows
     // stay byte-identical to the pre-PR-08 shape.
@@ -103,14 +119,14 @@ function binarySideDetail(side: { sha256?: string; byteLength?: number }) {
 
 export function engineMomentDetailForIpc(
   detail: WorkspaceEngineMomentDetail,
-  agentAuthorDisplayName: EngineMomentAuthorNamer,
+  names: EngineMomentAuthorNames,
 ): EngineMomentDetailRecord {
   if (detail.protected) {
     // Protected moments are metadata-only: no payload exists anywhere, so
     // both text sides are null and the renderer shows "Contents are
     // protected" in place of a diff.
     return {
-      ...engineMomentBaseForIpc(detail.moment, agentAuthorDisplayName),
+      ...engineMomentBaseForIpc(detail.moment, names),
       protected: true,
       beforeText: null,
       afterText: null,
@@ -125,7 +141,7 @@ export function engineMomentDetailForIpc(
   const beforeBinary = before !== null && before.contentKind === "binary" ? before : null;
   const afterBinary = after.contentKind === "binary" ? after : null;
   return {
-    ...engineMomentBaseForIpc(moment, agentAuthorDisplayName),
+    ...engineMomentBaseForIpc(moment, names),
     // The record-level kind mirrors the timeline row: keyed on the after
     // side, so a pure-binary detail keeps its established shape.
     ...(afterBinary !== null

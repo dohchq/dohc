@@ -31,9 +31,8 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build --workspace=PASS test --workspace=PASS doctests=PASS " +
-  "test collab crash tier=PASS " +
-  "cargo-deny=PASS cargo-audit=PASS";
+  "test --workspace=PASS doctests=PASS build daemon=PASS " +
+  "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => check(passVerdict));
@@ -73,15 +72,6 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       check(passVerdict.replace("native target=PASS ", "")),
     /native target/,
   );
-  // The crash tier is compiled out of the plain workspace test run, so an
-  // evidence line missing this row means the exactly-once tests never ran.
-  assert.throws(
-    () =>
-      check(
-        passVerdict.replace(" test collab crash tier=PASS", ""),
-      ),
-    /test collab crash tier/,
-  );
   // The advisory scan is the one that had been silently skipping: CI never
   // installed cargo-audit, so the gate probed, reported SKIP, and the verdict
   // check did not mind. Both halves are now required -- the tool is installed
@@ -93,6 +83,15 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-audit/,
   );
+});
+
+test("a PASS verdict requires scratch cleanup to have passed", () => {
+  for (const replacement of ["", " scratch leak=SKIP", " scratch leak=FAIL"]) {
+    assert.throws(
+      () => check(passVerdict.replace(" scratch leak=PASS", replacement)),
+      /scratch leak/,
+    );
+  }
 });
 
 test("a required step is matched by its whole name, not as a substring", () => {
@@ -217,7 +216,7 @@ test("the gate name is required in its own field, not anywhere in the line", () 
   const impostor =
     "- 2026-07-27T00:00:00.000Z | not-the-gate | run-rust-checks | PASS | " +
     "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-    "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+    "test --workspace=PASS doctests=PASS build daemon=PASS " +
     "cargo-deny=PASS cargo-audit=PASS";
   assert.throws(
     () => check(impostor),
@@ -349,23 +348,28 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 // contract. `scripts/rust-gate-artifact.test.mjs` now runs the real producer
 // and feeds its evidence line to this checker, which cannot rot.
 
-test("PR workflow validates the canonical verdict and installed cargo-deny version", () => {
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/run-rust-checks\.mjs 2>&1 \| tee pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/require-ci-pass-verdict\.mjs pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_DENY_VERSION[\s\S]*"cargo-deny \$CARGO_DENY_VERSION"/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"\$CARGO_AUDIT_VERSION"/,
-  );
+test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
+  const document = load(workflow);
+  for (const [job, prefix, gate] of [
+    ["javascript", "xvfb-run -a ", "js"],
+    ["rust", "", "rust"],
+  ]) {
+    const steps = document.jobs[job].steps;
+    const selected = steps.find(step => step.run?.trim() === `${prefix}pnpm verify:pr --base "$PR_BASE_SHA" --job ${gate}`);
+    const full = steps.find(step => step.run?.trim() === `${prefix}pnpm verify:pr --base HEAD --job ${gate} --full`);
+    assert.ok(selected, `${job} must use affected-package selection for PRs`);
+    assert.equal(selected.if, "github.event_name == 'pull_request'");
+    assert.equal(selected.env.PR_BASE_SHA, "${{ github.event.pull_request.base.sha }}");
+    assert.ok(full, `${job} must support complete manual verification`);
+    assert.equal(full.if, "github.event_name == 'workflow_dispatch'");
+    const checkout = steps.find(step => step.uses?.startsWith("actions/checkout@"));
+    assert.equal(checkout.with.ref, "${{ github.sha }}");
+    assert.equal(checkout.with["fetch-depth"], 0, "base and merge commit must both be available");
+    assert.equal(checkout.with["persist-credentials"], false);
+  }
+  const install = document.jobs.rust.steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
+  assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
+    `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
 });
 
 test("both gate filters select on ignore rules and vendored engine dependencies", () => {
@@ -396,14 +400,125 @@ test("both gate filters select on ignore rules and vendored engine dependencies"
   assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
 });
 
-test("PR workflow stays dispatch-only and cannot schedule cloud runners", () => {
+// These cases use string/boolean comparisons shared by JavaScript and Actions.
+// Actionlint checks syntax; this helper does not model all Actions coercions.
+// Read the actual expressions so a removed switch or dependency breaks the test.
+function workflowExpression(expression, { github, vars = {}, inputs = {}, needs = {}, cancelled = false }) {
+  const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  return Function("github", "vars", "inputs", "needs", "fromJSON", "format", "always", "cancelled", `return (${source});`)(
+    github, vars, inputs, needs, JSON.parse,
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[index]),
+    () => true, () => cancelled,
+  );
+}
+
+function workflowContext({ enabled = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4" } = {}) {
+  return {
+    github: {event_name: event, repository: "dohc-ai/dohc", event: {pull_request: {draft, head: {repo: {full_name: fork ? "contributor/dohc" : "dohc-ai/dohc"}}}}},
+    vars: {BLACKSMITH_ENABLED: enabled}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size} : {},
+  };
+}
+
+test("disabled cloud CI never allocates a PR runner, while manual runs stay self-hosted", () => {
   const document = load(workflow);
-  assert.deepEqual(Object.keys(document.on), ["workflow_dispatch"]);
-  for (const [name, job] of Object.entries(document.jobs)) {
-    assert.ok(Array.isArray(job["runs-on"]), `${name} must use explicit local runner labels`);
-    assert.ok(job["runs-on"].includes("self-hosted"), `${name} must use a self-hosted runner`);
+  assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
+  assert.deepEqual(document.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]);
+  for (const enabled of ["", "false", "0", "disabled"]) {
+    for (const draft of [false, true]) {
+      const context = workflowContext({enabled, draft});
+      assert.equal(workflowExpression(document.jobs.changes.if, context), false);
+      for (const name of ["javascript", "rust"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
+      assert.equal(workflowExpression(document.jobs.verification.if, {...context, needs: {changes: {result: "skipped"}}}), false);
+    }
+    const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
+    assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
+    for (const job of Object.values(document.jobs)) {
+      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["self-hosted", "linux", "x64"]);
+    }
   }
-  assert.equal(document.concurrency["cancel-in-progress"], false);
+});
+
+test("enabled cloud CI excludes drafts and forks and bounds manual runner sizes", () => {
+  const {jobs, concurrency} = load(workflow);
+  for (const draft of [false, true]) for (const fork of [false, true]) {
+    assert.equal(workflowExpression(jobs.changes.if, workflowContext({enabled: "true", draft, fork})), !draft && !fork);
+  }
+  for (const event of ["pull_request", "workflow_dispatch"]) {
+    assert.equal(workflowExpression(concurrency["cancel-in-progress"], workflowContext({event})), event === "pull_request");
+  }
+  assert.match(concurrency.group, /github\.event_name/, "manual runs must not replace PR checks");
+  for (const size of ["4", "8", "32", ""]) {
+    const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
+    for (const name of ["javascript", "rust"]) {
+      assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
+      assert.equal(jobs[name]["timeout-minutes"], 60);
+    }
+    for (const name of ["changes", "verification"]) {
+      assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
+    }
+  }
+  for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
+    const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
+    assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
+    assert.equal(workflowExpression(jobs.rust.if, context), rust === "true");
+  }
+  for (const gate of ["all", "js", "rust"]) {
+    const context = {...workflowContext({event: "workflow_dispatch", gate}), needs: {changes: {outputs: {}}}};
+    assert.equal(workflowExpression(jobs.javascript.if, context), gate !== "rust");
+    assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
+  }
+});
+
+test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {
+  const {jobs} = load(workflow);
+  const checkout = jobs.changes.steps.find(step => step.uses?.startsWith("actions/checkout@"));
+  const filter = jobs.changes.steps.find(step => step.id === "filter");
+  assert.equal(checkout.with.ref, "${{ github.sha }}");
+  assert.equal(checkout.with["fetch-depth"], 0);
+  assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
+  assert.equal(filter.with.base, "${{ github.event.pull_request.base.sha }}");
+  for (const name of ["javascript", "rust"]) {
+    const upload = jobs[name].steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
+    assert.equal(upload.if, "always()");
+    assert.equal(upload.with["retention-days"], 7);
+    assert.equal(upload.with["include-hidden-files"], true);
+    assert.ok(upload.with.path.trim().split("\n").every(path => /\/(?:result\.json|\*\.log)$/.test(path)), "upload only receipts and logs, not workspaces or profiles");
+  }
+});
+
+test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
+  const job = load(workflow).jobs.verification;
+  assert.deepEqual(job.needs, ["changes", "javascript", "rust"]);
+  assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
+  assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
+  const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
+  const setupIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
+  assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "self-hosted verdicts need Node on PATH");
+  assert.equal(job.steps[setupIndex].with["node-version"], "24");
+  const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
+  assert.ok(source, "the final check must execute its verdict");
+  const run = (jobs, event = "pull_request", gate = "all") => spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+    env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate}, encoding: "utf8", timeout: 10_000,
+  });
+  const jobs = (js, rust, jsResult, rustResult) => ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}});
+  for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
+    const valid = jobs(js, rust, js === "true" ? "success" : "skipped", rust === "true" ? "success" : "skipped");
+    assert.equal(run(valid).status, 0);
+    for (const name of ["javascript", "rust"]) for (const result of ["failure", "cancelled", undefined]) {
+      assert.equal(run({...valid, [name]: {result}}).status, 1);
+    }
+    for (const name of ["javascript", "rust"]) {
+      const opposite = valid[name].result === "success" ? "skipped" : "success";
+      assert.equal(run({...valid, [name]: {result: opposite}}).status, 1);
+    }
+  }
+  for (const result of ["failure", "cancelled", "skipped", undefined]) {
+    assert.equal(run({...jobs("true", "true", "success", "success"), changes: {result}}).status, 1);
+  }
+  assert.equal(run(jobs(undefined, "false", "skipped", "skipped")).status, 1);
+  for (const gate of ["all", "js", "rust"]) {
+    assert.equal(run(jobs(undefined, undefined, gate === "rust" ? "skipped" : "success", gate === "js" ? "skipped" : "success"), "workflow_dispatch", gate).status, 0);
+  }
 });
 
 // A run's readings: the tree before the first step, then after each step. A
@@ -459,12 +574,12 @@ test("a tree that changed and changed back is caught by the reading between", ()
   const restored = classifyTreeProvenance([
     { step: "start", state: A },
     { step: "native target", state: A },
-    { step: "build --workspace", state: B },
+    { step: "build daemon", state: B },
     { step: "test --workspace", state: A },
   ]);
   assert.equal(restored.status, "FAIL");
   // The step is named, because that is what a reader has to re-run.
-  assert.match(restored.reason, /HEAD moved during `build --workspace`/);
+  assert.match(restored.reason, /HEAD moved during `build daemon`/);
   assert.equal(restored.stamp, "UNATTRIBUTABLE");
 
   // The same for an edit that is reverted: A, dirty, A.
@@ -819,7 +934,7 @@ test("a HEAD that moved and came back inside one step is refused", () => {
   // commit cannot show.
   const returned = classifyTreeProvenance([
     { step: "start", state: A },
-    { step: "build --workspace", state: A },
+    { step: "build daemon", state: A },
     { step: "test --workspace", state: logged(2) },
   ]);
   assert.equal(returned.status, "FAIL");

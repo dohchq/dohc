@@ -1,3 +1,4 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import type { MomentAuthor } from "@dohc/workspace-contracts";
 import type {
   MaterializeRelayPullPage,
@@ -12,12 +13,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import {
-  localWorkspaceSdkDatabaseEditor,
-  localWorkspaceSdkReads,
-} from "../testing/localWorkspaceSdkReads";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -171,7 +167,21 @@ function liveCapture(
 ): WorkspaceEngineCapture {
   const { requests, ...rest } = options;
   return capture(root, {
-    rustEngineSessions: mockLiveSessions(loopback, requests),
+    rustEngineSessions: mockLiveSessions(loopback, requests, undefined, async (request) => {
+      const params = request.params as { createOnly?: boolean; path: string; text: string };
+      if (request.method !== VERSIONED_METHOD.textWrite || params.createOnly !== true) return;
+      const target = join(root, params.path);
+      await mkdir(dirname(target), { recursive: true });
+      try {
+        await writeFile(target, params.text, { flag: "wx" });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          requests?.push(request);
+          throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
+        }
+        throw error;
+      }
+    }),
     ...rest,
   });
 }
@@ -344,6 +354,29 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(objectId).toBeTruthy();
     expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    await engine.stop();
+  });
+
+  it("lists one file's moments in the active version when given its object id", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    for (const [path, text, objectId] of [
+      ["plan.md", "# Plan\n", "object-plan"],
+      ["other.md", "# Other\n", "object-other"],
+      ["plan.md", "# Plan\n\nShip Friday.\n", "object-plan"],
+    ] as const) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text, objectId });
+    }
+    const engine = capture(root, { rustEngineSessions: mockLiveSessions(loopback, requests) });
+
+    const page = await engine.listMoments({ limit: 10, objectId: "object-plan" });
+    expect(page.moments.map((moment) => [moment.path, moment.objectId, moment.protected])).toEqual([
+      ["plan.md", "object-plan", false],
+      ["plan.md", "object-plan", false],
+    ]);
+    expect(page.activeVersionId).toBe("main");
+    expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
     await engine.stop();
   });
 
@@ -1003,6 +1036,28 @@ describe("workspaceEngineCapture batch capture", () => {
     await reopened.stop();
   });
 
+  it("names the agent on a response it removes during a run an automation started",async()=>{
+    const root=await createTestScratch("dohc-response-agent-");
+    const requests:Request[]=[];
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine(),requests);
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    await write(root,"responses/accepted-a.md","response");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    expect((await engine.undoAcceptedAppResponse(selection,{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3})).status).toBe("deleted");
+    expect(requests.findLast(request=>request.method==="versionedText.delete")?.params).toMatchObject({
+      requestId:"undo-a",author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3},
+    });
+    await engine.stop();
+  });
+
   it("pages long response history and recovers an interrupted deletion without deleting a restore",async()=>{
     const root=await createTestScratch("dohc-response-recovery-");
     const requests:Request[]=[];
@@ -1141,6 +1196,51 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("does not save a Collection file stored as binary as an edit when its bytes are unchanged", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const current = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from("version: 1\n") });
+    const changed = await store.writeBinaryFile({ ...target, bytes: Buffer.from(current) });
+    await write(root, target.path, current);
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await engine.restoreFileToBeforeMoment(changed.moment.id);
+
+    const summaries = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.map(
+      (moment) => moment.metadata.summary,
+    );
+    expect(summaries).not.toContain("Saved latest edits");
+    expect(await readFile(join(root, target.path), "utf8")).toBe("version: 1\n");
+    await engine.stop();
+  });
+
+  it("restores nothing when the current text has the bytes of the binary state before the moment", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "trip/automations.yaml", metadata: { origin: "api" as const } };
+    const original = "version: 1\nautomations: []\n";
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    await store.writeBinaryFile({ ...target, bytes: Buffer.from(original) });
+    const edited = await store.writeTextFile({ ...target, text: "version: 1\n" });
+    await store.writeTextFile({ ...target, text: original });
+    await write(root, target.path, original);
+    const before = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.length;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+
+    await expect(engine.restoreFileToBeforeMoment(edited.moment.id)).resolves.toMatchObject({
+      restoredMomentId: edited.moment.id,
+    });
+
+    expect((await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(before);
+    expect((await store.readTextFile(target))?.contentKind).toBe("text");
+    await engine.stop();
+  });
+
   it("closes both daemon stores when the final capture flush rejects", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
@@ -1221,6 +1321,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
@@ -1270,6 +1371,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -1327,7 +1429,8 @@ describe("workspaceEngineCapture batch capture", () => {
         // an absent `head` would silently disable the absent-head refusal for
         // every drift case here.
         head: "present" as const,
-        lineage: "existing" as const,
+        // A fresh document: an existing lineage would settle once at open.
+        lineage: "absent" as const,
         evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
@@ -1365,6 +1468,76 @@ describe("workspaceEngineCapture batch capture", () => {
   }
 
   const EDITOR_TEXT = "typed in dohc\n";
+
+  // The open says "settling" before its settle runs. A settle refused before
+  // it starts reports nothing of its own, so the open closes that report.
+  it("replaces the open-time Saving… when the settle is refused before it starts", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async () =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            throw new Error("refused before the settle started");
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toEqual(["settling", "error"]));
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("reports the open-time settle's own failure once", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            const failure = new Error("the settle started and failed");
+            options.onSettleStart?.(1);
+            options.onSettleError?.(failure, 1);
+            throw failure;
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toContain("error"));
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(states).toEqual(["settling", "settling", "error"]);
+  });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -2505,53 +2678,22 @@ describe("createDefaultDiskWriter symlink containment", () => {
 });
 
 // Agent-attributed capture: while a dohc-tracked agent run is active the
-// daemon stamps its captures with that author; a plugin write carries its
+// daemon stamps its captures with that author; an authored write carries its
 // own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
-  const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+  const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
 
-  it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
+  it("records an authored write under its own author, not the ambient run", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     await engine.setActiveAgentRun(run);
-    const spawnId = "plugin-spawn-123";
+    const author = { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn-123" } as const;
 
-    await invokePluginSdkHost(
-      {
-        pluginId: "hello-plugin",
-        workspaceRoot: root,
-        reads: localWorkspaceSdkReads(root),
-        editDatabase: localWorkspaceSdkDatabaseEditor(root),
-        spawnId,
-        requestPath: "plugin-process",
-        isWritable: () => true,
-        writeAvailable: async () => true,
-        writeAuthoredText: async (path, text, options) => {
-          expect(options.overwrite).toBe(true);
-          await engine.writeAuthoredTextFile(
-            join(root, path),
-            text,
-            options.author,
-          );
-          return { path };
-        },
-      },
-      "files.write",
-      { path: "plugin-output.txt", text: "Written by plugin\n" },
-    );
+    await engine.writeAuthoredTextFile(join(root, "output.txt"), "Written by an agent\n", author);
 
-    expect(await readFile(join(root, "plugin-output.txt"), "utf8")).toBe(
-      "Written by plugin\n",
-    );
-    expect(await liveMomentAuthors(engine)).toEqual([
-      {
-        kind: "agent",
-        agentId: "plugin:hello-plugin",
-        onBehalfOf: "local",
-        agentRunId: spawnId,
-      },
-    ]);
+    expect(await readFile(join(root, "output.txt"), "utf8")).toBe("Written by an agent\n");
+    expect(await liveMomentAuthors(engine)).toEqual([author]);
     await engine.stop();
   });
 
@@ -2569,7 +2711,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const result = await engine.writeAuthoredTextFile(
       join(root, "alias", "output.txt"),
       "canonical\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
     );
 
     expect(result.resolvedAbsolutePath).toBe(join(canonical, "output.txt"));
@@ -2588,7 +2730,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const target = join(root, "exclusive.txt");
     const author = {
       kind: "agent" as const,
-      agentId: "plugin:test",
+      agentId: "test-agent",
       onBehalfOf: "local",
       agentRunId: "spawn",
     };
@@ -2600,11 +2742,51 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
-    expect(String(attempts.find((attempt) => attempt.status === "rejected")?.reason)).toContain(
-      "File already exists: exclusive.txt",
-    );
+    const collision = attempts.find((attempt) => attempt.status === "rejected")?.reason;
+    expect(collision).toBeInstanceOf(VersionedTextStoreError);
+    expect(collision).toMatchObject({ code: "target-path-exists", message: "File already exists: exclusive.txt" });
     await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
     await engine.stop();
+  });
+
+  it("refuses an authored create when an ordinary file wins after the existence check", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const targetPath = join(root, "record.md");
+    const competingText = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nKeep this record.\n";
+    const realLoopback = new VersionedLoopbackEngine();
+    let injected = false;
+    const requests: Request[] = [];
+    const loopback = new Proxy(realLoopback, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") return Reflect.get(target, property, receiver);
+        return async (request: Request) => {
+          if (!injected && request.method === VERSIONED_METHOD.versionsActive) {
+            injected = true;
+            await writeFile(targetPath, competingText, { flag: "wx" });
+          }
+          return target.sendRequest(request);
+        };
+      },
+    });
+    const engine = liveCapture(root, loopback, { requests });
+    try {
+      const outcome = await engine.writeAuthoredTextFile(
+        targetPath,
+        "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
+        { kind: "agent", agentId: "plugin:records", onBehalfOf: "local", agentRunId: "create" },
+        { createOnly: true },
+      ).then(() => "created", (error: unknown) => ({ refused: String(error) }));
+      expect(injected).toBe(true);
+      expect.soft(outcome).not.toBe("created");
+      expect.soft(outcome).toEqual({ refused: expect.stringMatching(/exist/i) });
+      expect.soft(await readFile(targetPath, "utf8")).toBe(competingText);
+      expect.soft(requests.filter(request => request.method === VERSIONED_METHOD.textWrite)).toEqual([
+        expect.objectContaining({ params: expect.objectContaining({ createOnly: true }) }),
+      ]);
+      expect(await liveMoments(engine)).toEqual([]);
+    } finally {
+      await engine.stop();
+    }
   });
 
   it("rechecks panel cancellation after an authored write reaches the capture queue", async () => {
@@ -2630,7 +2812,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const blocker = engine.writeAuthoredTextFile(
       join(root, "queue-blocker.txt"),
       "block\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
     );
     await entered.promise;
 
@@ -2638,13 +2820,13 @@ describe("workspaceEngineCapture agent attribution", () => {
     const pending = engine.writeAuthoredTextFile(
       join(root, "cancelled.txt"),
       "must not land\n",
-      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { kind: "agent", agentId: "test-agent", onBehalfOf: "local", agentRunId: "spawn" },
       { signal: controller.signal },
     );
     controller.abort();
     release.resolve();
 
-    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await expect(pending).rejects.toThrow("The write was cancelled.");
     await blocker;
     expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
     await engine.stop();
@@ -2655,7 +2837,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const author = {
       kind: "agent" as const,
-      agentId: "plugin:test",
+      agentId: "test-agent",
       onBehalfOf: "local",
       agentRunId: "spawn",
     };
@@ -2689,6 +2871,8 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     await engine.setActiveAgentRun(run);
     await engine.setActiveAgentRun(null);
+    // A run an automation woke names its chain depth; a person's names none.
+    await engine.setActiveAgentRun({ ...run, agentRunId: "run-woken", depth: 3 });
 
     const authorRequests = requests.filter((request) =>
       request.method === "capture.setAuthor" ||
@@ -2698,11 +2882,16 @@ describe("workspaceEngineCapture agent attribution", () => {
       "capture.setAuthor",
       "capture.flush",
       "capture.setAuthor",
+      "capture.setAuthor",
     ]);
+    const { depth: _personDepth, ...person } = run;
     expect(authorRequests[0]?.params).toEqual({
-      author: { kind: "agent", ...run },
+      author: { kind: "agent", ...person },
     });
     expect(authorRequests[2]?.params).toEqual({ author: null });
+    expect(authorRequests[3]?.params).toEqual({
+      author: { kind: "agent", ...person, agentRunId: "run-woken", depth: 3 },
+    });
     await engine.stop();
   });
 
@@ -2980,6 +3169,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           get artifactAssets() {
             return activeAssets;
           },
@@ -3411,6 +3601,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             return "absent" as const;
           },
           lineage: "absent" as const,
+          unsettled: false,
           evict: async () => {
             evicts += 1;
           },

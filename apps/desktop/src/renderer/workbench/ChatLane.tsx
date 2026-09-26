@@ -39,7 +39,7 @@ export function ChatLane(props: {
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
@@ -137,7 +137,7 @@ export function ChatLane(props: {
     } catch (error) {
       if (!isCurrent()) return;
       setLoading(false);
-      onError(ipcErrorMessage(error, "Could not load the chat."));
+      onError(ipcErrorMessage(error, "Could not load the chat."), error);
     }
   }, [channelId, markRead, onError, workspaceId]);
 
@@ -231,7 +231,7 @@ export function ChatLane(props: {
       void load(true);
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not send that message."));
+      onError(ipcErrorMessage(error, "Could not send that message."), error);
     } finally {
       if (current === token.current) setSending(false);
     }
@@ -256,7 +256,7 @@ export function ChatLane(props: {
       setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved.decision : entry));
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not answer that poll."));
+      onError(ipcErrorMessage(error, "Could not answer that poll."), error);
     } finally {
       if (current === token.current) {
         setSending(false);

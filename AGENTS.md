@@ -43,7 +43,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 7. **Apps are real web apps.** A dohc app is source-backed, inspectable, dynamic, and connected only to data and capabilities the owner exposes. Its source lives and syncs in the workspace so collaborators and their agents can continue changing it. It can be shared by URL with someone who does not use dohc. Treat app execution, authentication, and workspace access as separate security boundaries.
 
-8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Plugins extend dohc; keep their source visible and easy for agents to change. The core must already provide the reliable substrate.
+8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Apps and Collection automations extend the work; their source and definitions live in the workspace, where any agent can read and change them. People customize dohc through a settings file and pinned apps. They do not rewrite built-in parts, and updates keep their settings and apps. The core must already provide the reliable substrate.
 
 Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
 
@@ -76,7 +76,7 @@ Use these examples to test product proposals. A feature can use dohc's vocabular
 
 ### Tailor the workspace
 
-- ✅ **dohc.** A user asks an agent to create or change a source-visible plugin or app for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
+- ✅ **dohc.** A user asks an agent to create or change an app or a Collection automation for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
 - ❌ **Not dohc.** dohc ships a hardcoded CRM, requires a project ritual, or becomes a template marketplace. dohc supplies reliable building blocks. Users and agents decide what to build.
 
 ## Product invariants
@@ -167,8 +167,11 @@ Run the smallest check that proves the change.
 
 ## Pull requests and merging
 
-PR verification runs locally because cloud CI costs remain out of budget.
-GitHub PR checks stay dispatch-only and require self-hosted runners. Do not enable cloud runners.
+Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABLED`.
+While off, run PR verification locally. Manual GitHub checks use self-hosted Linux runners.
+When enabled, ready PRs from this repository use Blacksmith. Fork PRs still need local verification.
+Use passing cloud evidence instead of repeating full gates locally when it covers the change.
+Before changing CI activation, read [the Blacksmith setup procedure](docs/how-to/enable-blacksmith.md).
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
@@ -176,15 +179,17 @@ Finish implementation, self-simplification, and focused checks before requesting
 
 The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
+The plan narrows JavaScript packages and integration proofs through workspace dependencies and external test inputs.
+Shared configuration and unknown code inputs retain full verification.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Before merging, require passing local evidence that covers the PR's changes.
+- Before merging, require passing canonical gate evidence that covers the PR's changes.
 - After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
 - Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
-- When impact is unclear, run both jobs with explicit `--job js` and `--job rust` invocations.
-- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
+- When impact is unclear, use `pnpm verify:pr --base <target-ref> --full` to run both complete jobs.
+- Record the tested commit, target ref, selected gates and JavaScript scope, result, and evidence location. Explain any reuse across commits.
 - If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 

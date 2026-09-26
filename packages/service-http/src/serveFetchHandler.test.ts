@@ -6,6 +6,7 @@ import { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHa
 const servers: Server[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -42,6 +43,137 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 }
 
 describe("serveFetchHandler", () => {
+  it("keeps Node's default receive deadline unless streaming is configured", async () => {
+    const ordinary = await serve({handler: async () => new Response(null)});
+    const streaming = await serve({streamBody: () => true, handler: async () => new Response(null)});
+    expect(ordinary.server.requestTimeout).toBe(300_000);
+    expect(ordinary.server.headersTimeout).toBe(60_000);
+    expect(streaming.server.requestTimeout).toBe(0);
+    expect(streaming.server.headersTimeout).toBe(60_000);
+  });
+
+  it("bounds ordinary body receipt after headers when streaming is configured", async () => {
+    const handler = vi.fn(async () => new Response("ok"));
+    const {port, server} = await serve({streamBody: url => url.pathname === "/import", handler});
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const arrived = new Promise<void>(resolve => server.once("request", () => resolve()));
+    const response = new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/ordinary`, {method: "POST"}, resolve);
+      request.on("error", reject);
+      request.write("unfinished");
+    });
+    await arrived;
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(300_000);
+    const refused = await response;
+    expect(refused.statusCode).toBe(408);
+    expect(refused.headers.connection).toBe("close");
+    refused.resume();
+    expect(handler).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the ordinary receipt timer before running the handler", async () => {
+    let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => {entered = resolve;});
+    const {port} = await serve({streamBody: () => false, handler: async request => {
+      expect(await request.text()).toBe("complete");
+      await new Promise<void>(resolve => {finish = resolve; entered();});
+      expect(request.signal.aborted).toBe(false);
+      return new Response("ok");
+    }});
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const response = new Promise<IncomingMessage>((resolve, reject) => {
+      httpRequest(`http://127.0.0.1:${port}/ordinary`, {method: "POST"}, resolve).on("error", reject).end("complete");
+    });
+    await started;
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(300_000);
+    finish();
+    const completed = await response;
+    expect(completed.statusCode).toBe(200);
+    completed.resume();
+  });
+
+  it("leaves streaming receipt deadlines to the handler and aborts a disconnected upload", async () => {
+    let entered!: () => void, aborted!: () => void;
+    const started = new Promise<void>(resolve => {entered = resolve;});
+    const cancelled = new Promise<void>(resolve => {aborted = resolve;});
+    let signal!: AbortSignal;
+    const {port} = await serve({streamBody: () => true, handler: async request => {
+      signal = request.signal;
+      request.signal.addEventListener("abort", aborted, {once: true});
+      const reader = request.body!.getReader();
+      expect((await reader.read()).value?.byteLength).toBe(1);
+      entered();
+      try { await reader.read(); } catch { /* Disconnect rejects the pending read. */ }
+      return new Response(null);
+    }});
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const request = httpRequest(`http://127.0.0.1:${port}/import`, {method: "POST"});
+    request.on("error", () => {});
+    request.write("x");
+    await started;
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(signal.aborted).toBe(false);
+    request.destroy();
+    await cancelled;
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("admits a streaming upload before its client finishes sending the body", async () => {
+    const { port } = await serve({
+      streamBody: () => true,
+      handler: async () => new Response("not authorized", { status: 403 }),
+    });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "POST" }, resolve);
+      request.on("error", reject);
+      request.write(Buffer.alloc(1));
+      // No end: authentication must not wait for the rest of an archive.
+    });
+    expect(response.statusCode).toBe(403);
+    response.resume();
+  });
+
+  it("answers a streamed route's GET without reading the upload it carries", async () => {
+    let body: ReadableStream<Uint8Array> | null | undefined;
+    const { port } = await serve({
+      streamBody: () => true,
+      handler: async request => {
+        body = request.body;
+        return new Response(null, { status: 405 });
+      },
+    });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "GET", headers: { "content-length": "1048576" } }, resolve);
+      request.on("error", reject);
+      request.write(Buffer.alloc(1));
+      // No end: the answer must not wait for the rest of the upload.
+    });
+    expect(response.statusCode).toBe(405);
+    expect(response.headers.connection).toBe("close");
+    expect(body).toBeNull();
+    response.resume();
+  });
+
+  it("streams uploads larger than its ordinary buffering cap with prepared headers", async () => {
+    const { port } = await serve({
+      streamBody: () => true,
+      prepareHeaders: headers => headers.set("x-trusted", "server"),
+      handler: async request => {
+        expect(request.headers.get("x-trusted")).toBe("server");
+        let bytes = 0;
+        for await (const chunk of request.body!) bytes += chunk.byteLength;
+        return Response.json({ bytes });
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${port}/import`, { method: "POST", body: Buffer.alloc(2048) });
+    expect(await response.json()).toEqual({ bytes: 2048 });
+  });
+
   it("disposes an errored response returned after its client disconnected", async () => {
     let entered!: () => void, cancellationAwaited!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });

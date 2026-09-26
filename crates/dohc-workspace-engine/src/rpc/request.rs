@@ -136,14 +136,38 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty())
     };
-    let run_valid = object
-        .get("agentRunId")
-        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
-    if object.get("kind").and_then(Value::as_str) != Some("agent")
-        || !nonempty("agentId")
-        || !nonempty("onBehalfOf")
-        || !run_valid
-    {
+    let depth_within = |value: &Value, least: u64| {
+        value.as_u64().is_some_and(|depth| {
+            (least..=u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH)).contains(&depth)
+        })
+    };
+    let valid = match object.get("kind").and_then(Value::as_str) {
+        // An agent run an automation started names its chain depth, so the
+        // claims its writes cause carry the chain on and stop at the cap. A
+        // run a person started names none: absent means 0.
+        Some("agent") => {
+            nonempty("agentId")
+                && nonempty("onBehalfOf")
+                && object
+                    .get("agentRunId")
+                    .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                && object
+                    .get("depth")
+                    .is_none_or(|value| depth_within(value, 1))
+        }
+        // An automation writing a file, so the moment carries its identity
+        // and chain depth into the claims the write causes.
+        Some("automation") => {
+            nonempty("automationId")
+                && nonempty("onBehalfOf")
+                && object.len() == 4
+                && object
+                    .get("depth")
+                    .is_some_and(|value| depth_within(value, 0))
+        }
+        _ => false,
+    };
+    if !valid {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     serde_json::to_string(&value)
@@ -203,5 +227,36 @@ impl EngineService {
             () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
             result = read => result.map_err(map_runtime),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_author;
+    use serde_json::json;
+
+    #[test]
+    fn an_agent_author_may_name_a_bounded_chain_depth() {
+        let agent = json!({"kind": "agent", "agentId": "runner", "onBehalfOf": "local"});
+        assert!(validated_author(Some(&agent)).is_ok());
+        let mut woken = agent.clone();
+        woken["depth"] = json!(3);
+        assert!(validated_author(Some(&woken)).is_ok());
+        for depth in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("3"),
+            json!(u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH) + 1),
+        ] {
+            let mut invalid = agent.clone();
+            invalid["depth"] = depth;
+            assert!(validated_author(Some(&invalid)).is_err(), "{invalid}");
+        }
+        let automation = json!({"kind": "automation", "automationId": "collection:Tasks#a", "onBehalfOf": "local"});
+        assert!(
+            validated_author(Some(&automation)).is_err(),
+            "an automation always names its depth"
+        );
     }
 }

@@ -97,6 +97,10 @@ import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
+import * as automationHostStorage from "./storage/automationHosts";
+import * as collectionWriteStorage from "./storage/collectionWrites";
+import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
+import * as automationPressStorage from "./storage/automationPresses";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -199,6 +203,7 @@ export {
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
 export { normalizeDiscussionDisplayName } from "./storage/discussion";
+export { CollectionWriteStaleError, type CollectionWriteReceipt } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
 
@@ -527,8 +532,72 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.readNoticeChanges(this, input);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): void {
-    noticeStorage.markNotices(this, input);
+  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+    return noticeStorage.markNotices(this, input);
+  }
+
+  noticeShareReceived(input: noticeStorage.NoticeShareReceivedInput): void {
+    noticeStorage.noticeShareReceived(this, input);
+  }
+
+  pendingShareNotices(recipientUserId: string) {
+    return noticeStorage.pendingShareNotices(this, recipientUserId);
+  }
+
+  readAutomationHost(input: {workspaceId: string; ownerUserId: string}) {
+    return automationHostStorage.readAutomationHost(this, input);
+  }
+
+  checkInAutomationComputer(input: automationHostStorage.AutomationHostCheckInInput) {
+    return automationHostStorage.checkInAutomationComputer(this, input);
+  }
+
+  chooseAutomationHost(input: automationHostStorage.AutomationHostChooseInput) {
+    return automationHostStorage.chooseAutomationHost(this, input);
+  }
+
+  releaseAutomationHost(input: automationHostStorage.AutomationHostReleaseInput) {
+    return automationHostStorage.releaseAutomationHost(this, input);
+  }
+
+  takeOverAutomationHost(input: automationHostStorage.AutomationHostTakeOverInput) {
+    return automationHostStorage.takeOverAutomationHost(this, input);
+  }
+
+  readAutomationGroupHandover(input: automationHostStorage.AutomationGroupHandoverInput) {
+    return automationHostStorage.readAutomationGroupHandover(this, input);
+  }
+
+  commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
+    return collectionWriteStorage.commitCollectionWrite(this, input);
+  }
+
+  readOwnerCollectionWrites(input: ownerCollectionWriteStorage.OwnerCollectionWritesInput) {
+    return ownerCollectionWriteStorage.readOwnerCollectionWrites(this, input);
+  }
+
+  recordAutomationPress(input: automationPressStorage.RecordAutomationPressInput) {
+    return automationPressStorage.recordAutomationPress(this, input);
+  }
+
+  listAutomationPresses(input: automationPressStorage.HostScope & { nowMs: number }) {
+    return automationPressStorage.listAutomationPresses(this, input);
+  }
+
+  automationPressWait(input: automationPressStorage.HostScope & { nowMs: number }) {
+    return automationPressStorage.automationPressWait(this, input);
+  }
+
+  pruneExpiredAutomationPresses(nowMs: number) {
+    return this.tx(() => automationPressStorage.pruneExpired(this, nowMs));
+  }
+
+  acceptAutomationPresses(input: Parameters<typeof automationPressStorage.acceptAutomationPresses>[1]) {
+    return automationPressStorage.acceptAutomationPresses(this, input);
+  }
+
+  settleAutomationPress(input: Parameters<typeof automationPressStorage.settleAutomationPress>[1]) {
+    return automationPressStorage.settleAutomationPress(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
@@ -900,6 +969,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    aboveRelaySeq?: number;
   }): SyncRelayLogRow[] {
     return objectIndexStorage.listVersionCreateLogRowsByBlob(this, input);
   }
@@ -1075,6 +1145,37 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     epochLogFloor: number;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
+  }
+
+  listLinkRevisionLogRows(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): SyncRelayLogRow[] {
+    return currentFilesStorage.listLinkRevisionLogRows(this, input);
+  }
+
+  currentObjectBlobByteLength(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    objectId: string;
+    sha256: string;
+    epochLogFloor: number;
+  }): number | null {
+    return currentFilesStorage.currentObjectBlobByteLength(this, input);
+  }
+
+  laterObjectMomentPaths(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    afterRelaySeq: number;
+    limit: number;
+  }): Array<string | null> {
+    return currentFilesStorage.laterObjectMomentPaths(this, input);
   }
 
   fetchLogPageDescending(input: {

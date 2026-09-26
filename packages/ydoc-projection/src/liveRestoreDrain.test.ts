@@ -21,6 +21,8 @@ import {canonicalAcceptedMetadata} from "../../../services/sync-relay/src/liveAc
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 import {OwnerRestoreReview} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
+import {liveBaselineStoredBytes} from "./liveBaselineQuotaTestSupport.js";
+import {journalMetadataBytes, liveDeliveryBookkeepingBytes} from "./liveDeliveryQuotaTestSupport.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
@@ -1057,23 +1059,47 @@ it("does not select a checkpoint after the chosen point", () => {
   } finally {f.close();}
 });
 
-it("resolves from a real 4095-cadence checkpoint and refuses its stale path or fence", () => {
+it("checkpoints exactly the 4095th real delivery including no-ops, restores its suffix, and refuses stale checkpoint authority", () => {
   const f = fixture("bootstrap", "service");
   try {
-    const receipts = [f.add("checkpoint")];
+    const receipts: ReturnType<typeof f.add>[] = [];
+    const changed = f.update("checkpoint", "checkpoint");
     const noop = Y.encodeStateAsUpdate(f.doc, Y.encodeStateVector(f.doc));
     expect([...noop]).toEqual([0, 0]);
-    for (let index = 1; index < 4095; index++) {
-      const committed = f.storage.commitLiveUpdateJournal(f.capture(noop, `checkpoint-noop-${index}`));
+    const stateCapture = vi.fn(() => {f.raw.exec("BEGIN IMMEDIATE"); f.raw.exec("ROLLBACK");});
+    for (let index = 0; index < 4095; index++) {
+      const input = f.capture(index === 0 ? changed : noop, `checkpoint-${index}`, f.actor, stateCapture);
+      expect(input.validation.kind).toBe("accepted");
+      const committed = f.storage.commitLiveUpdateJournal(input);
+      expect(committed.result).toMatchObject({kind: "accepted", replayed: false, receipt: {journalCursor: index + 1}});
+      if (index === 0) expect(committed.admitted!.metadata.firstSeen.length).toBeGreaterThan(0);
+      else expect(committed.admitted!.metadata.firstSeen).toEqual([]);
       if (committed.result.kind !== "accepted") throw Error(committed.result.kind);
       receipts.push(committed.result.receipt);
+      if (index === 4093) {
+        expect(stateCapture).not.toHaveBeenCalled();
+        expect(f.storage.readLiveUpdateJournalCut({document: f.document}))
+          .toMatchObject({kind: "cut", cut: {suffixCount: 4094, checkpoint: {cursor: null}}});
+      }
     }
+    expect(stateCapture).toHaveBeenCalledTimes(1);
     const cut = f.storage.readLiveUpdateJournalCut({document: f.document});
-    expect(cut).toMatchObject({kind: "cut", cut: {highWater: 4095, checkpoint: {cursor: 4095}, suffixCount: 0}});
+    expect(cut).toMatchObject({kind: "cut", cut: {highWater: 4095, checkpoint: {cursor: 4095}, suffixCount: 0, suffixBytes: 0}});
     if (cut.kind !== "cut") throw Error(cut.kind);
     const checkpoint = Uint8Array.from(cut.cut.checkpoint.bytes);
+    expect(checkpoint).toEqual(Y.encodeStateAsUpdate(f.doc));
+    expect(checkpoint).not.toEqual(f.input.baselineBytes);
+    expect(f.journalRows().usage).toBe(liveBaselineStoredBytes(f.raw) + changed.byteLength + noop.byteLength * 4094 + checkpoint.byteLength
+      + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw));
+    const next = f.storage.commitLiveUpdateJournal(f.capture(noop, "next"));
+    expect(next.result.kind).toBe("accepted");
+    if (next.result.kind !== "accepted") throw Error(next.result.kind);
+    receipts.push(next.result.receipt);
+    expect(f.storage.readLiveUpdateJournalCut({document: f.document}))
+      .toMatchObject({kind: "cut", cut: {highWater: 4096, suffixCount: 1, checkpoint: {cursor: 4095}}});
     const point = f.add("point"), expected = hash(Buffer.from(yDocToMarkdown(f.doc)));
     receipts.push(point, f.add("future"));
+    expect(receipts).toHaveLength(4098);
     f.intent.restorePointCursor = point.journalCursor;
     f.intent.restorePointReceiptDigest = point.updateDigest;
     f.fence();
@@ -1089,7 +1115,7 @@ it("resolves from a real 4095-cadence checkpoint and refuses its stale path or f
     const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
     const capture = f.store.captureStopRestorePoint(input);
     expect(capture.checkpoint).toEqual({cursor: 4095, bytes: checkpoint, digest: hash(checkpoint)});
-    expect(capture.events.map(event => event.metadata.accepted.receipt)).toEqual([point]);
+    expect(capture.events.map(event => event.metadata.accepted.receipt)).toEqual([next.result.receipt, point]);
     expect(resolveLiveRestorePoint(capture, policy)).toEqual({journalCursor: point.journalCursor, receiptDigest: point.updateDigest,
       markdownDigest: expected, projectionDigest: expected});
     expect(expected).not.toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));

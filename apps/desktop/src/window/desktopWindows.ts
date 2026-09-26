@@ -3,10 +3,7 @@ import type { DesktopUserSettingsResult, WorkspaceSummary } from "../ipc/bridgeC
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
 import { buildMenuTemplate } from "./applicationMenu";
-import {
-  createGuestZoomApplier,
-  resolvePersistedZoomApplication,
-} from "./windowZoom";
+import { resolvePersistedZoomApplication } from "./windowZoom";
 import {
   focusShareHandoffWindow,
   focusShareHandoffWindowWhenReady,
@@ -33,7 +30,6 @@ interface DesktopWindowsDependencies {
   // Handed to every renderer window's preload (dev-tools grant).
   preloadArguments?: readonly string[];
   afterRendererCrashLoop?: () => void;
-  readonly pluginSurfaces: { applyWebAppZoom(level: number): void };
   readonly rendererWorkspaceSessions: Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   >;
@@ -142,8 +138,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
         );
         if (application === null) return;
         if ("applyEverywhere" in application) {
-          // One path for hosts and guests: a guest attached before the read
-          // resolved must not stay at 100% until the next zoom change.
+          // Every window opened before the read resolved takes the level.
           applyZoomLevelToWindows(application.applyEverywhere);
         } else if (!window.isDestroyed()) {
           window.webContents.setZoomLevel(application.applyToWindow);
@@ -217,13 +212,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     for (const window of liveZoomedWindows()) {
       window.webContents.setZoomLevel(zoomLevel);
     }
-    // Embedded plugin content follows the window zoom: the person who
-    // zoomed because text was too small is usually working IN the panel. Only
-    // embedded guests — the same app opened by URL keeps the browser's zoom.
-    dependencies.pluginSurfaces.applyWebAppZoom(zoomLevel);
   }
-
-  const bindGuestZoom = createGuestZoomApplier(() => knownZoomLevel);
 
   function broadcastUserSettings(result: DesktopUserSettingsResult): void {
     for (const window of liveZoomedWindows()) {
@@ -499,7 +488,6 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     sendWorkspaceActivated,
     reportActivationFailure,
     applyZoomLevelToWindows,
-    bindGuestZoom,
     broadcastUserSettings,
     refreshApplicationMenu,
     refreshNativeWorkspaceSurfaces,

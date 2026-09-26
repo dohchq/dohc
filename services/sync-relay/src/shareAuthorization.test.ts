@@ -122,7 +122,7 @@ describe("share authorization", () => {
     for (const selectorJson of [
       "{", JSON.stringify({ paths: ["docs"], versionId: "pinned-version" }),
       JSON.stringify({ paths: [], versionId: null }),
-      JSON.stringify({ kind: "chat-channel", channelWireId: "channel-1" }),
+      JSON.stringify({ kind: "chat", channelWireId: "channel-1" }),
     ]) {
       expect(authorizeNamedLiveEditShareGrant({
         storage: storageFixture({ share: { ...share, selectorJson } }),
@@ -202,7 +202,7 @@ describe("share authorization", () => {
     const blockedShare: SyncRelayShareRow = {
       ...share,
       selectorJson: JSON.stringify({
-        kind: "chat-channel",
+        kind: "chat",
         channelWireId: "wire-agent",
       }),
     };
@@ -362,11 +362,11 @@ describe("share authorization", () => {
     }
   });
 
-  it("applies each chat-channel action to the grant access", () => {
+  it("applies each chat action to the grant access", () => {
     const chatShare: SyncRelayShareRow = {
       ...share,
       selectorJson: JSON.stringify({
-        kind: "chat-channel",
+        kind: "chat",
         channelWireId: "wire-1",
       }),
     };
@@ -448,7 +448,7 @@ describe("share authorization", () => {
     const chatShare: SyncRelayShareRow = {
       ...share,
       selectorJson: JSON.stringify({
-        kind: "chat-channel",
+        kind: "chat",
         channelWireId: "wire-agent",
       }),
     };

@@ -125,7 +125,7 @@ describe("workspaceActivity capture hooks", () => {
     await activity.open(workspace());
     expect(activity.hasAgentRun("activity-test")).toBe(false);
 
-    const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+    const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
     await activity.setAgentRun("activity-test", run);
     expect(setActiveAgentRun).toHaveBeenLastCalledWith(run);
     expect(activity.hasAgentRun("activity-test")).toBe(true);
@@ -153,11 +153,13 @@ describe("workspaceActivity capture hooks", () => {
       agentId: "chat-runner",
       onBehalfOf: "local",
       agentRunId: "run-1",
+      depth: 0,
     };
     const second = {
       agentId: "panel",
       onBehalfOf: "local",
       agentRunId: "run-2",
+      depth: 0,
     };
     expect(await activity.claimAgentRun("activity-test", first)).toBe(true);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(false);
@@ -254,7 +256,10 @@ describe("workspaceActivity cloud sync nudge", () => {
         queued += 1;
       },
       queuePull: () => {},
+      retryNow: async () => undefined,
       snapshot: () => ({
+        syncFailure: null,
+        retrying: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -287,15 +292,80 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("reads an engine stopped on the relay API version as disconnected, naming the side to update", async () => {
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      snapshot: () => ({
+        syncFailure: null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 2,
+        conflictCount: 0,
+        authExpired: false,
+        updateRequired: "server" as const,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.state).toBe("cloud-disconnected");
+    expect(status.updateRequired).toBe("server");
+    await activity.stopAll();
+  });
+
   // Failed-join rollback (0P-C gate fix): close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
+  // A pass someone asked for reads as syncing, not as the failure it may
+  // clear; an automatic pass does not hide the failure.
+  it("shows a failed sync as syncing only while a retry someone asked for runs", async () => {
+    let retrying = false;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      snapshot: () => ({
+        syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
+        retrying,
+        syncing: true,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 1,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").state).toBe("sync-failed");
+    retrying = true;
+    expect(activity.getStatus("activity-test").state).toBe("syncing");
+    expect(activity.getStatus("activity-test").syncFailure?.attempts).toBe(2);
+    await activity.stopAll();
+  });
+
   it("close stops and forgets a single workspace", async () => {
     let stopped = 0;
     const engine = {
       start: async () => {},
       queueSync: () => {},
       queuePull: () => {},
+      retryNow: async () => undefined,
       snapshot: () => ({
+        syncFailure: null,
+        retrying: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -343,8 +413,12 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineBuilds += 1;
         return {
           start: async () => undefined,
-          queueSync: () => undefined, queuePull: () => undefined,
+          queueSync: () => undefined,
+          queuePull: () => undefined,
+          retryNow: async () => undefined,
           snapshot: () => ({
+            syncFailure: null,
+            retrying: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -398,8 +472,12 @@ describe("workspaceActivity cloud sync nudge", () => {
         },
         engineFor: () => ({
           start: async () => undefined,
-          queueSync: () => undefined, queuePull: () => undefined,
+          queueSync: () => undefined,
+          queuePull: () => undefined,
+          retryNow: async () => undefined,
           snapshot: () => ({
+            syncFailure: null,
+            retrying: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -564,8 +642,12 @@ describe("workspaceActivity cloud sync nudge", () => {
       }),
       engineFor: () => ({
         start: async () => undefined,
-        queueSync: () => undefined, queuePull: () => undefined,
+        queueSync: () => undefined,
+        queuePull: () => undefined,
+        retryNow: async () => undefined,
         snapshot: () => ({
+          syncFailure: null,
+          retrying: false,
           syncing: false,
           lastSyncedAtMs: null,
           pendingChangeCount: 0,
@@ -596,6 +678,37 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(retireLiveSessions.mock.invocationCallOrder[0]).toBeLessThan(
       captureStop.mock.invocationCallOrder[0]!,
     );
+  });
+
+  // A shared view has no recorder, so its refresh reports the store's
+  // refusal. The status carries it like a capture's, and only a shared view
+  // takes it: a workspace with a recorder hears its store through capture.
+  it("puts a shared view's store refusal on its status", async () => {
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({ shareView: true, capture: null }),
+    });
+    await activity.open(workspace());
+    notify.mockClear();
+    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    const refused = activity.getStatus("activity-test");
+    expect(refused.historyShareView).toBe(true);
+    expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
+    expect(refused.engineStoreRefusedDetail).toBe("a newer build ran migration 5 (next)");
+    expect(notify).toHaveBeenCalledOnce();
+    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    expect(notify).toHaveBeenCalledOnce();
+    activity.recordShareViewStoreRefusal("activity-test", null, null);
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    await activity.stopAll();
+
+    const owned = createWorkspaceActivity(vi.fn(), {
+      captureFor: () => ({ shareView: false, capture: null }),
+    });
+    await owned.open(workspace());
+    owned.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", null);
+    expect(owned.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    await owned.stopAll();
   });
 
   // The engine's own words for a refusal ride along, so a report can carry

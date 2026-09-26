@@ -23,6 +23,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -42,6 +43,7 @@ import {
   startCliServer,
   type CliCollectionsPort,
   type CliCollectionWriteSeam,
+  type CliDocumentsPort,
   type CliRegistryWorkspace,
   type CliServerHandle,
   type CliServerOptions,
@@ -191,6 +193,9 @@ describe("CLI socket server", () => {
   let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
+  // The chain depth of the agent run in progress in each workspace, as main
+  // reports it: this one for the fixture workspace, 0 for any other.
+  let agentRunDepth: number;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -395,6 +400,7 @@ describe("CLI socket server", () => {
         return momentId === moments.detail.id ? moments.detail : null;
       },
     };
+    agentRunDepth = 0;
     serverOptions = {
       stateDir,
       listWorkspaces() {
@@ -425,8 +431,10 @@ describe("CLI socket server", () => {
           writeTargets.push(target);
         },
         scanChatDispatch: async () => undefined,
+        notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
+      agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       async onWrite() {
         calls.writes += 1;
       },
@@ -588,6 +596,35 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(0);
   });
 
+  it("narrows history to one tracked file inside the workspace", async () => {
+    const listed: Array<{ limit: number; objectId?: string }> = [];
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.listMoments = async (input) => {
+      listed.push(input);
+      return [moments.summary];
+    };
+    await mkdir(join(workspaceRoot, "notes"), { recursive: true });
+
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "tracked.md" })).resolves.toMatchObject({
+      changes: [{ id: "moment_primary" }],
+    });
+    await expect(invoke("moments", { cwd: join(workspaceRoot, "notes"), actor: "human", path: "../tracked.md" })).resolves.toMatchObject({
+      count: 1,
+    });
+    expect(listed).toEqual([
+      { limit: 500, objectId: "object_tracked" },
+      { limit: 500, objectId: "object_tracked" },
+    ]);
+
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "missing.md" })).rejects.toThrow(
+      "file is not a tracked workspace file: missing.md",
+    );
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "../outside.md" })).rejects.toThrow(
+      "file is outside this workspace: ../outside.md",
+    );
+    expect(listed).toHaveLength(2);
+  });
+
   it("returns MCP-shaped history and chats with engine ids that post and reply accept", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -621,10 +658,10 @@ describe("CLI socket server", () => {
       changes: [{
         id: "moment_primary",
         path: "primary.md",
-        summary: "Updated primary",
         files: [{ path: "primary.md", operation: "write" }],
       }],
     });
+    expect(moments.changes[0]).not.toHaveProperty("summary");
     const moment = await invoke("moment", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1305,7 +1342,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
         },
       },
       {
@@ -1314,7 +1351,7 @@ describe("CLI socket server", () => {
           collectionPath: "tasks",
           name: "write-brief",
           fields: { status: "open" },
-          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 0 },
         },
       },
       {
@@ -1326,6 +1363,409 @@ describe("CLI socket server", () => {
         },
       },
     ]);
+  });
+
+  it("reads and edits documents with provenance the door derives", async () => {
+    const edits: Array<Parameters<CliDocumentsPort["edit"]>[0]> = [];
+    context.documents = {
+      async read(path) {
+        return { path, markdown: "# Plan\n\nDraft." };
+      },
+      async edit(input) {
+        edits.push(input);
+        return { path: input.path, changed: true };
+      },
+      async create() {
+        throw new Error("creates are not under test");
+      },
+    };
+
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", markdown: "# Plan\n\nDraft." });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/plan.md",
+      find: "Draft.",
+      replacement: "Final.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "Appended.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    // An agent that names itself is recorded under that name, and one that
+    // does not stays an agent with no name.
+    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    expect(edits).toEqual([
+      {
+        path: "notes/plan.md",
+        edit: { find: "Draft.", replacement: "Final." },
+        origin: { actorOriginId: "claude-code", attribution: agent },
+      },
+      {
+        path: "notes/plan.md",
+        edit: { find: undefined, replacement: "Appended." },
+        origin: { attribution: agent },
+      },
+    ]);
+  });
+
+  it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
+    const authors: unknown[] = [];
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields(input) {
+          authors.push(input.author);
+          return { path: input.recordPath };
+        },
+        async createRecord(input) {
+          authors.push(input.author);
+          return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+        },
+      },
+    };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        authors.push(input.origin);
+        return { path: input.path, changed: true };
+      },
+      async create(input) {
+        authors.push(input.origin);
+        return { path: input.path };
+      },
+    };
+    agentRunDepth = 3;
+
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
+    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
+    await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
+    await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" });
+    // A write that names a person is the run's agent's too, so the agent
+    // cannot start the chain over by leaving out --as-agent.
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } });
+    // With no run an automation started, a person's write stays a person's.
+    agentRunDepth = 0;
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
+
+    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", depth: 3 };
+    const attribution = { actorKind: "agent", onBehalfOf: "local", depth: 3 };
+    expect(authors).toEqual([
+      woken,
+      woken,
+      { attribution },
+      { actorOriginId: "claude-code", attribution },
+      woken,
+      { kind: "local", label: "Sam" },
+    ]);
+  });
+
+  it("posts, replies, and reacts as the agent during a run an automation started, whatever actor the caller names", async () => {
+    if (!store) throw new Error("Store is not available");
+    agentRunDepth = 3;
+    const posted = await post({ actor: "human", title: "Stamped", body: "Stamped the tasks." });
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.",
+      attachments: [], needsDecision: false,
+    });
+    await invoke("react", { cwd: workspaceRoot, actor: "human", message: posted.messageId, emoji: "👍" });
+    const threadId = `thread-${posted.threadId.slice("th_".length)}`;
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    expect(messages.map((message) => message.author.kind)).toEqual(["agent", "agent"]);
+    const reactions = await store.listReactions({ workspaceId: WORKSPACE_ID, threadId });
+    expect(reactions.map((reaction) => reaction.author.kind)).toEqual(["agent"]);
+
+    // A person's run, or none, leaves the caller's actor as it is.
+    agentRunDepth = 0;
+    const own = await post({ actor: "human", title: "Mine", body: "My own post." });
+    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
+    expect(mine?.author.kind).toBe("human");
+  });
+
+  it("creates a Markdown document with provenance the door derives", async () => {
+    const creates: Array<Parameters<CliDocumentsPort["create"]>[0]> = [];
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit() {
+        throw new Error("edits are not under test");
+      },
+      async create(input) {
+        creates.push(input);
+        return { path: input.path };
+      },
+    };
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/new.md",
+      markdown: "# New",
+    })).resolves.toEqual({ ok: true, path: "notes/new.md" });
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/board.excalidraw",
+      markdown: "",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a document path ends in .md or .markdown: notes/board.excalidraw",
+    });
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "human",
+      path: "notes/other.md",
+      markdown: "x",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
+    });
+    expect(creates).toEqual([{
+      path: "notes/new.md",
+      markdown: "# New",
+      origin: {
+        actorOriginId: "claude-code",
+        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+      },
+    }]);
+  });
+
+  it("comments on a file through the chat write path a person's comment takes", async () => {
+    if (!store) throw new Error("Store is not available");
+    const started = await invoke("fileChatStart", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "tracked.md",
+      title: "Budget",
+      body: "Is 400 enough for food?",
+    });
+    if (!started.ok) throw new Error(started.reason);
+    expect(started.path).toBe("tracked.md");
+
+    // The comment is the file's chat, authored as the agent under the name
+    // it gave, on behalf of the person.
+    await expect(invoke("fileChats", {
+      cwd: workspaceRoot, actor: "agent", path: "tracked.md",
+    })).resolves.toMatchObject({
+      ok: true,
+      threads: [{ id: started.threadId, title: "Budget", linkedPathHint: "tracked.md" }],
+    });
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: started.threadId });
+    expect(messages).toMatchObject([{
+      id: started.messageId,
+      body: "Is 400 enough for food?",
+      author: { kind: "agent", displayName: "claude-code" },
+      authorOwnerDisplayName: "Sam",
+    }]);
+
+    // A file dohc does not track has no chats to start.
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "agent", path: "untracked.md", title: "T", body: "B",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track untracked.md") });
+
+    // A comment through the socket is an agent's, whatever the caller claims.
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "human", path: "tracked.md", title: "T", body: "B",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+    });
+
+    // A retry with the same request id returns the first chat instead of
+    // starting a second; the id cannot be reused for a different comment.
+    const once = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Once", body: "One chat.", requestId: "req-1" };
+    const first = await invoke("fileChatStart", once);
+    if (!first.ok) throw new Error(first.reason);
+    await expect(invoke("fileChatStart", once)).resolves.toEqual(first);
+    await expect(invoke("fileChatStart", { ...once, body: "Another." })).resolves.toEqual({
+      ok: false,
+      reason: "request id req-1 was already used for a different request",
+    });
+    const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
+    if (!chats.ok) throw new Error(chats.reason);
+    expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
+    // An agent that gave no name carries the agent name from the person's settings.
+    await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
+      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
+
+    // A shared view refuses before the chat module is reached.
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "T", body: "B",
+    })).rejects.toThrow("chats are not available in a read-only shared view");
+  });
+
+  it("answers a resent document edit with its first result", async () => {
+    let applied = 0;
+    const saving = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        if (input.edit.replacement === "Refused.") throw new Error("The text to replace is not in the document.");
+        if (input.edit.replacement === "Unsaved.") {
+          applied += 1;
+          throw new LiveDocumentEditAppliedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+        }
+        if (input.edit.replacement === "Lost.") {
+          applied += 1;
+          throw new LiveDocumentEditAppliedError("Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in notes/plan.md.");
+        }
+        applied += 1;
+        await new Promise<void>((resolve) => { saving.release = resolve; });
+        return { path: input.path, changed: true };
+      },
+      async create() {
+        throw new Error("creates are not under test");
+      },
+    };
+    const append = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "Appended.", requestId: "edit-1" };
+
+    // The caller's first request is still saving when it gives up and sends
+    // the edit again; both hear the one result.
+    const first = invoke("documentEdit", append);
+    await vi.waitFor(() => expect(applied).toBe(1));
+    const resent = invoke("documentEdit", append);
+    saving.release();
+    await expect(first).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", append)).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(1);
+    await expect(invoke("documentEdit", { ...append, replacement: "Other." })).resolves.toEqual({
+      ok: false,
+      reason: "request id edit-1 was already used for a different request",
+    });
+
+    // An edit that changed nothing may be sent again under its id. One that
+    // reached the document may not, whether it went unsaved or someone
+    // removed the block it went into.
+    const refused = { ...append, replacement: "Refused.", requestId: "edit-2" };
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false });
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("not in the document") });
+    const unsaved = { ...append, replacement: "Unsaved.", requestId: "edit-3" };
+    const unsavedResult = await invoke("documentEdit", unsaved);
+    expect(unsavedResult).toMatchObject({ ok: false, reason: expect.stringContaining("not saved it") });
+    await expect(invoke("documentEdit", unsaved)).resolves.toEqual(unsavedResult);
+    const lost = { ...append, replacement: "Lost.", requestId: "edit-4" };
+    const lostResult = await invoke("documentEdit", lost);
+    expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("is not in notes/plan.md") });
+    await expect(invoke("documentEdit", lost)).resolves.toEqual(lostResult);
+    expect(applied).toBe(3);
+  });
+
+  it("keeps a running request's id, and refuses a resend whose result it no longer holds", async () => {
+    serverOptions.requestIdLimits = { results: 1, ids: 1 };
+    let applied = 0;
+    const slow = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        applied += 1;
+        if (input.edit.replacement === "Slow.") {
+          await new Promise<void>((resolve) => { slow.release = resolve; });
+        }
+        return { path: input.path, changed: true };
+      },
+      async create() {
+        throw new Error("creates are not under test");
+      },
+    };
+    const request = (replacement: string, requestId: string) => ({
+      cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement, requestId,
+    });
+
+    // Other requests finish while the first is still saving, past the limit.
+    const running = invoke("documentEdit", request("Slow.", "slow"));
+    await vi.waitFor(() => expect(applied).toBe(1));
+    for (const id of ["a", "b", "c"]) await invoke("documentEdit", request(`Edit ${id}.`, id));
+    const resent = invoke("documentEdit", request("Slow.", "slow"));
+    slow.release();
+    await expect(running).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(4);
+
+    // "slow" finished, and a later result pushes it out: its id is still
+    // known, so a resend is refused rather than run again.
+    await invoke("documentEdit", request("Edit d.", "d"));
+    await expect(invoke("documentEdit", request("Slow.", "slow"))).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("no longer holds the result of request id slow, so it did not run it again"),
+    });
+    expect(applied).toBe(5);
+  });
+
+  it("refuses document edits it cannot attribute or place", async () => {
+    let touched = 0;
+    context.documents = {
+      async read() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async edit() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async create() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+    };
+    // A person types in the editor. A request claiming to be their edit could
+    // come from any process holding the socket token.
+    for (const agent of [undefined, "claude-code"]) {
+      await expect(invoke("documentEdit", {
+        cwd: workspaceRoot,
+        actor: "human",
+        ...(agent === undefined ? {} : { agent }),
+        path: "notes/plan.md",
+        replacement: "x",
+      })).resolves.toEqual({
+        ok: false,
+        reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+      });
+    }
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+      replacement: "x",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    expect(touched).toBe(0);
+
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "x",
+    })).rejects.toThrow("document changes are not available in a read-only shared view");
+    expect(touched).toBe(0);
   });
 
   it("answers collection verbs honestly when the port is absent", async () => {

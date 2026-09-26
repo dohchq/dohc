@@ -2,6 +2,7 @@ import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
@@ -44,6 +45,8 @@ async function response(run: () => unknown): Promise<Response> {
   try { return Response.json(await run(), {headers}); }
   catch (error) {
     if (isAppBackendRuntimeError(error)) return Response.json({code: error.refusal.code, message: error.refusal.message}, {status: 409, headers});
+    if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error)) return Response.json({code: error.code, message: error.message},
+      {status: 503, headers: {...headers, ...(error.retryAfterMs ? {"retry-after": String(Math.ceil(error.retryAfterMs / 1000))} : {})}});
     if (error instanceof JournalError) throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
     if (error instanceof DatasetHostError) throw relayError(error.code === "not_authorized" ? "not_found" : error.code === "invalid" ? "bad_request" : "conflict");
     throw error;
@@ -68,8 +71,16 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
       if (cursor.workspaceId !== scope.workspaceId || cursor.datasetId !== scope.datasetId || !Number.isSafeInteger(cursor.revision) || Number(cursor.revision) < 0) throw badRequest("Invalid recovery source cursor.");
       const sourceCursor = {workspaceId: scope.workspaceId, datasetId: scope.datasetId, hostEpoch: text(cursor.hostEpoch), approvedRevisionHash: digest(cursor.approvedRevisionHash), revision: Number(cursor.revision), digest: digest(cursor.digest)};
       const manifestSha256 = digest(request.headers.get("x-dohc-dataset-manifest-sha256"));
-      const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(120_000)]);
       const release = admit({dataset: JSON.stringify([scope.workspaceId, scope.datasetId]), participant: auth.userId, organizer: true}, "restore", options.nowMs());
+      const deadline = new AbortController();
+      const signal = AbortSignal.any([request.signal, storage.unavailable, deadline.signal]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const renewDeadline = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => deadline.abort(new DOMException("Recovery import timed out", "TimeoutError")), 120_000);
+        timer.unref();
+      };
+      renewDeadline();
       try {
         const body = request.body;
         async function* stream() {
@@ -80,13 +91,17 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
             for (;;) {
               signal.throwIfAborted();
               if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
-              const item = await reader.read(); if (item.done) break;
+              const item = await reader.read();
+              signal.throwIfAborted();
+              // Bound idle receipt, then give installation its own deadline.
+              if (item.done) { renewDeadline(); break; }
+              if (item.value.byteLength) renewDeadline();
               for (let offset = 0; offset < item.value.byteLength; offset += 1024 * 1024) yield item.value.subarray(offset, offset + 1024 * 1024);
             }
           } finally {signal.removeEventListener("abort", aborted); await reader.cancel().catch(() => {}); reader.releaseLock();}
         }
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
-      } finally {release();}
+      } finally {clearTimeout(timer); release();}
     }
     const read = ["list", "describe", "artifacts", "permissions", "history", "history-revision", "lifecycle", "pending-attempts", "delete-preview", "deletion-status"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");

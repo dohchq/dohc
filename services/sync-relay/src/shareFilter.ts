@@ -16,6 +16,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
+import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
 // PR 18 share grants: the server-side filter that decides which replicated
@@ -55,14 +56,14 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
-// MU-C4 shared channels: a bidirectional chat-channel grant. Unlike the
-// read-only path/version selector above, a chat-channel share scopes a whole
+// MU-C4 shared channels: a bidirectional chat grant. Unlike the
+// read-only path/version selector above, a chat share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
 // access is "read-write" — lets the member append channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:
 // the member replays the channel but every inbound append is refused.
 export interface StoredChatChannelShareSelector {
-  kind: "chat-channel";
+  kind: "chat";
   // The channel's cross-machine wire identity (chat_channel_wire_ids in the
   // engine; `wireId` on chat.channel.create). Never a local channel id or
   // slug — those differ per machine.
@@ -74,7 +75,7 @@ export interface ChatChannelShareSelector extends StoredChatChannelShareSelector
 }
 
 // One share for a group: its chat channel and its folder together. The
-// chat half scopes like a chat-channel grant; the file half scopes like a
+// chat half scopes like a chat grant; the file half scopes like a
 // path grant on the folder. Access is the chat vocabulary; the file side
 // reads read-write as edit and read-only as view.
 export interface StoredGroupShareSelector {
@@ -121,7 +122,7 @@ export function groupChannelIsOrdinary(
 
 // The chat half of a group grant, for the code paths that scope chat ops.
 export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareSelector {
-  return { kind: "chat-channel", channelWireId: selector.channelWireId, access: selector.access };
+  return { kind: "chat", channelWireId: selector.channelWireId, access: selector.access };
 }
 
 // The file half of a group grant. read-write edits the folder; read-only
@@ -140,7 +141,7 @@ export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   return isChatChannelSelector(selector) ? null : selector;
 }
 
-// A selector with a chat-channel side: a chat-channel grant, or a group's
+// A selector with a chat side: a chat grant, or a group's
 // channel.
 export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector | null {
   if (isGroupSelector(selector)) return chatHalfOfGroup(selector);
@@ -191,7 +192,7 @@ export interface ChatShareThreadResolver extends ShareFileChatResolver {
 export function isChatChannelSelector(
   selector: AnyShareSelector,
 ): selector is ChatChannelShareSelector {
-  return "kind" in selector && (selector as { kind?: unknown }).kind === "chat-channel";
+  return "kind" in selector && (selector as { kind?: unknown }).kind === "chat";
 }
 
 export function isLiveEditShareSelector(
@@ -208,7 +209,7 @@ export type GroupSelectorValidation =
   | {
       ok: false;
       code:
-        | typeof RELAY_ERRORS.invalid_channel.code
+        | typeof RELAY_ERRORS.invalid_chat.code
         | typeof RELAY_ERRORS.invalid_path.code
         | typeof RELAY_ERRORS.secret_path.code
         | typeof RELAY_ERRORS.too_many_paths.code
@@ -237,14 +238,14 @@ export function validateGroupShareSelector(
     if (kind === undefined) {
       return {
         ok: false,
-        code: RELAY_ERRORS.invalid_channel.code,
-        message: "The relay has not received this channel yet. Try again after it syncs.",
+        code: RELAY_ERRORS.invalid_chat.code,
+        message: "The relay has not received this group yet. Try again after it syncs.",
       };
     }
     if (kind !== "channel") {
       return {
         ok: false,
-        code: RELAY_ERRORS.invalid_channel.code,
+        code: RELAY_ERRORS.invalid_chat.code,
         message: "A direct message has no folder to share.",
       };
     }
@@ -263,7 +264,7 @@ export function validateGroupShareSelector(
     return {
       ok: false,
       code: RELAY_ERRORS.invalid_path.code,
-      message: "a group shares exactly its channel folder",
+      message: "a group shares exactly its folder",
     };
   }
   return {
@@ -281,7 +282,7 @@ export type ChatChannelSelectorValidation =
   | { ok: true; selector: StoredChatChannelShareSelector }
   | {
       ok: false;
-      code: typeof RELAY_ERRORS.invalid_channel.code;
+      code: typeof RELAY_ERRORS.invalid_chat.code;
       message: string;
     };
 
@@ -319,7 +320,7 @@ export function validateChatChannelShareSelector(
   ) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
+      code: RELAY_ERRORS.invalid_chat.code,
       message: "channelWireId must be a non-empty trimmed string",
     };
   }
@@ -333,26 +334,26 @@ export function validateChatChannelShareSelector(
   if (wireId === GENERAL_CHANNEL_WIRE_ID) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "the general channel is personal to each workspace",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "the general group is personal to each workspace",
     };
   }
   const resolvedKind = chat?.channelKind(wireId);
   if (resolvedKind === "agent") {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "agent channels cannot be shared",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "agent chats cannot be shared",
     };
   }
   if (resolvedKind === null) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "channel is not shareable",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "chat is not shareable",
     };
   }
-  return { ok: true, selector: { kind: "chat-channel", channelWireId: wireId } };
+  return { ok: true, selector: { kind: "chat", channelWireId: wireId } };
 }
 
 export type ShareSelectorValidation =
@@ -520,7 +521,7 @@ export function parseStoredAnyShareSelectorJson(
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    if ((parsed as { kind?: unknown }).kind === "chat-channel") {
+    if ((parsed as { kind?: unknown }).kind === "chat") {
       if ((parsed as { access?: unknown }).access !== undefined) return null;
       const validation = validateChatChannelShareSelector(
         parsed as { channelWireId?: unknown },
@@ -546,7 +547,7 @@ export function parseStoredAnyShareSelectorJson(
 // classified engine-tracked right now. The current-state fold rejects path
 // aliases, so replay must reject the same rows instead of serving a spelling
 // the current endpoint will never contain.
-function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
+export function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
   return isCanonicalSharePath(path) && visibleSharePath(selector, path) !== null;
 }
 
@@ -608,7 +609,7 @@ export function parseChatThreadTopic(topic: string): string | null {
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
 // workspace-relative path (doc co-presence on a shared file). For a MU-C4
-// chat-channel selector two topic shapes are allowed, both scoped to exactly
+// chat selector two topic shapes are allowed, both scoped to exactly
 // the granted channel:
 //   - the bare granted channel wire id (channel-level co-presence), and
 //   - `chat:thread:<threadId>` for a thread that binds to the granted channel,
@@ -618,7 +619,7 @@ export function parseChatThreadTopic(topic: string): string | null {
 //     malformed `chat:thread:` topic is refused. Without a resolver a thread
 //     topic can never be authorized (fail closed).
 // Everything the share does not positively expose is refused — a recipient of
-// `a.md` cannot subscribe to presence for `b.md`, and a chat-channel member
+// `a.md` cannot subscribe to presence for `b.md`, and a chat member
 // cannot subscribe to any other channel's or thread's presence.
 export function presenceTopicAllowedForShare(
   selector: AnyShareSelector,
@@ -898,6 +899,9 @@ const SERVED_CHAT_FIELDS = {
     "parentMessageId",
     "body",
     "createdAtMs",
+    // An automation's chain depth, so a chain stops across computers. The
+    // automation and its Collection path never leave the author's computer.
+    "chainDepth",
   ],
   "chat.reaction.set": [
     "reactionId",
@@ -1202,7 +1206,7 @@ export function filterOpForShare(
 // moment lands in the GRANTER's log and the granter's engine replays it
 // (#646 PR3-0).
 //
-// Only chat crosses in this direction today. A chat-channel grant at
+// Only chat crosses in this direction today. A chat grant at
 // `read-write` appends what the channel branch admits. A file share appends
 // only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
@@ -1323,7 +1327,7 @@ export function filterProposedChangeForShare(
   raw: unknown,
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): ProposedChangeDecision {
-  // A chat-channel grant shares no files, so it can propose no change to one.
+  // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
@@ -1416,6 +1420,161 @@ export function filterProposedChangeForShare(
       afterContentKind,
       afterByteLength,
       recordedAtMs,
+    },
+  };
+}
+
+// The Collection files a named recipient with Edit may write directly
+// (ADR 0013). Everything else, deletes and renames included, stays on
+// proposals.
+export const COLLECTION_SCHEMA_FILE = "collection.yaml";
+export const COLLECTION_AUTOMATIONS_FILE = "automations.yaml";
+// Records one new-Collection batch may create.
+export const MAX_NEW_COLLECTION_RECORDS = 500;
+// The content one direct write may carry, summed over its files.
+export const MAX_COLLECTION_WRITE_BYTES = 4 * 1024 * 1024;
+
+// One direct write, as the decision classifies it. Every change is a text
+// write with normalized paths, and `collectionPath` is never the root.
+export type CollectionWrite =
+  // An in-place write to `<C>/collection.yaml`.
+  | { kind: "schema"; collectionPath: string; change: ProposedChange }
+  // An in-place write to `<C>/automations.yaml`, or creating it.
+  | { kind: "automations"; collectionPath: string; change: ProposedChange }
+  // Creates `<P>/<N>/collection.yaml`, then an optional `automations.yaml`,
+  // then `.md` records directly inside `<P>/<N>`, in that order, so the
+  // owner's engine meets the schema before the records.
+  | { kind: "new-collection"; collectionPath: string; changes: ProposedChange[] };
+
+export type CollectionWriteDecision =
+  | { allowed: false }
+  | { allowed: true; write: CollectionWrite };
+
+function parentPath(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
+}
+
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * The file selector a recipient may change a Collection through: Edit on
+ * main, from a file share or a Group share whose channel is ordinary. A
+ * chat share, a version share, or a lower level has none. The direct write
+ * and the relayed Button press both start here.
+ */
+export function collectionEditSelector(
+  selector: AnyShareSelector,
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): ShareSelector | null {
+  if (isChatChannelSelector(selector)) return null;
+  if (isGroupSelector(selector)) {
+    return groupChannelIsOrdinary(selector, chat) ? collectionEditSelector(fileHalfOfGroup(selector), chat) : null;
+  }
+  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) return null;
+  return selector;
+}
+
+/** Edit on the Collection folder itself or a folder above it, not only on its files. */
+export function coversCollectionFolder(selector: ShareSelector, folder: string): boolean {
+  return folder !== "" && visibleSharePath(selector, folder) === folder;
+}
+
+// The single decision point for what a recipient may WRITE DIRECTLY. It is a
+// fourth question beside reading, appending, and proposing, and it has its
+// own function for the reason those do: the direct lane must never widen by
+// inheriting the proposal allowlist. It parses each change with the proposal
+// rules and then narrows: an Edit grant on files in main, text writes only,
+// and one of three shapes whose Collection folder the selector covers.
+//
+// It decides the shape only. Whether the files exist, whether the base is
+// current, and whether their content is valid are the storage's and the
+// route's checks.
+export function filterCollectionWriteForShare(
+  selector: AnyShareSelector,
+  raw: unknown,
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): CollectionWriteDecision {
+  const refused: CollectionWriteDecision = { allowed: false };
+  const files = collectionEditSelector(selector, chat);
+  if (files === null) return refused;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
+    return refused;
+  }
+  const changes: ProposedChange[] = [];
+  // Two paths that one disk would hold as one file are one path here.
+  const paths = new Set<string>();
+  let bytes = 0;
+  for (const entry of raw) {
+    const decision = filterProposedChangeForShare(files, entry, chat);
+    if (!decision.allowed) return refused;
+    const change = decision.change;
+    if (
+      change.operation !== "write" || change.afterContentKind !== "text" ||
+      change.afterPath === null || change.afterByteLength === null
+    ) {
+      return refused;
+    }
+    // A write in place names one path on both sides. Anything else moves a
+    // file, which stays on proposals.
+    if (change.basedOnPath !== null && change.basedOnPath !== change.afterPath) return refused;
+    const key = pathCollisionKey(change.afterPath);
+    if (paths.has(key)) return refused;
+    paths.add(key);
+    bytes += change.afterByteLength;
+    if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
+    changes.push(change);
+  }
+  const coversFolder = (folder: string) => coversCollectionFolder(files, folder);
+
+  const schemaCreates = changes.filter(
+    (change) => change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
+  );
+  if (schemaCreates.length === 0) {
+    if (changes.length !== 1) return refused;
+    const change = changes[0]!;
+    const collectionPath = parentPath(change.afterPath!);
+    if (!coversFolder(collectionPath)) return refused;
+    const file = baseName(change.afterPath!);
+    if (file === COLLECTION_SCHEMA_FILE && change.basedOnPath !== null) {
+      return { allowed: true, write: { kind: "schema", collectionPath, change } };
+    }
+    if (file === COLLECTION_AUTOMATIONS_FILE) {
+      return { allowed: true, write: { kind: "automations", collectionPath, change } };
+    }
+    return refused;
+  }
+
+  // A new Collection: creates only, all directly inside one folder whose
+  // parent the selector covers.
+  if (schemaCreates.length !== 1) return refused;
+  const schema = schemaCreates[0]!;
+  const collectionPath = parentPath(schema.afterPath!);
+  if (!coversFolder(parentPath(collectionPath))) return refused;
+  let automations: ProposedChange | null = null;
+  const records: ProposedChange[] = [];
+  for (const change of changes) {
+    if (change === schema) continue;
+    if (change.basedOnPath !== null || parentPath(change.afterPath!) !== collectionPath) return refused;
+    const file = baseName(change.afterPath!);
+    if (file === COLLECTION_AUTOMATIONS_FILE) {
+      if (automations !== null) return refused;
+      automations = change;
+    } else if (file.toLowerCase().endsWith(".md")) {
+      records.push(change);
+    } else {
+      return refused;
+    }
+  }
+  if (records.length > MAX_NEW_COLLECTION_RECORDS) return refused;
+  return {
+    allowed: true,
+    write: {
+      kind: "new-collection",
+      collectionPath,
+      changes: [schema, ...(automations ? [automations] : []), ...records],
     },
   };
 }

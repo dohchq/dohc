@@ -279,7 +279,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         .unwrap();
     let handle = f.adopt(&owner).await;
     let before = f.counts();
-    let update = f.doc.frontmatter_set("status", "pending-only");
+    let update = f.doc.frontmatter_set("status", "pending-only").unwrap();
     let appended = actor
         .ydoc_record_update(
             DocKey::new("workspace", "main", "object").unwrap(),
@@ -353,7 +353,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         )
         .await
         .unwrap();
-    assert!(matches!(applied, ApplicationResult::Applied(_)));
+    assert!(matches!(applied, ApplicationResult::Applied(..)));
     actor
         .owner_ydoc_outbox_acknowledge(
             "workspace".into(),

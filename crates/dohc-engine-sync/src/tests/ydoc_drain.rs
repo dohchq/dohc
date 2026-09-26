@@ -477,6 +477,12 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             record_facts: Vec::new(),
         }))
     );
+    let remote_changes = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| dohc_engine_storage::remote_changes_applied_in(conn, "ws"))
+            .expect("read the count")
+    };
+    assert_eq!(remote_changes(&engine), 1, "parking the op counts it");
 
     // The lease is gone (close/eviction/crash — any teardown): the drain must
     // land the acked-but-parked envelope in the durable lineage.
@@ -510,6 +516,11 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         })
         .expect("count Y.Doc updates");
     assert_eq!(update_rows, 1, "the drained update reaches the Y.Doc log");
+    assert_eq!(
+        remote_changes(&engine),
+        2,
+        "applying it changes the document"
+    );
 
     let redrained = drain_deferred_ydoc_for_key(
         &mut engine,
@@ -523,6 +534,11 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         "replaying the parked row is content-deduped"
     );
     assert!(redrained.refusals.is_empty());
+    assert_eq!(
+        remote_changes(&engine),
+        2,
+        "a deduped redrain counts nothing"
+    );
 }
 
 #[test]
@@ -576,11 +592,13 @@ fn drained_parked_update_derives_its_record_facts() {
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
 
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
-        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let filler = local
+            .frontmatter_set("padding", &format!("{index}"))
+            .unwrap();
         let outcome = dohc_engine_collab::record_local_update(
             &mut engine,
             &mut cache,
@@ -697,11 +715,13 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
 
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
-        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let filler = local
+            .frontmatter_set("padding", &format!("{index}"))
+            .unwrap();
         let outcome = dohc_engine_collab::record_local_update(
             &mut engine,
             &mut cache,
@@ -908,7 +928,7 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
     let update_sha = engine
         .put_binary_blob(&remote_update)
         .expect("store remote update");
@@ -2358,6 +2378,13 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
     )
     .expect("drain deferred base");
     assert_eq!(drained.drained, 1);
+    assert_eq!(
+        engine
+            .read_with(|conn| dohc_engine_storage::remote_changes_applied_in(conn, "ws"))
+            .expect("read the count"),
+        1,
+        "the drained base replaces this computer's lineage with one from elsewhere"
+    );
     let replacement = drained
         .lineage_replacements
         .first()

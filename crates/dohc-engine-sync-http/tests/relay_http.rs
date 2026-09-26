@@ -385,7 +385,14 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect("push workspace");
     assert!(matches!(
         outcome,
@@ -420,7 +427,14 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect_err("ahead relay must diverge");
     assert_eq!(error, RelayError::OriginDiverged);
     assert_eq!(
@@ -495,7 +509,14 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
         }
     });
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect("rewind retry");
     assert!(matches!(
         outcome,
@@ -569,6 +590,7 @@ fn push_rewind_is_durable_before_a_failed_retry() {
             &mut engine,
             "ws",
             &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
             1_000,
             0,
         ),
@@ -1003,7 +1025,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     );
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
+            .commit_pull_cursor(
+                &mut reopened,
+                "ws",
+                &pending,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+                1_000
+            )
             .expect("commit after materialization"),
         TxnOutcome::Committed(Vec::new())
     );
@@ -1092,19 +1121,22 @@ fn every_relay_fixture_code_maps_to_its_rust_variant() {
 fn expected_relay_error(code: &str) -> RelayError {
     match code {
         "ambiguous_selector" => RelayError::AmbiguousSelector,
+        "api_version_too_new" => RelayError::ApiVersionTooNew,
+        "api_version_too_old" => RelayError::ApiVersionTooOld,
         "authorship_mismatch" => RelayError::AuthorshipMismatch,
         "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" | "dependents_changed" | "notice_list_full" => RelayError::Conflict,
+        "conflict" | "dependents_changed" | "notice_list_full" | "stale" => RelayError::Conflict,
+        "collection_write_rate_limited" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,
         "identity_not_recognized" => RelayError::IdentityNotRecognized,
         "identity_required" => RelayError::IdentityRequired,
         "internal_error" => RelayError::ServerInternal,
-        "invalid_channel" => RelayError::InvalidChannel,
+        "invalid_chat" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
         "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
             RelayError::Forbidden
@@ -1112,7 +1144,8 @@ fn expected_relay_error(code: &str) -> RelayError {
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
-        "notice_rate_limited" => RelayError::HttpStatus(429),
+        "automation_host_rate_limited" | "notice_rate_limited" => RelayError::HttpStatus(429),
+        "automation_press_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
@@ -1133,6 +1166,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let handler_etag = etag.clone();
     let server = FakeServer::start(move |request| {
         assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+        assert_eq!(request.header("x-dohc-api-version"), Some("1"));
         let mut seen = handler_seen.lock().expect("seen endpoints");
         seen.insert(format!("{} {}", request.method, request.path()));
         seen.insert(format!("TARGET {}", request.target));
@@ -1171,6 +1205,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
                 200,
                 json!({
                     "ok": true,
+                    "ownOriginId": "relay:share-member:authenticated-origin",
                     "ops": [{
                         "relaySeq": 1,
                         "originId": "peer",
@@ -1315,7 +1350,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
             }],
         })
         .expect("share push");
-    transport
+    let shared = transport
         .shared_channel_pull(SharedChannelRequest {
             share_id: "share-1".to_owned(),
             channel_wire_id: "wire-1".to_owned(),
@@ -1324,6 +1359,10 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
             ops: Vec::new(),
         })
         .expect("share pull");
+    assert_eq!(
+        shared.own_origin_id.as_deref(),
+        Some("relay:share-member:authenticated-origin")
+    );
     transport
         .share_view_pull(ShareViewRequest {
             share_id: "share-1".to_owned(),
@@ -1355,9 +1394,9 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     ] {
         assert!(seen.contains(endpoint), "missing endpoint {endpoint}");
     }
-    assert!(
-        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1")
-    );
+    assert!(seen.contains(
+        "TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1&originId=member"
+    ));
     assert!(
         seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500"),
         "forwarding an unbounded share-view limit exceeds the response budget"
@@ -1678,4 +1717,21 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         binary_constraint, "MAX_INGEST_BLOB_BYTES",
         "the refusal must not name the transport's loosest ceiling"
     );
+}
+
+#[test]
+fn shared_channel_pull_requires_authenticated_origin_metadata() {
+    let server = FakeServer::start(|request| {
+        assert!(request.target.contains("originId=member"));
+        assert!(request.target.contains("channelWireId=wire"));
+        TestResponse::json(200, json!({"ops": [], "nextCursor": 0, "hasMore": false}))
+    });
+    let result = transport(&server).shared_channel_pull(SharedChannelRequest {
+        share_id: "share".into(),
+        channel_wire_id: "wire".into(),
+        origin_id: "member".into(),
+        cursor: 0,
+        ops: Vec::new(),
+    });
+    assert!(matches!(result, Err(RelayError::InvalidResponse)));
 }

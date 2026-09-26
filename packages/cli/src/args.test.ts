@@ -249,6 +249,70 @@ describe("parseCliArguments", () => {
     });
   });
 
+  it("asks for help without parsing the verb's arguments", () => {
+    expect(parseCliArguments([], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["-h"], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["chat"], {})).toEqual({ help: ["chat"] });
+    expect(parseCliArguments(["--help", "dataset"], {})).toEqual({ help: ["dataset"] });
+    expect(parseCliArguments(["chat", "reply", "--help"], {})).toEqual({ help: ["chat", "reply"] });
+    expect(parseCliArguments(["chat", "--help", "post"], {})).toEqual({ help: ["chat", "post"] });
+  });
+
+  it("reads --help as verb input once operands start", () => {
+    expect(parseCliArguments(["chat", "post", "general", "Use", "-h", "for", "help"], {})).toMatchObject({
+      verb: "post",
+      body: "Use -h for help",
+    });
+    expect(() => parseCliArguments(["chat", "post", "general", "--help", "me"], {})).toThrow(
+      "unknown chat post option '--help'; put options first, then --, then text that starts with a dash",
+    );
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "---", "Report"], {})).toThrow(
+      "unknown chat reply option '---'; put options first, then --, then text that starts with a dash",
+    );
+    expect(parseCliArguments(["chat", "reply", "th_a", "--needs-decision", "--as-agent", "--", "--- Report"], {})).toMatchObject({
+      actor: "agent",
+      verb: "reply",
+      needsDecision: true,
+      body: "--- Report",
+    });
+    expect(() => parseCliArguments(["dataset", "list", "--foo"], {})).toThrow(/^unknown dataset list option '--foo'$/);
+    expect(() => parseCliArguments(["app", "prepare", "-h", "{}"], {})).toThrow("app prepare does not accept '{}'");
+  });
+
+  it("reads --help as text after the terminator or as a flag value", () => {
+    expect(parseCliArguments(["chat", "post", "general", "--", "--help"], {})).toMatchObject({
+      verb: "post",
+      body: "--help",
+    });
+    expect(parseCliArguments(["chat", "post", "general", "--title", "--help", "Body"], {})).toMatchObject({
+      verb: "post",
+      title: "--help",
+      body: "Body",
+    });
+  });
+
+  it("requires the fields the CLI cannot ask for later", () => {
+    expect(() =>
+      parseCliArguments(["dataset", "prepareRecovery", JSON.stringify({ workspaceId: "w" })], {}),
+    ).toThrow("dataset prepareRecovery requires sourcePath");
+    expect(() =>
+      parseCliArguments(["dataset", "list", JSON.stringify({ workspaceId: "w", action: "delete" })], {}),
+    ).toThrow("dataset list arguments must not name another action");
+  });
+
+  it("accepts a renamed app verb's own name or its request action", () => {
+    const selection = { workspaceId: "w", grantId: "g" };
+    for (const action of ["responses", "list"]) {
+      expect(parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action })], {})).toMatchObject({
+        verb: "ownerAppResponses",
+        request: { action: "list" },
+      });
+    }
+    expect(() =>
+      parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action: "undo" })], {}),
+    ).toThrow("app responses arguments must not name another action");
+  });
+
   it("returns distinct input errors", () => {
     expect(() => parseCliArguments(["chat", "reply", "th_a"], {})).toThrow(
       "reply requires a body or '-' for stdin",

@@ -1,15 +1,16 @@
-use super::ActorHandle;
+use super::{ActorHandle, ClaimAnnouncer};
 use crate::error::RuntimeError;
 use dohc_engine_collab::{LeaseRegistry, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
-    BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
-    ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse,
-    RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
+    BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
+    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
+    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
+    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
     ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, adopt_join_identity,
@@ -128,6 +129,14 @@ pub enum RelayOperation {
         submit_id: String,
         max_read_bytes: usize,
     },
+    /// Write this replica's changes to a Collection's own files directly into
+    /// the granter's workspace. Every other change stays on proposals.
+    PushDirectWrites {
+        workspace_id: String,
+        share_id: String,
+        granted: dohc_engine_sync::ShareGrant,
+        max_read_bytes: usize,
+    },
     CommitShareViewCursor {
         workspace_id: String,
         cursor: ShareCursor,
@@ -135,6 +144,10 @@ pub enum RelayOperation {
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
+// A relay worker task ended without an answer: it panicked, or its runtime
+// dropped it. That is a failure on this machine, not a network one, so it must
+// not read as an unreachable server.
+const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RelayIoRequest {
@@ -155,6 +168,7 @@ enum RelayIoRequest {
     ShareBlob(ShareBlobRequest),
     ShareBlobUpload(ShareBlobUploadRequest),
     ShareProposalSubmit(ShareProposalSubmitRequest),
+    ShareCollectionWrite(ShareCollectionWriteRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +190,7 @@ enum RelayIoResponse {
     ShareBlob(BlobDownloadResponse),
     ShareBlobUpload,
     ShareProposalSubmit(ShareProposalSubmitResponse),
+    ShareCollectionWrite(ShareCollectionWriteResponse),
 }
 
 #[derive(Default)]
@@ -204,7 +219,7 @@ impl DeferredRelayTransport {
         if let Some(index) = state
             .completed
             .iter()
-            .position(|(completed, _)| completed == &request)
+            .position(|(completed, _)| same_io_request(completed, &request))
         {
             let release = matches!(
                 state.completed[index].0,
@@ -215,7 +230,6 @@ impl DeferredRelayTransport {
                     | RelayIoRequest::UploadKeyEnvelope(_)
                     | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
-                    | RelayIoRequest::ShareBlobUpload(_)
                     | RelayIoRequest::ShareProposalSubmit(_)
             ) || matches!(
                 &state.completed[index].1,
@@ -269,6 +283,17 @@ impl DeferredRelayTransport {
         if let Ok(RelayIoResponse::ShareLogPush(response)) = &result {
             state.share_log_pushed = state.share_log_pushed.saturating_add(response.inserted);
         }
+        // A completed upload stays for every rerun of its operation, so it
+        // keeps only what names it: the content is gone once it is sent.
+        let request = match request {
+            RelayIoRequest::ShareBlobUpload(upload) => {
+                RelayIoRequest::ShareBlobUpload(ShareBlobUploadRequest {
+                    bytes: Vec::new(),
+                    ..upload
+                })
+            }
+            other => other,
+        };
         state.completed.push((request, result));
     }
 
@@ -286,6 +311,18 @@ impl DeferredRelayTransport {
             }
             _ => {}
         }
+    }
+}
+
+/// Whether a completed request answers `request`. A share upload is named by
+/// its share and content hash, because its completed copy no longer holds the
+/// content.
+fn same_io_request(completed: &RelayIoRequest, request: &RelayIoRequest) -> bool {
+    match (completed, request) {
+        (RelayIoRequest::ShareBlobUpload(done), RelayIoRequest::ShareBlobUpload(asked)) => {
+            done.share_id == asked.share_id && done.sha256 == asked.sha256
+        }
+        _ => completed == request,
     }
 }
 
@@ -406,6 +443,13 @@ impl RelayTransport for DeferredRelayTransport {
         ShareProposalSubmitResponse,
         ShareProposalSubmit
     );
+    relay_transport_method!(
+        share_collection_write,
+        ShareCollectionWriteRequest,
+        ShareCollectionWrite,
+        ShareCollectionWriteResponse,
+        ShareCollectionWrite
+    );
 }
 
 #[cfg(test)]
@@ -415,6 +459,79 @@ mod relay_bench;
 #[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    /// An operation reruns from its start after each relay call. Send changes
+    /// uploads each changed file's content before it submits, so a completed
+    /// upload must answer every later rerun. When it was consumed on its first
+    /// rerun, each extra upload doubled the reruns: four uploads took 16.
+    #[test]
+    fn an_operation_with_several_uploads_reruns_once_per_relay_call() {
+        let transport = DeferredRelayTransport::default();
+        let uploads: Vec<ShareBlobUploadRequest> = ['a', 'b', 'c', 'd']
+            .into_iter()
+            .map(|sha| ShareBlobUploadRequest {
+                share_id: "share".to_owned(),
+                sha256: sha.to_string().repeat(64),
+                bytes: vec![1, 2, 3],
+            })
+            .collect();
+        let operation = || -> Result<(), RelayError> {
+            for upload in &uploads {
+                transport.share_blob_upload(upload.clone())?;
+            }
+            Ok(())
+        };
+        let mut runs = 0;
+        loop {
+            runs += 1;
+            assert!(runs <= uploads.len() + 1, "an upload was sent again");
+            match operation() {
+                Ok(()) => break,
+                Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING => {
+                    let request = transport.take_pending().expect("pending upload");
+                    transport.complete(request, Ok(RelayIoResponse::ShareBlobUpload));
+                }
+                Err(error) => panic!("unexpected relay error: {error:?}"),
+            }
+        }
+        assert_eq!(runs, uploads.len() + 1);
+        assert!(
+            transport
+                .state
+                .lock()
+                .expect("state")
+                .completed
+                .iter()
+                .all(|(request, _)| matches!(
+                    request,
+                    RelayIoRequest::ShareBlobUpload(upload) if upload.bytes.is_empty()
+                )),
+            "a kept upload holds no content",
+        );
+    }
+
+    #[test]
+    fn a_completed_direct_write_answers_every_rerun_of_its_operation() {
+        let transport = DeferredRelayTransport::default();
+        let request = ShareCollectionWriteRequest {
+            share_id: "share".to_owned(),
+            submit_id: "direct-1".to_owned(),
+            changes: Vec::new(),
+        };
+        let written = ShareCollectionWriteResponse::Written {
+            paths: vec!["trip/packing/collection.yaml".to_owned()],
+        };
+        transport.complete(
+            RelayIoRequest::ShareCollectionWrite(request.clone()),
+            Ok(RelayIoResponse::ShareCollectionWrite(written.clone())),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                transport.share_collection_write(request.clone()),
+                Ok(written.clone())
+            );
+        }
+    }
 
     #[test]
     fn completed_blob_batch_transfers_body_allocations_without_copying() {
@@ -997,6 +1114,7 @@ pub enum RelayOperationOutcome {
     ShareViewPulled(ShareViewPullOutcome),
     ShareViewIdentity(ShareViewIdentityRecord),
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
+    DirectWritesPushed(DirectWritePushOutcome),
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -1014,6 +1132,19 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    /// How many changes that did not originate on this computer the engine
+    /// has applied to the workspace; 0 before the first.
+    pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_storage::remote_changes_applied_in(conn, &workspace_id)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn relay(
         &self,
         configuration: RelayConfiguration,
@@ -1036,6 +1167,7 @@ impl ActorHandle {
             let queued_leases = leases.clone();
             let queued_token = token.clone();
             let queued_reservation = reservation.clone();
+            let queued_claims = self.claims.clone();
             let outcome = self
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
@@ -1048,6 +1180,7 @@ impl ActorHandle {
                             queued_transport,
                             queued_operation,
                             &queued_leases,
+                            &queued_claims,
                         )
                     };
                     // A pull can claim, replace, or advance lineages behind the
@@ -1107,6 +1240,10 @@ fn build_http_transport(
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
 const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
 
+fn relay_io_aborted() -> RelayError {
+    RelayError::Local(RELAY_IO_ABORTED.to_owned())
+}
+
 fn relay_io_cancelled() -> RelayError {
     RelayError::Local(RELAY_IO_CANCELLED.to_owned())
 }
@@ -1127,7 +1264,7 @@ async fn execute_http_request(
 
     tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
         .await
-        .map_err(|_| RelayError::Partitioned)?
+        .map_err(|_| relay_io_aborted())?
 }
 
 /// Fan one deterministic bridge request into bounded blocking GETs. At the
@@ -1200,7 +1337,7 @@ where
         };
         let (index, result) = joined
             .ok_or(RelayError::InvalidResponse)?
-            .map_err(|_| RelayError::Partitioned)?;
+            .map_err(|_| relay_io_aborted())?;
         results[index] = Some(result);
     }
     if token.is_cancelled() {
@@ -1262,24 +1399,50 @@ fn execute_blocking_http_request(
         RelayIoRequest::ShareProposalSubmit(request) => transport
             .share_proposal_submit(request)
             .map(RelayIoResponse::ShareProposalSubmit),
+        RelayIoRequest::ShareCollectionWrite(request) => transport
+            .share_collection_write(request)
+            .map(RelayIoResponse::ShareCollectionWrite),
     }
 }
 
+/// Run one relay operation, then announce every Group automation claim its
+/// applies committed. A pass that fails on a later envelope still announces
+/// them: its retry finds those messages stored and claims nothing again.
 fn execute_relay_operation(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     transport: DeferredRelayTransport,
     operation: RelayOperation,
     leases: &LeaseRegistry,
+    claims: &ClaimAnnouncer,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
+    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases);
+    claims.announce(&client.take_automation_claims());
+    outcome
+}
+
+fn run_relay_operation(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    client: &RelaySyncClient<DeferredRelayTransport>,
+    operation: RelayOperation,
+    leases: &LeaseRegistry,
+) -> Result<RelayOperationOutcome, RuntimeError> {
     match operation {
         RelayOperation::Push {
             workspace_id,
             now_ms,
             max_read_bytes,
         } => client
-            .push_workspace(store, &workspace_id, &NoFaults, now_ms, max_read_bytes)
+            .push_workspace(
+                store,
+                &workspace_id,
+                &NoFaults,
+                leases,
+                now_ms,
+                max_read_bytes,
+            )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::Pull {
@@ -1293,7 +1456,14 @@ fn execute_relay_operation(
             workspace_id,
             cursor,
             now_ms,
-        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults, now_ms)? {
+        } => match client.commit_pull_cursor(
+            store,
+            &workspace_id,
+            &cursor,
+            &NoFaults,
+            leases,
+            now_ms,
+        )? {
             TxnOutcome::Committed(sharing_declined) => {
                 Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
             }
@@ -1488,6 +1658,22 @@ fn execute_relay_operation(
             )
             .map(RelayOperationOutcome::ShareProposalSubmitted)
             .map_err(RuntimeError::from),
+        RelayOperation::PushDirectWrites {
+            workspace_id,
+            share_id,
+            granted,
+            max_read_bytes,
+        } => client
+            .push_direct_writes(
+                store,
+                &workspace_id,
+                &share_id,
+                &granted,
+                &NoFaults,
+                max_read_bytes,
+            )
+            .map(RelayOperationOutcome::DirectWritesPushed)
+            .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {
             workspace_id,
             cursor,
@@ -1525,6 +1711,7 @@ mod share_view_identity_tests {
                 created_at_ms: 1_000,
             },
             &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
         )
         .expect("recording runs");
         match outcome {

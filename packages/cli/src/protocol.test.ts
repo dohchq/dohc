@@ -8,6 +8,22 @@ import {
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
+describe("moment author results", () => {
+  it.each([
+    { kind: "agent", agentId: "agent" },
+    { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
+  ])("keeps a $kind author without a declared principal", (author) => {
+    const result = {
+      changes: [{
+        id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
+        path: "tasks/a.md", versionId: "main", fileCount: 1, author,
+      }],
+      count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+    };
+    expect(parseCliResult("moments", result)).toEqual(result);
+  });
+});
+
 function request(verb: string, args: Record<string, unknown>) {
   return {
     token,
@@ -229,6 +245,65 @@ describe("collection result schemas", () => {
     expect(() =>
       parseCliResult("collectionCreateRecord", { ok: true, recordId: "rec_1" }),
     ).toThrow();
+  });
+});
+
+describe("document request schemas", () => {
+  it("parses a read, an edit, and an edit that adds at the end", () => {
+    expect(cliRequestSchema.safeParse(request("documentRead", { path: "notes/a.md" })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      agent: "claude-code", path: "notes/a.md", find: "Draft", replacement: "Final",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      path: "notes/a.md", replacement: "## Next",
+    })).success).toBe(true);
+  });
+
+  it("refuses an agent name that could pass for an automation, and an empty find", () => {
+    for (const agent of ["plugin/automation", "", " padded", "x".repeat(65)]) {
+      expect(cliRequestSchema.safeParse(request("documentEdit", {
+        agent, path: "notes/a.md", replacement: "x",
+      })).success, agent).toBe(false);
+    }
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      path: "notes/a.md", find: "", replacement: "x",
+    })).success).toBe(false);
+  });
+
+  it("parses a document create and a comment on a file", () => {
+    expect(cliRequestSchema.safeParse(request("documentCreate", {
+      agent: "claude-code", path: "notes/new.md", markdown: "# New",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("fileChatStart", {
+      path: "notes/new.md", title: "Budget", body: "Is 400 enough?", runId: "run-1",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("fileChatStart", {
+      path: "notes/new.md", title: "", body: "x",
+    })).success).toBe(false);
+    expect(parseCliResult("fileChatStart", {
+      ok: true, path: "notes/new.md", threadId: "thread-1", messageId: "message-1",
+    })).toMatchObject({ ok: true, threadId: "thread-1" });
+    expect(() => parseCliResult("fileChatStart", {
+      ok: true, path: "notes/new.md", threadId: "th_1", messageId: "message-1",
+    })).toThrow();
+  });
+
+  it("bounds each side of an edit by its UTF-8 bytes, not its characters", () => {
+    // Three bytes per character: 80,000 fit 256 KiB and 90,000 do not.
+    const edit = (replacement: string) =>
+      cliRequestSchema.safeParse(request("documentEdit", { path: "notes/a.md", replacement })).success;
+    expect(edit("日".repeat(80_000))).toBe(true);
+    expect(edit("日".repeat(90_000))).toBe(false);
+    expect(edit("a".repeat(256 * 1024))).toBe(true);
+  });
+
+  it("parses document results and structured failures", () => {
+    expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" }))
+      .toEqual({ ok: true, path: "a.md", markdown: "# A" });
+    expect(parseCliResult("documentEdit", { ok: true, path: "a.md", changed: false }))
+      .toEqual({ ok: true, path: "a.md", changed: false });
+    expect(parseCliResult("documentEdit", { ok: false, reason: "refused" }))
+      .toEqual({ ok: false, reason: "refused" });
   });
 });
 

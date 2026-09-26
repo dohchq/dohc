@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RecordButton } from "./collections/RecordButton";
+import { useAutomationButtons } from "./collections/useAutomationButtons";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
-import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
@@ -95,6 +98,21 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   };
   const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, revision: dataset?.revision, revisionSha256: dataset?.revisionSha256, invoke, onError,
     onChanged: () => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); } });
+  const columns = useMemo(() => dataset && transactionalDescription(dataset), [dataset]);
+  // Button fields: what each shows, and presses in flight from this window.
+  // A table with none asks main nothing.
+  const table = dataset?.tables.find(candidate => candidate.tableId === tableId);
+  const buttonFields = useMemo(() => table?.fields.flatMap(field => field.type === "button" ? [field.name] : []) ?? [], [table]);
+  const buttons = useAutomationButtons({ workspaceId, of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null, onError, onNotice: message => onNotice?.(message) });
+  useEffect(() => { void buttons?.refresh(); }, [buttons, dataset]);
+  useEffect(() => buttons === null ? undefined : bridge().onCollectionAutomationsChanged(event => { if (event.workspaceId === workspaceId) void buttons.refresh(); }), [buttons, workspaceId]);
+  // A run a press started changes records without touching a file, so the table reads them again when it ends.
+  useEffect(() => buttons?.onSettled(() => setRecordsVersion(value => value + 1)), [buttons]);
+  const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
+    fields: buttonFields,
+    // A dataset record's id goes to main as JSON, since the table's key can be a number.
+    render: (field, row) => <RecordButton buttons={buttons} field={field} recordId={JSON.stringify(row.id)} recordLabel={`record ${String(row.id)}`} />,
+  }, [buttons, buttonFields]);
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
@@ -103,7 +121,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     return result.savedPath;
   }
   if (deleted) return <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">Collection deleted</div>;
-  if (!dataset) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+  if (!dataset || !columns) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <span className="text-sm text-muted">{loading ? "Opening collection…" : "Open this collection to see its records."}</span>
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
   </div>;
@@ -141,7 +159,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
       return result;
     }} />}</>;
-  return <><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
+  return <><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+    buttons={buttonColumns}
     activeView={owner ? activeView : null}
     viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
     copy={copy}
@@ -176,7 +195,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     }}
     resolveRelation={async (input, signal) => {
       signal.throwIfAborted();
-      const relation = dataset.tables.flatMap(table => table.fields).find(field => field.fieldId === input.fieldId)?.relation;
+      const relation = columns.tables.flatMap(table => table.fields).find(field => field.fieldId === input.fieldId)?.relation;
       if (!relation || relation.datasetId !== datasetId) throw Error("This related Collection is unavailable.");
       const target = dataset.tables.find(table => table.tableId === relation.tableId);
       const read = dataset.operations.find(operation => operation.tableId === relation.tableId && operation.kind === "read" && operation.readOnly && operation.fieldIds.includes(relation.fieldId));
@@ -247,7 +266,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         const { kind: _, ...page } = result;
         return page;
       }} />}
-    {transferringCsv && <DatasetTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
+    {transferringCsv && <DatasetTransferDialog workspaceId={workspaceId} dataset={columns} tableId={tableId} invoke={invoke} onError={onError}
       onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
       onSave={async (file, signal) => {
         signal.throwIfAborted();

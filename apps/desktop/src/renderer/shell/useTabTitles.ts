@@ -1,17 +1,11 @@
 import { useCallback, useState } from "react";
-import {
-  momentDiffTabPath,
-  pluginDetailsTabPath,
-  pluginWebAppTabPath,
-} from "../workbench/workbenchState";
+import { momentDiffTabPath } from "../workbench/workbenchState";
 
 const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
 
 export function useTabTitles(workspaceId: string) {
-  // Display labels that do not belong in tab identity. Plugin pages report
-  // their manifest titles after mount; moment pages report the durable path
-  // returned with their record. Reading plugin manifests from here instead
-  // failed the desktop e2e in 4 of 6 runs because that request races startup.
+  // Display labels that do not belong in tab identity: moment pages report
+  // the durable path returned with their record.
   const [knownTabTitles, setKnownTabTitles] = useState<{
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
@@ -28,24 +22,6 @@ export function useTabTitles(workspaceId: string) {
     },
     [workspaceId],
   );
-  const rememberWebAppTitle = useCallback(
-    (
-      pluginId: string,
-      webAppId: string,
-      instanceKey: string | null,
-      title: string,
-    ) =>
-      rememberTabTitle(
-        pluginWebAppTabPath(pluginId, webAppId, instanceKey),
-        title,
-      ),
-    [rememberTabTitle],
-  );
-  const rememberPluginDetailsTitle = useCallback(
-    (pluginId: string, directoryName: string, title: string) =>
-      rememberTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
-    [rememberTabTitle],
-  );
   const rememberMomentDiffPath = useCallback(
     (momentId: string, filePath: string) =>
       rememberTabTitle(momentDiffTabPath(momentId), filePath),
@@ -58,8 +34,6 @@ export function useTabTitles(workspaceId: string) {
 
   return {
     tabLabels,
-    rememberWebAppTitle,
-    rememberPluginDetailsTitle,
     rememberMomentDiffPath,
   };
 }

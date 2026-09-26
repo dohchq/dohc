@@ -166,7 +166,7 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
 }
 
 /// Fail-closed author parsing (parity with the TS wire `MomentAuthorSchema`):
-/// only an exact agent, public, or named shape renders as an author. Anything
+/// only a supported author shape renders as an author. Anything
 /// else, such as bad JSON or a hand-edited shape, surfaces as an explicit
 /// corrupt marker, never a valid-looking attribution.
 fn parsed_moment_author(raw: &str) -> Value {
@@ -185,6 +185,9 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .is_some_and(|v| !v.is_empty() && v.len() <= 500)
         })
     };
+    let principal_ok = object
+        .get("onBehalfOf")
+        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
         return if valid { value } else { corrupt() };
@@ -196,6 +199,24 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .get("grantGeneration")
                 .and_then(Value::as_i64)
                 .is_some_and(|generation| generation >= 1);
+        return if valid { value } else { corrupt() };
+    }
+    if object.get("kind").and_then(Value::as_str) == Some("automation") {
+        let text = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+        };
+        let valid = object.len() == 3 + usize::from(object.contains_key("onBehalfOf"))
+            && text("automationId")
+            && principal_ok
+            && object
+                .get("depth")
+                .and_then(Value::as_u64)
+                .is_some_and(|depth| {
+                    depth <= u64::from(dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH)
+                });
         return if valid { value } else { corrupt() };
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
@@ -210,16 +231,22 @@ fn parsed_moment_author(raw: &str) -> Value {
         Some(Value::String(v)) => !v.is_empty(),
         Some(_) => false,
     };
-    if kind_ok && nonempty("agentId") && nonempty("onBehalfOf") && run_ok {
+    if kind_ok && nonempty("agentId") && principal_ok && run_ok {
         let mut author = json!({
             "kind": "agent",
             "agentId": object["agentId"],
-            "onBehalfOf": object["onBehalfOf"],
         });
+        if let Some(principal) = object.get("onBehalfOf") {
+            author["onBehalfOf"] = principal.clone();
+        }
         // The contract field is OPTIONAL (`agentRunId?: string`), never
         // nullable — omit it when absent, exactly as pickMomentAuthor does.
         if let Some(run_id) = object.get("agentRunId") {
             author["agentRunId"] = run_id.clone();
+        }
+        // Named only past 0; a depth an older build stored unchecked reads as none.
+        if let Some(depth) = dohc_engine_domain::agent_author_depth(object.get("depth")) {
+            author["depth"] = json!(depth);
         }
         author
     } else {
@@ -402,9 +429,68 @@ mod relay_author_tests {
     use serde_json::json;
 
     #[test]
+    fn preserves_declared_authors_without_inventing_a_principal() {
+        for author in [
+            json!({"kind":"agent", "agentId":"agent"}),
+            json!({"kind":"agent", "agentId":"agent", "agentRunId":"run", "depth":3}),
+            json!({"kind":"automation", "automationId":"collection:tasks#stamp", "depth":4}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            for principal in [json!(null), json!(""), json!(42)] {
+                let mut malformed = author.clone();
+                malformed["onBehalfOf"] = principal;
+                assert_eq!(
+                    parsed_moment_author(&malformed.to_string()),
+                    json!({"corrupt":true})
+                );
+            }
+        }
+        for malformed in [
+            json!({"kind":"agent"}),
+            json!({"kind":"automation", "automationId":"collection:tasks#stamp"}),
+            json!({"kind":"automation", "depth":4}),
+            json!({"kind":"automation", "automationId":"a", "depth":65}),
+            json!({"kind":"automation", "automationId":"a", "depth":4, "extra":true}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    /// An older build stored an agent author with any depth it was given, 0
+    /// included. After an upgrade, history reads such a depth as none, as it
+    /// reads a run a person started.
+    #[test]
+    fn reads_a_stored_agent_depth_outside_the_chain_as_none() {
+        let named =
+            json!({"kind":"agent", "agentId":"agent", "onBehalfOf":"local", "agentRunId":"run"});
+        for depth in [json!(0), json!(65), json!("3"), json!(null)] {
+            let mut stored = named.clone();
+            stored["depth"] = depth;
+            assert_eq!(parsed_moment_author(&stored.to_string()), named, "{stored}");
+        }
+    }
+
+    #[test]
     fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
         let author = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
         assert_eq!(parsed_moment_author(&author.to_string()), author);
+        let automation = json!({
+            "kind": "automation",
+            "automationId": "collection:tasks#stamp",
+            "onBehalfOf": "local",
+            "depth": 1,
+        });
+        assert_eq!(parsed_moment_author(&automation.to_string()), automation);
+        assert_eq!(
+            parsed_moment_author(
+                &json!({"kind":"automation", "automationId":"a", "onBehalfOf":"local"}).to_string()
+            ),
+            json!({"corrupt":true}),
+            "an automation author names its depth"
+        );
         for malformed in [
             json!({"kind":"public", "principalId":"holder"}),
             json!({"kind":"public", "principalId":"", "grantId":"grant"}),

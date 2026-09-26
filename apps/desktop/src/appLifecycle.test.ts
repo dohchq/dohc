@@ -86,6 +86,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         stop: vi.fn(async () => { log.push("dispatch-stop"); }),
       },
       refreshTray: vi.fn(async () => { log.push("tray"); return false; }),
+      releaseIdleWorkspaces: vi.fn(async () => { log.push("release idle"); }),
       reportTrayFailure: vi.fn(),
       warmCredentials: vi.fn(async () => { log.push("credentials"); }),
       reconcileCloud: vi.fn(() => { log.push("cloud"); }),
@@ -101,8 +102,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       budgetMs: 3000,
       beginEngineShutdown: vi.fn(() => { log.push("begin-shutdown"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
-      stopPlugins: vi.fn(async () => { log.push("plugins-stop"); }),
-      stopAgentSessions: vi.fn(async () => { log.push("agents-stop"); }),
+      stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
       stopAgentIntegration: vi.fn(async () => { log.push("integration-stop"); }),
       closeWorkspaces: vi.fn(async () => { log.push("workspaces-close"); }),
@@ -533,18 +533,17 @@ describe("desktop open intents", () => {
 });
 
 describe("desktop shutdown", () => {
-  it.each(["search", "plugins", "agents", "dispatch", "ydoc", "integration", "cli"] as const)(
+  it.each(["search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
     "waits for %s before releasing workspace authority",
     async (heldProducer) => {
       vi.useFakeTimers();
       const gates = {
-        search: deferred(), plugins: deferred(), agents: deferred(), dispatch: deferred(),
+        search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
         ydoc: deferred(), integration: deferred(), cli: deferred(),
       };
       const f = fixture((d) => {
         d.shutdown.stopSearch = () => gates.search.promise;
-        d.shutdown.stopPlugins = () => gates.plugins.promise;
-        d.shutdown.stopAgentSessions = () => gates.agents.promise;
+        d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
         d.services.dispatch.stop = () => gates.dispatch.promise;
         d.shutdown.settleYDocs = () => gates.ydoc.promise;
         d.shutdown.stopAgentIntegration = () => gates.integration.promise;
@@ -567,7 +566,7 @@ describe("desktop shutdown", () => {
   it("settles every producer before closing authorities, then closes database, relay, and daemon", async () => {
     vi.useFakeTimers();
     const gates = {
-      search: deferred(), plugins: deferred(), agents: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
+      search: deferred(), sitePreviews: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
     };
     const integrationStarted = deferred();
     const cliStarted = deferred();
@@ -575,8 +574,7 @@ describe("desktop shutdown", () => {
     const exited = deferred();
     const f = fixture((d) => {
       d.shutdown.stopSearch = () => gates.search.promise;
-      d.shutdown.stopPlugins = () => gates.plugins.promise;
-      d.shutdown.stopAgentSessions = () => gates.agents.promise;
+      d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
       d.services.dispatch.stop = () => gates.dispatch.promise;
       d.shutdown.settleYDocs = () => gates.ydoc.promise;
       d.shutdown.stopAgentIntegration = () => { integrationStarted.resolve(); return gates.integration.promise; };
@@ -591,12 +589,11 @@ describe("desktop shutdown", () => {
     expect(f.lifecycle.isQuitting()).toBe(true);
     expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
-    gates.agents.resolve();
     await integrationStarted.promise;
     gates.dispatch.resolve();
     await cliStarted.promise;
     gates.search.resolve();
-    gates.plugins.resolve();
+    gates.sitePreviews.resolve();
     gates.integration.resolve();
     gates.cli.resolve();
     await vi.advanceTimersByTimeAsync(0);
@@ -674,7 +671,7 @@ describe("desktop shutdown", () => {
   it("keeps producer failure contained and preserves database-failure skipping of relay teardown", async () => {
     vi.useFakeTimers();
     const f = fixture((d) => {
-      d.shutdown.stopPlugins = async () => { throw new Error("plugin"); };
+      d.shutdown.stopSitePreviews = async () => { throw new Error("site previews"); };
       d.shutdown.disposeDatabase = async () => { throw new Error("database"); };
     });
     f.app.emit("will-quit", event());
@@ -704,6 +701,28 @@ describe("desktop shutdown", () => {
     f.app.emit("window-all-closed");
     await vi.advanceTimersByTimeAsync(0);
     expect(f.app.quit).toHaveBeenCalledTimes(enabled ? 0 : 1);
+    expect(f.dependencies.services.releaseIdleWorkspaces, "staying closes the workspaces nothing uses").toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+
+  it("quits once the last reason to run without windows goes, and not while a window is open", async () => {
+    let keep = true;
+    const f = fixture((d) => { d.services.refreshTray = async () => keep; });
+    await f.lifecycle.backgroundReasonsChanged();
+    expect(f.app.quit, "a schedule still runs").not.toHaveBeenCalled();
+    keep = false;
+    await f.lifecycle.backgroundReasonsChanged();
+    expect(f.app.quit, "no window and nothing to run").toHaveBeenCalledOnce();
+
+    const withWindow = fixture((d) => { d.services.refreshTray = async () => false; });
+    withWindow.dependencies.windows.create();
+    await withWindow.lifecycle.backgroundReasonsChanged();
+    expect(withWindow.app.quit).not.toHaveBeenCalled();
+    const mac = fixture((d) => {
+      d.runtime = { ...d.runtime, platform: "darwin" };
+      d.services.refreshTray = async () => false;
+    });
+    await mac.lifecycle.backgroundReasonsChanged();
+    expect(mac.app.quit).not.toHaveBeenCalled();
   });
 
   it("quits after a failed tray refresh but leaves macOS window closure alone", async () => {

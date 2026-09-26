@@ -52,6 +52,8 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     restore_before_moment_id: Option<String>,
     #[serde(default)]
+    create_only: bool,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -313,31 +315,53 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
-        let result = open
-            .actor
-            .versioned_text_write_indexed_with_history(
-                WriteText {
-                    workspace_id: open.workspace_id.clone(),
-                    version_id: params.version_id,
-                    object_id,
-                    path,
-                    text,
-                    moment_id,
-                    request_id,
-                    metadata_origin: origin,
-                    metadata_summary: params.summary,
-                    metadata_correlation_id: params.correlation_id,
-                    author_json,
-                    now_ms: params.now_ms.unwrap_or(now_ms()?),
-                },
-                open.root.clone(),
-                params.restore_before_moment_id,
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await;
+        if params.create_only && params.restore_before_moment_id.is_some() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "create-only cannot restore history",
+            ));
+        }
+        let input = WriteText {
+            workspace_id: open.workspace_id.clone(),
+            version_id: params.version_id,
+            object_id,
+            path,
+            text,
+            moment_id,
+            request_id,
+            metadata_origin: origin,
+            metadata_summary: params.summary,
+            metadata_correlation_id: params.correlation_id,
+            author_json,
+            now_ms: params.now_ms.unwrap_or(now_ms()?),
+        };
+        let result = if params.create_only {
+            open.actor
+                .versioned_text_create(
+                    input,
+                    open.root.clone(),
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+        } else {
+            open.actor
+                .versioned_text_write_indexed_with_history(
+                    input,
+                    open.root.clone(),
+                    params.restore_before_moment_id,
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+        };
         drop(session_serial);
         let result = result.map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &result.automation_claims,
+        );
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": snapshot_json(&result.snapshot),
@@ -758,6 +782,11 @@ impl EngineService {
             .await;
         drop(session_serial);
         let result = result.map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &result.automation_claims,
+        );
         Ok(json!({
             "rolledBack": true,
             "deduped": result.deduped,
@@ -960,6 +989,7 @@ mod tests {
             workspace: Some(handle.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({
                 "versionId": "main",
                 "path": "scoped.bin",

@@ -8,32 +8,18 @@ import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   GetSitePreviewLogsPayload,
-  InvokePluginCommandPayload,
-  InvokePluginPanelSdkPayload,
   ListSitesPayload,
-  PluginPanelOpenedEvent,
-  PluginPanelInvalidatedEvent,
-  PluginPanelSdkEvent,
-  PluginStatusChangedEvent,
-  PluginWebAppFailedEvent,
-  PluginWebAppOpenedEvent,
-  OpenPluginWebAppPayload,
-  SetPluginWebAppBoundsPayload,
-  StartPluginWebAppPayload,
-  StopPluginWebAppPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
-  OpenPluginPanelPayload,
-  StartPluginPanelPayload,
-  StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceActivityEvent,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
   OwnerLiveRefusalsResult,
@@ -41,6 +27,7 @@ import {
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
+  ShareDirectWritesPushedEvent,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -48,33 +35,23 @@ import {
   ExitRoundAnswerPayload,
   ExitRoundMessage,
   ExplorerMenuCommand,
-  ListPluginsResult,
-  InvokePluginCommandResult,
   MenuCommand,
-  OpenPluginPanelResult,
-  OpenPluginWebAppResult,
-  PluginActionResult,
-  PluginSettingsResult,
-  PluginSizesResult,
-  PluginUninstallPreflightResult,
+  CrashReportChangedEvent,
   NoticesChangedEvent,
   SearchResultsEvent,
   ShareHandoffStatus,
-  StartPluginPanelResult,
-  StartPluginWebAppResult,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
   WorkbenchMenuCommand,
+  WorkspaceIdPayload,
   WorkspaceSummary,
+  crashReportOperations,
   noticeOperations,
+  scheduleHostOperations,
+  ScheduleHostChangedEvent,
   workspaceSearchOperations,
   workspaceVersionOperations,
-  parseInvokePluginPanelSdkPayloadForIpc,
-  parsePluginPanelInvalidatedEventForIpc,
-  parsePluginPanelSdkEventForIpc,
-  parsePluginStatusChangedEventForIpc,
-  parsePluginWebAppFailedEventForIpc,
   parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
@@ -113,13 +90,6 @@ async function invokeParsed<Schema extends z.ZodType>(
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
 // mistyped method fails the desktop typecheck).
-const pluginPanelOpenedListeners = new Set<
-  (event: PluginPanelOpenedEvent) => void
->();
-const pluginWebAppOpenedListeners = new Set<
-  (event: PluginWebAppOpenedEvent) => void
->();
-
 // One unforgeable identity per preload/document lifetime. Main uses it to
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
@@ -248,120 +218,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getSitePreviewLogs, payload),
   stopSitePreview: (payload: StopSitePreviewPayload) =>
     ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
-  openPluginPanel: async (payload: OpenPluginPanelPayload) => {
-    const result = OpenPluginPanelResult.parse(
-      await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
-    );
-    const event: PluginPanelOpenedEvent = {
-      workspaceId: payload.workspaceId,
-      ...result,
-    };
-    for (const listener of pluginPanelOpenedListeners) listener(event);
-    return result;
-  },
-  onPluginPanelOpened: (listener) => {
-    pluginPanelOpenedListeners.add(listener);
-    return () => pluginPanelOpenedListeners.delete(listener);
-  },
-  startPluginPanel: async (payload: StartPluginPanelPayload) =>
-    StartPluginPanelResult.parse(
-      await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
-    ),
-  onPluginPanelInvalidated: (
-    listener: (event: PluginPanelInvalidatedEvent) => void,
-  ) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parsePluginPanelInvalidatedEventForIpc(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.pluginPanelInvalidated, handler);
-    return () =>
-      ipcRenderer.removeListener(CHANNELS.pluginPanelInvalidated, handler);
-  },
-  invokePluginCommand: async (payload: InvokePluginCommandPayload) =>
-    InvokePluginCommandResult.parse(
-      await ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload),
-    ),
-  stopPluginPanel: (payload: StopPluginPanelPayload) =>
-    ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
-  invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>
-    ipcRenderer.invoke(
-      CHANNELS.invokePluginPanelSdk,
-      parseInvokePluginPanelSdkPayloadForIpc(payload),
-    ),
-  onPluginPanelSdkEvent: (listener: (event: PluginPanelSdkEvent) => void) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parsePluginPanelSdkEventForIpc(raw);
-      if (!parsed) {
-        console.error(
-          "[desktop] dropped a plugin panel SDK event that failed the IPC schema.",
-        );
-        return;
-      }
-      listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.pluginPanelSdkEvent, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.pluginPanelSdkEvent, handler);
-  },
-  openPluginWebApp: async (payload: OpenPluginWebAppPayload) => {
-    const result = OpenPluginWebAppResult.parse(
-      await ipcRenderer.invoke(CHANNELS.openPluginWebApp, payload),
-    );
-    const event: PluginWebAppOpenedEvent = {
-      workspaceId: payload.workspaceId,
-      ...result,
-    };
-    for (const listener of pluginWebAppOpenedListeners) listener(event);
-    return result;
-  },
-  onPluginWebAppOpened: (listener) => {
-    pluginWebAppOpenedListeners.add(listener);
-    return () => pluginWebAppOpenedListeners.delete(listener);
-  },
-  startPluginWebApp: async (payload: StartPluginWebAppPayload) =>
-    StartPluginWebAppResult.parse(
-      await ipcRenderer.invoke(CHANNELS.startPluginWebApp, payload),
-    ),
-  setPluginWebAppBounds: (payload: SetPluginWebAppBoundsPayload) =>
-    ipcRenderer.invoke(CHANNELS.setPluginWebAppBounds, payload),
-  stopPluginWebApp: (payload: StopPluginWebAppPayload) =>
-    ipcRenderer.invoke(CHANNELS.stopPluginWebApp, payload),
-  onPluginWebAppFailed: (listener: (event: PluginWebAppFailedEvent) => void) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parsePluginWebAppFailedEventForIpc(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.pluginWebAppFailed, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.pluginWebAppFailed, handler);
-  },
-  listPlugins: async (payload) =>
-    ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
-  installPlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.installPlugin, payload)),
-  disablePlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.disablePlugin, payload)),
-  enablePlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.enablePlugin, payload)),
-  approvePlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.approvePlugin, payload)),
-  rebuildPlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.rebuildPlugin, payload)),
-  pluginUninstallPreflight: async (payload) =>
-    PluginUninstallPreflightResult.parse(
-      await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
-    ),
-  pluginSizes: async (payload) =>
-    PluginSizesResult.parse(await ipcRenderer.invoke(CHANNELS.pluginSizes, payload)),
-  uninstallPlugin: async (payload) =>
-    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload)),
-  getPluginSettings: async (payload) =>
-    PluginSettingsResult.parse(
-      await ipcRenderer.invoke(CHANNELS.getPluginSettings, payload),
-    ),
-  setPluginSettings: async (payload) =>
-    PluginSettingsResult.parse(
-      await ipcRenderer.invoke(CHANNELS.setPluginSettings, payload),
-    ),
+  onSitePreviewReplaced: (listener) =>
+    onEvent(CHANNELS.sitePreviewReplaced, SitePreviewReplacedEvent, listener),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>
@@ -457,6 +315,46 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
   dismissAutomationFailure: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
+  listCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
+  listCollectionAutomationRuns: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
+  retryCollectionAutomation: (payload) =>
+    ipcRenderer.invoke(CHANNELS.retryCollectionAutomation, payload),
+  undoCollectionAutomationRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.undoCollectionAutomationRun, payload),
+  listAutomationTargets: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationTargets, payload),
+  checkCollectionAutomation: (payload) =>
+    ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
+  stopAndRestorePerson: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stopAndRestorePerson, payload),
+  undoStopAndRestore: (payload) =>
+    ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
+  confirmCollectionAutomationStep: (payload) =>
+    ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
+  writeCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
+  listAutomationButtons: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationButtons, payload),
+  listRecordButtons: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRecordButtons, payload),
+  pressAutomationButton: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pressAutomationButton, payload),
+  listAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationHolds, payload),
+  resetAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resetAutomationHolds, payload),
+  revealAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revealAutomationHolds, payload),
+  dismissAutomationStops: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissAutomationStops, payload),
+  automationShareImpact: (payload) =>
+    ipcRenderer.invoke(CHANNELS.automationShareImpact, payload),
+  listCollectionFieldMarks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionFieldMarks, payload),
+  onCollectionAutomationsChanged: (listener) =>
+    onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationFailuresChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
@@ -478,6 +376,54 @@ const bridge: DohcDesktopBridge = {
     return () =>
       ipcRenderer.removeListener(CHANNELS.automationFailuresChanged, handler);
   },
+  ...operationBridge(crashReportOperations, invoke),
+  onCrashReportChanged: (listener) =>
+    onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
+  onAutomationHoldsChanged: (
+    listener: (event: { workspaceId: string }) => void,
+  ) => {
+    // Validate at the boundary like every main-sent event: the listener
+    // only ever sees a workspace id string; anything else is dropped.
+    const handler = (_event: unknown, payload: unknown) => {
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "workspaceId" in payload &&
+        typeof (payload as { workspaceId: unknown }).workspaceId === "string"
+      ) {
+        listener({
+          workspaceId: (payload as { workspaceId: string }).workspaceId,
+        });
+      }
+    };
+    ipcRenderer.on(CHANNELS.automationHoldsChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.automationHoldsChanged, handler);
+  },
+  onAutomationRunSettled: (listener) => {
+    // Validated at the boundary: anything that is not a settled run is dropped.
+    const handler = (_event: unknown, payload: unknown) => {
+      if (typeof payload !== "object" || payload === null) return;
+      const { workspaceId, claimId, outcome, error } = payload as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || typeof claimId !== "string") return;
+      if (outcome !== "done" && outcome !== "skipped" && outcome !== "failed" && outcome !== "ended") return;
+      if (error !== null && typeof error !== "string") return;
+      listener({ workspaceId, claimId, outcome, error });
+    };
+    ipcRenderer.on(CHANNELS.automationRunSettled, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.automationRunSettled, handler);
+  },
+  onAutomationRunWaiting: (listener) => {
+    const handler = (_event: unknown, payload: unknown) => {
+      if (typeof payload !== "object" || payload === null) return;
+      const { workspaceId, claimId, reason } = payload as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || typeof claimId !== "string") return;
+      if (reason !== "roster" && reason !== "held" && reason !== "busy") return;
+      listener({ workspaceId, claimId, reason });
+    };
+    ipcRenderer.on(CHANNELS.automationRunWaiting, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.automationRunWaiting, handler);
+  },
   listShareProposals: (payload) =>
     ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
   readShareProposalChanges: (payload) =>
@@ -488,6 +434,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
   submitShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
+  pushShareDirectWrites: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
+  onShareDirectWritesPushed: (listener) =>
+    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
   listMyShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>
@@ -561,6 +511,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
+  retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),
   rebuildEngineStore: (payload) =>
     ipcRenderer.invoke(CHANNELS.rebuildEngineStore, payload),
   startAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.startAgentRun, payload),
@@ -568,12 +519,6 @@ const bridge: DohcDesktopBridge = {
   getAgentRunStatus: (payload) =>
     ipcRenderer.invoke(CHANNELS.getAgentRunStatus, payload),
   getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
-  probeAgentDrivers: (payload) =>
-    ipcRenderer.invoke(CHANNELS.probeAgentDrivers, payload),
-  getAgentSessionState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getAgentSessionState, payload),
-  answerAgentPermission: (payload) =>
-    ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
   stopAgentRun: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAgentRun, payload),
   resumeThreadDispatch: (payload) =>
@@ -588,6 +533,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
   reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
+  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
   getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
   openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
   openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>
@@ -617,14 +563,6 @@ const bridge: DohcDesktopBridge = {
       listener(parseWorkspaceActivityEventForIpc(raw));
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
-  },
-  onPluginStatusChanged: (listener: (event: PluginStatusChangedEvent) => void) => {
-    const handler = (_event: unknown, raw: unknown) => {
-      const parsed = parsePluginStatusChangedEventForIpc(raw);
-      if (parsed) listener(parsed);
-    };
-    ipcRenderer.on(CHANNELS.pluginStatusChanged, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.pluginStatusChanged, handler);
   },
   onCloudSessionChanged: (
     listener: (event: {
@@ -673,8 +611,11 @@ const bridge: DohcDesktopBridge = {
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),
+  ...operationBridge(scheduleHostOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
+  onScheduleHostChanged: (listener) =>
+    onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound
