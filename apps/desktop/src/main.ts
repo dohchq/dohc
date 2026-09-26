@@ -74,6 +74,9 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
+  WORKSPACE_METHOD,
+  decodeWorkspaceResult,
+  type AutomationGroupHandover,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -205,6 +208,7 @@ import {
   computersOfAnswer,
   createAutomationHosts,
   hostOfAnswer,
+  automationHostGeneration,
   isAutomationHost,
   relayUnreachable,
 } from "./automations/automationHost";
@@ -1804,6 +1808,7 @@ function engineForWorkspace(
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       automationHosts.relayAnswered(workspace.workspaceId);
+      collectionAutomationsOf(workspace.workspaceId)?.relayAnswered();
       // The relay answers again, so this computer may be the host again.
       if (recovered) withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, (lease) => lease.state.relayedPresses)?.start();
       return withWorkspaceAttachmentAsync(workspace, () =>
@@ -3319,12 +3324,14 @@ const automationHosts = createAutomationHosts({
   },
   startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
   hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
-  // The release waits until the engine here holds no Group subscription,
-  // so no message that reaches this computer after the release claims here.
+  // The release waits until the engine here claims no more Group messages,
+  // and carries what it decided so the next host claims each one once.
   finishHere: async (workspaceId, stillHandingOver) => {
     const automations = collectionAutomationsOf(workspaceId);
-    if (!automations || !(await automations.removeGroupSubscriptions(stillHandingOver))) return null;
-    return await automationScheduler.finishHere(workspaceId);
+    const groups = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
+    if (groups === null) return null;
+    const throughMs = await automationScheduler.finishHere(workspaceId);
+    return throughMs === null ? null : { throughMs, groups };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
@@ -3410,6 +3417,26 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return false;
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
+}
+
+// The Group handover the release that started this host generation carried,
+// as the relay keeps it, or null when none did. The engine checks it again
+// before it takes it.
+async function automationGroupHandover(workspaceId: string, generation: number): Promise<AutomationGroupHandover | null> {
+  const entry = findWorkspace(workspaceId);
+  if (!entry?.remote) return null;
+  const { credentials } = await remoteForWorkspace(entry);
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/automation-host/groups?generation=${generation}`,
+    { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  const groups = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
+    ? (body as { groups?: unknown }).groups
+    : undefined;
+  if (groups === undefined) throw new Error(`The relay answered the Group handover read with ${response.status}.`);
+  return groups === null ? null : decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, groups);
 }
 
 // Whether any computer can run this workspace's schedules and Group
@@ -3554,7 +3581,8 @@ function createCollectionAutomationsFor(
     postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
-    runsGroupTriggers: () => isAutomationHost(findWorkspace(workspaceId), () => automationHosts.stillRuns(workspaceId)),
+    groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
+    groupHandover: (generation) => automationGroupHandover(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),

@@ -33,7 +33,9 @@ import {
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
-  type AutomationUnsubscribeGroupsResult,
+  type AutomationGroupHandover,
+  type AutomationWatchGroupsParams,
+  type AutomationWatchGroupsResult,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1177,15 +1179,21 @@ export class VersionedLiveAdapter {
   }
 
   /**
-   * Removes every Group subscription in the workspace in one engine write,
-   * including one the desktop lost track of, so no message stored after it
-   * claims until one is added again.
+   * Stops every Group subscription in the workspace from claiming, in one
+   * engine write, and answers what the next automation host needs.
    */
-  async unsubscribeAutomationGroups(): Promise<AutomationUnsubscribeGroupsResult> {
-    return this.workspaceRequest(
-      WORKSPACE_METHOD.automationsUnsubscribeGroups,
-      {},
-    );
+  async releaseAutomationGroups(): Promise<AutomationGroupHandover> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsReleaseGroups, {});
+  }
+
+  /**
+   * Sets every Group subscription this computer watches, in one engine
+   * write, taking a new host generation's handover.
+   */
+  async watchAutomationGroups(
+    input: AutomationWatchGroupsParams,
+  ): Promise<AutomationWatchGroupsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsWatchGroups, input);
   }
 
   /**

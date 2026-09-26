@@ -3,9 +3,10 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_COMPUTERS_PER_WORKSPACE,
   AUTOMATION_HOST_MAX_BODY_BYTES,
+  AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES,
   type RelayAutomationHostState,
 } from "@dohc/workspace-contracts/relay";
-import { isAutomationHostPath } from "./automationHostRoutes";
+import { automationHostMaxBodyBytes, isAutomationHostPath } from "./automationHostRoutes";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -30,6 +31,12 @@ const WORKSPACE = "workspace-trip";
 const BASE = `/sync/${WORKSPACE}/automation-host`;
 
 let clock = 10_000;
+
+// A Group handover as the engine of the computer handing over answers it.
+const GROUPS = {
+  floorMs: 1,
+  automations: [{ automationId: "collection:Trip#task", sinceMs: 1, decided: [{ messageId: "m1", createdAtMs: 2 }] }],
+};
 
 async function relay(
   overrides: HandlerOverrides = {},
@@ -63,6 +70,10 @@ async function checkIn(h: SyncRelayHandler, installId: string, claim = false, la
 
 async function read(h: SyncRelayHandler): Promise<RelayAutomationHostState> {
   return state(await h(request("owner", BASE)));
+}
+
+async function groups(h: SyncRelayHandler, generation: number | string, userId = "owner"): Promise<Response> {
+  return h(request(userId, `${BASE}/groups?generation=${generation}`));
 }
 
 describe("automation hosts", () => {
@@ -101,7 +112,7 @@ describe("automation hosts", () => {
       for (const [action, body] of [
         ["check-in", { installId: "ana-laptop", label: "Ana", claim: true }],
         ["choose", { installId: "desktop", generation: 1 }],
-        ["release", { installId: "desktop", generation: 1, releasedThroughMs: 1 }],
+        ["release", { installId: "desktop", generation: 1, releasedThroughMs: 1, groups: GROUPS }],
         ["take-over", { generation: 1 }],
       ] as const) {
         expect((await send(h, action, body, userId)).status, `${userId} ${action}`).toBe(404);
@@ -127,16 +138,16 @@ describe("automation hosts", () => {
     });
     expect((await send(h, "choose", { installId: "laptop", generation: 1 })).status, "stale").toBe(409);
     expect(
-      (await send(h, "release", { installId: "laptop", generation: 2, releasedThroughMs: 5 })).status,
+      (await send(h, "release", { installId: "laptop", generation: 2, releasedThroughMs: 5, groups: GROUPS })).status,
       "only the computer handing over releases",
     ).toBe(409);
     expect(
-      (await send(h, "release", { installId: "desktop", generation: 1, releasedThroughMs: 5 })).status,
+      (await send(h, "release", { installId: "desktop", generation: 1, releasedThroughMs: 5, groups: GROUPS })).status,
       "a release names the generation it read",
     ).toBe(409);
 
     const released = await state(
-      await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000 }),
+      await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS }),
     );
     expect(released.host).toEqual({
       installId: "laptop",
@@ -145,6 +156,35 @@ describe("automation hosts", () => {
       releasedThroughMs: 9_000,
     });
     expect((await send(h, "take-over", { generation: 3 })).status, "nothing to take over").toBe(409);
+  });
+
+  it("keeps a release's Group handover for the host it names, while that host's generation lasts", async () => {
+    const { h } = await relay();
+    await checkIn(h, "desktop", true);
+    await checkIn(h, "laptop");
+    expect(await (await groups(h, 1)).json(), "the first host began without one").toEqual({ ok: true, groups: null });
+    await send(h, "choose", { installId: "laptop", generation: 1 });
+    expect(
+      (await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: [] })).status,
+      "groups is an object",
+    ).toBe(400);
+    expect(
+      (await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5 })).status,
+      "a release carries the Group handover",
+    ).toBe(400);
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 5, groups: GROUPS });
+
+    expect(await (await groups(h, 3)).json()).toEqual({ ok: true, groups: GROUPS });
+    expect((await groups(h, 2)).status, "not the current generation").toBe(409);
+    expect((await groups(h, "x")).status).toBe(400);
+    expect((await groups(h, 3, "stranger")).status, "only the owner").toBe(404);
+    expect((await send(h, "groups", {})).status, "a read").toBe(405);
+
+    // The owner moves on: that handover is not the new generation's.
+    await send(h, "choose", { installId: "desktop", generation: 3 });
+    expect((await groups(h, 3)).status).toBe(409);
+    await send(h, "take-over", { generation: 4 });
+    expect(await (await groups(h, 5)).json(), "a take-over carries none").toEqual({ ok: true, groups: null });
   });
 
   it("cancels a handover by choosing the old computer back, and keeps it while choosing a third", async () => {
@@ -173,7 +213,7 @@ describe("automation hosts", () => {
     await checkIn(h, "laptop");
     await checkIn(h, "studio");
     await send(h, "choose", { installId: "laptop", generation: 1 });
-    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000, groups: GROUPS });
 
     // The laptop has not read the desktop's release when the owner chooses
     // the studio, so it reports its own older checkpoint.
@@ -185,7 +225,7 @@ describe("automation hosts", () => {
       releasedThroughMs: 9_000,
     });
     const released = await state(
-      await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5_000 }),
+      await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5_000, groups: GROUPS }),
     );
     expect(released.host).toEqual({
       installId: "studio",
@@ -213,7 +253,7 @@ describe("automation hosts", () => {
       releasedThroughMs: null,
     });
     expect(
-      (await send(h, "release", { installId: "desktop", generation: 3, releasedThroughMs: 1 })).status,
+      (await send(h, "release", { installId: "desktop", generation: 3, releasedThroughMs: 1, groups: GROUPS })).status,
       "a late release after a take-over changes nothing",
     ).toBe(409);
   });
@@ -257,6 +297,22 @@ describe("automation hosts", () => {
       padding: "x".repeat(AUTOMATION_HOST_MAX_BODY_BYTES),
     });
     expect(large.status).toBe(413);
+
+    // A release carries the Group handover, so it takes more.
+    await checkIn(fresh, "laptop");
+    await send(fresh, "check-in", { installId: "desktop", label: "Desktop", claim: true });
+    await send(fresh, "choose", { installId: "laptop", generation: 1 });
+    const release = (padding: number) => send(fresh, "release", {
+      installId: "desktop",
+      generation: 2,
+      releasedThroughMs: 1,
+      groups: { ...GROUPS, padding: "x".repeat(padding) },
+    });
+    expect((await release(AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES)).status).toBe(413);
+    expect((await release(AUTOMATION_HOST_MAX_BODY_BYTES)).status).toBe(200);
+    expect(automationHostMaxBodyBytes(`${BASE}/release`)).toBe(AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES);
+    expect(automationHostMaxBodyBytes(`${BASE}/check-in`)).toBe(AUTOMATION_HOST_MAX_BODY_BYTES);
+    expect(automationHostMaxBodyBytes(`/sync/${WORKSPACE}/live-host`)).toBeNull();
   });
 
   it("gives the small body limit to every spelling the router accepts", async () => {
@@ -299,7 +355,7 @@ describe("automation hosts", () => {
       expect((await send(h, "check-in", body)).status, JSON.stringify(body)).toBe(400);
     }
     expect((await send(h, "choose", { installId: "desktop", generation: -1 })).status).toBe(400);
-    expect((await send(h, "release", { installId: "desktop", generation: 0, releasedThroughMs: 1.5 })).status).toBe(400);
+    expect((await send(h, "release", { installId: "desktop", generation: 0, releasedThroughMs: 1.5, groups: GROUPS })).status).toBe(400);
     expect((await h(request("owner", `${BASE}/check-in`))).status, "check-in is a POST").toBe(405);
     expect((await send(h, "read", {})).status).toBe(404);
     expect((await h(request("owner", `${BASE}/choose/extra`))).status).toBe(404);
@@ -319,6 +375,7 @@ describe("automation hosts", () => {
     db.close();
     expect(countRows(dbPath, "sync_relay_automation_hosts")).toBe(0);
     expect(countRows(dbPath, "sync_relay_automation_computers")).toBe(0);
+    expect(countRows(dbPath, "sync_relay_automation_group_handovers")).toBe(0);
 
     const damaged = inspectDatabase(dbPath);
     damaged.exec("DROP TABLE sync_relay_automation_computers");

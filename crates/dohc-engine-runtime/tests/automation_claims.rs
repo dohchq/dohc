@@ -1256,9 +1256,9 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_chat_write_announces_the_group_claims_it_committed() {
     use dohc_engine_domain::{
-        AutomationGroupSubscription, ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane,
-        FollowState, FollowTargetKind, LinkedChatStore, SetFollow, StartChannelThread,
-        subscribe_automation_group,
+        AutomationGroupHandoverInput, AutomationGroupSubscription, AutomationGroupWatch,
+        ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane, FollowState,
+        FollowTargetKind, LinkedChatStore, SetFollow, StartChannelThread, watch_automation_groups,
     };
     use dohc_engine_sync::apply_chat_envelope;
 
@@ -1278,18 +1278,22 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 &NoFaults,
             )
             .expect("Group");
-        subscribe_automation_group(
+        watch_automation_groups(
             &mut store,
             GROUP_WS,
-            &AutomationGroupSubscription {
-                automation_id: "collection:Trip/Tasks#task".to_owned(),
-                channel_id: "trip".to_owned(),
-                starts_with: Some("/task".to_owned()),
+            &AutomationGroupWatch {
+                generation: 0,
+                subscriptions: vec![AutomationGroupSubscription {
+                    automation_id: "collection:Trip/Tasks#task".to_owned(),
+                    channel_id: "trip".to_owned(),
+                    starts_with: Some("/task".to_owned()),
+                }],
+                handover: AutomationGroupHandoverInput::Unfetched,
             },
             6,
             &NoFaults,
         )
-        .expect("subscribe");
+        .expect("watch");
         // A member's message arrives before its thread and is parked.
         let early = ReplicationEnvelope {
             workspace_id: GROUP_WS.to_owned(),

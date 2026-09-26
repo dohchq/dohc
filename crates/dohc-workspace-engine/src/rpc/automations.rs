@@ -8,7 +8,11 @@ use dohc_engine_domain::AutomationChangeKind;
 use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
+use dohc_engine_domain::AutomationGroupHandover;
+use dohc_engine_domain::AutomationGroupHandoverAutomation;
+use dohc_engine_domain::AutomationGroupHandoverInput;
 use dohc_engine_domain::AutomationGroupSubscription;
+use dohc_engine_domain::AutomationGroupWatch;
 use dohc_engine_domain::AutomationPress;
 use dohc_engine_domain::AutomationPressed;
 use dohc_engine_domain::AutomationRetry;
@@ -35,17 +39,9 @@ pub(crate) const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 /// running rather than double-fired.
 pub(crate) const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
-/// A subscription names records under a path or messages in one Group.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum AutomationSubscribeParams {
-    Records(AutomationRecordsSubscribeParams),
-    Group(AutomationGroupSubscribeParams),
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationRecordsSubscribeParams {
+struct AutomationSubscribeParams {
     automation_id: String,
     path: String,
     kinds: Vec<AutomationChangeKind>,
@@ -55,38 +51,97 @@ struct AutomationRecordsSubscribeParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationGroupSubscribeParams {
-    automation_id: String,
-    group_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    starts_with: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum AutomationUnsubscribeParams {
-    Records(AutomationRecordsUnsubscribeParams),
-    Group(AutomationGroupUnsubscribeParams),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationRecordsUnsubscribeParams {
+struct AutomationUnsubscribeParams {
     automation_id: String,
     path: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationGroupUnsubscribeParams {
-    automation_id: String,
-    group_id: String,
+struct AutomationReleaseGroupsParams {
+    now_ms: Option<i64>,
 }
 
-/// Removing every Group subscription takes no parameters.
+/// Every Group subscription this computer watches, at the automation host
+/// generation it runs at. An absent `handover` means the caller has not
+/// fetched one; `null` means the relay holds none.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AutomationUnsubscribeGroupsParams {}
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationWatchGroupsParams {
+    generation: i64,
+    subscriptions: Vec<AutomationGroupSubscriptionParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    handover: Option<Option<AutomationGroupHandoverParams>>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupSubscriptionParams {
+    automation_id: String,
+    group_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    starts_with: Option<String>,
+}
+
+/// A handover as `automations.releaseGroups` answered it on the computer
+/// that handed over.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupHandoverParams {
+    floor_ms: i64,
+    automations: Vec<AutomationGroupHandoverAutomationParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupHandoverAutomationParams {
+    automation_id: String,
+    since_ms: i64,
+    decided: Vec<AutomationGroupDecidedParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupDecidedParams {
+    message_id: String,
+    created_at_ms: i64,
+}
+
+impl From<AutomationGroupHandoverParams> for AutomationGroupHandover {
+    fn from(params: AutomationGroupHandoverParams) -> Self {
+        AutomationGroupHandover {
+            floor_ms: params.floor_ms,
+            automations: params
+                .automations
+                .into_iter()
+                .map(|automation| AutomationGroupHandoverAutomation {
+                    automation_id: automation.automation_id,
+                    since_ms: automation.since_ms,
+                    decided: automation
+                        .decided
+                        .into_iter()
+                        .map(|decided| (decided.message_id, decided.created_at_ms))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn automation_group_handover_json(handover: &AutomationGroupHandover) -> Value {
+    json!({
+        "floorMs": handover.floor_ms,
+        "automations": handover.automations.iter().map(|automation| json!({
+            "automationId": automation.automation_id,
+            "sinceMs": automation.since_ms,
+            "decided": automation.decided.iter().map(|(message_id, created_at_ms)| json!({
+                "messageId": message_id,
+                "createdAtMs": created_at_ms,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -234,46 +289,23 @@ impl EngineService {
         let params: AutomationSubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let workspace_id = open.workspace_id.clone();
-        let subscribed = match params {
-            AutomationSubscribeParams::Records(params) => {
-                Self::read_under_ctx(
-                    &cancellation,
-                    "automations.subscribe",
-                    open.actor.automation_subscribe(
-                        workspace_id,
-                        AutomationSubscription {
-                            automation_id: params.automation_id,
-                            prefix: params.path,
-                            kinds: params.kinds,
-                            fields: params.fields,
-                        },
-                        now_ms()?,
-                        Arc::new(NoFaults),
-                        cancellation.token(),
-                    ),
-                )
-                .await?
-            }
-            AutomationSubscribeParams::Group(params) => {
-                Self::read_under_ctx(
-                    &cancellation,
-                    "automations.subscribe",
-                    open.actor.automation_subscribe_group(
-                        workspace_id,
-                        AutomationGroupSubscription {
-                            automation_id: params.automation_id,
-                            channel_id: params.group_id,
-                            starts_with: params.starts_with,
-                        },
-                        now_ms()?,
-                        Arc::new(NoFaults),
-                        cancellation.token(),
-                    ),
-                )
-                .await?
-            }
-        };
+        let subscribed = Self::read_under_ctx(
+            &cancellation,
+            "automations.subscribe",
+            open.actor.automation_subscribe(
+                open.workspace_id.clone(),
+                AutomationSubscription {
+                    automation_id: params.automation_id,
+                    prefix: params.path,
+                    kinds: params.kinds,
+                    fields: params.fields,
+                },
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
         Ok(json!({ "subscribed": subscribed }))
     }
 
@@ -286,61 +318,89 @@ impl EngineService {
         let params: AutomationUnsubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let workspace_id = open.workspace_id.clone();
-        let unsubscribed = match params {
-            AutomationUnsubscribeParams::Records(params) => {
-                Self::read_under_ctx(
-                    &cancellation,
-                    "automations.unsubscribe",
-                    open.actor.automation_unsubscribe(
-                        workspace_id,
-                        params.automation_id,
-                        params.path,
-                        Arc::new(NoFaults),
-                        cancellation.token(),
-                    ),
-                )
-                .await?
-            }
-            AutomationUnsubscribeParams::Group(params) => {
-                Self::read_under_ctx(
-                    &cancellation,
-                    "automations.unsubscribe",
-                    open.actor.automation_unsubscribe_group(
-                        workspace_id,
-                        params.automation_id,
-                        params.group_id,
-                        Arc::new(NoFaults),
-                        cancellation.token(),
-                    ),
-                )
-                .await?
-            }
-        };
-        Ok(json!({ "unsubscribed": unsubscribed }))
-    }
-
-    /// Every Group subscription in the workspace, removed in one write.
-    pub(super) async fn automations_unsubscribe_groups(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let AutomationUnsubscribeGroupsParams {} = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let removed = Self::read_under_ctx(
+        let unsubscribed = Self::read_under_ctx(
             &cancellation,
-            "automations.unsubscribeGroups",
-            open.actor.automation_unsubscribe_groups(
+            "automations.unsubscribe",
+            open.actor.automation_unsubscribe(
                 open.workspace_id.clone(),
+                params.automation_id,
+                params.path,
                 Arc::new(NoFaults),
                 cancellation.token(),
             ),
         )
         .await?;
-        Ok(json!({ "removed": removed }))
+        Ok(json!({ "unsubscribed": unsubscribed }))
+    }
+
+    /// Stop every Group subscription here from claiming, and answer what the
+    /// next host needs.
+    pub(super) async fn automations_release_groups(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationReleaseGroupsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let handover = Self::read_under_ctx(
+            &cancellation,
+            "automations.releaseGroups",
+            open.actor.automation_release_groups(
+                open.workspace_id.clone(),
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(automation_group_handover_json(&handover))
+    }
+
+    /// Set every Group subscription this computer watches, taking a new host
+    /// generation's handover. Claims for stored messages announce themselves
+    /// post-commit.
+    pub(super) async fn automations_watch_groups(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationWatchGroupsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let watch = AutomationGroupWatch {
+            generation: params.generation,
+            subscriptions: params
+                .subscriptions
+                .into_iter()
+                .map(|subscription| AutomationGroupSubscription {
+                    automation_id: subscription.automation_id,
+                    channel_id: subscription.group_id,
+                    starts_with: subscription.starts_with,
+                })
+                .collect(),
+            handover: match params.handover {
+                None => AutomationGroupHandoverInput::Unfetched,
+                Some(None) => AutomationGroupHandoverInput::Missing,
+                Some(Some(handover)) => AutomationGroupHandoverInput::Fetched(handover.into()),
+            },
+        };
+        let watched = Self::read_under_ctx(
+            &cancellation,
+            "automations.watchGroups",
+            open.actor.automation_watch_groups(
+                open.workspace_id.clone(),
+                watch,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        emit_automation_claimed(&self.events, &open.workspace_id, &watched.claims);
+        Ok(json!({ "needsHandover": watched.needs_handover }))
     }
 
     pub(super) async fn automations_claim_next(

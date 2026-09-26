@@ -36,7 +36,8 @@ export const WORKSPACE_METHOD = {
   captureSetAuthor: "capture.setAuthor",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
-  automationsUnsubscribeGroups: "automations.unsubscribeGroups",
+  automationsReleaseGroups: "automations.releaseGroups",
+  automationsWatchGroups: "automations.watchGroups",
   automationsClaimNext: "automations.claimNext",
   automationsFailures: "automations.failures",
   automationsListClaims: "automations.listClaims",
@@ -164,20 +165,8 @@ export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
-/**
- * Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine: the
- * records under a path, or the messages in one Group.
- */
-export type AutomationSubscribeParams = AutomationRecordsSubscribeParams | AutomationGroupSubscribeParams;
-
-/** A Collection automation's interest in one Group's messages, optionally only those that start with some text. */
-type AutomationGroupSubscribeParams = WorkspaceJsonObject & {
-  automationId: string;
-  groupId: string;
-  startsWith?: string;
-};
-
-type AutomationRecordsSubscribeParams = WorkspaceJsonObject & {
+/** Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine. */
+export type AutomationSubscribeParams = WorkspaceJsonObject & {
   automationId: string;
   /** Collection path prefix; "." covers the whole workspace. */
   path: string;
@@ -192,9 +181,41 @@ type AutomationRecordsSubscribeParams = WorkspaceJsonObject & {
 };
 
 /** Mirrors AutomationUnsubscribeParams in crates/dohc-workspace-engine. */
-export type AutomationUnsubscribeParams =
-  | (WorkspaceJsonObject & { automationId: string; path: string })
-  | (WorkspaceJsonObject & { automationId: string; groupId: string });
+export type AutomationUnsubscribeParams = WorkspaceJsonObject & { automationId: string; path: string };
+
+/**
+ * What the next automation host needs so each Group message claims exactly
+ * once across a handover. `automations.releaseGroups` answers it and
+ * `automations.watchGroups` takes it; the relay carries it between them.
+ */
+export type AutomationGroupHandover = WorkspaceJsonObject & {
+  floorMs: number;
+  automations: Array<WorkspaceJsonObject & {
+    automationId: string;
+    sinceMs: number;
+    decided: Array<WorkspaceJsonObject & { messageId: string; createdAtMs: number }>;
+  }>;
+};
+
+/** One Collection automation's interest in one Group's messages, optionally only those that start with some text. */
+type AutomationGroupSubscription = WorkspaceJsonObject & {
+  automationId: string;
+  groupId: string;
+  startsWith?: string;
+};
+
+/**
+ * Mirrors AutomationWatchGroupsParams in crates/dohc-workspace-engine: every
+ * Group subscription this computer watches, at the automation host
+ * generation it runs at (0 for a workspace that never synced). Without
+ * `handover`, a new generation changes nothing and answers `needsHandover`;
+ * `null` says the relay holds none.
+ */
+export type AutomationWatchGroupsParams = WorkspaceJsonObject & {
+  generation: number;
+  subscriptions: AutomationGroupSubscription[];
+  handover?: AutomationGroupHandover | null;
+};
 
 export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
@@ -277,8 +298,8 @@ export type AutomationSubscribeResult =
 export type AutomationUnsubscribeResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribe];
 
-export type AutomationUnsubscribeGroupsResult =
-  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribeGroups];
+export type AutomationWatchGroupsResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsWatchGroups];
 
 /** Null when no pending claim remains: the drain loop's stop condition. */
 export type AutomationClaimNextResult =
@@ -345,7 +366,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
-  [WORKSPACE_METHOD.automationsUnsubscribeGroups]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsReleaseGroups]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsWatchGroups]: AutomationWatchGroupsParams;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
   [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
@@ -1030,6 +1052,25 @@ const AutomationClaimSchema = mutableStruct({
   ]),
 });
 
+/**
+ * Mirrors automation_group_handover_json in crates/dohc-workspace-engine.
+ * The desktop passes it through the relay to the next host unchanged.
+ */
+const AutomationGroupHandoverSchema = mutableStruct({
+  floorMs: Schema.Int,
+  automations: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        automationId: Schema.NonEmptyString,
+        sinceMs: Schema.Int,
+        decided: Schema.mutable(
+          Schema.Array(mutableStruct({ messageId: Schema.NonEmptyString, createdAtMs: Schema.Int })),
+        ),
+      }),
+    ),
+  ),
+});
+
 const AutomationScheduleMarkSchema = mutableStruct({
   automationId: Schema.NonEmptyString,
   scheduleHash: Schema.NonEmptyString,
@@ -1088,9 +1129,10 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.automationsUnsubscribe]: mutableStruct({
     unsubscribed: Schema.Boolean,
   }),
-  /** How many Group subscriptions the call removed; none are left after it. */
-  [WORKSPACE_METHOD.automationsUnsubscribeGroups]: mutableStruct({
-    removed: Schema.Int,
+  [WORKSPACE_METHOD.automationsReleaseGroups]: AutomationGroupHandoverSchema,
+  /** A new host generation without its handover changes nothing. */
+  [WORKSPACE_METHOD.automationsWatchGroups]: mutableStruct({
+    needsHandover: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
   /**

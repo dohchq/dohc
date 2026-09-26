@@ -6,6 +6,21 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
+import type { SqliteDb } from "./types";
+
+// The Group handover the last release carried, for the host it named: at
+// most one per workspace, replaced by the next release. It is served only
+// while that host's generation is current.
+export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_group_handovers (
+      workspace_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
+      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 1048576)
+    ) STRICT;
+  `);
+}
 
 // Every input names the owner the route authenticated. Each call checks
 // ownership again inside its transaction, because reading the request body
@@ -31,6 +46,12 @@ export interface AutomationHostReleaseInput extends OwnerScope {
   installId: string;
   generation: number;
   releasedThroughMs: number;
+  /** The Group handover, as JSON text. */
+  groups: string;
+}
+
+export interface AutomationGroupHandoverInput extends OwnerScope {
+  generation: number;
 }
 
 export interface AutomationHostTakeOverInput extends OwnerScope {
@@ -188,7 +209,29 @@ export function releaseAutomationHost(
       handoverFrom: null,
       releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
     }, host);
+    storage.db.prepare(
+      `INSERT INTO sync_relay_automation_group_handovers (workspace_id, generation, groups_json)
+       VALUES (?, ?, ?)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         generation = excluded.generation, groups_json = excluded.groups_json`,
+    ).run(input.workspaceId, host.generation + 1, input.groups);
     return readState(storage, input.workspaceId);
+  });
+}
+
+// The Group handover the release that started `generation` carried, or null
+// when that generation began without one. Only the current generation's.
+export function readAutomationGroupHandover(
+  storage: StorageContext,
+  input: AutomationGroupHandoverInput,
+): Record<string, unknown> | null {
+  return storage.readTx(() => {
+    requireOwner(storage, input);
+    if (readHost(storage, input.workspaceId)?.generation !== input.generation) throw relayError("conflict");
+    const row = storage.db.prepare(
+      "SELECT groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ? AND generation = ?",
+    ).get(input.workspaceId, input.generation);
+    return row ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null;
   });
 }
 

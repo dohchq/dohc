@@ -58,6 +58,21 @@ pub const MAX_AUTOMATION_SUBSCRIPTION_FIELDS: usize = 64;
 /// values is counted in [`AutomationFieldFacts::omitted`].
 pub const MAX_AUTOMATION_FIELD_FACTS_BYTES: usize = 64 * 1024;
 
+/// How far back a host keeps what it decided about Group messages, and so
+/// how far back a handover carries it. Every Group subscription starts no
+/// earlier than this before the last time its host watched or released it:
+/// a message that first reaches a host longer than this after it was posted
+/// claims nothing there.
+pub const AUTOMATION_GROUP_COVERAGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The most decided messages one handover carries. Past it, the handover
+/// starts after the newest ones it leaves out, and the next host claims
+/// nothing posted before that.
+pub const MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES: usize = 2_000;
+
+/// The most Group subscriptions one computer watches in a workspace.
+pub const MAX_AUTOMATION_GROUP_SUBSCRIPTIONS: usize = 256;
+
 /// How many of an automation's newest claims `automations.listClaims`
 /// returns. A settle prunes the automation's done claims older than these.
 /// A claim that ever failed stays: it is the evidence ADR 0008 keeps, and
@@ -152,6 +167,55 @@ pub struct AutomationGroupSubscription {
     /// The Group's channel id on this computer.
     pub channel_id: String,
     pub starts_with: Option<String>,
+}
+
+/// What the next host needs so each Group message claims exactly once across
+/// a handover (ADR 0012). Messages posted before `floor_ms` claim nothing
+/// there. For each automation this computer watched: the time its messages
+/// start, and each message some host already decided for it, claimed or
+/// skipped as the automation's own post, since the floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationGroupHandover {
+    pub floor_ms: i64,
+    pub automations: Vec<AutomationGroupHandoverAutomation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationGroupHandoverAutomation {
+    pub automation_id: String,
+    pub since_ms: i64,
+    /// Each decided message's id and the time it was posted.
+    pub decided: Vec<(String, i64)>,
+}
+
+/// The Group subscriptions a computer that runs Group automations watches
+/// now, all of them, at the automation host generation it runs at: 0 for a
+/// workspace that never synced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationGroupWatch {
+    pub generation: i64,
+    pub subscriptions: Vec<AutomationGroupSubscription>,
+    pub handover: AutomationGroupHandoverInput,
+}
+
+/// The handover a watch at a new generation takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationGroupHandoverInput {
+    /// The caller has not fetched it. A watch at a generation this computer
+    /// has not taken yet changes nothing and asks for it.
+    Unfetched,
+    /// The relay holds none: the first host, or one that took over.
+    Missing,
+    Fetched(AutomationGroupHandover),
+}
+
+/// What a watch did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationGroupWatched {
+    /// The generation is new and no handover came: nothing changed.
+    pub needs_handover: bool,
+    /// Claims for messages stored before the subscription started here.
+    pub claims: Vec<AutomationClaim>,
 }
 
 /// A message this computer is storing, as a Group automation's claim sees it.
@@ -630,15 +694,14 @@ pub fn collection_automation_path(automation_id: &str) -> Option<&str> {
     .then_some(path)
 }
 
-/// Register one Collection automation's interest in one Group's messages. A
-/// second call for the pair replaces its prefix. Returns whether the stored
-/// subscription changed.
-pub fn subscribe_automation_group_in_tx(
+/// A Group subscription's channel id, once it names a Collection automation,
+/// a Group on this computer, and a bounded starting text that starts with
+/// text, not space.
+fn group_subscription_channel(
     conn: &Connection,
     workspace_id: &str,
     subscription: &AutomationGroupSubscription,
-    now_ms: i64,
-) -> Result<bool, DomainError> {
+) -> Result<String, DomainError> {
     if collection_automation_path(&subscription.automation_id).is_none() {
         return Err(DomainError::InvalidInput {
             reason: "A Group subscription belongs to a Collection automation, collection:<path>#<id>.",
@@ -669,41 +732,7 @@ pub fn subscribe_automation_group_in_tx(
             reason: "A Group subscription's starting text must be bounded and start with text, not space.",
         });
     }
-    let changed = conn
-        .execute(
-            "INSERT INTO automation_group_subscriptions \
-             (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(workspace_id, automation_id, channel_id) DO UPDATE SET \
-               starts_with = excluded.starts_with \
-             WHERE starts_with IS NOT excluded.starts_with",
-            params![
-                workspace_id,
-                subscription.automation_id,
-                channel_id,
-                subscription.starts_with,
-                now_ms,
-            ],
-        )
-        .map_err(DomainError::sql_persist)?;
-    Ok(changed == 1)
-}
-
-/// Remove one Group interest. Returns whether a row existed.
-pub(crate) fn unsubscribe_automation_group_in_tx(
-    conn: &Connection,
-    workspace_id: &str,
-    automation_id: &str,
-    channel_id: &str,
-) -> Result<bool, DomainError> {
-    let removed = conn
-        .execute(
-            "DELETE FROM automation_group_subscriptions \
-             WHERE workspace_id = ?1 AND automation_id = ?2 AND channel_id = ?3",
-            params![workspace_id, automation_id, channel_id],
-        )
-        .map_err(DomainError::sql_persist)?;
-    Ok(removed == 1)
+    Ok(channel_id)
 }
 
 /// The message a claim carries: its facts, and its body whole within
@@ -736,15 +765,21 @@ fn claim_message(message: &AutomationGroupMessage<'_>, channel_id: &str, lane: &
     value
 }
 
+/// One Group subscription as a claim reads it. Messages posted before
+/// `since_ms` claim nothing.
+struct GroupWatch<'a> {
+    automation_id: &'a str,
+    starts_with: Option<&'a str>,
+    channel_id: &'a str,
+    since_ms: i64,
+}
+
 /// Claim a message this computer is storing, in the transaction that stores
-/// it, for every Group subscription on its thread's Group whose starting text
-/// the message's text begins with, after its leading whitespace. Only a
+/// it, for every running Group subscription on its thread's Group. Only a
 /// Group, a channel of kind `channel`, has subscriptions that claim; a DM, the
-/// agent channel, and a file's thread never do. Each claim keys on the
-/// message id, so a message stored again claims nothing. The writing
-/// automation never claims its own message. A message at the chain depth cap
-/// records a failed `chain-stopped` claim instead. Returns only the claims
-/// this call inserted.
+/// agent channel, and a file's thread never do. A frozen subscription, on a
+/// computer that handed its automations over, claims nothing. Returns only
+/// the claims this call inserted.
 pub fn claim_group_message_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -752,28 +787,87 @@ pub fn claim_group_message_in_tx(
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     let mut statement = conn
         .prepare_cached(
-            "SELECT s.automation_id, s.starts_with, t.channel_id, t.lane \
+            "SELECT s.automation_id, s.starts_with, t.channel_id, t.lane, s.created_at_ms \
              FROM chat_threads t \
              JOIN chat_channels c \
                ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
              JOIN automation_group_subscriptions s \
                ON s.workspace_id = t.workspace_id AND s.channel_id = t.channel_id \
              WHERE t.workspace_id = ?1 AND t.thread_id = ?2 AND c.kind = 'channel' \
+               AND s.frozen = 0 \
              ORDER BY s.automation_id",
         )
         .map_err(DomainError::sql_corrupt)?;
-    let subscriptions: Vec<(String, Option<String>, String, String)> = statement
+    let subscriptions: Vec<(String, Option<String>, String, String, i64)> = statement
         .query_map(params![workspace_id, message.thread_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(DomainError::sql_corrupt)?
         .collect::<Result<_, _>>()
         .map_err(DomainError::sql_corrupt)?;
-    if subscriptions.is_empty() {
+    let mut inserted = Vec::new();
+    for (automation_id, starts_with, channel_id, lane, since_ms) in &subscriptions {
+        let watch = GroupWatch {
+            automation_id,
+            starts_with: starts_with.as_deref(),
+            channel_id,
+            since_ms: *since_ms,
+        };
+        inserted.extend(decide_group_message(
+            conn,
+            workspace_id,
+            &watch,
+            lane,
+            message,
+        )?);
+    }
+    Ok(inserted)
+}
+
+/// Decide one message for one watching automation, once on every host that
+/// ever runs it: record the decision in the coverage, then claim the message,
+/// unless the automation wrote it. A message posted before the subscription
+/// starts, or whose text, after its leading whitespace, does not begin with
+/// the starting text, is not decided. A message a host decided before, here
+/// or on a computer that handed over, claims nothing. A message at the chain
+/// depth cap records a failed `chain-stopped` claim instead.
+fn decide_group_message(
+    conn: &Connection,
+    workspace_id: &str,
+    watch: &GroupWatch<'_>,
+    lane: &str,
+    message: &AutomationGroupMessage<'_>,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let text = message.body.trim_start_matches(is_js_trim_ws);
+    if message.created_at_ms < watch.since_ms
+        || watch
+            .starts_with
+            .is_some_and(|prefix| !text.starts_with(prefix))
+    {
         return Ok(Vec::new());
     }
-    let text = message.body.trim_start_matches(is_js_trim_ws);
-    let writer = message.automation_id;
+    let decided_now = conn
+        .execute(
+            "INSERT OR IGNORE INTO automation_group_coverage \
+             (workspace_id, automation_id, message_id, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                workspace_id,
+                watch.automation_id,
+                message.message_id,
+                message.created_at_ms
+            ],
+        )
+        .map_err(DomainError::sql_persist)?
+        == 1;
+    if !decided_now || message.automation_id == Some(watch.automation_id) {
+        return Ok(Vec::new());
+    }
     // An automation message claims at its depth, kept within 1 and the cap, so
     // a chain stops at the cap across computers. A forged high depth only
     // stops a chain early; a missing one counts as 1. An agent's message
@@ -791,45 +885,404 @@ pub fn claim_group_message_in_tx(
         _ => 0,
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
-    let mut inserted = Vec::new();
-    for (automation_id, starts_with, channel_id, lane) in &subscriptions {
-        if writer == Some(automation_id.as_str())
-            || starts_with
-                .as_deref()
-                .is_some_and(|prefix| !text.starts_with(prefix))
+    let collection_path =
+        collection_automation_path(watch.automation_id).ok_or(DomainError::StateCorrupt {
+            reason: "Group subscription automation id has no Collection path",
+        })?;
+    let claimed = ClaimedChange {
+        trigger: AutomationTrigger::Key {
+            key: format!("message:{}", message.message_id),
+        },
+        record_id: None,
+        collection_path,
+        depth,
+        change: AutomationChange {
+            kind: AutomationChangeKind::Message,
+            author_origin_id: message.automation_id.map(str::to_owned),
+            actor_kind: ChangeActorKind::parse(message.author_kind),
+            on_behalf_of: message.author_user_id.map(str::to_owned),
+        },
+        // A stopped chain never runs, so its claim keeps no message.
+        fields: AutomationFieldFacts {
+            message: (!chain_stopped).then(|| claim_message(message, watch.channel_id, lane)),
+            ..AutomationFieldFacts::default()
+        },
+        chain_stopped,
+    };
+    insert_claims(
+        conn,
+        workspace_id,
+        &[watch.automation_id],
+        &claimed,
+        message.created_at_ms,
+    )
+}
+
+/// Stop every Group subscription here from claiming, and answer what the
+/// next host needs, in one transaction (ADR 0012). The subscriptions stay,
+/// frozen, so a release repeated after a lost answer answers the same.
+fn release_automation_groups_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<AutomationGroupHandover, DomainError> {
+    conn.execute(
+        "UPDATE automation_group_subscriptions SET frozen = 1 \
+         WHERE workspace_id = ?1 AND frozen = 0",
+        params![workspace_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let window_start = keep_group_coverage_window(conn, workspace_id, now_ms)?;
+    // Past the bound, the handover starts after the newest decision it leaves out.
+    let left_out: Option<i64> = conn
+        .query_row(
+            "SELECT created_at_ms FROM automation_group_coverage \
+             WHERE workspace_id = ?1 AND automation_id IN \
+               (SELECT automation_id FROM automation_group_subscriptions WHERE workspace_id = ?1) \
+             ORDER BY created_at_ms DESC LIMIT 1 OFFSET ?2",
+            params![workspace_id, MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let floor_ms = left_out.map_or(window_start, |newest_left_out| {
+        window_start.max(newest_left_out.saturating_add(1))
+    });
+    let mut automations: Vec<AutomationGroupHandoverAutomation> = conn
+        .prepare_cached(
+            "SELECT automation_id, MIN(created_at_ms) FROM automation_group_subscriptions \
+             WHERE workspace_id = ?1 GROUP BY automation_id ORDER BY automation_id",
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .query_map(params![workspace_id], |row| {
+            Ok(AutomationGroupHandoverAutomation {
+                automation_id: row.get(0)?,
+                since_ms: row.get::<_, i64>(1)?.max(floor_ms),
+                decided: Vec::new(),
+            })
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    let mut decided = conn
+        .prepare_cached(
+            "SELECT automation_id, message_id, created_at_ms FROM automation_group_coverage \
+             WHERE workspace_id = ?1 AND created_at_ms >= ?2 \
+             ORDER BY automation_id, created_at_ms, message_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = decided
+        .query_map(params![workspace_id, floor_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    for row in rows {
+        let (automation_id, message_id, created_at_ms) = row.map_err(DomainError::sql_corrupt)?;
+        if let Ok(index) = automations
+            .binary_search_by(|automation| automation.automation_id.as_str().cmp(&automation_id))
         {
-            continue;
+            automations[index].decided.push((message_id, created_at_ms));
         }
-        let collection_path =
-            collection_automation_path(automation_id).ok_or(DomainError::StateCorrupt {
-                reason: "Group subscription automation id has no Collection path",
-            })?;
-        let claimed = ClaimedChange {
-            trigger: AutomationTrigger::Key {
-                key: format!("message:{}", message.message_id),
-            },
-            record_id: None,
-            collection_path,
-            depth,
-            change: AutomationChange {
-                kind: AutomationChangeKind::Message,
-                author_origin_id: writer.map(str::to_owned),
-                actor_kind: ChangeActorKind::parse(message.author_kind),
-                on_behalf_of: message.author_user_id.map(str::to_owned),
-            },
-            // A stopped chain never runs, so its claim keeps no message.
-            fields: AutomationFieldFacts {
-                message: (!chain_stopped).then(|| claim_message(message, channel_id, lane)),
-                ..AutomationFieldFacts::default()
-            },
-            chain_stopped,
-        };
-        inserted.extend(insert_claims(
+    }
+    Ok(AutomationGroupHandover {
+        floor_ms,
+        automations,
+    })
+}
+
+/// Keeps what this computer decided about Group messages within the window,
+/// and starts every Group subscription no earlier than the window, so the
+/// coverage always holds each decision a subscription could meet again.
+/// Answers where the window starts.
+fn keep_group_coverage_window(
+    conn: &Connection,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<i64, DomainError> {
+    let window_start = now_ms.saturating_sub(AUTOMATION_GROUP_COVERAGE_MS);
+    conn.execute(
+        "UPDATE automation_group_subscriptions SET created_at_ms = ?2 \
+         WHERE workspace_id = ?1 AND created_at_ms < ?2",
+        params![workspace_id, window_start],
+    )
+    .map_err(DomainError::sql_persist)?;
+    conn.execute(
+        "DELETE FROM automation_group_coverage WHERE workspace_id = ?1 AND created_at_ms < ?2",
+        params![workspace_id, window_start],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(window_start)
+}
+
+/// Set the Group subscriptions this computer watches, all of them, in one
+/// transaction. At a host generation it has not taken yet, it first takes
+/// that generation's handover: every message the last host decided claims
+/// nothing here, and each automation starts where it started there. A
+/// subscription that was not running here claims, in the same transaction,
+/// each stored message it would have claimed. One still running keeps its
+/// start, so it claims nothing twice.
+fn watch_automation_groups_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    watch: &AutomationGroupWatch,
+    now_ms: i64,
+) -> Result<AutomationGroupWatched, DomainError> {
+    if !(0..=MAX_SAFE_GENERATION).contains(&watch.generation) {
+        return Err(DomainError::InvalidInput {
+            reason: "An automation host generation is a whole number from 0.",
+        });
+    }
+    if watch.subscriptions.len() > MAX_AUTOMATION_GROUP_SUBSCRIPTIONS {
+        return Err(DomainError::InvalidInput {
+            reason: "Too many Group subscriptions for one workspace.",
+        });
+    }
+    // Every subscription is checked before anything changes.
+    let mut automations = HashSet::new();
+    let mut channels = Vec::with_capacity(watch.subscriptions.len());
+    for subscription in &watch.subscriptions {
+        if !automations.insert(subscription.automation_id.as_str()) {
+            return Err(DomainError::InvalidInput {
+                reason: "An automation watches one Group.",
+            });
+        }
+        channels.push(group_subscription_channel(
             conn,
             workspace_id,
-            &[automation_id.as_str()],
-            &claimed,
-            message.created_at_ms,
+            subscription,
+        )?);
+    }
+    let taken: i64 = conn
+        .query_row(
+            "SELECT generation FROM automation_group_imports WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .unwrap_or(0);
+    let handover = if watch.generation > taken {
+        let handover = match &watch.handover {
+            AutomationGroupHandoverInput::Unfetched => {
+                return Ok(AutomationGroupWatched {
+                    needs_handover: true,
+                    claims: Vec::new(),
+                });
+            }
+            AutomationGroupHandoverInput::Missing => None,
+            AutomationGroupHandoverInput::Fetched(handover) => {
+                validate_group_handover(handover)?;
+                Some(handover)
+            }
+        };
+        conn.execute(
+            "INSERT INTO automation_group_imports (workspace_id, generation) VALUES (?1, ?2) \
+             ON CONFLICT(workspace_id) DO UPDATE SET generation = excluded.generation",
+            params![workspace_id, watch.generation],
+        )
+        .map_err(DomainError::sql_persist)?;
+        handover
+    } else {
+        None
+    };
+    if let Some(handover) = handover {
+        let mut insert = conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO automation_group_coverage \
+                 (workspace_id, automation_id, message_id, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        for automation in &handover.automations {
+            for (message_id, created_at_ms) in &automation.decided {
+                insert
+                    .execute(params![
+                        workspace_id,
+                        automation.automation_id,
+                        message_id,
+                        created_at_ms
+                    ])
+                    .map_err(DomainError::sql_persist)?;
+            }
+        }
+    }
+    let window_start = keep_group_coverage_window(conn, workspace_id, now_ms)?;
+    // The subscriptions still running here, by automation and Group, with their start.
+    let running: Vec<(String, String, i64)> = conn
+        .prepare_cached(
+            "SELECT automation_id, channel_id, created_at_ms FROM automation_group_subscriptions \
+             WHERE workspace_id = ?1 AND frozen = 0",
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .query_map(params![workspace_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    conn.execute(
+        "DELETE FROM automation_group_subscriptions WHERE workspace_id = ?1",
+        params![workspace_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let mut claims = Vec::new();
+    for (subscription, channel_id) in watch.subscriptions.iter().zip(&channels) {
+        let still_running = running
+            .iter()
+            .find(|(automation_id, channel, _)| {
+                *automation_id == subscription.automation_id && channel == channel_id
+            })
+            .map(|(_, _, since_ms)| *since_ms);
+        let handed_over = handover.and_then(|handover| {
+            handover
+                .automations
+                .iter()
+                .find(|automation| automation.automation_id == subscription.automation_id)
+                .map(|automation| automation.since_ms.max(handover.floor_ms))
+        });
+        let since_ms = handed_over
+            .or(still_running)
+            .unwrap_or(now_ms)
+            .max(window_start);
+        conn.execute(
+            "INSERT INTO automation_group_subscriptions \
+             (workspace_id, automation_id, channel_id, starts_with, created_at_ms, frozen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                workspace_id,
+                subscription.automation_id,
+                channel_id,
+                subscription.starts_with,
+                since_ms,
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+        if still_running.is_none() || handed_over.is_some() {
+            let watch = GroupWatch {
+                automation_id: &subscription.automation_id,
+                starts_with: subscription.starts_with.as_deref(),
+                channel_id,
+                since_ms,
+            };
+            claims.extend(claim_stored_group_messages(conn, workspace_id, &watch)?);
+        }
+    }
+    Ok(AutomationGroupWatched {
+        needs_handover: false,
+        claims,
+    })
+}
+
+/// The largest generation a JSON number carries exactly.
+const MAX_SAFE_GENERATION: i64 = 9_007_199_254_740_991;
+
+/// A handover within its bounds, naming Collection automations and messages.
+fn validate_group_handover(handover: &AutomationGroupHandover) -> Result<(), DomainError> {
+    let invalid = || DomainError::InvalidInput {
+        reason: "A Group handover is outside its bounds.",
+    };
+    if handover.automations.len() > MAX_AUTOMATION_GROUP_SUBSCRIPTIONS
+        || handover
+            .automations
+            .iter()
+            .map(|automation| automation.decided.len())
+            .sum::<usize>()
+            > MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES
+    {
+        return Err(invalid());
+    }
+    for automation in &handover.automations {
+        if collection_automation_path(&automation.automation_id).is_none() {
+            return Err(invalid());
+        }
+        if automation.decided.iter().any(|(message_id, _)| {
+            message_id.is_empty()
+                || message_id.len() > MAX_IDENTIFIER_BYTES
+                || message_id.chars().any(char::is_control)
+        }) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Decide, for one subscription that starts running here, each message
+/// already stored in its Group since it starts, oldest first.
+fn claim_stored_group_messages(
+    conn: &Connection,
+    workspace_id: &str,
+    watch: &GroupWatch<'_>,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT m.message_id, m.thread_id, m.parent_message_id, m.author_kind, \
+                    m.author_display_name, m.author_owner_display_name, m.author_user_id, \
+                    m.body, m.created_at_ms, m.automation_id, m.chain_depth, t.lane \
+             FROM chat_messages m \
+             JOIN chat_threads t \
+               ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+             WHERE m.workspace_id = ?1 AND t.channel_id = ?2 AND m.created_at_ms >= ?3 \
+             ORDER BY m.created_at_ms, m.message_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let mut rows = statement
+        .query(params![workspace_id, watch.channel_id, watch.since_ms])
+        .map_err(DomainError::sql_corrupt)?;
+    let mut inserted = Vec::new();
+    while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+        let stored = (|| -> rusqlite::Result<_> {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<u32>>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })()
+        .map_err(DomainError::sql_corrupt)?;
+        let (
+            message_id,
+            thread_id,
+            parent_message_id,
+            author_kind,
+            author_display_name,
+            author_owner_display_name,
+            author_user_id,
+            body,
+            created_at_ms,
+            automation_id,
+            chain_depth,
+            lane,
+        ) = stored;
+        let message = AutomationGroupMessage {
+            message_id: &message_id,
+            thread_id: &thread_id,
+            parent_message_id: parent_message_id.as_deref(),
+            author_kind: &author_kind,
+            author_display_name: &author_display_name,
+            author_owner_display_name: author_owner_display_name.as_deref(),
+            author_user_id: author_user_id.as_deref(),
+            body: &body,
+            created_at_ms,
+            automation_id: automation_id.as_deref(),
+            chain_depth,
+        };
+        inserted.extend(decide_group_message(
+            conn,
+            workspace_id,
+            watch,
+            &lane,
+            &message,
         )?);
     }
     Ok(inserted)
@@ -2555,46 +3008,30 @@ pub fn subscribe_automation(
     })?)
 }
 
-pub fn subscribe_automation_group(
+/// Stop every Group subscription here from claiming and answer what the next
+/// host needs. See [`release_automation_groups_in_tx`].
+pub fn release_automation_groups(
     store: &mut EngineStore,
     workspace_id: &str,
-    subscription: &AutomationGroupSubscription,
     now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<bool, DomainError> {
+) -> Result<AutomationGroupHandover, DomainError> {
     committed(store.write_with(faults, |tx| {
-        subscribe_automation_group_in_tx(tx, workspace_id, subscription, now_ms)
+        release_automation_groups_in_tx(tx, workspace_id, now_ms)
     })?)
 }
 
-pub fn unsubscribe_automation_group(
+/// Set the Group subscriptions this computer watches, taking a new host
+/// generation's handover. See [`watch_automation_groups_in_tx`].
+pub fn watch_automation_groups(
     store: &mut EngineStore,
     workspace_id: &str,
-    automation_id: &str,
-    channel_id: &str,
+    watch: &AutomationGroupWatch,
+    now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<bool, DomainError> {
+) -> Result<AutomationGroupWatched, DomainError> {
     committed(store.write_with(faults, |tx| {
-        unsubscribe_automation_group_in_tx(tx, workspace_id, automation_id, channel_id)
-    })?)
-}
-
-/// Remove every Group subscription in the workspace, in one transaction:
-/// once it commits, no message this computer stores claims until a Group
-/// subscription is added again. The desktop calls it before it hands the
-/// workspace's automations to another computer, so a subscription it lost
-/// track of goes too. Returns how many it removed.
-pub fn unsubscribe_automation_groups(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    faults: &dyn FaultInjector,
-) -> Result<usize, DomainError> {
-    committed(store.write_with(faults, |tx| {
-        tx.execute(
-            "DELETE FROM automation_group_subscriptions WHERE workspace_id = ?1",
-            params![workspace_id],
-        )
-        .map_err(DomainError::sql_persist)
+        watch_automation_groups_in_tx(tx, workspace_id, watch, now_ms)
     })?)
 }
 

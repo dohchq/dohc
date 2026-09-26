@@ -612,16 +612,30 @@ describe("automations wire schemas", () => {
         unsubscribed: false,
       }),
     ).toEqual({ unsubscribed: false });
+    const handover = {
+      floorMs: 10,
+      automations: [
+        {
+          automationId: "collection:Trip#task",
+          sinceMs: 10,
+          decided: [{ messageId: "m1", createdAtMs: 20 }],
+        },
+      ],
+    };
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
-        removed: 2,
-      }),
-    ).toEqual({ removed: 2 });
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, handover),
+    ).toEqual(handover);
     expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
-        removed: true,
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, {
+        ...handover,
+        automations: [{ ...handover.automations[0], decided: [{ messageId: "" }] }],
       }),
     ).toThrow();
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsWatchGroups, {
+        needsHandover: true,
+      }),
+    ).toEqual({ needsHandover: true });
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {

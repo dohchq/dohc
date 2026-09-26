@@ -21,9 +21,9 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
-import { isAutomationHostPath } from "./automationHostRoutes";
+import { automationHostMaxBodyBytes } from "./automationHostRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
-import { AUTOMATION_HOST_MAX_BODY_BYTES, AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
+import { AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
@@ -434,16 +434,15 @@ setInterval(() => {
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
-  maxBodyBytes: (url) =>
+  maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
-    isAutomationHostPath(url.pathname) ? AUTOMATION_HOST_MAX_BODY_BYTES :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
-      : MAX_BODY_BYTES,
+      : MAX_BODY_BYTES),
   oversized: (url) =>
     url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")

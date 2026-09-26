@@ -609,6 +609,23 @@ export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
 // longest ago, unless it is the host or handing over.
 export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
+// A release carries, as `groups`, what the next host needs so each Group
+// message starts its automations exactly once across the handover: the
+// Collection automations the computer handing over watched, and the ids of
+// the Group messages it and earlier hosts already decided, at most one
+// window of them. The relay keeps it, as a JSON object it does not read, for
+// the host the release names, and answers it to
+// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>.
+export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 1024 * 1024;
+
+// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>:
+// the Group handover the release that started this generation carried, or
+// null when none did, as for the first host or one that took over. A
+// generation that is no longer the host's is refused with `conflict`.
+export interface RelayAutomationGroupHandoverResponse {
+  ok: true;
+  groups: Record<string, unknown> | null;
+}
 
 export interface RelayAutomationHost {
   installId: string;

@@ -26,6 +26,8 @@ import {
   isInvalidInputRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
+  type AutomationGroupHandover,
+  type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
 import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
@@ -54,7 +56,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import { sameSubscriptionTarget, unsubscribeParams, type AutomationRunStore, type RunWrite, type StoredRun, type StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -135,11 +137,13 @@ type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutom
 
 export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listCollections(): Promise<CollectionListResult>;
-  /** Records under a path, or one Group's messages. */
-  subscribeAutomation(input: StoredSubscription): Promise<unknown>;
-  unsubscribeAutomation(input: { automationId: string; path: string } | { automationId: string; groupId: string }): Promise<unknown>;
-  /** Every Group subscription in the workspace, removed in one engine write. */
-  unsubscribeAutomationGroups(): Promise<unknown>;
+  /** Records under a path. */
+  subscribeAutomation(input: RecordSubscription): Promise<unknown>;
+  unsubscribeAutomation(input: { automationId: string; path: string }): Promise<unknown>;
+  /** Stops every Group subscription here from claiming, and answers what the next host needs. */
+  releaseAutomationGroups(): Promise<AutomationGroupHandover>;
+  /** Sets every Group subscription this computer watches, taking a new host generation's handover. */
+  watchAutomationGroups(input: AutomationWatchGroupsParams): Promise<{ needsHandover: boolean }>;
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
@@ -219,11 +223,18 @@ export interface CollectionAutomationsOptions {
   /** Where automations post and send direct messages, and the writer they use. */
   chat: AutomationChatDependencies;
   /**
-   * Whether this computer is the workspace's automation host, from its last
-   * host read. Only the host registers Group subscriptions, so the engine
-   * claims each Group message on one computer (ADR 0012).
+   * The automation host generation this computer runs at, from its last
+   * host read: 0 for a workspace that never synced, null when it is not the
+   * host. Only the host watches Groups, so the engine claims each Group
+   * message on one computer (ADR 0012).
    */
-  runsGroupTriggers(): Promise<boolean>;
+  groupHost(): Promise<number | null>;
+  /**
+   * The Group handover the release that started this host generation
+   * carried, from the relay, or null when none did. Throws when the relay
+   * does not answer.
+   */
+  groupHandover(generation: number): Promise<AutomationGroupHandover | null>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
@@ -590,15 +601,18 @@ export class CollectionAutomations {
   private chat: ChatDirectory | null = null;
   /** The Groups Group-message automations watch, found for their subscriptions. */
   private groups: ChatDirectory | null = null;
-  /** Whether this computer was the automation host at the last reconcile, so it registers Group subscriptions. */
+  /** Whether this computer was the automation host at the last reconcile, so it watches Groups. */
   private groupTriggersHere = false;
   /**
    * The engine may hold other Group subscriptions than `subscribed` lists:
-   * at open, after a crash between subscribing and saving, or after a bulk
-   * removal whose answer was lost. Until a reconcile settles it, the host
-   * registers each one again, and any other computer removes them all.
+   * at open, or after a watch or release whose answer was lost. Until one
+   * lands, a reconcile sends the whole set again.
    */
   private groupSubscriptionsUncertain = true;
+  /** The host generation the engine last took Group subscriptions at, from this executor. */
+  private watchedGeneration: number | null = null;
+  /** The relay did not answer for a new generation's Group handover: the next sync pull asks again. */
+  private handoverUnread = false;
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
@@ -795,8 +809,8 @@ export class CollectionAutomations {
   }
 
   /**
-   * Whether this computer is the automation host may have changed: add or
-   * remove Group subscriptions to match.
+   * Whether this computer is the automation host may have changed: watch
+   * or release Groups to match.
    */
   hostChanged(): void {
     if (this.opened === null) return;
@@ -804,29 +818,35 @@ export class CollectionAutomations {
       .catch((error: unknown) => this.options.onError("update Group subscriptions for the automation host", error));
   }
 
+  /** A sync pull reached the relay: a Group handover it could not read before is asked for again. */
+  relayAnswered(): void {
+    if (this.handoverUnread) this.hostChanged();
+  }
+
   /**
    * Before this computer hands the workspace's automations to another one:
-   * the engine removes every Group subscription in the workspace, including
+   * the engine stops every Group subscription in the workspace, including
    * one this computer lost track of, so no message it stores after that
-   * claims here. Resolves true once the engine answered, or false when the
-   * executor has not opened, the owner called the handover off, or the
-   * engine did not answer; the handover then waits and tries again. A
-   * message claimed here before still runs here, as a claimed schedule does.
+   * claims here, and answers the Group handover for the release. Resolves
+   * null when the executor has not opened, the owner called the handover
+   * off, or the engine did not answer; the handover then waits and tries
+   * again. A message claimed here before still runs here, as a claimed
+   * schedule does.
    */
-  async removeGroupSubscriptions(stillHandingOver: () => boolean): Promise<boolean> {
+  async releaseGroupSubscriptions(stillHandingOver: () => boolean): Promise<AutomationGroupHandover | null> {
     await this.opened;
-    if (this.state !== "open") return false;
-    let removed = false;
+    if (this.state !== "open") return null;
+    let handover = null as AutomationGroupHandover | null;
     try {
       await this.enqueue(async () => {
         // Called off while this waited in line: keep them.
-        if (stillHandingOver()) removed = await this.removeEngineGroupSubscriptions();
+        if (stillHandingOver()) handover = await this.releaseEngineGroups();
       });
     } catch (error) {
-      this.options.onError("remove Group subscriptions before a handover", error);
-      return false;
+      this.options.onError("stop Group subscriptions before a handover", error);
+      return null;
     }
-    return removed;
+    return handover;
   }
 
   /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
@@ -2259,64 +2279,110 @@ export class CollectionAutomations {
     if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
       await this.options.requestHost();
     }
-    // Only a computer the relay names keeps Group subscriptions.
-    this.groupTriggersHere = await this.options.runsGroupTriggers();
-    // Off the host the engine keeps no Group subscription, even one missing
-    // from this computer's record.
-    const tracksGroups = [...this.subscribed.values()].some(isGroupSubscription);
-    if (!this.groupTriggersHere && (this.groupSubscriptionsUncertain || tracksGroups)) {
-      await this.removeEngineGroupSubscriptions();
-    }
+    // Only a computer the relay names watches Groups.
+    const generation = await this.options.groupHost();
+    this.groupTriggersHere = generation !== null;
     const desired = this.desiredSubscriptions();
     let changed = false;
-    // After a removal with no answer, the host registers every Group
-    // subscription again. Once every change lands, the engine matches the record.
-    const uncertain = this.groupTriggersHere && this.groupSubscriptionsUncertain;
-    let settled = true;
     for (const [automationId, subscription] of [...this.subscribed]) {
-      // A subscription to another path or Group goes; the same pair is replaced in place.
+      if (isGroupSubscription(subscription)) continue;
+      // A subscription to another path goes; the same path is replaced in place.
       const wanted = desired.get(automationId);
-      if (wanted && sameSubscriptionTarget(wanted, subscription)) continue;
+      if (wanted && !isGroupSubscription(wanted) && wanted.path === subscription.path) continue;
       const removed = await this.withLiveEngine((engine) =>
-        engine.unsubscribeAutomation(unsubscribeParams(subscription)),
+        engine.unsubscribeAutomation({ automationId, path: subscription.path }),
       );
       // Engine unavailable: keep the entry so the next reconcile retries it.
-      if (removed === null) {
-        settled = false;
-        continue;
-      }
+      if (removed === null) continue;
       this.subscribed.delete(automationId);
       changed = true;
     }
     for (const [automationId, subscription] of desired) {
-      const again = all || (uncertain && isGroupSubscription(subscription));
-      if (!again && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
+      if (isGroupSubscription(subscription)) continue;
+      if (!all && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
       const subscribed = await this.withLiveEngine((engine) => engine.subscribeAutomation(subscription));
-      if (subscribed === null) {
-        settled = false;
-        continue;
-      }
+      if (subscribed === null) continue;
       this.subscribed.set(automationId, subscription);
       changed = true;
     }
-    if (uncertain && settled) this.groupSubscriptionsUncertain = false;
     if (changed) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    await this.reconcileGroups(generation, [...desired.values()].filter(isGroupSubscription), all);
     await this.reconcileDatasets(all);
   }
 
   /**
-   * Removes every Group subscription the engine holds for this workspace,
-   * tracked or not, in one engine write. True once the engine answered.
+   * Off the host, the engine's Group subscriptions stop; on it, the engine
+   * watches exactly the Groups the automations watch, taking a new host
+   * generation's handover first. The engine is asked only when its set may
+   * differ from the one wanted.
    */
-  private async removeEngineGroupSubscriptions(): Promise<boolean> {
-    // The removal may commit even when its answer is lost.
+  private async reconcileGroups(generation: number | null, wanted: GroupSubscription[], all: boolean): Promise<void> {
+    const tracked = [...this.subscribed.values()].filter(isGroupSubscription);
+    if (generation === null) {
+      if (all || this.groupSubscriptionsUncertain || tracked.length > 0) await this.releaseEngineGroups();
+      return;
+    }
+    const byAutomation = (left: GroupSubscription, right: GroupSubscription) => left.automationId.localeCompare(right.automationId);
+    const same = isDeepStrictEqual([...tracked].sort(byAutomation), [...wanted].sort(byAutomation));
+    if (all || this.groupSubscriptionsUncertain || !same || this.watchedGeneration !== generation) {
+      await this.watchEngineGroups(generation, wanted);
+    }
+  }
+
+  /**
+   * The engine watches exactly these Groups at this host generation. A new
+   * generation first needs its handover: the engine changes nothing until
+   * the relay's copy arrives, then takes it and claims each stored message
+   * no host decided, in one write.
+   */
+  private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
+    // A watch may land even when its answer is lost.
     this.groupSubscriptionsUncertain = true;
-    if ((await this.withLiveEngine((engine) => engine.unsubscribeAutomationGroups())) === null) return false;
+    const input = {
+      generation,
+      subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
+        startsWith === undefined ? { automationId, groupId } : { automationId, groupId, startsWith }),
+    };
+    let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
+    if (answer?.needsHandover) {
+      let handover: AutomationGroupHandover | null;
+      try {
+        handover = await this.options.groupHandover(generation);
+      } catch (error) {
+        // Nothing changed in the engine. The next sync pull asks again.
+        this.handoverUnread = true;
+        this.options.onError("read the Group handover", error);
+        return;
+      }
+      this.handoverUnread = false;
+      answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, handover }));
+    }
+    if (answer === null || answer.needsHandover) return;
+    for (const [automationId, subscription] of [...this.subscribed]) {
+      if (isGroupSubscription(subscription)) this.subscribed.delete(automationId);
+    }
+    for (const subscription of wanted) this.subscribed.set(subscription.automationId, subscription);
+    this.watchedGeneration = generation;
+    this.groupSubscriptionsUncertain = false;
+    await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+  }
+
+  /**
+   * Stops every Group subscription the engine holds for this workspace,
+   * tracked or not, in one engine write. Answers the Group handover, or null
+   * when the engine did not answer.
+   */
+  private async releaseEngineGroups(): Promise<AutomationGroupHandover | null> {
+    // The release may land even when its answer is lost.
+    this.groupSubscriptionsUncertain = true;
+    const handover = await this.withLiveEngine((engine) => engine.releaseAutomationGroups());
+    if (handover === null) return null;
     const tracked = [...this.subscribed].filter(([, subscription]) => isGroupSubscription(subscription));
     for (const [automationId] of tracked) this.subscribed.delete(automationId);
+    this.watchedGeneration = null;
     this.groupSubscriptionsUncertain = false;
     if (tracked.length > 0) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
-    return true;
+    return handover;
   }
 
   /** The same diff against the dataset ledger, which keeps its own subscriptions. */
@@ -2789,17 +2855,22 @@ export class CollectionAutomations {
       await this.withLiveHost((ledger) => ledger.unsubscribe(held.claim.datasetId, automationId));
       return;
     }
+    // A Group's subscriptions go as a whole at the next reconcile.
+    if (held.claim.change.kind === "message") return;
     const id = parseCollectionAutomationId(automationId);
     if (id === null) return;
-    const stored = this.subscribed.get(automationId) ?? { automationId, path: id.collectionPath, kinds: [] };
-    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation(unsubscribeParams(stored)));
+    const stored = this.subscribed.get(automationId);
+    const path = stored && !isGroupSubscription(stored) ? stored.path : id.collectionPath;
+    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path }));
     if (removed !== null && this.subscribed.delete(automationId)) {
       await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     }
   }
 }
 
-const isGroupSubscription = (subscription: StoredSubscription) => "groupId" in subscription;
+type RecordSubscription = Extract<StoredSubscription, { path: string }>;
+type GroupSubscription = Extract<StoredSubscription, { groupId: string }>;
+const isGroupSubscription = (subscription: StoredSubscription): subscription is GroupSubscription => "groupId" in subscription;
 
 function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
   return reach.kind === "post"

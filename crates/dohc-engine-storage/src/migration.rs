@@ -2508,6 +2508,40 @@ ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
         OR (settled_update_seq >= 0 AND settled_update_seq <= head_update_seq));
 ";
 
+/// Group message claims that hold across a handover (ADR 0012).
+///
+/// A frozen Group subscription claims nothing: the computer handing over
+/// freezes them all, and keeps them so a repeated release answers the same.
+/// The coverage names every (automation, message) a host decided, claimed
+/// or skipped as the automation's own post, including those an earlier host
+/// handed over. A message it names never claims again here, and the next
+/// host gets the recent part. The import row holds the host generation
+/// whose handover this computer took, so the same handover never applies
+/// twice. Coverage starts with the message claims this computer already
+/// holds.
+const V2_AUTOMATION_GROUP_COVERAGE_DDL: &str = "\
+ALTER TABLE automation_group_subscriptions
+    ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1));
+CREATE TABLE automation_group_coverage (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    message_id    TEXT    NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id, message_id)
+) STRICT;
+CREATE INDEX idx_automation_group_coverage_created
+    ON automation_group_coverage(workspace_id, created_at_ms);
+CREATE TABLE automation_group_imports (
+    workspace_id TEXT    NOT NULL PRIMARY KEY,
+    generation   INTEGER NOT NULL CHECK (generation >= 0)
+) STRICT;
+INSERT OR IGNORE INTO automation_group_coverage
+    (workspace_id, automation_id, message_id, created_at_ms)
+SELECT workspace_id, automation_id, substr(trigger_key, 9), created_at_ms
+FROM automation_claims
+WHERE change_kind = 'message' AND trigger_key LIKE 'message:%';
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2607,6 +2641,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 15,
         id: "v2-ydoc-settled-update-seq",
         sql: V2_YDOC_SETTLED_UPDATE_SEQ_DDL,
+        sets_user_version: None,
+    },
+    // Ordinal 16 belongs to another change that may land first.
+    Migration {
+        ordinal: 17,
+        id: "v2-automation-group-coverage",
+        sql: V2_AUTOMATION_GROUP_COVERAGE_DDL,
         sets_user_version: None,
     },
 ];
@@ -2934,6 +2975,10 @@ mod tests {
                 "v2-ydoc-settled-update-seq",
                 "ff19c6ed0c9ceb9d4fde2fc59e12529c5e428a9ef722d7c4280748e839e1e65a",
             ),
+            (
+                "v2-automation-group-coverage",
+                "31e114fe6018fc0eb3e08b0938364f1c1699a480af3cd8819fecb58b7778d6ae",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3183,6 +3228,62 @@ mod tests {
                  VALUES ('ws', 'collection:Invoices#report', 'h', 5);",
         )
         .expect("a press and a schedule mark");
+    }
+
+    /// A store's message claims become its Group coverage, and its Group
+    /// subscriptions stay on.
+    #[test]
+    fn message_claims_from_before_group_coverage_become_coverage() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-automation-group-coverage")
+            .expect("the Group coverage migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("the schema before it");
+        conn.execute_batch(
+            "INSERT INTO automation_group_subscriptions \
+                 (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
+                 VALUES ('ws', 'collection:Trip#task', 'trip', '/task', 1); \
+             INSERT INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_key, record_id, \
+                  collection_path, depth, state, created_at_ms, updated_at_ms, change_kind) \
+                 VALUES ('ws', 'atc_message', 'collection:Trip#task', 'message:m1', NULL, \
+                         'Trip', 0, 'done', 20, 30, 'message'), \
+                        ('ws', 'atc_press', 'collection:Trip#pay', 'press:p1', 'rec', \
+                         'Trip', 0, 'done', 20, 30, 'button');",
+        )
+        .expect("a subscription and two claims");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let coverage: Vec<(String, String, i64)> = conn
+            .prepare(
+                "SELECT automation_id, message_id, created_at_ms FROM automation_group_coverage",
+            )
+            .expect("coverage")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("read");
+        assert_eq!(
+            coverage,
+            vec![("collection:Trip#task".to_owned(), "m1".to_owned(), 20)]
+        );
+        let frozen: i64 = conn
+            .query_row(
+                "SELECT frozen FROM automation_group_subscriptions",
+                [],
+                |row| row.get(0),
+            )
+            .expect("subscription");
+        assert_eq!(frozen, 0, "a subscription stays on");
+        assert!(
+            conn.execute("UPDATE automation_group_subscriptions SET frozen = 2", [],)
+                .is_err(),
+            "frozen is a flag"
+        );
     }
 
     /// Messages and mentions written before automations could post keep every
