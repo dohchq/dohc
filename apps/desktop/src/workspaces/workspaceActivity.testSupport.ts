@@ -121,6 +121,13 @@ export function createInMemoryWorkspaceActivity(
       const authority = authorities.get(workspaceId);
       if (authority) service.queueCloudSync(authority.state);
     },
+    retryCloudSync: (
+      workspaceId: string,
+      reason: "person" | "reconnect",
+    ): Promise<void> => {
+      const authority = authorities.get(workspaceId);
+      return authority ? service.retryCloudSync(authority.state, reason) : Promise.resolve();
+    },
     setAgentRun: (
       workspaceId: string,
       run: ActiveAgentRun | null,

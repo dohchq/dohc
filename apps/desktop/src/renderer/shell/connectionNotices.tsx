@@ -42,7 +42,7 @@ const NO_WORKSPACE = "";
 export function useConnectionNotices() {
   const {
     shellErrors,
-    showShellError,
+    reportShellFailure,
     retryShellError,
     hideShellError,
     dismissShellError,
@@ -53,12 +53,16 @@ export function useConnectionNotices() {
   const reporter = useCallback(
     (reopen?: (serverUrl: string | null) => void) =>
       (error: ConnectionErrorReport) => {
-        showShellError(error.message, error.cause, () => {
-          if (error.retry?.()) return;
-          reopen?.(error.serverUrl);
+        reportShellFailure({
+          message: error.message,
+          cause: error.cause,
+          retry: () => {
+            if (error.retry?.()) return;
+            reopen?.(error.serverUrl);
+          },
         });
       },
-    [showShellError],
+    [reportShellFailure],
   );
 
   const notices = useMemo<WorkspaceErrorNotice[]>(
@@ -68,7 +72,7 @@ export function useConnectionNotices() {
         message: error.message,
         details: errorDetails([
           ["Error", error.message],
-          ["Cause", error.cause],
+          ...(error.details ?? []),
           ["Platform", bridge().platform],
           ["Time", new Date(error.atMs).toISOString()],
         ]),

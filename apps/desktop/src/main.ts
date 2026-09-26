@@ -77,6 +77,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   protocol,
   safeStorage,
   session,
@@ -2068,6 +2069,31 @@ const activity = {
       workspaceActivity.queueCloudSync(lease.state.activity),
     );
   },
+  // Starts the pass under the lease and waits for it outside, so a pass that
+  // waits on an unreachable server holds no workspace authority.
+  retryCloudSync: (
+    workspaceId: string,
+    reason: "person" | "reconnect",
+  ): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.retryCloudSync(lease.state.activity, reason),
+    ),
+  retryFailingCloudSyncs: (): void => {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      // Started inside the promise, so a workspace closing under the loop
+      // fails its own retry and not the others.
+      void Promise.resolve()
+        .then(() => {
+          const failing = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+            workspaceActivity.getStatus(workspace, lease.state.activity).syncFailure,
+          );
+          return failing ? activity.retryCloudSync(workspaceId, "reconnect") : undefined;
+        })
+        .catch((error: unknown) => {
+          console.error(`[desktop] sync retry after wake failed for ${workspaceId}:`, error);
+        });
+    }
+  },
   queueCloudPull: (workspaceId: string): void => {
     if (!findWorkspace(workspaceId)) return;
     withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3967,6 +3993,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     registerHandlers: () => {
       nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
+      // A backoff can outlast a sleep. On wake, try each failing sync now.
+      powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       registerIpcHandlers();
       // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
       // Registered before the window so the first load can already fetch.
@@ -4323,6 +4351,7 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
+    retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,

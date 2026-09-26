@@ -704,7 +704,7 @@ export function NoticeCenter(props: {
     // Automation failures: durable until dismissed, like the share-refusal
     // banner. Dismissing acknowledges the generation on screen; a failure
     // recorded after this render has a higher generation and comes back.
-    for (const error of [...(props.workspaceErrors ?? [])].sort(
+    for (const error of [...(props.workspaceErrors ?? [])].reverse().sort(
       (a, b) => b.atMs - a.atMs,
     )) {
       next.push({
@@ -950,16 +950,6 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (props.syncStatus?.syncFailing) {
-      next.push({
-        id: "cloud-sync-failing",
-        tone: "warning",
-        title: "Cloud sync is failing",
-        body: "Cloud sync is failing for this workspace. Changes stay safe locally and sync will keep retrying.",
-        Icon: AlertTriangle,
-      });
-    }
-
     if (props.agentActive) {
       next.push({
         id: "agent-active",
@@ -1058,11 +1048,13 @@ export function NoticeCenter(props: {
   const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0);
   const count = localCount + unreadSent;
   // The newest error whose toast is still open. One at a time: the rest
-  // wait in Notices with the count.
+  // wait in Notices with the count. The list is in arrival order, so two
+  // messages in the same millisecond show the later one.
   const errorToast = useMemo(
     () =>
       [...(props.workspaceErrors ?? [])]
         .filter((error) => !error.seen)
+        .reverse()
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
