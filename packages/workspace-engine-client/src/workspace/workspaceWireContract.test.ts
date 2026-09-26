@@ -822,6 +822,10 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
     ).toThrow(ProtocolShapeError);
+    const runNow = { ...due, trigger: { key: "run-now:schedule-skipped:ws:collection:Invoices#weekday-report:2000" } };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: runNow })).toEqual({ claim: runNow });
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: null })).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, {})).toThrow(ProtocolShapeError);
   });
 
   it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
