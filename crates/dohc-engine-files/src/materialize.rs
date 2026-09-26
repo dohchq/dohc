@@ -256,9 +256,10 @@ pub struct AuthoredCreateStage {
     target: PathBuf,
 }
 
+#[derive(Debug)]
 pub struct AuthoredCreatePublishError {
     pub error: MaterializeError,
-    pub published: bool,
+    pub may_be_published: bool,
 }
 
 impl AuthoredCreateStage {
@@ -303,9 +304,16 @@ impl AuthoredCreateStage {
 
     /// False means an existing entry won. Never overwrite or follow that entry.
     pub fn publish(&self) -> Result<bool, AuthoredCreatePublishError> {
+        self.publish_with_link(|from, to| std::fs::hard_link(from, to))
+    }
+
+    fn publish_with_link(
+        &self,
+        link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<bool, AuthoredCreatePublishError> {
         let unpublished = |error| AuthoredCreatePublishError {
             error,
-            published: false,
+            may_be_published: false,
         };
         walk_target_components(
             &self.root,
@@ -316,19 +324,31 @@ impl AuthoredCreateStage {
             ensure_real_directory,
         )
         .map_err(unpublished)?;
-        match std::fs::hard_link(&self.stage, &self.target) {
-            Ok(()) => {
-                sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(
-                    |error| AuthoredCreatePublishError {
-                        error,
-                        published: true,
-                    },
-                )?;
-                Ok(true)
+        if let Err(error) = link(&self.stage, &self.target) {
+            // A remote server can create the link before losing its reply.
+            // Unsupported is a definitive refusal; other outcomes need identity evidence.
+            if error.kind() == ErrorKind::Unsupported {
+                return Err(unpublished(MaterializeError::io(&self.target, &error)));
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(unpublished(MaterializeError::io(&self.target, &e))),
+            match self.is_published() {
+                Ok(true) => {}
+                Ok(false) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
+                Ok(false) => return Err(unpublished(MaterializeError::io(&self.target, &error))),
+                Err(_) => {
+                    return Err(AuthoredCreatePublishError {
+                        error: MaterializeError::io(&self.target, &error),
+                        may_be_published: true,
+                    });
+                }
+            }
         }
+        sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(|error| {
+            AuthoredCreatePublishError {
+                error,
+                may_be_published: true,
+            }
+        })?;
+        Ok(true)
     }
 
     pub fn is_published(&self) -> Result<bool, MaterializeError> {
@@ -2308,6 +2328,64 @@ fn rename_no_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authored_create_resolves_ambiguous_link_outcomes_by_identity() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::AlreadyExists,
+        ] {
+            let root = dohc_test_scratch::ScratchDir::new_named("ambiguous-link").expect("scratch");
+            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"a".repeat(64))
+                .expect("stage");
+            stage.prepare("authored").expect("prepare");
+            let result = stage.publish_with_link(|from, to| {
+                std::fs::hard_link(from, to)?;
+                Err(std::io::Error::from(kind))
+            });
+            assert!(result.expect("own link is published"));
+            assert!(stage.is_published().expect("identity"));
+        }
+    }
+
+    #[test]
+    fn authored_create_keeps_unknown_link_evidence_but_refuses_known_failures() {
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            let root = dohc_test_scratch::ScratchDir::new_named("unknown-link").expect("scratch");
+            let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"b".repeat(64))
+                .expect("stage");
+            stage.prepare("authored").expect("prepare");
+            let error = stage
+                .publish_with_link(|from, _| {
+                    std::fs::remove_file(from)?;
+                    Err(std::io::Error::from(kind))
+                })
+                .expect_err("failed link");
+            assert_eq!(
+                error.may_be_published,
+                kind != std::io::ErrorKind::Unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn authored_create_link_collision_preserves_foreign_file() {
+        let root = dohc_test_scratch::ScratchDir::new_named("foreign-link").expect("scratch");
+        let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"c".repeat(64))
+            .expect("stage");
+        stage.prepare("authored").expect("prepare");
+        std::fs::write(root.path().join("record.md"), "foreign").expect("foreign");
+        assert!(!stage.publish().expect("collision"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("record.md")).expect("read"),
+            "foreign"
+        );
+    }
+
     use super::*;
     use dohc_engine_storage::{
         FaultAction, JobStatus, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,

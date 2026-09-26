@@ -273,7 +273,7 @@ fn create_on_store(
             return Err(DomainError::TargetPathExists.into());
         }
         Err(error) => {
-            if !error.published {
+            if !error.may_be_published {
                 discard(store)?;
                 let _ = stage.cleanup();
             }
@@ -489,7 +489,7 @@ mod tests {
                         .cleanup()
                         .expect("make publication evidence unavailable");
                     Err(AuthoredCreatePublishError {
-                        published: false,
+                        may_be_published: false,
                         error: MaterializeError::Io {
                             path: "tasks/record.md".into(),
                             kind: std::io::ErrorKind::Unsupported,
@@ -535,7 +535,7 @@ mod tests {
                 |stage| {
                     assert!(stage.publish().map_err(|e| e.error).expect("publish"));
                     Err(AuthoredCreatePublishError {
-                        published: true,
+                        may_be_published: true,
                         error: MaterializeError::Io {
                             path: "tasks/record.md".into(),
                             kind: std::io::ErrorKind::PermissionDenied,
