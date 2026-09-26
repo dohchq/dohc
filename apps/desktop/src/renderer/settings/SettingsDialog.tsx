@@ -18,6 +18,7 @@ import {
   useState,
 } from "react";
 import {
+  DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
   type DesktopUserSettingsResult,
   MAX_ZOOM_LEVEL,
@@ -43,6 +44,7 @@ import { PreferredNameControl } from "./PreferredNameControl";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
+import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
   isSettingsSectionId,
@@ -573,6 +575,29 @@ export function SettingsDialog(props: {
                   <Plus size={14} strokeWidth={1.9} />
                 </button>
               </div>
+            </SettingRow>
+            <SettingRow
+              title="Sidebar"
+              modified={
+                isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
+                isModified(userSettings.sidebar.hidden, DEFAULT_SIDEBAR_SETTINGS.hidden)
+              }
+              onReset={() =>
+                void saveUserSettings({
+                  ...userSettings,
+                  sidebar: {
+                    ...userSettings.sidebar,
+                    order: DEFAULT_SIDEBAR_SETTINGS.order,
+                    hidden: DEFAULT_SIDEBAR_SETTINGS.hidden,
+                  },
+                })
+              }
+              testId="settings-row-sidebar"
+            >
+              <SidebarViewsControl
+                sidebar={userSettings.sidebar}
+                onChange={(sidebar) => void saveUserSettings({ ...userSettings, sidebar })}
+              />
             </SettingRow>
           </div>
         );

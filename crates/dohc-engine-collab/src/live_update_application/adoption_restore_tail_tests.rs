@@ -78,7 +78,7 @@ fn native_tail_apply(
         },
         update_bytes: bytes.clone(),
     };
-    let ApplicationResult::Applied(ack) = apply_committed(
+    let ApplicationResult::Applied(ack, _) = apply_committed(
         &mut f.store,
         &mut WriterDocCache::new(),
         &f.handle,

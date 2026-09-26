@@ -1497,6 +1497,7 @@ export function ChatsView(props: {
                       authorUserId: preview.authorUserId,
                       createdAtMs: preview.createdAtMs,
                       bodySnippet: preview.bodySnippet,
+                      ...(preview.automation ? { automation: preview.automation } : {}),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],
@@ -4571,6 +4572,7 @@ export function ChatsView(props: {
                                 mode,
                               })
                       }
+                      onOpenPath={props.onOpenPath}
                       onOpenBookmark={
                         bookmark && props.onOpenPath
                           ? () => props.onOpenPath?.(bookmark.destinationPath)

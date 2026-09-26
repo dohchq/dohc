@@ -200,7 +200,7 @@ interface AutomationFieldValue {
 }
 
 const AUTOMATION_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
-type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
+export type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
 
 const AUTOMATION_SCHEDULE_FREQUENCIES = ["hour", "day", "weekday", "week", "month"] as const;
 
@@ -215,7 +215,7 @@ const AUTOMATION_SCHEDULE_FREQUENCIES = ["hour", "day", "weekday", "week", "mont
 // "00:00" or ":00". Without `days`, a weekly schedule runs on Monday and a
 // monthly schedule on the 1st. The parser fills these defaults in, so the
 // model is explicit.
-type AutomationScheduleTrigger =
+export type AutomationScheduleTrigger =
   | { kind: "schedule"; every: "hour" | "day" | "weekday"; at: string; timezone: string }
   | { kind: "schedule"; every: "week"; at: string; days: AutomationWeekday[]; timezone: string }
   | { kind: "schedule"; every: "month"; at: string; days: number[]; timezone: string };

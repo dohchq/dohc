@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { parseDatasetDefinition, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, parseDatasetDefinition, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 
 /** Prepare a separate source revision. Only owner approval can activate the public read action. */
 export function generateDatasetRelationChoices(input: { revision: DatasetRevision; schemaSql: string; operationSource: string; tableId: string; fieldId: string; labelFieldId: string }) {
   const revision = parseDatasetRevision(input.revision), definition = structuredClone(revision.definition);
-  const field = definition.tables.find(table => table.tableId === input.tableId)?.fields.find(field => field.fieldId === input.fieldId);
+  const table = definition.tables.find(table => table.tableId === input.tableId);
+  const field = table && datasetColumnFields(table).find(field => field.fieldId === input.fieldId);
   if (!field?.relation) throw Error("Choose a related-record field in this Collection.");
   const relation = field.relation;
   const target = definition.tables.find(table => table.tableId === relation.tableId)!;
-  const key = target.fields.find(field => field.fieldId === relation.fieldId)!;
-  const label = target.fields.find(field => field.fieldId === input.labelFieldId);
+  const key = datasetColumnFields(target).find(field => field.fieldId === relation.fieldId)!;
+  const label = datasetColumnFields(target).find(field => field.fieldId === input.labelFieldId);
   if (!label || !["text", "number", "select"].includes(label.type)) throw Error("Choose a text, number, or select field as the public label.");
   const operationId = randomUUID(), name = `choices_${operationId.replaceAll("-", "")}`;
   definition.operations.push({ operationId, name, label: `Read ${field.name} choices`, tableId: target.tableId, kind: "read", access: "link", readOnly: true,

@@ -6,6 +6,7 @@ import {LINK_SECRET_PATTERN} from "@dohc/security-contract/wire-patterns";
 import {badRequest,notFound,relayError} from "./errors";
 import type {SyncRelayStorage} from "./storage";
 import type {createLinkResponseStreams} from "./linkResponseStreams";
+import type {DiscussionActivityHub} from "./discussionActivity";
 
 export type LinkAppCollectionRoute={route:"link-app-collection";publicationId:string};
 export interface AppCollectionPolicy {maxCreatesPerGrant:number}
@@ -18,6 +19,7 @@ export function createLinkAppCollectionRoutes(options:{
   capabilityLimiter:TokenBucketLimiter;grantLimiter:TokenBucketLimiter;
   egress:Pick<LinkEgressRateLimiter,"reserve">;
   streams:Pick<ReturnType<typeof createLinkResponseStreams>,"admitLinkBlobBytes"|"respondWithLinkBytes">;
+  discussionActivity:Pick<DiscussionActivityHub,"wakeLog">;
 }) {
   const limits=options.limits&&{...options.limits},policy=options.policy&&{...options.policy};
   if(policy&&(!limits||!Number.isSafeInteger(policy.maxCreatesPerGrant)||policy.maxCreatesPerGrant<1))throw new TypeError("Invalid app collection policy.");
@@ -52,6 +54,9 @@ export function createLinkAppCollectionRoutes(options:{
         let input;try{input=parseAppCollectionCreateRequest(raw);}catch{throw badRequest("Invalid collection request.");}
         expectedAuthorityRevision=input.authorityRevision;
         result=options.storage.acceptAppCollection({...base,expectedAuthorityRevision,idempotencyKey:input.idempotencyKey,fields:input.fields,nowMs:options.nowMs()},policy);
+        // The submission is a moment in the owner's log: wake the owner's devices.
+        const workspaceId=options.storage.getShare(admitted.shareId)?.workspaceId;
+        if(workspaceId!==undefined)options.discussionActivity.wakeLog(workspaceId);
       }
       const bytes=new TextEncoder().encode(JSON.stringify(result));
       if(bytes.byteLength>RESPONSE_BYTES)throw new Error("Collection response exceeded its admitted bound.");

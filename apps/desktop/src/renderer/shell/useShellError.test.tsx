@@ -24,6 +24,40 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {
+    const send = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.showDirectWriteNotice({
+      kind: "direct-write-stale", message: "stale", retry: null, send: { label: "Send as proposal", run: send },
+    }));
+    act(() => result.current.showDirectWriteNotice({
+      kind: "direct-write-refused", message: "refused", retry: null, send: { label: "Send as proposal", run: send },
+    }));
+    act(() => result.current.showDirectWriteNotice({
+      kind: "direct-write-failed", message: "failed", retry: vi.fn(), send: null,
+    }));
+    expect(result.current.shellErrors.map((error) => [error.kind, error.action?.label])).toEqual([
+      ["direct-write-stale", "Send as proposal"],
+      ["direct-write-refused", "Send as proposal"],
+      ["direct-write-failed", undefined],
+    ]);
+    act(() => result.current.runShellErrorAction(result.current.shellErrors[1]!.id));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors.map((error) => error.kind)).toEqual(["direct-write-failed"]);
+  });
+
+  it("runs a success notice's undo once and drops the row", () => {
+    const undo = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });
+    act(() => result.current.showSuccessNotice('Deleted "Stamp"', undo));
+    expect(result.current.shellErrors[0]).toMatchObject({ tone: "success", retry: null, action: { label: "Undo" } });
+    const id = result.current.shellErrors[0]!.id;
+
+    act(() => result.current.runShellErrorAction(id));
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("replaces a row that says the same thing or has the same kind", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellError("Could not refresh history.", new Error("a")));
