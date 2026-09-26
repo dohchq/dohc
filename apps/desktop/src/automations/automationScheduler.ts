@@ -43,15 +43,20 @@ export interface ScheduleSource {
   }): Promise<AutomationScheduleMark | null>;
 }
 
-/** Whether this computer runs a workspace's schedules. */
+/** Where a workspace's schedules run. */
 export interface ScheduleHost {
-  /** Asked before each step. */
+  /** Whether this computer runs the workspace's schedules now. It may ask the relay first. */
   runsHere(): Promise<boolean>;
   /**
    * Asked right before each claim, with nothing awaited in between: false
    * once something changed, such as the workspace starting to sync.
    */
   stillRuns(): boolean;
+  /**
+   * When it does not run them, whether to ask again within the timer's cap:
+   * the owner can move a synced workspace's schedules to this computer.
+   */
+  asksAgain(): boolean;
 }
 
 export interface SchedulerClock {
@@ -117,6 +122,11 @@ interface Workspace {
   coveredFrom: number;
   /** Spans slept through or jumped over that some mark has not passed yet. */
   skipped: SkippedSpan[];
+  /**
+   * Set when this computer took over from another: a schedule it has no
+   * mark for starts here instead of at now, once.
+   */
+  unmarkedFrom: number | null;
 }
 
 export class AutomationScheduler {
@@ -126,6 +136,8 @@ export class AutomationScheduler {
   private sample: { wall: number; monotonic: number } | null = null;
   private suspendedAt: number | null = null;
   private stepping: Promise<void> | null = null;
+  // Steps run one at a time, including a handover's last one.
+  private queue: Promise<unknown> = Promise.resolve();
   private stepAgain = false;
   private disposed = false;
 
@@ -140,8 +152,50 @@ export class AutomationScheduler {
       marks: null,
       coveredFrom: this.options.clock.now() - START_GRACE_MS,
       skipped: [],
+      unmarkedFrom: null,
     });
     this.wake();
+  }
+
+  /**
+   * This computer became the workspace's host. After another computer
+   * released through `startAfterMs`, due times after it run here, less
+   * what this computer did not live through. When this computer's clock
+   * is behind, nothing runs until it passes the release. With no release,
+   * the schedules start at now.
+   */
+  startedHere(workspaceId: string, startAfterMs: number | null): void {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) return;
+    const now = this.options.clock.now();
+    workspace.coveredFrom = startAfterMs === null ? now : Math.max(workspace.coveredFrom, startAfterMs);
+    workspace.unmarkedFrom = startAfterMs === null ? null : workspace.coveredFrom;
+    this.wake();
+  }
+
+  /**
+   * The owner moved the workspace's schedules to another computer: step
+   * them here one last time. Resolves with the time through which every
+   * due time ran or was skipped, or null when the step stopped short.
+   */
+  finishHere(workspaceId: string): Promise<number | null> {
+    return this.serial(async () => {
+      const workspace = this.workspaces.get(workspaceId);
+      if (!workspace || this.disposed) return null;
+      try {
+        // Every schedule steps through one cutoff, so the release is true
+        // for each of them: one past the engine's per-step bound steps again.
+        const cutoff = this.options.clock.now();
+        for (;;) {
+          const through = await this.stepWorkspace(workspace, cutoff, true);
+          if (through === null || through >= cutoff) return through;
+        }
+      } catch (error) {
+        workspace.marks = null;
+        this.options.onError(`finish the schedules in workspace "${workspaceId}"`, error);
+        return null;
+      }
+    });
   }
 
   remove(workspaceId: string): void {
@@ -159,7 +213,7 @@ export class AutomationScheduler {
       this.stepAgain = true;
       return;
     }
-    this.stepping = this.stepAll()
+    this.stepping = this.serial(() => this.stepAll())
       .catch((error: unknown) => this.options.onError("step the schedules", error))
       .finally(() => {
         this.stepping = null;
@@ -202,6 +256,12 @@ export class AutomationScheduler {
     this.disposed = true;
     this.clearTimer();
     this.workspaces.clear();
+  }
+
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(work);
+    this.queue = result.catch(() => undefined);
+    return result;
   }
 
   private clearTimer(): void {
@@ -251,52 +311,65 @@ export class AutomationScheduler {
     this.arm();
   }
 
-  private async stepWorkspace(workspace: Workspace, now: number): Promise<void> {
+  // Steps one workspace to `now`. Resolves with the time through which
+  // every due time ran or was skipped, or null when the step stopped short.
+  private async stepWorkspace(workspace: Workspace, now: number, handingOver = false): Promise<number | null> {
     const schedules = workspace.source.schedules();
-    if (schedules === null) return;
+    if (schedules === null) return null;
     if (schedules.length === 0) {
       workspace.skipped = [];
-      return;
+      return now;
     }
-    workspace.runs = await workspace.host.runsHere();
-    if (!workspace.runs) {
-      workspace.skipped = [];
-      return;
+    if (!handingOver) {
+      workspace.runs = await workspace.host.runsHere();
+      if (!workspace.runs) {
+        workspace.skipped = [];
+        return null;
+      }
     }
     if (workspace.marks === null) {
-      const marks = await workspace.source.scheduleMarks();
+      const read = await workspace.source.scheduleMarks();
       // The engine is not answering. It wakes the scheduler when it does.
-      if (marks === null) return;
-      workspace.marks = new Map(marks.map((mark) => [mark.automationId, mark]));
+      if (read === null) return null;
+      workspace.marks = new Map(read.map((mark) => [mark.automationId, mark]));
     }
-    let through = now;
-    for (const { automationId } of schedules) {
-      // Checked with nothing awaited before the claim goes out: this
-      // computer still runs the workspace, and the schedule as it is now,
-      // switched on and since when.
-      if (!workspace.host.stillRuns()) {
+    const marks = workspace.marks;
+    // Sends one claim, planned from the schedule as it is right then: from
+    // the checks to the send, nothing is awaited.
+    const claim = async (
+      automationId: string,
+      plan: (schedule: ScheduledAutomation) => { run: number[]; throughMs: number } | null,
+    ): Promise<AutomationScheduleMark | "nothing" | null> => {
+      if (!handingOver && !workspace.host.stillRuns()) {
         workspace.runs = false;
-        return;
+        return null;
       }
       const schedule = workspace.source.schedules()?.find((current) => current.automationId === automationId);
-      if (!schedule) continue;
-      const step = planScheduleStep(schedule, workspace.marks.get(automationId), now, workspace.coveredFrom, workspace.skipped);
-      if (step === null) continue;
-      const mark = await workspace.source.claimSchedule({
-        automationId,
-        scheduleHash: schedule.scheduleHash,
-        ...step,
-      });
-      if (mark === null) {
-        // Read the marks again once the engine answers.
-        workspace.marks = null;
-        return;
+      const step = schedule ? plan(schedule) : null;
+      if (!schedule || step === null) return "nothing";
+      const mark = await workspace.source.claimSchedule({ automationId, scheduleHash: schedule.scheduleHash, ...step });
+      // Read the marks again once the engine answers.
+      if (mark === null) workspace.marks = null;
+      else marks.set(automationId, mark);
+      return mark;
+    };
+    let through = now;
+    for (const { automationId } of schedules) {
+      if (workspace.unmarkedFrom !== null) {
+        const from = workspace.unmarkedFrom;
+        const adopted = await claim(automationId, (schedule) =>
+          marks.get(automationId)?.scheduleHash === schedule.scheduleHash ? null : { run: [], throughMs: from });
+        if (adopted === null) return null;
       }
-      workspace.marks.set(automationId, mark);
-      through = Math.min(through, mark.throughMs);
+      const claimed = await claim(automationId, (schedule) =>
+        planScheduleStep(schedule, marks.get(automationId), now, workspace.coveredFrom, workspace.skipped));
+      if (claimed === null) return null;
+      if (claimed !== "nothing") through = Math.min(through, claimed.throughMs);
     }
+    workspace.unmarkedFrom = null;
     // Every mark passed these spans, so nothing is left to skip in them.
     workspace.skipped = workspace.skipped.filter((span) => span.through > through);
+    return through;
   }
 
   // The earliest due time after every mark, at most MAX_TIMER_MS ahead. No
@@ -308,13 +381,18 @@ export class AutomationScheduler {
     const latest = now + MAX_TIMER_MS;
     let wakeAt: number | null = null;
     for (const [workspaceId, workspace] of this.workspaces) {
-      if (!workspace.runs) continue;
       let schedules: ScheduledAutomation[];
       try {
         schedules = workspace.source.schedules() ?? [];
       } catch (error) {
         this.options.onError(`set the timer for the schedules in workspace "${workspaceId}"`, error);
         wakeAt = Math.min(wakeAt ?? latest, latest);
+        continue;
+      }
+      if (schedules.length === 0) continue;
+      if (!workspace.runs) {
+        // Ask again within the cap whether the owner moved the schedules here.
+        if (workspace.host.asksAgain()) wakeAt = Math.min(wakeAt ?? latest, latest);
         continue;
       }
       for (const schedule of schedules) {

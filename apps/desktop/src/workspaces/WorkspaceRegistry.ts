@@ -2,6 +2,7 @@ import { app } from "electron";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing } from "../automations/shareRoster";
 import {
   createRegistryStore,
@@ -111,6 +112,12 @@ export function acknowledgeWorkspaceAutomationFailure(
   generation: number,
 ): void {
   store().acknowledgeAutomationFailure(workspaceId, automationId, generation);
+}
+
+// The relay's latest answer for which computer runs the workspace's
+// schedules. See registryStore.setAutomationHost.
+export function setWorkspaceAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+  store().setAutomationHost(workspaceId, host);
 }
 
 // A new listing of the workspace's grants. See registryStore.setShareRoster.

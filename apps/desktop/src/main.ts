@@ -94,7 +94,7 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir } from "node:fs/promises";
-import { release as osRelease, type as osType } from "node:os";
+import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
   PluginPanelSdkEvent,
@@ -186,6 +186,7 @@ import {
   setWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
+  setWorkspaceAutomationHost,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
   stateDir,
@@ -194,6 +195,7 @@ import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./autom
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { AutomationScheduler } from "./automations/automationScheduler";
+import { computerLabel, createAutomationHosts } from "./automations/automationHost";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
@@ -1345,7 +1347,8 @@ function createDesktopWorkspaceAuthorityState(
   const collectionAutomations = createCollectionAutomationsFor(binding, datasetHost);
   automationScheduler.add(binding.workspaceId, collectionAutomations, {
     runsHere: () => runsSchedulesHere(binding.workspaceId),
-    stillRuns: () => unsyncedHere(binding.workspaceId),
+    stillRuns: () => stillRunsSchedulesHere(binding.workspaceId),
+    asksAgain: () => findWorkspace(binding.workspaceId)?.remote !== undefined,
   });
   return {
     activity: new WorkspaceActivityState(),
@@ -1432,6 +1435,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
     automationScheduler.remove(binding.workspaceId);
+    automationHosts.close(binding.workspaceId);
     const results = await Promise.allSettled([
       // The executor hands its held dataset claims back before the host closes.
       state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
@@ -2042,6 +2046,7 @@ function engineForWorkspace(
     afterSuccessfulPull: ({ recovered }) => {
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
+      automationHosts.relayAnswered(workspace.workspaceId);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );
@@ -3292,6 +3297,7 @@ async function openWorkspaceActivityForOperation(
   shareRosters.open(canonicalWorkspace.workspaceId);
   // Automations run where changes are captured: never in a shared view.
   if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
+    automationHosts.open(canonicalWorkspace.workspaceId);
     void operation.state.collectionAutomations.open();
   }
   return result;
@@ -3417,22 +3423,71 @@ const automationScheduler = new AutomationScheduler({
   onError: (context, error) => console.warn(`[desktop] Schedules: ${context}:`, error),
 });
 
-// Whether this computer runs a workspace's schedules. Until the relay
-// records which of the owner's computers does, this computer runs them
-// only for a workspace whose own folder says it never synced: this is its
+const AUTOMATION_HOST_REQUEST_TIMEOUT_MS = 15_000;
+
+// Which of the owner's computers runs each open synced workspace's
+// schedules, as the relay records it.
+const automationHosts = createAutomationHosts({
+  installId: localReactorFallbackId,
+  label: () => computerLabel(hostname()),
+  synced: (workspaceId) => findWorkspace(workspaceId)?.remote !== undefined,
+  send: async (workspaceId, request) => {
+    const workspace = findWorkspace(workspaceId);
+    if (!workspace) return null;
+    let credentials: CloudSessionCredentials;
+    try {
+      ({ credentials } = await remoteForWorkspace(workspace));
+    } catch {
+      // Signed out, or signed in to another account or server.
+      return null;
+    }
+    if (!credentials.relayUrl) return null;
+    const response = await relayShareResponseWithCredentials(
+      credentials,
+      `/sync/${encodeURIComponent(workspaceId)}/automation-host/${request.action}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request.body),
+        signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+      },
+    );
+    return { status: response.status, body: await response.json().catch(() => undefined) };
+  },
+  stored: (workspaceId) => findWorkspace(workspaceId)?.automationHost,
+  store: setWorkspaceAutomationHost,
+  startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
+  finishHere: (workspaceId) => automationScheduler.finishHere(workspaceId),
+  logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
+});
+
+// Whether this computer runs a workspace's schedules. A synced workspace
+// runs them on the computer its relay names. One that does not sync runs
+// them here only when its own folder says it never synced: this is its
 // only computer. A workspace shared with this person is never theirs to run.
 async function runsSchedulesHere(workspaceId: string): Promise<boolean> {
   const entry = findWorkspace(workspaceId);
-  if (entry === null || !unsyncedHere(workspaceId)) return false;
+  if (entry === null || entry.shareView !== undefined) return false;
+  if (entry.remote !== undefined) return automationHosts.runsHere(workspaceId);
   return (await readSyncHistory(entry.rootPath)) === "never-synced";
 }
 
 // Turning sync on or opening a share records it in the folder and the
-// registry in one synchronous call, so this check, made with nothing
-// awaited before a claim, stops a step that started before.
-function unsyncedHere(workspaceId: string): boolean {
+// registry in one synchronous call, and a synced workspace answers from its
+// last host read. So this check, made with nothing awaited before a claim,
+// stops a step that started before either changed.
+function stillRunsSchedulesHere(workspaceId: string): boolean {
   const entry = findWorkspace(workspaceId);
-  return entry !== null && entry.remote === undefined && entry.shareView === undefined;
+  if (entry === null || entry.shareView !== undefined) return false;
+  return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
+}
+
+// Whether any computer can run this workspace's schedules as it stands.
+// One that synced before, or whose folder has no record, needs sync on.
+async function schedulesCanRun(workspaceId: string): Promise<boolean> {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || entry.shareView !== undefined) return false;
+  return entry.remote !== undefined || (await readSyncHistory(entry.rootPath)) === "never-synced";
 }
 
 // Windows sends every top-level window WM_TIMECHANGE when the system clock
@@ -3517,7 +3572,7 @@ function createCollectionAutomationsFor(
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
-    runsSchedules: () => runsSchedulesHere(workspaceId),
+    runsSchedules: () => schedulesCanRun(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {

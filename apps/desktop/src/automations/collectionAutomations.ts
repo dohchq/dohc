@@ -95,9 +95,9 @@ const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
-// Until the relay records which of the owner's computers runs schedules,
-// only a workspace that says it has never synced runs them.
-const NEVER_SYNCED_SCHEDULES = "Schedules run only in a workspace that has never synced, for now.";
+// A workspace that synced before, or that has no record of whether it did,
+// runs schedules only once it syncs and its relay names a computer.
+const SCHEDULES_NEED_SYNC = "Turn on sync to run this workspace's schedules.";
 // After the deadline, a run's writes stop at their next check. A write
 // still running after this long is not settled at all, so nothing can land
 // after the claim settles; the engine's recovery requeues the claim.
@@ -210,7 +210,7 @@ export interface CollectionAutomationsOptions {
   onAutomationsChanged(): void;
   /** The index was read again, so the schedules this executor can run may differ. */
   onSchedulesChanged?(): void;
-  /** Whether this computer runs the workspace's schedules. Every computer does unless set. */
+  /** Whether some computer can run the workspace's schedules. True unless set. */
   runsSchedules?(): Promise<boolean>;
   onError(context: string, error: unknown): void;
   /**
@@ -787,7 +787,7 @@ export class CollectionAutomations {
       const hash = definitionHash(automation);
       const summary = {
         valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation) ?? this.groupTriggerProblem(automation) ??
-          (automation.when.kind === "schedule" && !runsSchedules ? NEVER_SYNCED_SCHEDULES : null),
+          (automation.when.kind === "schedule" && !runsSchedules ? SCHEDULES_NEED_SYNC : null),
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
