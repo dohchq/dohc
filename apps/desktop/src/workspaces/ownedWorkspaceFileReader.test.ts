@@ -1,12 +1,44 @@
-import { mkdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { mkdir, readdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ShareMountRecord } from "./registryStore";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
-import type { ShareViewFiles } from "./shareViewFiles";
+import type {
+  ShareViewFileReadRequest,
+  ShareViewFiles,
+  ShareViewFilesTarget,
+} from "./shareViewFiles";
 import { prepareShareProjectionRead } from "./shareMounts";
 import { createTestScratch } from "./testTemp";
 import { WORKSPACE_ASSET_MAX_BYTES } from "./workspaceAssets";
+import {
+  readDatabaseSnapshot,
+  readDatabaseSnapshotFromBytes,
+} from "./workspaceDatabase";
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => {
+    exec(sql: string): void;
+    close(): void;
+  };
+};
+
+function seedDatabase(path: string, marker: string): void {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(
+      `CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', '${marker}');`,
+    );
+  } finally {
+    database.close();
+  }
+}
+
+const WORKSPACE_ID = "workspace-owner-test";
+const MOUNT = { shareId: "healthy-share", label: "healthy" };
 
 describe("owned workspace asset reads", () => {
   it("pairs local bytes with the resolved target path", async () => {
@@ -205,5 +237,166 @@ describe("owned workspace asset reads", () => {
     await truncate(localPath, WORKSPACE_ASSET_MAX_BYTES + 1);
 
     await expect(prepared.source.readAsset()).rejects.toThrow(/too large/i);
+  });
+});
+
+describe("owned workspace database reads", () => {
+  it("reads a shared database from owner bytes and refuses a recipient-only database", async () => {
+    const root = await createTestScratch("dohc-owned-database-owner-");
+    const mountRoot = join(root, "shared-with-me", "healthy");
+    await mkdir(mountRoot, { recursive: true });
+    const canonicalSeed = join(root, "canonical-seed.sqlite");
+    seedDatabase(canonicalSeed, "canonical owner");
+    const canonicalWalMode = new DatabaseSync(canonicalSeed);
+    canonicalWalMode.exec("PRAGMA journal_mode = WAL;");
+    canonicalWalMode.close();
+    const canonicalBytes = await readFile(canonicalSeed);
+    const projectionPath = join(mountRoot, "canonical.sqlite");
+    seedDatabase(projectionPath, "projection main");
+    const recipientOnlyPath = join(mountRoot, "recipient-only.sqlite");
+    seedDatabase(recipientOnlyPath, "recipient only");
+    await symlink(projectionPath, join(root, "shared-alias.sqlite"), "file");
+    const projection = new DatabaseSync(projectionPath);
+    projection.exec(
+      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'projection wal';",
+    );
+    await expect(readFile(`${projectionPath}-wal`)).resolves.not.toHaveLength(0);
+    await expect(
+      readDatabaseSnapshot(
+        root,
+        "shared-with-me/healthy/canonical.sqlite",
+      ),
+    ).resolves.toMatchObject({
+      tables: [
+        {
+          name: "sentinel",
+          rows: [expect.objectContaining({ marker: "projection wal" })],
+        },
+      ],
+    });
+
+    const readOwner = vi.fn(
+      async (
+        _target: ShareViewFilesTarget,
+        request: ShareViewFileReadRequest,
+      ) => {
+        if (request.kind !== "asset" || request.path !== "canonical.sqlite") {
+          throw new Error(`Shared file not found: ${request.path}`);
+        }
+        return {
+          kind: "asset" as const,
+          bytes: canonicalBytes,
+          mediaType: "application/octet-stream",
+        };
+      },
+    );
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: root, shareMounts: [MOUNT] },
+      files: { read: readOwner },
+    });
+
+    try {
+      const snapshot = await reader.readDatabase("shared-with-me/healthy/canonical.sqlite");
+      expect(snapshot).toMatchObject({
+        path: "shared-with-me/healthy/canonical.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "canonical owner" })],
+          },
+        ],
+      });
+      expect(readOwner).toHaveBeenCalledTimes(1);
+
+      const aliasSnapshot = await reader.readDatabase("shared-alias.sqlite");
+      expect(aliasSnapshot).toMatchObject({
+        path: "shared-alias.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "canonical owner" })],
+          },
+        ],
+      });
+
+      await expect(
+        reader.readDatabase("shared-with-me/healthy/recipient-only.sqlite"),
+      ).rejects.toThrow(/shared file not found/i);
+      expect(readOwner).toHaveBeenCalledTimes(3);
+    } finally {
+      projection.close();
+    }
+  });
+
+  it("reads current WAL state from a local database owner", async () => {
+    const root = await createTestScratch("dohc-owned-local-database-wal-");
+    await mkdir(join(root, "data"), { recursive: true });
+    const databasePath = join(root, "data", "local.sqlite");
+    seedDatabase(databasePath, "main file");
+    await symlink(databasePath, join(root, "source.sqlite"));
+    const database = new DatabaseSync(databasePath);
+    database.exec(
+      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'local wal';",
+    );
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
+      files: { read: vi.fn() },
+    });
+
+    try {
+      await expect(
+        reader.readDatabase("source.sqlite"),
+      ).resolves.toMatchObject({
+        path: "source.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "local wal" })],
+          },
+        ],
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("reads a valid local database larger than the asset limit", async () => {
+    const root = await createTestScratch("dohc-owned-local-database-large-");
+    const databasePath = join(root, "large.sqlite");
+    const database = new DatabaseSync(databasePath);
+    database.exec(
+      `CREATE TABLE payload (data BLOB); INSERT INTO payload VALUES (zeroblob(${WORKSPACE_ASSET_MAX_BYTES + 1}));`,
+    );
+    database.close();
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
+      files: { read: vi.fn() },
+    });
+
+    await expect(
+      reader.readDatabase("large.sqlite"),
+    ).resolves.toMatchObject({
+      path: "large.sqlite",
+      tables: [{ name: "payload" }],
+    });
+  });
+
+  it("removes its private database snapshot when SQLite rejects owner bytes", async () => {
+    const prefix = "dohc-database-snapshot-";
+    const before = new Set(
+      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
+    );
+
+    await expect(
+      readDatabaseSnapshotFromBytes(
+        "shared-with-me/healthy/broken.sqlite",
+        Buffer.from("not a sqlite database"),
+      ),
+    ).rejects.toThrow();
+
+    const after = new Set(
+      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
+    );
+    expect(after).toEqual(before);
   });
 });

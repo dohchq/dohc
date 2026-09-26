@@ -11,13 +11,18 @@ import {
   expressionProblem,
   findQueryOf,
   localIsoTime,
+  runNowSkippedFrom,
+  operationsOf,
   parseCollectionAutomationId,
   planRun,
+  scheduleDueAt,
+  scheduleHash,
   subscriptionFor,
   triggerMatches,
   unsupportedReason,
   type RunInputs,
 } from "./automationPlan";
+import { chatDirectoryOf } from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -52,7 +57,7 @@ function claim(change: Partial<RecordChange> = {}): AutomationClaim {
 const task = { id: "rec_task", path: "Tasks/one.md", values: { Status: "Done", Count: 2 } };
 
 function inputs(definition: Automation, overrides: Partial<RunInputs> = {}): RunInputs {
-  return { automation: definition, claim: claim(), record: task, found: new Map(), ...overrides };
+  return { automation: definition, claim: claim(), record: task, found: new Map(), person: null, message: null, chat: null, ...overrides };
 }
 
 describe("automation ids", () => {
@@ -60,7 +65,7 @@ describe("automation ids", () => {
     const id = collectionAutomationId("Plans #1/Tasks", "stamp");
     expect(id).toBe("collection:Plans #1/Tasks#stamp");
     expect(parseCollectionAutomationId(id)).toEqual({ collectionPath: "Plans #1/Tasks", id: "stamp" });
-    expect(parseCollectionAutomationId("plugin:tools/stamp")).toBeNull();
+    expect(parseCollectionAutomationId("other:tools/stamp")).toBeNull();
   });
 
   it("hashes what an automation does, not its name or switch", () => {
@@ -103,18 +108,42 @@ describe("what the executor can run", () => {
     expect(subscriptionFor({ kind: "field-changed", field: "Status", to: null, table: null })).toEqual({ kinds: ["changed"], fields: ["Status"] });
     expect(subscriptionFor({ kind: "record-changed", fields: null, table: null })).toEqual({ kinds: ["changed"] });
     expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
+    expect(subscriptionFor({ kind: "schedule", every: "day", at: "09:00", timezone: "UTC" })).toBeNull();
+    // A press claims a button's run; no change does.
+    expect(subscriptionFor({ kind: "button", field: "Mark paid", table: null })).toBeNull();
   });
 
-  it("names why it cannot run messages, code, schedules, or a Find the query cannot express", () => {
+  it("runs a document Collection's button, and names the dataset operations a button's steps invoke", () => {
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid}\ndo: [{set: {Paid: true}}]"))).toBeNull();
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {button: Mark paid, table: Invoices}\ndo: [{set: {Paid: true}}]"))).toMatch(/table/);
+    const steps = automation([
+      "id: a", "name: A", "when: {button: Mark paid, table: Invoices}", "do:",
+      "  - set: {Paid: true}", "    operation: invoices.markPaid",
+      "  - if: record.Total > 100", "    do: [{add-record: {Note: large}, collection: Log, operation: log.add}]",
+      "  - set: {Paid: true}", "    operation: invoices.markPaid",
+    ].join("\n"));
+    expect(operationsOf(steps)).toEqual(["invoices.markPaid", "log.add"]);
+  });
+
+  it("names why it cannot run code or a Find the query cannot express", () => {
     const withStep = (step: string) => automation(`id: a\nname: A\nwhen: record-added\ndo: [${step}]`);
     expect(unsupportedReason(withStep("{set: {Done: true}}"))).toBeNull();
-    expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toMatch(/messages/);
+    expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toBeNull();
+    expect(unsupportedReason(withStep("{wake-agent: Hi, person: user-1}"))).toBeNull();
+    expect(unsupportedReason(withStep("{post: Hi, group: Trip}"))).toBeNull();
+    expect(unsupportedReason(withStep("{direct-message: Hi, to: [user-1, '=trigger.record.Owner']}"))).toBeNull();
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
+    // A Group message starts an automation dohc can run.
+    const fromGroup = (step: string) => automation(`id: a\nname: A\nwhen: {group-message: Trip}\ndo: [${step}]`);
+    expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
     expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/Collection action/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [{find: 'true', as: all}]")))
-      .toMatch(/record change/);
+    const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
+    expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();
+    expect(unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}"))).toMatch(/no trigger record/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]")))
+      .toBeNull();
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
   });
@@ -144,6 +173,67 @@ describe("field writes", () => {
       { collection: "Archive", field: "Filed" },
       { collection: null, field: "Nudged" },
     ]);
+  });
+});
+
+describe("schedule claims", () => {
+  const sweep = automation("id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: UTC}\ndo: [{add-record: {Title: '=today()'}}]");
+  const due = Date.UTC(2026, 8, 25, 9);
+  const scheduled = (key: string): AutomationClaim => ({
+    ...claim(),
+    automationId: "collection:Tasks#sweep",
+    trigger: { key },
+    recordId: null,
+    change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+  });
+
+  it("reads the due time from the claim's key", () => {
+    expect(scheduleDueAt(scheduled(`schedule:${due}`))).toBe(due);
+    for (const key of ["press:1", "schedule:", "schedule:01", "schedule:-5", "schedule:99999999999999999"]) {
+      expect(scheduleDueAt(scheduled(key)), key).toBeNull();
+    }
+    expect(scheduleDueAt(claim())).toBeNull();
+  });
+
+  it("matches only a schedule claim, and gives formulas the due time instead of a record", () => {
+    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(`schedule:${due}`), record: null, found: new Map() };
+    expect(triggerMatches(run)).toBe(true);
+    expect(triggerMatches({ ...run, claim: claim() })).toBe(false);
+    const request = evaluationRequest(run, due);
+    expect(request.scope).not.toHaveProperty("record");
+    // The due time reads in the schedule's own zone, whatever this computer's is.
+    expect(request.scope.trigger).toEqual({ kind: "schedule", dueAt: "2026-09-25T09:00:00.000+00:00" });
+    for (const [timezone, instant, dueAt] of [
+      ["America/New_York", Date.UTC(2026, 8, 25, 13), "2026-09-25T09:00:00.000-04:00"],
+      ["Asia/Kolkata", Date.UTC(2026, 8, 25, 3, 30), "2026-09-25T09:00:00.000+05:30"],
+    ] as const) {
+      const zoned = automation(`id: sweep\nname: Sweep\nwhen: {schedule: day, at: '09:00', timezone: ${timezone}}\ndo: [{add-record: {Title: x}}]`);
+      const zonedRun = { ...run, automation: zoned, claim: scheduled(`schedule:${instant}`) };
+      expect(evaluationRequest(zonedRun, instant).scope.trigger, timezone).toEqual({ kind: "schedule", dueAt });
+    }
+  });
+
+  it("runs a Run now claim at its claim time, with when the skipped runs began", () => {
+    const first = Date.UTC(2026, 8, 22, 9);
+    const key = `run-now:schedule-skipped:ws-1:collection:Tasks#sweep:${first}`;
+    expect(runNowSkippedFrom(scheduled(key))).toBe(first);
+    for (const other of [`schedule:${first}`, "run-now:other:1", `run-now:schedule-skipped:${first}`]) {
+      expect(runNowSkippedFrom(scheduled(other)), other).toBeNull();
+    }
+    const run = { person: null, message: null, chat: null, automation: sweep, claim: scheduled(key), record: null, found: new Map() };
+    expect(triggerMatches(run)).toBe(true);
+    expect(evaluationRequest(run, due).scope.trigger).toEqual({
+      kind: "schedule",
+      dueAt: "2026-09-25T09:00:00.000+00:00",
+      skipped: "2026-09-22T09:00:00.000+00:00",
+    });
+  });
+
+  it("hashes the schedule, so a changed time or zone starts a new mark", () => {
+    const base = { kind: "schedule" as const, every: "day" as const, at: "09:00", timezone: "UTC" };
+    expect(scheduleHash(base)).toBe(scheduleHash({ ...base }));
+    expect(scheduleHash(base)).not.toBe(scheduleHash({ ...base, at: "10:00" }));
+    expect(scheduleHash(base)).not.toBe(scheduleHash({ ...base, timezone: "Europe/London" }));
   });
 });
 
@@ -300,6 +390,24 @@ describe("plans", () => {
     expect(plan.kind === "plan" && plan.steps.map(step => step.ordinal)).toEqual([4, 5]);
   });
 
+  it("runs a press for the record as it is now, naming the button, when it was pressed, and who pressed it", () => {
+    const definition = automation("id: paid\nname: Paid\nwhen: {button: Mark paid}\ndo: [{set: {Paid by: '=person.name'}}]");
+    const pressedAt = Date.UTC(2026, 8, 25, 2, 0);
+    const press = { ...claim({ kind: "button", onBehalfOf: "user-ice", fields: [] }), trigger: { key: "press:p1" }, createdAtMs: pressedAt };
+    const run = inputs(definition, { claim: press, person: { id: "user-ice", name: "Ice" } });
+    expect(triggerMatches(run)).toBe(true);
+    expect(triggerMatches(inputs(definition))).toBe(false);
+    const request = evaluationRequest(run, pressedAt);
+    expect(request.scope).toEqual({
+      record: { Status: "Done", Count: 2, id: "rec_task" },
+      previous: {},
+      trigger: { kind: "button", field: "Mark paid", pressedAt: localIsoTime(pressedAt), record: { Status: "Done", Count: 2, id: "rec_task" } },
+      person: { id: "user-ice", name: "Ice" },
+      bindings: {},
+      now: localIsoTime(pressedAt),
+    });
+  });
+
   it("asks for every formula in one request, reading now as the time of the change", () => {
     const definition = automation([
       "id: stamp", "name: Stamp", "when: {field-changed: Status}", "if: record.Count > 1",
@@ -448,5 +556,32 @@ describe("a formula's syntax, for the builder", () => {
     expect(expressionProblem("(() => { while (true) {} })()")).toBeNull();
     expect(expressionProblem("record.Status ==")).toBe("Unexpected token.");
     expect(expressionProblem("1 2")).toBe("Unexpected text at character 3.");
+  });
+});
+
+describe("messages", () => {
+  const directory = chatDirectoryOf(
+    [{ id: "trip", name: "Trip", slug: "trip", kind: "channel", type: "both", wireId: "trip", runningThreadId: null }],
+    { kind: "owner", ownerUserId: null, grants: [] },
+  );
+  const tell = automation("id: t\nname: T\nwhen: record-added\ndo: [{post: 'Hi {record.Status}', group: Trip}]");
+  const key = { claimId: "atc_1", hash: "h" };
+
+  it("posts the text the evaluator rendered, and refuses a message with no text", () => {
+    const run = inputs(tell, { chat: directory });
+    const request = evaluationRequest(run, 0);
+    expect(request.formulas).toEqual([{
+      kind: "text", parts: [{ kind: "text", text: "Hi " }, { kind: "expression", expression: "record.Status" }],
+    }]);
+    expect(planRun(run, request, [{ ok: true, value: "Hi Done  \r\n" }], key)).toMatchObject({
+      kind: "plan",
+      steps: [{ ordinal: 0, effects: [{
+        kind: "message", effectId: "atc_1/h/0/post", to: { kind: "group", channelId: "trip", lane: "posts" }, body: "Hi Done",
+      }] }],
+    });
+    expect(planRun(run, request, [{ ok: true, value: " \n" }], key))
+      .toEqual({ kind: "failed", error: "The message in step 1 is empty.", timedOut: false });
+    expect(planRun(run, request, [{ ok: true, value: 5 }], key))
+      .toEqual({ kind: "failed", error: "The message in step 1 is not text.", timedOut: false });
   });
 });

@@ -427,6 +427,7 @@ describe("CLI socket server", () => {
           writeTargets.push(target);
         },
         scanChatDispatch: async () => undefined,
+        notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
       async onWrite() {

@@ -136,6 +136,8 @@ export type DatasetHistoryRevision = z.infer<typeof DatasetHistoryRevision>;
 export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
   entries: z.array(z.object({ revision: z.number().int().positive(), operation: z.string().min(1).max(64), callerReference: sha256.nullable(),
     recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000).nullable(), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative(), undo: DatasetHistoryUndo.optional(),
+    // The automation that made the change. The desktop adds its name from the Collection's automations.yaml.
+    automation: z.object({ automationId: z.string().min(1).max(1024), depth: z.number().int().min(1).max(4), name: z.string().min(1).max(120).optional() }).strict().optional(),
     schema: z.object({ previousRevisionHash: sha256, revisionHash: sha256 }).strict().optional() }).strict()).max(100),
   nextBeforeRevision: z.number().int().positive().nullable() }).strict();
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CollectionSchema } from "@dohc/workspace-contracts";
+import type { AutomationButtonState } from "../../automations/automationButtons";
 import { Overlay } from "../Overlay";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import {
@@ -8,6 +9,7 @@ import {
   fieldDraftError,
   FieldDraftRow,
   FIELD_TYPE_LABELS,
+  FIELD_TYPES_WITH_BUTTON,
   inputClass,
   NO_OPTIONS_PROBLEM,
   parseOptionsText,
@@ -62,6 +64,10 @@ export function FieldsDialog(props: {
   /** Collection folder paths a relation field can target. */
   relationTargets: readonly string[];
   apply: SchemaApply;
+  /** What each Button field does now, by field name; null while it loads. */
+  buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
+  /** Opens the automation builder with the trigger set to this button. */
+  onChooseButtonAutomation?: (field: string) => void;
   onClose: () => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
@@ -152,6 +158,16 @@ export function FieldsDialog(props: {
                 <span className="shrink-0 text-[11px] text-subtle">
                   {FIELD_TYPE_LABELS[field.type]}
                 </span>
+                {field.type === "button" && props.onChooseButtonAutomation &&
+                  props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
+                  <SecondaryButton
+                    aria-label={`Choose what ${field.name} does`}
+                    disabled={pending}
+                    onClick={() => props.onChooseButtonAutomation?.(field.name)}
+                  >
+                    Choose what it does
+                  </SecondaryButton>
+                ) : null}
                 {field.type === "select" || field.type === "multi-select" ? (
                   <SecondaryButton
                     aria-label={`Edit field ${field.name}`}
@@ -171,6 +187,7 @@ export function FieldsDialog(props: {
             draft={draft}
             disabled={pending}
             relationTargets={props.relationTargets}
+            types={FIELD_TYPES_WITH_BUTTON}
             onChange={setDraft}
           />
           <SecondaryButton

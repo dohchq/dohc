@@ -28,7 +28,7 @@ const WS: &str = "ws-automation-claims";
 const PATH: &str = "tasks/alpha.md";
 const OBJECT: &str = "automation-claim-record-object";
 const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
-const AUTOMATION: &str = "plugin:triage";
+const AUTOMATION: &str = "collection:tasks#triage";
 
 /// Added and changed records under "tasks", on any field or only `field`.
 fn subscription(automation_id: &str, field: Option<&str>) -> AutomationSubscription {
@@ -331,7 +331,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     let (served, served_facts) = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             250,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -472,11 +472,11 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             .collect::<Vec<_>>(),
         vec!["collection:tasks#priority", AUTOMATION],
     );
-    // Each executor drains only its own namespace.
+    // Each prefix drains only its own claims.
     let (collection_claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            "collection:".to_owned(),
+            "collection:tasks#priority".to_owned(),
             510,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -493,7 +493,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         handle
             .automation_claim_next(
                 WS.to_owned(),
-                "collection:".to_owned(),
+                "collection:tasks#priority".to_owned(),
                 520,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
@@ -501,7 +501,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             .await
             .expect("claim next")
             .is_none(),
-        "the plugin automation's claim waits for its own executor"
+        "the triage claim waits for its own prefix"
     );
     supervisor.close(&source_db).expect("close source actor");
 
@@ -859,7 +859,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -873,7 +873,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             210,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -927,7 +927,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             1_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -979,7 +979,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             2_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1010,7 +1010,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             200,
             faults.clone(),
             CancellationToken::new(),
@@ -1030,7 +1030,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1072,7 +1072,7 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             200,
             Arc::new(NoFaults),
             cancelled.clone(),
@@ -1171,7 +1171,7 @@ async fn abandoning_a_claim_request_does_not_cancel_its_admitted_transaction() {
             handle
                 .automation_claim_next(
                     WS.to_owned(),
-                    "plugin:".to_owned(),
+                    AUTOMATION.to_owned(),
                     200,
                     gate,
                     CancellationToken::new(),
@@ -1220,7 +1220,7 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
-            "plugin:".to_owned(),
+            AUTOMATION.to_owned(),
             200,
             PanicFaults::at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),

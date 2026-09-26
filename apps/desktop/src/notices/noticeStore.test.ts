@@ -43,6 +43,10 @@ interface Relay {
   outdated: boolean;
   // Posts of notices fail in transit; marks still go.
   failPosts: boolean;
+  // Posts of notices are refused, as the relay refuses a settled skipped notice.
+  refusePosts?: boolean;
+  // Posts of notices reach the relay, and their answer is lost.
+  losePostReplies?: boolean;
   failPulls: boolean;
   // Runs, and is awaited, as each request leaves.
   onRequest?: (request: Request) => void | Promise<void>;
@@ -73,10 +77,15 @@ function account(server: Relay, userId: string): NoticeAccount {
         const path = new URL(request.url).pathname;
         const failing = request.method === "POST" ? server.failPosts && path === "/sync/notices" : server.failPulls;
         if (!server.online || failing) throw new TypeError("fetch failed");
+        if (server.refusePosts && request.method === "POST" && path === "/sync/notices") {
+          return Response.json({ ok: false, error: "refused", code: "notice_refused" }, { status: 403 });
+        }
         if (server.outdated && path.startsWith("/sync/notices")) {
           return Response.json({ ok: false, error: "not found", code: "not_found" }, { status: 404 });
         }
-        return await server.handler(request);
+        const answer = await server.handler(request);
+        if (server.losePostReplies && request.method === "POST" && path === "/sync/notices") throw new TypeError("fetch failed");
+        return answer;
       },
     },
   };
@@ -104,7 +113,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -132,7 +141,7 @@ async function computer(
         },
       };
     },
-    installId: () => "install-a",
+    installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
@@ -210,6 +219,108 @@ describe("notices on one person's computers", () => {
     await laptop.store.sync();
     await desktop.store.sync();
     expect((await desktop.store.list()).notices).toEqual([]);
+  });
+
+  it("tells only the first computer to dismiss a notice that it did", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    const ref = { store: "account" as const, noticeId: "agent-run:1" };
+    await laptop.store.postNotice(notice());
+    // The post has not left yet: the dismissal sends it first.
+    expect(await laptop.store.dismissFirst(ref, laptop.signedIn?.key ?? null)).toBe("first");
+    expect(await laptop.store.dismissFirst(ref, laptop.signedIn?.key ?? null), "asked again after a lost answer").toBe("first");
+    await desktop.store.sync();
+    expect(await desktop.store.dismissFirst(ref, desktop.signedIn?.key ?? null)).toBe("not-first");
+    expect((await laptop.store.list()).notices, "dismissed rows leave the list").toEqual([]);
+
+    server.online = false;
+    expect(await laptop.store.dismissFirst({ store: "account", noticeId: "other" }, laptop.signedIn?.key ?? null)).toBe("unanswered");
+    expect(await laptop.store.dismissFirst(ref, "another account")).toBe("unanswered");
+  });
+
+  it("lets this computer's own dismissal decide for a notice only it holds", async () => {
+    const signedOut = await computer(null);
+    await signedOut.store.postNotice(notice());
+    const ref = { store: "local" as const, noticeId: "agent-run:1" };
+    expect(await signedOut.store.dismissFirst(ref, null)).toBe("first");
+    expect(await signedOut.store.dismissFirst(ref, null), "asked again after a crash").toBe("first");
+    expect(await signedOut.store.dismissFirst({ store: "local", noticeId: "gone" }, null)).toBe("not-first");
+  });
+
+  it("drops a skipped schedule's notice the relay refuses, and never keeps it here", async () => {
+    const server = await relay();
+    server.refusePosts = true;
+    const laptop = await computer(account(server, "ana"));
+    const skipped = notice({ noticeId: "schedule-skipped:ws:collection:T#r:1000", kind: "schedule-skipped", title: "Report skipped once", body: "" });
+    await laptop.store.postNotice(skipped);
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    expect((await laptop.store.list()).notices.map((row) => [row.store, row.noticeId]), "only the other notice moved here")
+      .toEqual([["local", "agent-run:1"]]);
+  });
+
+  it("never drops a waiting skipped schedule's notice to make room", async () => {
+    const server = await relay();
+    server.online = false;
+    const laptop = await computer(account(server, "ana"), { outboxPostLimit: 2 });
+    await laptop.store.postNotice(notice({ noticeId: "schedule-skipped:ws:collection:T#r:1000", kind: "schedule-skipped", title: "Report skipped once", body: "" }));
+    for (const id of ["agent-run:1", "agent-run:2", "agent-run:3"]) await laptop.store.postNotice(notice({ noticeId: id }));
+    const ids = (await laptop.store.list()).notices.map((row) => row.noticeId);
+    expect(ids).toContain("schedule-skipped:ws:collection:T#r:1000");
+    expect(ids).not.toContain("agent-run:1");
+  });
+
+  it("dismisses a withdrawn notice whose post was already on its way", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.onRequest = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices") return;
+      server.onRequest = undefined;
+      await laptop.store.withdraw("agent-run:1");
+    };
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    await laptop.store.sync();
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    await desktop.store.sync();
+    expect((await desktop.store.list()).notices, "the relay holds it dismissed").toEqual([]);
+    expect((await laptop.store.list()).notices).toEqual([]);
+  });
+
+  it("dismisses a withdrawn notice the relay took although its answer was lost", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.losePostReplies = true;
+    server.onRequest = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices") return;
+      server.onRequest = undefined;
+      await laptop.store.withdraw("agent-run:1");
+    };
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    // The next pass confirms the post before its dismissal goes.
+    server.losePostReplies = false;
+    await laptop.store.sync();
+    await laptop.store.sync();
+    const desktop = await computer(account(server, "ana"), { installId: "install-b" });
+    await desktop.store.sync();
+    expect((await desktop.store.list()).notices, "held and dismissed on the relay").toEqual([]);
+  });
+
+  it("takes back a notice it posted", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    server.online = false;
+    await laptop.store.postNotice(notice());
+    await laptop.store.withdraw("agent-run:1");
+    expect((await laptop.store.list()).notices, "an unsent post goes").toEqual([]);
+    server.online = true;
+    await laptop.store.postNotice(notice({ noticeId: "agent-run:2" }));
+    await laptop.store.sync();
+    await laptop.store.withdraw("agent-run:2");
+    await laptop.store.sync();
+    expect((await laptop.store.list()).notices, "a sent one is dismissed").toEqual([]);
   });
 
   it("posts a notice id once", async () => {
@@ -486,6 +597,23 @@ describe("notices on one person's computers", () => {
     await laptop.store.sync();
     expect((await file(laptop, "account")).rows).toEqual([]);
     expect(laptop.changes).toBe(changes + 1);
+  });
+});
+
+describe("a notice whose sender stopped", () => {
+  it("sends nothing and keeps nothing once its signal ends", async () => {
+    const server = await relay();
+    const signedIn = await computer(account(server, "owner"));
+    const stopped = AbortSignal.abort();
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:1", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await expect(signedIn.store.postNotice(notice({ noticeId: "automation-notify:2", recipientUserId: "ana", signal: stopped })))
+      .rejects.toMatchObject({ name: "AbortError" });
+    await signedIn.store.sync();
+    expect((await signedIn.store.list()).notices).toEqual([]);
+    const ana = await computer(account(server, "ana"));
+    await ana.store.sync();
+    expect((await ana.store.list()).notices).toEqual([]);
   });
 });
 

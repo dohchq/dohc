@@ -1520,9 +1520,8 @@ export type ChangeAuthor =
   | { kind: "agent"; agentId: string; onBehalfOf: string }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
-  // id ("collection:<collection path>#<automation id>" or
-  // "plugin:<plugin name>/<automation id>"), and depth is the write's
-  // automation-chain depth: one greater than its trigger's.
+  // id ("collection:<collection path>#<automation id>"), and depth is the
+  // write's automation-chain depth: one greater than its trigger's.
   | {
       kind: "automation";
       automationId: string;

@@ -1394,7 +1394,7 @@ describe("automation authors", () => {
       automation: { automationId: "collection:Trip/Tasks#stamp", chainDepth: 1 },
       author: { kind: "human", displayName: "Ice" }, body: "Done" })).rejects.toThrow("invalid-input");
     await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
-      automation: { automationId: "plugin:hello/triage", chainDepth: 1 },
+      automation: { automationId: "other:hello/triage", chainDepth: 1 },
       author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
   });
 

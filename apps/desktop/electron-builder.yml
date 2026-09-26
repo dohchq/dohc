@@ -26,7 +26,7 @@ files:
   - "!**/*.tsbuildinfo"
   - "!node_modules/@dohc/*/src/**/*.test.ts"
   - "!node_modules/@dohc/sync-relay/dist/**"
-  # Main bundles the Effect runtime; CLI and plugin tools own their dependencies.
+  # Main bundles the Effect runtime; the CLI owns its dependencies.
   - "!node_modules/effect/**"
   - "!node_modules/electron-updater/**"
 asar: true
@@ -69,10 +69,6 @@ extraResources:
       - "dohc-mcp"
       - "dohc-mcp.cmd"
       - "dohc-mcp.mjs"
-  - from: resources/plugin-tools
-    to: plugin-tools
-    filter:
-      - "**/*"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

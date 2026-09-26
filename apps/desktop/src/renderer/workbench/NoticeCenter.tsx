@@ -1,3 +1,4 @@
+import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
@@ -18,10 +19,6 @@ import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import type {
-  AgentNotification,
-  AgentNotificationKind,
-} from "./agentNotifications";
 import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
 
 type NoticeAction = {
@@ -154,24 +151,8 @@ function sentence(text: string): string {
 }
 
 
-const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
-  finished: CheckCircle2,
-  "needs-input": Bot,
-  asked: MessageSquare,
-  error: AlertTriangle,
-  "login-required": LogIn,
-};
-
-const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
-  finished: "success",
-  "needs-input": "warning",
-  asked: "neutral",
-  error: "danger",
-  "login-required": "warning",
-};
-
 // A Collection automation's engine id is "collection:<collection path>#<id>".
-// Its definition lives in the Collection's automations.yaml, not in a plugin.
+// Its definition lives in the Collection's automations.yaml.
 export function collectionAutomationOf(
   automationId: string,
 ): { collection: string; id: string } | null {
@@ -186,42 +167,39 @@ export function collectionAutomationOf(
 // engine-recorded reason codes get their own honest sentences; every other
 // error is the handler's own text. The copy must never claim the handler
 // threw when it did not run at all (chain-stopped) or did not finish
-// (reclaim-exhausted). A Collection automation's way forward is the
-// notice's Try again and Open automation, so its body only states what
-// happened; a plugin's names its source.
+// (reclaim-exhausted). The way forward is the notice's Try again and Open
+// automation, so the body only states what happened.
 function automationFailureCopy(failure: AutomationFailureNotice): {
   title: string;
   body: string;
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  const collection = collectionAutomationOf(failure.automationId);
-  const name = failure.name ?? collection?.id ?? failure.automationId;
-  const next = (step: string) => (collection ? "" : ` Open the plugin's source to ${step}.`);
+  const name = failure.name ?? collectionAutomationOf(failure.automationId)?.id ?? failure.automationId;
   if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
         `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${name}" did not run.${next("shorten the chain")}`,
+        `"${name}" did not run.`,
     };
   }
   if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
       title: `Automation "${name}" did not finish`,
-      body: `${count}dohc stopped retrying a run that did not finish.${next("check the handler")}`,
+      body: `${count}dohc stopped retrying a run that did not finish.`,
     };
   }
   return {
     title: `Automation "${name}" failed`,
-    body: `${count}${sentence(failure.error)}${next("fix the handler")}`,
+    body: `${count}${sentence(failure.error)}`,
   };
 }
 
 // One automation failure as a notice, for its row and its toast: the copy,
 // the report Copy puts on the clipboard, and the ways forward. A Collection
 // automation offers Try again, except after a chain stop, and Open
-// automation; a plugin's names its source in the body instead.
+// automation.
 function automationFailureNotice(
   failure: AutomationFailureNotice,
   handlers: {
@@ -258,7 +236,7 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
     const entry = automations.get(stop.automationId) ??
       { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
     const who = stop.stoppedFor ?? "Someone you shared with";
-    entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
+    entry.reasons.add(`${who} cannot ${automationReachCopy(stop, true)}.`);
     automations.set(stop.automationId, entry);
   }
   const [only] = automations.values();
@@ -387,20 +365,12 @@ export function NoticeCenter(props: {
   // invent a title neither of them wrote.
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
   onReviewShareChanges?: (proposalId: string) => void;
-  // Agent -> user notifications (finished / needs-input / asked / error).
-  // Informational ledger entries: the History rail shows what the run did,
-  // and a blocked run raises its own permission card. Dismiss acknowledges.
-  agentNotifications?: readonly AgentNotification[];
-  onDismissAgentNotification?: (id: string) => void;
   // Automation failures (ADR 0008): the engine's failed claim rows the
   // owner has not acknowledged, one notice per automation with the newest
   // error and a count. Durable — they come back after a restart until
   // dismissed, and a newer failure re-raises a dismissed one.
   automationFailures?: readonly AutomationFailureNotice[];
-  onDismissAutomationFailure?: (
-    automationId: string,
-    generation: number,
-  ) => void;
+  onDismissAutomationFailure?: (failure: AutomationFailureNotice) => void;
   // A crash report waiting on this computer. Send report is absent when this
   // build has no report server; main owns the dialog it opens.
   crashReport?: CrashReportNotice | null;
@@ -438,6 +408,9 @@ export function NoticeCenter(props: {
   // aborts.
   onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
   onDismissSentNotice?: (notice: NoticeRow) => void;
+  // Run now on a skipped schedule's notice. Resolves to null once the run
+  // started here, or to a sentence that says why it did not.
+  onRunSentNoticeNow?: (notice: NoticeRow) => Promise<string | null>;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
   // someone dismisses it.
@@ -489,6 +462,26 @@ export function NoticeCenter(props: {
     cancelOpen();
     setSentNotes(new Map());
   }, [cancelOpen, sentAccount]);
+  // The Run now on its way, by row key: another waits until it answers.
+  const [runningKey, setRunningKey] = useState<string | null>(null);
+  const { onRunSentNoticeNow } = props;
+  const runSentNoticeNow = useCallback(
+    async (notice: NoticeRow) => {
+      if (!onRunSentNoticeNow) return;
+      const key = sentKey(sentAccount, notice);
+      setRunningKey(key);
+      let note: string | null;
+      try {
+        note = await onRunSentNoticeNow(notice);
+      } catch (error) {
+        note = error instanceof Error ? error.message : "The automation did not start.";
+      } finally {
+        setRunningKey((current) => (current === key ? null : current));
+      }
+      if (note !== null) setSentNotes((current) => new Map(current).set(key, note));
+    },
+    [onRunSentNoticeNow, sentAccount],
+  );
   const { onOpenSentNotice } = props;
   const openSentNotice = useCallback(
     async (notice: NoticeRow) => {
@@ -680,30 +673,10 @@ export function NoticeCenter(props: {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
-  const agentNotifications = props.agentNotifications ?? [];
   const notices = useMemo<Notice[]>(() => {
     const next: Notice[] = [];
     const state = props.syncStatus?.state;
     const conflictCount = props.syncStatus?.conflictCount ?? 0;
-
-    // Agent -> user notices lead: a run that finished, is blocked, asked a
-    // question, or failed is the thing the user most needs to see. Newest
-    // first so a fresh ask isn't buried under an older "finished".
-    for (const notification of [...agentNotifications].sort(
-      (a, b) => b.createdAtMs - a.createdAtMs,
-    )) {
-      next.push({
-        id: notification.id,
-        tone: AGENT_NOTICE_TONE[notification.kind],
-        title: notification.title,
-        body: notification.body,
-        timeMs: notification.createdAtMs,
-        Icon: AGENT_NOTICE_ICON[notification.kind],
-        ...(props.onDismissAgentNotification
-          ? { onDismiss: () => props.onDismissAgentNotification?.(notification.id) }
-          : {}),
-      });
-    }
 
     // Above the sync notices: someone is waiting on the granter's decision,
     // and until it comes their work sits where nobody can use it.
@@ -789,9 +762,9 @@ export function NoticeCenter(props: {
       });
     }
     for (const hold of props.automationHolds ?? []) {
-      const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
+      const reach = automationReachCopy(hold);
       next.push({
-        id: `automation-hold-${hold.automationId}-${hold.step}`,
+        id: `automation-hold-${hold.automationId}-${hold.step}${hold.recipient ? `-${hold.recipient}` : ""}`,
         tone: "warning",
         title: `Automation "${hold.automationName}" is waiting`,
         body: hold.stoppedFor
@@ -825,10 +798,7 @@ export function NoticeCenter(props: {
         ...(props.onDismissAutomationFailure
           ? {
               onDismiss: () =>
-                props.onDismissAutomationFailure?.(
-                  failure.automationId,
-                  failure.generation,
-                ),
+                props.onDismissAutomationFailure?.(failure),
             }
           : {}),
       });
@@ -1035,7 +1005,6 @@ export function NoticeCenter(props: {
 
     return next;
   }, [
-    agentNotifications,
     crashReport,
     props.onSendCrashReport,
     props.onDismissCrashReport,
@@ -1049,7 +1018,6 @@ export function NoticeCenter(props: {
     props.automationStops,
     props.onDismissAutomationStops,
     props.conflictSummaries,
-    props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
     props.onRetryAutomationFailure,
     props.onOpenAutomation,
@@ -1636,6 +1604,10 @@ export function NoticeCenter(props: {
                       const openNotice = openable && props.onOpenSentNotice
                         ? () => void openSentNotice(notice)
                         : undefined;
+                      const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
+                        ? () => void runSentNoticeNow(notice)
+                        : undefined;
+                      const running = runningKey === key;
                       const dismissNotice = props.onDismissSentNotice
                         ? () => {
                             cancelOpen(key);
@@ -1666,15 +1638,27 @@ export function NoticeCenter(props: {
                                   <span className="sr-only">Unread</span>
                                 </span>
                               ) : null}
+                              {runNow ? (
+                                <button
+                                  type="button"
+                                  data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                  aria-busy={running || undefined}
+                                  disabled={runningKey !== null}
+                                  onClick={runNow}
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                                >
+                                  {running ? "Starting…" : "Run now"}
+                                </button>
+                              ) : null}
                               {openNotice ? (
                                 <button
                                   type="button"
                                   data-testid={`sent-notice-${notice.noticeId}-open`}
                                   aria-busy={busy || undefined}
                                   onClick={openNotice}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50"
+                                  className={`${runNow ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50`}
                                 >
-                                  {busy ? "Opening…" : "Open"}
+                                  {busy ? "Opening…" : notice.kind === "schedule-skipped" ? "Open automation" : "Open"}
                                 </button>
                               ) : null}
                               {dismissNotice ? (
@@ -1686,7 +1670,7 @@ export function NoticeCenter(props: {
                                     focusPastRow(event.currentTarget);
                                     dismissNotice();
                                   }}
-                                  className={`${openNotice ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                                  className={`${openNotice || runNow ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                                 >
                                   <X size={11} aria-hidden />
                                 </button>

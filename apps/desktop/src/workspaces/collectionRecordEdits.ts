@@ -27,9 +27,9 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createFile } from "./workspaceFiles";
 
-// The one main-side collection write seam. Every agent surface (plugin SDK,
-// MCP/CLI) sets record fields and creates records through these two
-// functions, so attribution, session ownership, and settle behavior cannot
+// The one main-side collection write seam. Every agent surface (MCP/CLI) and
+// Collection automations set record fields and create records through these
+// two functions, so attribution, session ownership, and settle behavior cannot
 // drift between surfaces. The record's live-document frontmatter map is the
 // storage path — the same one the desktop PropertiesPanel and collection
 // views write through.
@@ -61,7 +61,7 @@ export interface CollectionRecordEditAdapter {
   ): Promise<CollectionGetRecordResult>;
 }
 
-/** Workspace-scoped authority the caller (main) supplies. The SDK/MCP caller never sees it. */
+/** Workspace-scoped authority the caller (main) supplies. The CLI/MCP caller never sees it. */
 export interface CollectionRecordEditContext {
   capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredTextFile">;
   workspaceRoot: string;
@@ -264,7 +264,7 @@ function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Arra
  * elsewhere).
  *
  * `recordPath` must already be validated and normalized by the caller
- * (sdkWorkspacePath or an equivalent write-path validator).
+ * (a write-path validator).
  */
 export async function setCollectionRecordFields(
   context: CollectionRecordEditContext,

@@ -904,7 +904,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             "only an automation message names an automation",
         ),
         (
-            automated("m1", named("plugin:hello/triage", 1)),
+            automated("m1", named("other:hello/triage", 1)),
             "automation id must be collection:<path>#<id>",
         ),
         (

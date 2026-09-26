@@ -74,15 +74,14 @@ it("holds an answer no window showed until the view opens again", async () => {
   expect(f.report).toHaveBeenCalledTimes(2);
 });
 
-it("stops asking a relay that takes no direct writes, and turns a thrown push into a failure", async () => {
+it("asks again after an ended share's answer, and turns a thrown push into a failure", async () => {
   const f = fixture();
   f.push.mockRejectedValueOnce(new Error("offline"));
   await expect(f.queue.pushNow("a")).resolves.toEqual({ status: "failed", writes: [], errorMessage: "offline", lasting: false });
   f.push.mockResolvedValueOnce({ status: "unavailable" });
   await expect(f.queue.pushNow("a")).resolves.toEqual({ status: "unavailable" });
-  f.queue.edited("a");
-  await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
-  await expect(f.queue.pushNow("a")).resolves.toEqual({ status: "unavailable" });
-  expect(f.push).toHaveBeenCalledTimes(2);
+  f.push.mockResolvedValueOnce(NOTHING);
+  await expect(f.queue.pushNow("a")).resolves.toEqual(NOTHING);
+  expect(f.push).toHaveBeenCalledTimes(3);
   expect(f.report).not.toHaveBeenCalled();
 });

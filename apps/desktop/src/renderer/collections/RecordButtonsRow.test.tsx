@@ -1,0 +1,89 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CollectionRecord } from "@dohc/workspace-contracts";
+import type { AutomationRunSettledEvent, ListRecordButtonsResult, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import { RecordButtonsRow } from "./RecordButtonsRow";
+import { resetAutomationButtonsForTests } from "./useAutomationButtons";
+
+const invoice: CollectionRecord = {
+  id: "rec-12", path: "Invoices/12.md", conflicted: false,
+  values: [{ field: "title", value: "Invoice 12", validation: { status: "valid" }, resolvedRelations: [] }],
+};
+
+function stub(answer: ListRecordButtonsResult) {
+  const activity = new Set<(event: WorkspaceActivityEvent) => void>();
+  const settled = new Set<(event: AutomationRunSettledEvent) => void>();
+  const bridge = {
+    listRecordButtons: vi.fn(async () => answer),
+    pressAutomationButton: vi.fn(async () => ({ busy: false as const, claimId: "atc_press", settled: null })),
+    onWorkspaceActivity: vi.fn((listener: (event: WorkspaceActivityEvent) => void) => {
+      activity.add(listener);
+      return () => activity.delete(listener);
+    }),
+    onAutomationRunSettled: vi.fn((listener: (event: AutomationRunSettledEvent) => void) => {
+      settled.add(listener);
+      return () => settled.delete(listener);
+    }),
+    onAutomationRunWaiting: vi.fn(() => () => undefined),
+    emitActivity: (event: WorkspaceActivityEvent) => { for (const listener of [...activity]) listener(event); },
+    emitSettled: (event: AutomationRunSettledEvent) => { for (const listener of [...settled]) listener(event); },
+  };
+  vi.stubGlobal("dohcDesktop", bridge);
+  return bridge;
+}
+
+afterEach(() => {
+  cleanup();
+  resetAutomationButtonsForTests();
+  vi.unstubAllGlobals();
+});
+
+describe("RecordButtonsRow", () => {
+  it("shows the record's buttons in one row and presses one for this record", async () => {
+    const bridge = stub({
+      record: invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }],
+    });
+    const onNotice = vi.fn();
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={onNotice} />);
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    expect(screen.getByTestId("record-buttons").contains(button)).toBe(true);
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1", collectionPath: "Invoices", field: "Mark paid", recordId: "rec-12",
+    })));
+    await act(async () => undefined);
+    act(() => bridge.emitSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+  });
+
+  it("shows nothing for a file that is not a record, or a Collection without buttons", async () => {
+    const bridge = stub({ record: null });
+    const { container } = render(<RecordButtonsRow workspaceId="ws-1" path="Notes/todo.md" onError={() => undefined} onNotice={() => undefined} />);
+    await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalled());
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("reads again when the record or its Collection's automations change, and not for other files", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/2026/12.md" onError={() => undefined} onNotice={() => undefined} />);
+    await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(1));
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Notes/todo.md", "Invoice/automations.yaml"] } as WorkspaceActivityEvent));
+    act(() => bridge.emitActivity({ workspaceId: "ws-2", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
+    expect(bridge.listRecordButtons).toHaveBeenCalledTimes(1);
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
+    await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
+  });
+
+  it("reports a failed read with Try again", async () => {
+    const bridge = stub({ record: null });
+    bridge.listRecordButtons.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    const onError = vi.fn();
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={() => undefined} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not read this record's buttons.", expect.any(Error), expect.any(Function)));
+    act(() => (onError.mock.calls[0]![2] as () => void)());
+    await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
+  });
+});

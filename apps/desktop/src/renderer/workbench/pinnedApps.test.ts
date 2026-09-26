@@ -8,7 +8,6 @@ import {
   defaultWorkbenchState,
   keepActiveViewAfterRailChange,
   keepActiveViewShown,
-  pluginViewId,
   toggleSidebarOnRail,
   parseAppViewId,
   parseUiState,
@@ -31,15 +30,14 @@ afterEach(() => {
 
 describe("sidebar views", () => {
   it("shows dohc's views in the person's order, then the rest, without the hidden ones", () => {
-    expect(sidebarViews({ order: ["sites", "search"], hidden: ["graph", "plugins"] }))
+    expect(sidebarViews({ order: ["sites", "search"], hidden: ["graph"] }))
       .toEqual(["sites", "search", "explorer", "history"]);
     expect(sidebarViews({ order: [], hidden: [] }))
-      .toEqual(["explorer", "search", "graph", "sites", "history", "plugins"]);
+      .toEqual(["explorer", "search", "graph", "sites", "history"]);
   });
 
   it("moves the selection to the first view on the rail when its view is hidden or its app unpinned", () => {
     const onSearch = setView(defaultWorkbenchState(), "search");
-    const plugin = pluginViewId("dohc-sites", "sites");
     expect(keepActiveViewShown(onSearch, ["sites", "explorer"])).toMatchObject({
       activeView: "sites",
       sidebarVisible: true,
@@ -50,13 +48,8 @@ describe("sidebar views", () => {
     expect(keepActiveViewShown(onApp, ["history", appViewId("apps/trip")])).toBe(onApp);
     // Explorer is hidden too, so the first view on the rail takes over.
     expect(keepActiveViewShown(onApp, ["history"]).activeView).toBe("history");
-    // With every view of dohc's hidden, a plugin's view comes first, then a
-    // pinned app.
-    expect(keepActiveViewShown(onSearch, [plugin, appViewId("report")]).activeView).toBe(plugin);
+    // With every view of dohc's hidden, a pinned app comes first.
     expect(keepActiveViewShown(onSearch, [appViewId("report")]).activeView).toBe(appViewId("report"));
-    // A plugin's view is its plugin list's to judge, even before that loads.
-    const onPlugin = setView(defaultWorkbenchState(), plugin);
-    expect(keepActiveViewShown(onPlugin, [])).toBe(onPlugin);
   });
 
   it("moves the selection only when the rail change removed the selected entry", () => {

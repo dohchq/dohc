@@ -9,14 +9,13 @@ export function createPrepareFixture(root, buildSource) {
     writeFileSync(join(root, path), contents);
   };
   put("package.json", '{"type":"module"}\n');
-  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\npackages/sdk/dist/\nservices/share-web/viewer/dist/\n");
+  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\n");
   put("pnpm-lock.yaml", "new-lock");
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
   put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
   put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
-  put("apps/desktop/scripts/stage-plugin-tools.mjs", "export const stagedEsbuildExecutable=()=>true;");
   put("scripts/verification/process.mjs", `
     import assert from 'node:assert/strict';
     import {execFileSync} from 'node:child_process';
@@ -49,7 +48,7 @@ export function createPrepareFixture(root, buildSource) {
         return {};
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
-      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','apps/desktop/resources/app-backend-runtime','packages/sdk/dist',
+      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/app-backend-runtime',
         ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/app-compiler']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       return {};

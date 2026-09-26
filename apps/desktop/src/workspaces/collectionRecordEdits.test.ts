@@ -19,7 +19,7 @@ import type { WorkspaceEngineYDocProviderSession } from "./workspaceEngineCaptur
 import { createTestScratch } from "./testTemp";
 const AGENT = {
   kind: "agent",
-  agentId: "plugin:notes",
+  agentId: "notes-agent",
   onBehalfOf: "local",
 } as const;
 
@@ -287,7 +287,7 @@ describe("setCollectionRecordFields", () => {
     // settle before release.
     expect(log.order).toEqual(["apply", "apply", "settle", "close"]);
     const journaled = {
-      actorOriginId: "plugin:notes",
+      actorOriginId: "notes-agent",
       attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
     };
     expect(log.journaled).toEqual([journaled, journaled]);
@@ -565,7 +565,7 @@ describe("setCollectionRecordFields", () => {
     expect(log.journaled).toEqual([
       { attribution: { actorKind: "human" } },
     ]);
-    expect(actorOriginIdFor(AGENT)).toBe("plugin:notes");
+    expect(actorOriginIdFor(AGENT)).toBe("notes-agent");
     expect(actorOriginIdFor({ kind: "user", userId: "local" })).toBeUndefined();
     expect(attributionFor(AGENT)).toEqual({
       actorKind: "agent",
@@ -682,7 +682,7 @@ describe("createCollectionRecord", () => {
     // Fields were seeded through the one write seam, attributed to the agent.
     expect(log.journaled).toEqual([
       {
-        actorOriginId: "plugin:notes",
+        actorOriginId: "notes-agent",
         attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
       },
     ]);

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionAutomations } from "../automations/collectionAutomations";
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
@@ -20,13 +21,14 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const reindexed: unknown[] = [];
   const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
   const stop = {
-    automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: 0, seq: 3,
+    automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
   };
   const dismissStops = vi.fn(async () => undefined);
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
-  const executor = { handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+  const executor = {
+    pinOperations: async (_path: string, automations: readonly Automation[]) => [...automations], handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -41,6 +43,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     writeText,
     showItemInFolder: () => undefined,
     deletePath: async () => undefined,
+    watchPress: () => undefined,
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
@@ -58,7 +61,7 @@ describe("steps a share stops", () => {
   it("lists the stopped steps with the holds, and dismisses the verdicts the person saw", async () => {
     const f = fixture();
     await expect(f.call(CHANNELS.listAutomationHolds, {})).resolves.toEqual({ holds: [], stops: [f.stop], unreadable: false });
-    const seen = { automationId: f.stop.automationId, definitionHash: f.stop.definitionHash, step: 0, seq: 3 };
+    const seen = { automationId: f.stop.automationId, definitionHash: f.stop.definitionHash, step: "0", seq: 3 };
     await f.call(CHANNELS.dismissAutomationStops, { stops: [seen] });
     expect(f.dismissStops).toHaveBeenCalledWith([seen]);
   });

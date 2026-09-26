@@ -88,10 +88,6 @@ export function normalizeWorkspaceImageAssetPath(relativePath: string): string {
   return validated.normalized;
 }
 
-function assertWriteNotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error("Workspace write was cancelled.");
-}
-
 // Resolves a workspace-relative path to a real absolute path inside the
 // workspace, enforcing path-safety and real-path containment — a renderer
 // can never resolve a path that escapes the root or follows a symlink out.
@@ -1089,109 +1085,62 @@ export async function writeWorkspaceTextInLease(
   }
 }
 
-// Binary sibling of restoreWorkspaceText: writes image bytes pasted/dropped
-// into the editor next to the current document. Same validation,
-// parent-dir creation, and real-path containment as text writes — a renderer
-// can never write outside the workspace or follow a symlink out — plus a 20MB
-// cap so a giant paste can't wedge the main process.
+// Writes image bytes pasted or dropped into the editor next to the current
+// document. A renderer can never write outside the workspace or follow a
+// symlink out, and a 20MB cap keeps a giant paste from wedging the main
+// process.
 const MAX_ASSET_WRITE_BYTES = 20 * 1024 * 1024;
 
-// The security-critical write core shared by asset and restore writes:
-// validate → realpath-contain (via the nearest existing ancestor, since the
-// target/parent may not exist yet) → mkdir → re-contain the now-real parent
-// (defeats a symlink swapped in during mkdir) → atomic temp+rename. Kept in
-// one place so a future hardening tweak can't be applied to one caller and
-// silently miss the other. `kind` only feeds the error strings.
-async function writeContainedFile(
+// The security-critical write core: validate → realpath-contain (via the
+// nearest existing ancestor, since the target/parent may not exist yet) →
+// mkdir → re-contain the now-real parent (defeats a symlink swapped in during
+// mkdir) → publish with an atomic hard link that refuses every existing leaf,
+// including a dangling link, instead of following or replacing it.
+async function writeContainedAsset(
   rootPath: string,
   relativePath: string,
-  data: Uint8Array | string,
-  kind: "asset" | "restore",
-  options: {
-    exclusive?: boolean;
-    signal?: AbortSignal;
-    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
-  } = {},
+  data: Uint8Array,
 ): Promise<void> {
-  const { exclusive = false, signal, resolvedPathPolicy } = options;
-  assertWriteNotAborted(signal);
-  const label = kind === "asset" ? "Asset" : "Restore";
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
-    throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
+    throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
   }
-  // The commit mode decides the semantics, because the two modes treat the
-  // leaf differently. The ordinary path renames over it, which replaces the
-  // entry and never follows -- so a tampered leaf is the thing being repaired,
-  // and refusing it would fail the restore on the very file it fixes.
-  //
-  // The exclusive commit is an atomic hard-link publish. It refuses every
-  // existing leaf, including a dangling link, instead of following or
-  // replacing it. The access mode still judges the leaf before staging so a
-  // planted alias cannot redirect either path involved in the commit.
-  const { relative: resolvedRelative, resolvedAbsolute: absolute } =
-    await assertResolvedWorkspacePath({
-      rootPath,
-      absolutePath: join(rootPath, validated.normalized),
-      spelled: relativePath,
-      label: `${label} path`,
-      access: exclusive ? "write" : "entry",
-    });
-  resolvedPathPolicy?.(resolvedRelative.replaceAll("\\", "/"));
+  // The access mode judges the leaf before staging so a planted alias cannot
+  // redirect either path involved in the commit.
+  const { resolvedAbsolute: absolute } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Asset path",
+    access: "write",
+  });
   const realRoot = await realpath(rootPath);
-  assertWriteNotAborted(signal);
   // Everything below works on the resolution the guard judged: the mkdir, the
   // staging file, and the commit. Rebuilding the path from the spelling would
   // let an ancestor alias swapped after the check redirect all three.
   const parent = dirname(absolute);
   if (!isInside(realRoot, await existingAncestor(parent))) {
-    throw new Error(`${label} path escapes workspace: ${relativePath}`);
+    throw new Error(`Asset path escapes workspace: ${relativePath}`);
   }
-  assertWriteNotAborted(signal);
   await mkdir(parent, { recursive: true });
-  assertWriteNotAborted(signal);
   if (!isInside(realRoot, await realpath(parent))) {
-    throw new Error(`${label} path escapes workspace: ${relativePath}`);
-  }
-  assertWriteNotAborted(signal);
-  if (exclusive) {
-    const temp = siblingTempPath(absolute, Date.now(), randomUUID());
-    let handle: FileHandle | undefined;
-    try {
-      assertWriteNotAborted(signal);
-      handle = await open(temp, "wx");
-      if (typeof data === "string") {
-        await handle.writeFile(data, "utf8");
-      } else {
-        await handle.writeFile(data);
-      }
-      await handle.close();
-      handle = undefined;
-      assertWriteNotAborted(signal);
-      // Publish a fully written inode atomically without replacing a target.
-      await link(temp, absolute);
-    } catch (error) {
-      await handle?.close().catch(() => undefined);
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw error;
-    }
-    await rm(temp, { force: true }).catch(() => undefined);
-    return;
+    throw new Error(`Asset path escapes workspace: ${relativePath}`);
   }
   const temp = siblingTempPath(absolute, Date.now(), randomUUID());
+  let handle: FileHandle | undefined;
   try {
-    assertWriteNotAborted(signal);
-    if (typeof data === "string") {
-      await writeFile(temp, data, "utf8");
-    } else {
-      await writeFile(temp, data);
-    }
-    assertWriteNotAborted(signal);
-    await rename(temp, absolute);
+    handle = await open(temp, "wx");
+    await handle.writeFile(data);
+    await handle.close();
+    handle = undefined;
+    // Publish a fully written inode atomically without replacing a target.
+    await link(temp, absolute);
   } catch (error) {
+    await handle?.close().catch(() => undefined);
     await rm(temp, { force: true }).catch(() => undefined);
     throw error;
   }
+  await rm(temp, { force: true }).catch(() => undefined);
 }
 
 export async function writeWorkspaceAsset(
@@ -1223,9 +1172,7 @@ export async function writeWorkspaceAssetInLease(
     );
   }
   try {
-    await writeContainedFile(rootPath, resolvedPath, bytes, "asset", {
-      exclusive: true,
-    });
+    await writeContainedAsset(rootPath, resolvedPath, bytes);
     return;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
@@ -1288,46 +1235,6 @@ export async function writeWorkspaceAssetInLease(
   }
   throw new Error(
     `An image attachment already exists at ${requestedPath} with different content.`,
-  );
-}
-
-export async function restoreWorkspaceText(
-  rootPath: string,
-  relativePath: string,
-  text: string,
-  options: {
-    signal?: AbortSignal;
-    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
-  } = {},
-): Promise<void> {
-  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
-    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
-  }
-  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
-    writeContainedFile(rootPath, relativePath, text, "restore", options),
-  );
-}
-
-// Creates a text file with the filesystem's exclusive-create primitive. This
-// keeps `overwrite: false` correct under concurrent callers; a preflight stat
-// followed by an ordinary write would allow both requests to win the race.
-export async function createWorkspaceTextExclusive(
-  rootPath: string,
-  relativePath: string,
-  text: string,
-  options: {
-    signal?: AbortSignal;
-    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
-  } = {},
-): Promise<void> {
-  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
-    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
-  }
-  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
-    writeContainedFile(rootPath, relativePath, text, "restore", {
-      exclusive: true,
-      ...options,
-    }),
   );
 }
 

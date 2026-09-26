@@ -100,7 +100,7 @@ for (const {name, cancel = false, selectedPackages} of [
       export async function run(command,args) {
         appendFileSync('commands.jsonl',JSON.stringify(args)+'\\n');
         if(args.includes('build')){completed.add(args[1]);return {stdout:''};}
-        assert.ok(completed.has('@dohc/sdk') && completed.has('@dohc/app-backend-runtime'));
+        assert.ok(completed.has('@dohc/app-backend-runtime'));
         if(args[1]==='test:repo'){writeFileSync('repository-complete','yes');return {stdout:''};}
         assert.ok(existsSync('repository-complete'));
         if(args.includes('list'))return {stdout:JSON.stringify([

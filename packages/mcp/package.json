@@ -22,7 +22,6 @@
   },
   "devDependencies": {
     "@dohc/app-browser": "workspace:*",
-    "@dohc/sdk": "workspace:*",
     "@types/node": "^24.13.3",
     "tsx": "^4.23.11",
     "typescript": "^7.0.2",

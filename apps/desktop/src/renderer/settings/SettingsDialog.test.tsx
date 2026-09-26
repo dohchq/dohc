@@ -12,8 +12,9 @@ import {
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
-import { pushOverlay, removeOverlay } from "../guestBlockingUi";
+import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
+import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import { SettingsDialog } from "./SettingsDialog";
 import { deferred } from "../../testing/deferred";
 
@@ -90,26 +91,6 @@ const bridge = {
     mcpEnabled = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
-  probeAgentDrivers: vi.fn(async () => ({
-    drivers: [
-      {
-        id: "codex",
-        displayName: "Codex",
-        installed: true,
-        version: "codex 1.0",
-        auth: { status: "unknown" as const, label: "CLI login" },
-        models: [],
-      },
-      {
-        id: "fixture-driver",
-        displayName: "Claude",
-        installed: false,
-        auth: { status: "unknown" as const },
-        models: [],
-      },
-    ],
-    session: null,
-  })),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -126,14 +107,6 @@ const bridge = {
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
-  listPlugins: vi.fn(async () => ({ ok: true as const, plugins: [] })),
-  installPlugin: vi.fn(),
-  disablePlugin: vi.fn(),
-  enablePlugin: vi.fn(),
-  approvePlugin: vi.fn(),
-  pluginUninstallPreflight: vi.fn(),
-  uninstallPlugin: vi.fn(),
-  onPluginStatusChanged: vi.fn(() => () => {}),
   getUserSettings: vi.fn(async () => ({
     settings: DEFAULT_USER_SETTINGS,
     source: "default" as const,
@@ -147,6 +120,11 @@ const bridge = {
     source: "stored" as const,
   })),
   getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
+  readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
+  onScheduleHostChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: vi.fn(() => () => undefined),
+  chooseScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
+  takeOverScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
   openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
@@ -580,10 +558,6 @@ describe("SettingsDialog", () => {
     // Usage examples are present.
     expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
     expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();
-    const probes = await screen.findAllByTestId("agent-probe-row");
-    expect(probes).toHaveLength(2);
-    expect(probes[0]?.textContent).toContain("Installed · sign-in not verified");
-    expect(probes[1]?.textContent).toContain("Not found");
   });
 
   it("does not claim an enabled MCP server is connected", async () => {

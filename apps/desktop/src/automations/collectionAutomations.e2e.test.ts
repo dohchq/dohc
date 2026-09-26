@@ -65,6 +65,11 @@ async function harness(automations: string, run: (context: {
   const errors: string[] = [];
   const executor = new CollectionAutomations({
     withEngine,
+    // These automations never post.
+    chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
+    runsGroupTriggers: () => false,
+    readMessageBody: async () => null,
+    postNotice: async () => { throw new Error("No notices in this test."); },
     withRecordWrites: async (signal, work) => await work(editContext(signal)),
     readText: async (path) => {
       try {
@@ -83,7 +88,12 @@ async function harness(automations: string, run: (context: {
     onFailuresChanged: () => undefined,
     onHoldsChanged: () => undefined,
     onAutomationsChanged: () => undefined,
+    personName: (userId) => userId,
+    mayRetryPress: async () => true,
+    onPressSettled: () => undefined,
+    onPressWaiting: () => undefined,
     onError: (context, error) => { errors.push(`${context}: ${String(error)}`); },
+    withDatasetHost: async () => null,
   });
   const stopBridge = bridgeAutomationClaimsToExecutors(lifecycle, () => executor);
   try {

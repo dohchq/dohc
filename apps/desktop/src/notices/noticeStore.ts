@@ -61,6 +61,8 @@ export interface PostNoticeInput {
   // Another person's relay user id. Absent, or your own id, sends the
   // notice to yourself.
   recipientUserId?: string;
+  // Ends the post before it sends or queues, as when an automation run stops.
+  signal?: AbortSignal;
 }
 
 // A notice for another person that did not reach them. The message says why.
@@ -80,6 +82,12 @@ export interface NoticeStore {
   // `account` is the key the caller's list showed. Account rows are marked
   // only while that account is signed in; local rows always are.
   mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void>;
+  // Dismisses one notice now and says whether this was its first dismissal,
+  // as Run now needs: "unanswered" when the relay could not say.
+  dismissFirst(ref: NoticeRef, account: string | null): Promise<"first" | "not-first" | "unanswered">;
+  // Takes back a notice this computer posted: an unsent post goes, and a
+  // sent one is dismissed.
+  withdraw(noticeId: string): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
 }
@@ -180,6 +188,12 @@ const AccountFile = z.object({
     createdAtMs: NoticeRow.shape.createdAtMs,
     // The relay accepted it; the next finished pull settles it.
     sent: z.boolean(),
+    // Taken back while unsent. A post never sent is dropped; one that went
+    // out is dismissed once the relay confirms it holds it.
+    withdrawn: z.literal(true).optional(),
+    // It went out at least once, and the relay may hold it even though no
+    // answer came back.
+    attempted: z.literal(true).optional(),
   })),
   marks: z.array(OutboxMark),
 });
@@ -396,7 +410,23 @@ export function createNoticeStore(deps: {
   async function sendPosts(session: NoticeSession): Promise<"done" | "routes-missing"> {
     const account = session.account;
     for (;;) {
-      const post = await locked(async () => (await loadAccount(account)).posts.find((waiting) => !waiting.sent));
+      const post = await locked(async () => {
+        const file = await loadAccount(account);
+        // A post taken back before it ever left never needs to go. One that
+        // went out may already be on the relay: it goes again, which the
+        // relay takes once, so its dismissal can follow.
+        const withdrawn = file.posts.filter((waiting) => !waiting.sent && waiting.withdrawn && !waiting.attempted);
+        if (withdrawn.length > 0) {
+          const ids = new Set(withdrawn.map((waiting) => waiting.request.noticeId));
+          file.posts = file.posts.filter((waiting) => !withdrawn.includes(waiting));
+          file.marks = file.marks.filter((waiting) => !ids.has(waiting.noticeId));
+        }
+        const next = file.posts.find((waiting) => !waiting.sent);
+        // Recorded before it leaves, so a lost answer leaves it uncertain.
+        if (next && !next.attempted) next.attempted = true;
+        if (withdrawn.length > 0 || next) await saveAccount(account, file);
+        return next;
+      });
       if (!post) return "done";
       let outcome: "sent" | "refused" | "invalid" = "sent";
       try {
@@ -432,7 +462,9 @@ export function createNoticeStore(deps: {
         file.posts = file.posts.filter((waiting) => waiting !== current);
         const mark = file.marks.find((waiting) => waiting.noticeId === noticeId);
         file.marks = file.marks.filter((waiting) => waiting !== mark);
-        if (outcome === "refused") {
+        // A skipped schedule's notice the relay refuses was one it already
+        // settled: kept here, its Run now would skip the relay's check.
+        if (outcome === "refused" && post.request.kind !== "schedule-skipped") {
           const local = await loadLocal();
           const { request } = post;
           addLocal(local, {
@@ -445,7 +477,7 @@ export function createNoticeStore(deps: {
           await saveLocal(local);
         }
         await saveAccount(account, file);
-        return outcome === "refused";
+        return outcome === "refused" && post.request.kind !== "schedule-skipped";
       });
       if (moved) deps.onChanged();
     }
@@ -580,7 +612,7 @@ export function createNoticeStore(deps: {
     // A session that changes while the notice is placed is read again.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await postOnce(input.recipientUserId, content);
+        return await postOnce(input.recipientUserId, content, input.signal);
       } catch (error) {
         if (!(error instanceof SessionChanged)) throw error;
         if (attempt === 3) throw new NoticeNotSentError("Your server session changed. Try again.");
@@ -588,7 +620,7 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function postOnce(recipientUserId: string | undefined, content: NoticeContent): Promise<void> {
+  async function postOnce(recipientUserId: string | undefined, content: NoticeContent, signal?: AbortSignal): Promise<void> {
     const session = await deps.session();
     const reach = session?.reachFor(content.workspaceId) ?? null;
     const request = (recipient: string, to: NoticeReach): PostNoticeRequest => ({
@@ -607,7 +639,7 @@ export function createNoticeStore(deps: {
           "Notices reach other people through a server. Sync this workspace with an up-to-date server first.",
         );
       }
-      return await postToAnotherPerson(session, request(recipientUserId, reach));
+      return await postToAnotherPerson(session, request(recipientUserId, reach), signal);
     }
     const createdAtMs = nowMs();
     const queued = await locked(async () => {
@@ -615,6 +647,7 @@ export function createNoticeStore(deps: {
       const file = session && reach ? await loadAccount(session.account) : null;
       // Checked after the loads, just before either list changes.
       if (session && !session.isCurrent()) throw new SessionChanged();
+      signal?.throwIfAborted();
       // A notice kept on this computer stays here.
       if (local.rows.some((row) => row.noticeId === content.noticeId)) return false;
       if (session && reach && file && !file.routesMissing) {
@@ -642,9 +675,10 @@ export function createNoticeStore(deps: {
   }
 
   // Makes room for one more unsent post. The oldest unsent posts go, with
-  // any marks waiting on them.
+  // any marks waiting on them. A skipped schedule's notice never goes: its
+  // schedule's mark already moved past what it reports.
   function dropOldestUnsent(file: AccountFile): void {
-    const unsent = file.posts.filter((post) => !post.sent);
+    const unsent = file.posts.filter((post) => !post.sent && post.request.kind !== "schedule-skipped");
     if (unsent.length < outboxPostLimit) return;
     const dropped = new Set(unsent.slice(0, unsent.length - outboxPostLimit + 1));
     const droppedIds = new Set([...dropped].map((post) => post.request.noticeId));
@@ -654,10 +688,11 @@ export function createNoticeStore(deps: {
 
   // Sent at once rather than queued, so the caller learns whether the
   // relay accepted it.
-  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest): Promise<void> {
+  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest, signal?: AbortSignal): Promise<void> {
     if (await locked(async () => (await loadAccount(session.account)).routesMissing)) {
       throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
     }
+    signal?.throwIfAborted();
     try {
       await relay(session, "/sync/notices", request);
     } catch (error) {
@@ -782,7 +817,91 @@ export function createNoticeStore(deps: {
     if (changed.account) void sync();
   }
 
-  return { postNotice, list, mark, sync };
+  async function dismissFirst(
+    ref: NoticeRef,
+    account: string | null,
+  ): Promise<"first" | "not-first" | "unanswered"> {
+    if (ref.store === "local") {
+      // Only this computer holds the notice, so every dismissal of it is
+      // this computer's: asking again after a crash answers "first" again.
+      const found = await locked(async () => {
+        const file = await loadLocal();
+        const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
+        if (!row) return "missing";
+        if (row.dismissedAtMs !== null) return "kept";
+        row.dismissedAtMs = nowMs();
+        await saveLocal(file);
+        return "dismissed";
+      });
+      if (found === "dismissed") deps.onChanged();
+      return found === "missing" ? "not-first" : "first";
+    }
+    const session = await deps.session();
+    if (!session?.isCurrent() || session.account.key !== account) return "unanswered";
+    // The notice's own post goes first, or the relay would not hold it yet.
+    await sync();
+    let dismissed: unknown;
+    try {
+      const response = await relay(session, "/sync/notices/marks", {
+        marks: [{ noticeId: ref.noticeId, mark: "dismissed" }],
+        // The relay names the first to dismiss, and tells this computer
+        // "first" again when it asks again.
+        installId: deps.installId(),
+      });
+      dismissed = ((await response.json().catch(() => null)) as { dismissed?: unknown } | null)?.dismissed;
+    } catch (error) {
+      console.warn("[notices] a dismissal for Run now could not be sent", error);
+      return "unanswered";
+    }
+    // An older relay does not say which dismissal was first.
+    if (!Array.isArray(dismissed)) return "unanswered";
+    await locked(async () => {
+      const file = await loadAccount(session.account);
+      const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
+      if (row) row.dismissedAtMs ??= nowMs();
+      file.marks = file.marks.filter((waiting) => waiting.noticeId !== ref.noticeId);
+      await saveAccount(session.account, file);
+    });
+    deps.onChanged();
+    return dismissed.includes(ref.noticeId) ? "first" : "not-first";
+  }
+
+  // Takes back a notice this computer posted, as a skipped schedule's notice
+  // whose skip did not happen after all: an unsent post goes, and a sent
+  // one is dismissed.
+  async function withdraw(noticeId: string): Promise<void> {
+    const session = await deps.session();
+    const changed = await locked(async () => {
+      let touched = false;
+      const local = await loadLocal();
+      const row = local.rows.find((candidate) => candidate.noticeId === noticeId);
+      if (row && row.dismissedAtMs === null) {
+        row.dismissedAtMs = nowMs();
+        await saveLocal(local);
+        touched = true;
+      }
+      if (session?.isCurrent()) {
+        const file = await loadAccount(session.account);
+        const post = file.posts.find((waiting) => waiting.request.noticeId === noticeId);
+        // An unsent post may already be on its way: it stays, marked, and
+        // its dismissal waits for the relay to accept it.
+        if (post && !post.sent && !post.withdrawn) {
+          post.withdrawn = true;
+          touched = true;
+        }
+        if ((post || file.rows.some((candidate) => candidate.noticeId === noticeId)) && queueMark(file, noticeId, "dismissed")) {
+          touched = true;
+        }
+        if (touched) await saveAccount(session.account, file);
+      }
+      return touched;
+    });
+    if (!changed) return;
+    deps.onChanged();
+    void sync();
+  }
+
+  return { postNotice, list, mark, sync, dismissFirst, withdraw };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

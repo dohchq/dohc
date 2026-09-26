@@ -11,7 +11,7 @@ import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
 import { proposalBase, proposalMomentPayload, type NamedMomentAuthor } from "../recipientMoments";
 import { COLLECTION_FILE_ORIGIN_PREFIX } from "../relayLogInputs";
-import { authorizeShareGrantAction } from "../shareAuthorization";
+import { currentCollectionEditGrant } from "../collectionEditGrant";
 import {
   COLLECTION_AUTOMATIONS_FILE,
   COLLECTION_SCHEMA_FILE,
@@ -21,7 +21,6 @@ import {
   type ProposedChange,
 } from "../shareFilter";
 import type { StorageContext } from "./context";
-import { readCurrentShareGrant } from "./currentShareGrant";
 import { SyncRelayBlobMissingError } from "./errors";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { SqliteDb } from "./types";
@@ -54,8 +53,9 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
       storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
       PRIMARY KEY (grant_id, submit_id)
     ) STRICT;
-    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant
-      ON sync_relay_collection_writes(workspace_id, grant_id, created_at_ms);
+    DROP INDEX IF EXISTS idx_sync_relay_collection_writes_grant;
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
+      ON sync_relay_collection_writes(grant_id, first_origin_seq);
     CREATE TRIGGER IF NOT EXISTS sync_relay_collection_writes_usage_insert
       AFTER INSERT ON sync_relay_collection_writes BEGIN
       UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + NEW.storage_bytes
@@ -128,22 +128,8 @@ export function commitCollectionWrite(
   return storage.tx(() => {
     const again = prior();
     if (again) return { receipt: again, created: false };
-    const current = readCurrentShareGrant(storage, {
-      grantId: input.grantId,
-      principal: { kind: "user", userId: input.userId },
-      generation: input.grantGeneration,
-    });
-    if (!current || current.share.shareId !== input.shareId || current.grant.parentGrantId !== null) {
-      throw notFound();
-    }
     // Edit on files, as a proposal needs; the decision then narrows it.
-    const authorized = authorizeShareGrantAction({
-      storage,
-      grantId: input.grantId,
-      action: "propose",
-      principal: { kind: "user", userId: input.userId },
-    });
-    if (!authorized.ok) throw authorized.reason === "denied" ? relayError("share_read_only") : notFound();
+    const authorized = currentCollectionEditGrant(storage, input);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, input.rawChanges, {
       channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
     });
@@ -227,12 +213,12 @@ function currentFile(
   storage: StorageContext,
   workspaceId: string,
   path: string,
-): { blobSha256: string; contentKind: string } | null {
+): { blobSha256: string } | null {
   const row = storage.db.prepare(
-    `SELECT blob_sha256, content_kind FROM sync_relay_current_files
+    `SELECT blob_sha256 FROM sync_relay_current_files
      WHERE workspace_id = ? AND version_id = ? AND path = ?`,
   ).get(workspaceId, MAIN_VERSION_ID, path);
-  return row ? { blobSha256: String(row.blob_sha256), contentKind: String(row.content_kind) } : null;
+  return row ? { blobSha256: String(row.blob_sha256) } : null;
 }
 
 // Compare-and-swap against the owner's current files: an edit's base is
@@ -248,14 +234,17 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
     return;
   }
   const schema = currentFile(storage, workspaceId, schemaPath);
-  // A folder that stopped being a Collection takes no direct write.
-  if (schema === null || schema.contentKind !== "text") {
+  // A folder that stopped being a Collection takes no direct write. A
+  // schema stored as binary is still the Collection's schema.
+  if (schema === null) {
     if (write.kind === "schema") throw new CollectionWriteStaleError(schemaPath, null);
     throw relayError("share_op_rejected");
   }
   const change = write.change;
   const current = currentFile(storage, workspaceId, change.afterPath!);
-  if ((current?.blobSha256 ?? null) !== change.basedOnBlobSha256 || (current !== null && current.contentKind !== "text")) {
+  // The base is the bytes, whatever their kind. A file the owner stored as
+  // binary before dohc read it as text takes an edit and becomes text.
+  if ((current?.blobSha256 ?? null) !== change.basedOnBlobSha256) {
     throw new CollectionWriteStaleError(change.afterPath!, current?.blobSha256 ?? null);
   }
   if (current === null && spellingTaken(storage, workspaceId, change.afterPath!)) {

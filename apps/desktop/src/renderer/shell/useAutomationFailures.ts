@@ -64,10 +64,11 @@ export function useAutomationFailures(
   // neither reloads nor reports anything in the next workspace.
   const workspace = useRequestSequence([workspaceId]);
   const dismissAutomationFailure = useCallback(
-    (automationId: string, generation: number) => {
+    (failure: Pick<AutomationFailureNotice, "automationId" | "generation" | "datasetInstance">) => {
+      const { automationId, generation, datasetInstance } = failure;
       const epoch = workspace.current();
       void bridge()
-        .dismissAutomationFailure({ workspaceId, automationId, generation })
+        .dismissAutomationFailure({ workspaceId, automationId, generation, datasetInstance })
         .then(async () => {
           if (workspace.isCurrent(epoch)) await reloadAutomationFailures();
         })

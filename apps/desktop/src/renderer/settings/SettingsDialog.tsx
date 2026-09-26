@@ -41,6 +41,7 @@ import { applyAppearanceSettings } from "../theme";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
+import { ScheduleHostRow } from "./ScheduleHostRow";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
@@ -872,6 +873,10 @@ export function SettingsDialog(props: {
       case "advanced":
         return (
           <div data-testid="settings-section-advanced">
+            <ScheduleHostRow
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
             <SettingRow
               title="Settings file"
               description="Changes apply when you save the file."

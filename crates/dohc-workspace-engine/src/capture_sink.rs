@@ -2,7 +2,7 @@
 
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
-use dohc_engine_domain::{AutomationClaim, COLLECTION_SCHEMA_FILENAME, DomainError};
+use dohc_engine_domain::{AutomationClaim, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
@@ -1563,11 +1563,7 @@ fn read_contained_current(
     // sink is never called — deliberately not a retire: the ratified CAL-3
     // delta keeps last-known-good rather than
     // false-deleting live user data behind an operational scan bound.
-    // Collection schemas are a reserved engine control file. The generic
-    // scanner deliberately classifies unknown extensions as binary, but
-    // collection discovery reads this YAML from the plaintext store.
-    let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
-        || is_text_media_type(media_type, path);
+    let text_media = is_text_media_type(media_type, path);
     let content_cap = if text_media {
         MAX_CAPTURE_TEXT_BYTES
     } else {

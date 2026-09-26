@@ -154,6 +154,21 @@ describe("button fields", () => {
     expect(onCellChange).not.toHaveBeenCalled();
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
   });
+
+  it("lets the host draw each button cell for its record, and never a text field's", () => {
+    const records = [makeRecord("rec-1", [indexedValue("title", "Invoice 12")])];
+    const schema = makeSchema([
+      { name: "title", type: "text" },
+      { name: "Mark paid", type: "button" },
+    ]);
+    const renderButton = vi.fn((field: { name: string }, record: { id: string }) => (
+      <button type="button">{`${field.name} for ${record.id}`}</button>
+    ));
+    render(<TableView schema={schema} records={records} renderButton={renderButton} />);
+    expect(screen.getByRole("button", { name: "Mark paid for rec-1" })).toBeDefined();
+    expect(renderButton.mock.calls.every(([field]) => field.name === "Mark paid")).toBe(true);
+    expect(screen.getByText("Invoice 12")).toBeDefined();
+  });
 });
 
 describe("field marks", () => {

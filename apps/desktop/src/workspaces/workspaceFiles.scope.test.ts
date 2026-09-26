@@ -54,7 +54,7 @@ describe("scoped file listings", () => {
     { path: "[notes]", recursive: true },
     { path: ".dohc", recursive: true },
     { path: "notes/node_modules", recursive: true },
-  ])("matches the complete listing filtered by the original SDK rules: %j", async (scope) => {
+  ])("matches the complete listing filtered by the scope rules: %j", async (scope) => {
     const complete = await listFiles(root, { includeContentIdentity: true });
     const matches = (path: string) => {
       if (scope.path !== "." && path !== scope.path && !path.startsWith(`${scope.path}/`)) {

@@ -467,13 +467,13 @@ describe("registered workspace settings and UI state", () => {
   it("merges workspace patches onto disk and resets only the admitted workspace", async () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getWorkspaceSettings, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" });
-    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { agents: { defaultModel: "external-model" } });
-    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.otherRoot, { agents: { defaultModel: "other-model" } });
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { sites: { defaultPreviewMode: "static" } });
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.otherRoot, { sites: { defaultPreviewMode: "build" } });
     const saved = await h.invoke(CHANNELS.setWorkspaceSettings, patchPayload);
-    expect(saved).toMatchObject({ settings: { agents: { mcpAutoStart: false, defaultModel: "external-model" } }, source: "stored" });
+    expect(saved).toMatchObject({ settings: { agents: { mcpAutoStart: false }, sites: { defaultPreviewMode: "static" } }, source: "stored" });
     await expect(h.invoke(CHANNELS.getWorkspaceSettings, workspacePayload)).resolves.toEqual(saved);
     await expect(h.invoke(CHANNELS.resetWorkspaceSettings, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
-    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.otherRoot)).resolves.toMatchObject({ settings: { agents: { defaultModel: "other-model" } } });
+    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.otherRoot)).resolves.toMatchObject({ settings: { sites: { defaultPreviewMode: "build" } } });
   });
 
   it("keeps recovery warnings and save refusals from the real settings file owner", async () => {

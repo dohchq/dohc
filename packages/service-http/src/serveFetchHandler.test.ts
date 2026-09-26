@@ -138,6 +138,27 @@ describe("serveFetchHandler", () => {
     response.resume();
   });
 
+  it("answers a streamed route's GET without reading the upload it carries", async () => {
+    let body: ReadableStream<Uint8Array> | null | undefined;
+    const { port } = await serve({
+      streamBody: () => true,
+      handler: async request => {
+        body = request.body;
+        return new Response(null, { status: 405 });
+      },
+    });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "GET", headers: { "content-length": "1048576" } }, resolve);
+      request.on("error", reject);
+      request.write(Buffer.alloc(1));
+      // No end: the answer must not wait for the rest of the upload.
+    });
+    expect(response.statusCode).toBe(405);
+    expect(response.headers.connection).toBe("close");
+    expect(body).toBeNull();
+    response.resume();
+  });
+
   it("streams uploads larger than its ordinary buffering cap with prepared headers", async () => {
     const { port } = await serve({
       streamBody: () => true,

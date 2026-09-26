@@ -75,6 +75,13 @@ export function useSentNoticeProps(input: {
     reportShellError("dohc could not read notices sent to you.", listFailure.error, relist);
   }, [listFailure, relist, reportShellError]);
 
+  const account = sentNotices?.account ?? null;
+  const runNow = useCallback(
+    async (notice: NoticeRow): Promise<string | null> =>
+      (await bridge().runSkippedScheduleNow({ account, notice: sentNoticeRef(notice) })).note,
+    [account],
+  );
+
   const read = useCallback(
     (notices: readonly NoticeRow[]) => {
       if (!sentNotices || notices.length === 0) return;
@@ -158,5 +165,6 @@ export function useSentNoticeProps(input: {
     onOpenSentNotice,
     onDismissSentNotice,
     onReadAllSentNotices,
+    onRunSentNoticeNow: runNow,
   };
 }

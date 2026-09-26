@@ -8,6 +8,7 @@ import {momentDiffTabPath} from "./workbenchState";
 
 afterEach(() => {cleanup(); vi.unstubAllGlobals();});
 const noop = () => {};
+const stopAndRestore = vi.fn();
 const base = {id: "baseline", workspaceId: "workspace", versionId: "main", objectId: "object", path: "docs/a.md",
   recordedAtMs: 2, operation: "write" as const, metadata: {origin: "local-file" as const}};
 const text = {path: base.path, contentKind: "text" as const, sha256: "a".repeat(64), byteLength: 5, text: "Hello"};
@@ -15,6 +16,7 @@ const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...b
 
 async function open(detail: WorkspaceEngineMomentDetail) {
   const moment = engineMomentDetailForIpc(detail, {
+    named: () => "Someone you shared with",
     agent: () => "Owner",
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
   });
@@ -22,7 +24,7 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
-    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} />);
+    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} />);
   await screen.findByTestId("engine-diff-restore-file");
   return {moment, ownerRestore};
 }
@@ -51,4 +53,17 @@ it("does not offer shared restore for protected Markdown history", async () => {
 it("does not offer shared restore for other text formats", async () => {
   await open({protected: false, moment: {...base, path: "docs/a.txt", payload: {before: null, after: {...text, path: "docs/a.txt"}}}});
   expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
+});
+
+it("offers Stop and restore only for a change a person the owner shared with wrote directly", async () => {
+  await open(textDetail);
+  expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
+  cleanup();
+  const named: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, path: "docs/collection.yaml",
+    author: {kind: "named", userId: "user_ana", grantId: "grant-1", grantGeneration: 1},
+    payload: {before: null, after: {...text, path: "docs/collection.yaml"}}}};
+  const {moment} = await open(named);
+  expect(moment.namedAuthor).toEqual({userId: "user_ana", label: "Someone you shared with"});
+  fireEvent.click(screen.getByTestId("engine-diff-stop-and-restore"));
+  expect(stopAndRestore).toHaveBeenCalledWith({userId: "user_ana", label: "Someone you shared with"});
 });

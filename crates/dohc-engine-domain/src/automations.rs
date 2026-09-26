@@ -42,12 +42,11 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 /// Bound on the error text a failed settle records.
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
-/// The namespaces an automation id lives in, one per executor: plugin
-/// automations are `plugin:<plugin name>/<automation id>`, Collection
-/// automations `collection:<collection path>#<automation id>`. Each executor
-/// drains its own namespace, so a subscription outside them would claim
-/// work nothing ever runs.
-pub const AUTOMATION_ID_NAMESPACES: [&str; 2] = ["plugin:", "collection:"];
+/// The namespace every automation id lives in: Collection automations are
+/// `collection:<collection path>#<automation id>`. The Collection executor
+/// drains this namespace, so a subscription outside it would claim work
+/// nothing ever runs.
+pub const AUTOMATION_ID_NAMESPACE: &str = "collection:";
 
 /// The most field names one subscription may list. An automation that
 /// watches more fields subscribes to every field.
@@ -548,11 +547,11 @@ pub fn subscribe_automation_in_tx(
 ) -> Result<bool, DomainError> {
     let automation_id =
         normalize_automation_identifier(&subscription.automation_id, "Automation id is invalid.")?;
-    if !AUTOMATION_ID_NAMESPACES.iter().any(|namespace| {
-        automation_id.len() > namespace.len() && automation_id.starts_with(namespace)
-    }) {
+    if automation_id.len() <= AUTOMATION_ID_NAMESPACE.len()
+        || !automation_id.starts_with(AUTOMATION_ID_NAMESPACE)
+    {
         return Err(DomainError::InvalidInput {
-            reason: "Automation id must start with plugin: or collection:.",
+            reason: "Automation id must start with collection:.",
         });
     }
     let prefix = normalize_automation_identifier(
@@ -1941,6 +1940,74 @@ pub fn claim_automation_schedule_in_tx(
     })
 }
 
+/// The owner chose Run now on a schedule's skipped-run notice. Insert one
+/// pending claim keyed `run-now:<notice id>`, with no record, at depth 0,
+/// like a schedule's due time. The notice's first dismissal on the relay
+/// picks the one computer that runs it; the key keeps a repeat on this
+/// computer from running it twice, so a run-now claim is never pruned.
+/// Answers the claim, and whether this call inserted it.
+pub fn claim_automation_run_now_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    automation_id: &str,
+    notice_id: &str,
+    now_ms: i64,
+) -> Result<AutomationRunNow, DomainError> {
+    let collection_path = button_or_schedule_collection(automation_id)?;
+    let notice_id = normalize_automation_identifier(notice_id, "Notice id is invalid.")?;
+    let key = format!("run-now:{notice_id}");
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT claim_id FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND trigger_key = ?3",
+            params![workspace_id, automation_id, key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if let Some(claim_id) = existing {
+        let claim =
+            claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+                reason: "A run-now claim disappeared inside its own transaction.",
+            })?;
+        return Ok(AutomationRunNow {
+            claim,
+            inserted: false,
+        });
+    }
+    let claimed = ClaimedChange {
+        trigger: AutomationTrigger::Key { key },
+        record_id: None,
+        collection_path,
+        depth: 0,
+        change: AutomationChange {
+            kind: AutomationChangeKind::Schedule,
+            author_origin_id: None,
+            actor_kind: None,
+            on_behalf_of: None,
+        },
+        fields: AutomationFieldFacts::default(),
+        chain_stopped: false,
+    };
+    let claim = insert_claims(conn, workspace_id, &[automation_id], &claimed, now_ms)?
+        .into_iter()
+        .next()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "A run-now claim was neither found nor inserted.",
+        })?;
+    Ok(AutomationRunNow {
+        claim,
+        inserted: true,
+    })
+}
+
+/// A Run now claim, and whether this call inserted it rather than found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationRunNow {
+    pub claim: AutomationClaim,
+    pub inserted: bool,
+}
+
 /// Every schedule mark in the workspace, ordered by automation id.
 pub(crate) fn list_automation_schedule_marks_in_tx(
     conn: &Connection,
@@ -2064,10 +2131,8 @@ fn claim_field_facts(
 
 /// Flip the oldest pending claim whose automation id starts with the prefix
 /// to running with `attempts + 1`, and return it with its field facts;
-/// `None` when nothing is pending. Each executor drains its own namespace:
-/// the plugin executor `"plugin:"` (ids `plugin:<plugin name>/<automation
-/// id>`), the Collection executor `"collection:"` (ids
-/// `collection:<collection path>#<automation id>`).
+/// `None` when nothing is pending. The Collection executor drains
+/// [`AUTOMATION_ID_NAMESPACE`].
 pub(crate) fn claim_next_pending_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -2366,7 +2431,7 @@ pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation
 pub(crate) const PRUNE_AGED_SCHEDULE_KEYS_SQL: &str = "DELETE FROM automation_claims \
      WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
        AND trigger_moment_order IS NULL AND change_kind <> 'message' \
-       AND change_kind = 'schedule' \
+       AND change_kind = 'schedule' AND substr(trigger_key, 1, 9) = 'schedule:' \
        AND CAST(substr(trigger_key, length('schedule:') + 1) AS INTEGER) < ( \
            SELECT m.through_ms - ?4 FROM automation_schedule_marks m \
            WHERE m.workspace_id = ?1 AND m.automation_id = ?2) \
@@ -2585,6 +2650,19 @@ pub fn claim_automation_schedule(
 ) -> Result<AutomationScheduleClaimed, DomainError> {
     committed(store.write_with(faults, |tx| {
         claim_automation_schedule_in_tx(tx, workspace_id, schedule, now_ms)
+    })?)
+}
+
+pub fn claim_automation_run_now(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    automation_id: &str,
+    notice_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationRunNow, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        claim_automation_run_now_in_tx(tx, workspace_id, automation_id, notice_id, now_ms)
     })?)
 }
 
