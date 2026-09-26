@@ -184,7 +184,18 @@ describe("automation hosts", () => {
     await send(h, "choose", { installId: "desktop", generation: 3 });
     expect((await groups(h, 3)).status).toBe(409);
     await send(h, "take-over", { generation: 4 });
-    expect(await (await groups(h, 5)).json(), "kept for another computer").toEqual({ ok: true, generation: 3, groups: null });
+    expect(await (await groups(h, 5)).json(), "another computer ran: a take over").toEqual({ ok: true, generation: 5, groups: null });
+
+    // The desktop runs on: a called-off handover later finds nobody else ran.
+    await send(h, "choose", { installId: "laptop", generation: 5 });
+    await send(h, "choose", { installId: "desktop", generation: 6 });
+    expect(await (await groups(h, 7)).json()).toEqual({ ok: true, generation: null, groups: null });
+
+    // Its release goes on as it is, whatever handover it took before.
+    await send(h, "choose", { installId: "laptop", generation: 7 });
+    const afterTakeOver = { floorMs: 9, automations: [] };
+    await send(h, "release", { installId: "desktop", generation: 8, releasedThroughMs: 9, groups: afterTakeOver, groupsTaken: 0 });
+    expect(await (await groups(h, 9)).json()).toEqual({ ok: true, generation: 9, groups: afterTakeOver });
   });
 
   it("keeps a handover for its computer across a handover the owner called off", async () => {

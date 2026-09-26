@@ -1078,6 +1078,7 @@ fn decided_json_bytes(message_id: &str) -> usize {
 /// by now within the message and byte bounds. A decision dated after now
 /// stays and never moves the floor. A handover a pending row came from,
 /// taken longer ago than the window, lets that row go. Answers the floor.
+/// Settling any claim runs it while the workspace has Group subscriptions.
 fn maintain_group_coverage(
     conn: &Connection,
     workspace_id: &str,
@@ -1110,11 +1111,10 @@ fn maintain_group_coverage(
         }
     }
     drop(rows);
-    let floor_ms = left_out
-        .map_or(window_start, |newest_left_out| {
-            window_start.max(newest_left_out.saturating_add(1))
-        })
-        .min(now_ms);
+    // At most one past now, since only decisions posted by now count.
+    let floor_ms = left_out.map_or(window_start, |newest_left_out| {
+        window_start.max(newest_left_out.saturating_add(1))
+    });
     conn.execute(
         "DELETE FROM automation_group_subscriptions \
          WHERE workspace_id = ?1 AND channel_id = ?2 AND EXISTS \
@@ -3055,8 +3055,16 @@ pub(crate) fn settle_automation_claim_in_tx(
     let settled = claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
         reason: "settled automation claim not found after update",
     })?;
-    // Each Group message claim a host settles keeps its coverage bounded.
-    if settled.change.kind == AutomationChangeKind::Message {
+    // Any claim a host of Group automations settles keeps its coverage
+    // bounded: a schedule posting into a Group it watches adds coverage too.
+    let watches_groups: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM automation_group_subscriptions WHERE workspace_id = ?1)",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if watches_groups {
         maintain_group_coverage(conn, workspace_id, now_ms)?;
     }
     // Past the history, a done field claim goes. A done added or removed

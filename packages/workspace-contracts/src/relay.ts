@@ -624,9 +624,9 @@ export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 2 * 1024 * 1024;
 // GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
 // for the current host's generation; another is refused with `conflict`.
 // `groups` is the Group handover the relay keeps for the current host, with
-// the `generation` it keeps it under. With `groups` null, `generation` names
-// a handover kept for another computer, as after a take over, or is null
-// when no release ever left one.
+// the `generation` it keeps it under. With `groups` null, `generation` says
+// another computer ran since this one last ran, as a take over does; null
+// says nobody did.
 export interface RelayAutomationGroupHandoverResponse {
   ok: true;
   generation: number | null;
