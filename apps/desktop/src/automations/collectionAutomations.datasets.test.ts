@@ -136,6 +136,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),
     listAutomationFailures: async () => ({ failures: [] }),
+    readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
   let hostOpen = options.hostOpen ?? true;
@@ -160,6 +161,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     onPressWaiting: (event) => { waiting.push(event); wake(); },
     groupHost: async () => (options.groups ? 0 : null),
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },

@@ -2515,13 +2515,18 @@ ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
 /// The coverage names every (automation, message) a host decided, claimed
 /// or skipped as the automation's own post, including those an earlier host
 /// handed over. A message it names never claims again here, and the next
-/// host gets the recent part. The import row holds the host generation this
-/// computer last watched at, so a relay record no newer than it changes
-/// nothing, and when it last took a handover. Coverage starts with the
-/// message claims this computer already holds.
+/// host gets the recent part. The state row holds, per workspace, the host
+/// generation this computer last watched at, so a relay record no newer than
+/// it changes nothing, when it last took a handover, the coverage floor, and
+/// when a Group message last started nothing because it was dated ahead of
+/// this computer's clock or arrived after the floor passed it. Every Group
+/// subscription already here starts now, because the claims kept so far do
+/// not say which older messages were decided.
 const V2_AUTOMATION_GROUP_COVERAGE_DDL: &str = "\
 ALTER TABLE automation_group_subscriptions
     ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1));
+UPDATE automation_group_subscriptions
+    SET created_at_ms = CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER);
 CREATE TABLE automation_group_coverage (
     workspace_id  TEXT    NOT NULL,
     automation_id TEXT    NOT NULL,
@@ -2531,16 +2536,14 @@ CREATE TABLE automation_group_coverage (
 ) STRICT;
 CREATE INDEX idx_automation_group_coverage_created
     ON automation_group_coverage(workspace_id, created_at_ms);
-CREATE TABLE automation_group_imports (
-    workspace_id   TEXT    NOT NULL PRIMARY KEY,
-    generation     INTEGER NOT NULL CHECK (generation >= 0),
-    imported_at_ms INTEGER NOT NULL
+CREATE TABLE automation_group_state (
+    workspace_id        TEXT    NOT NULL PRIMARY KEY,
+    generation          INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    imported_at_ms      INTEGER NOT NULL DEFAULT 0,
+    floor_ms            INTEGER,
+    ahead_skipped_at_ms INTEGER,
+    late_skipped_at_ms  INTEGER
 ) STRICT;
-INSERT OR IGNORE INTO automation_group_coverage
-    (workspace_id, automation_id, message_id, created_at_ms)
-SELECT workspace_id, automation_id, substr(trigger_key, 9), created_at_ms
-FROM automation_claims
-WHERE change_kind = 'message' AND trigger_key LIKE 'message:%';
 ";
 
 /// The frozen, ordered list of migrations this build knows. No build may
@@ -2978,7 +2981,7 @@ mod tests {
             ),
             (
                 "v2-automation-group-coverage",
-                "d4ab2fefcb14de1667162d3b5242d73a29cf6f6f0865d191c75913ce7dcc50cd",
+                "5b2247e5582d3fdb328eae4d4af88ae7c2e9be8acf0e2dd8aa6ccfa81d23afe8",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3231,10 +3234,11 @@ mod tests {
         .expect("a press and a schedule mark");
     }
 
-    /// A store's message claims become its Group coverage, and its Group
-    /// subscriptions stay on.
+    /// Every Group subscription from before the coverage starts at the
+    /// upgrade, so a later handover replays no message from before it, and
+    /// stays on.
     #[test]
-    fn message_claims_from_before_group_coverage_become_coverage() {
+    fn group_subscriptions_from_before_the_coverage_start_at_the_upgrade() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1_000);
@@ -3248,43 +3252,43 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO automation_group_subscriptions \
                  (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
-                 VALUES ('ws', 'collection:Trip#task', 'trip', '/task', 1); \
-             INSERT INTO automation_claims \
-                 (workspace_id, claim_id, automation_id, trigger_key, record_id, \
-                  collection_path, depth, state, created_at_ms, updated_at_ms, change_kind) \
-                 VALUES ('ws', 'atc_message', 'collection:Trip#task', 'message:m1', NULL, \
-                         'Trip', 0, 'done', 20, 30, 'message'), \
-                        ('ws', 'atc_press', 'collection:Trip#pay', 'press:p1', 'rec', \
-                         'Trip', 0, 'done', 20, 30, 'button');",
+                 VALUES ('ws', 'collection:Trip#task', 'trip', '/task', 1);",
         )
-        .expect("a subscription and two claims");
+        .expect("a subscription");
+        let clock = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64
+        };
+        let upgrading = clock();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
-        let coverage: Vec<(String, String, i64)> = conn
-            .prepare(
-                "SELECT automation_id, message_id, created_at_ms FROM automation_group_coverage",
-            )
-            .expect("coverage")
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("rows")
-            .collect::<Result<_, _>>()
-            .expect("read");
-        assert_eq!(
-            coverage,
-            vec![("collection:Trip#task".to_owned(), "m1".to_owned(), 20)]
-        );
-        let frozen: i64 = conn
+        let upgraded = clock();
+        let (start, frozen): (i64, i64) = conn
             .query_row(
-                "SELECT frozen FROM automation_group_subscriptions",
+                "SELECT created_at_ms, frozen FROM automation_group_subscriptions",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("subscription");
+        assert!(
+            (upgrading - 1..=upgraded + 1).contains(&start),
+            "{start} is the upgrade"
+        );
         assert_eq!(frozen, 0, "a subscription stays on");
         assert!(
             conn.execute("UPDATE automation_group_subscriptions SET frozen = 2", [],)
                 .is_err(),
             "frozen is a flag"
         );
+        let coverage: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM automation_group_coverage",
+                [],
+                |row| row.get(0),
+            )
+            .expect("coverage");
+        assert_eq!(coverage, 0);
     }
 
     /// Messages and mentions written before automations could post keep every

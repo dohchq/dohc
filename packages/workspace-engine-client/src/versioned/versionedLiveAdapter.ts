@@ -21,6 +21,7 @@ import {
   type AutomationRunNowResult,
   type AutomationClaimSummary,
   type AutomationFailuresResult,
+  type AutomationGroupSkipsResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
   type AutomationPressParams,
@@ -1287,6 +1288,11 @@ export class VersionedLiveAdapter {
    */
   async listAutomationFailures(): Promise<AutomationFailuresResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
+  }
+
+  /** When Group messages last started nothing here for a reason a person can act on. */
+  async readAutomationGroupSkips(): Promise<AutomationGroupSkipsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsGroupSkips, {});
   }
 
   /**

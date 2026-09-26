@@ -340,6 +340,17 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn automation_group_skips(
+        &self,
+        workspace_id: String,
+    ) -> Result<dohc_engine_domain::AutomationGroupSkips, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_domain::read_automation_group_skips(store, &workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn automation_failures(
         &self,
         workspace_id: String,

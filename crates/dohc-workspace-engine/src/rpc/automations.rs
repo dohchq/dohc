@@ -463,6 +463,25 @@ impl EngineService {
         }))
     }
 
+    /// When Group messages last started nothing here because they were
+    /// dated ahead of this computer's clock, or arrived after the coverage
+    /// floor passed them: this computer's time, or null.
+    pub(super) async fn automations_group_skips(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let skips = Self::read_under_ctx(
+            &cancellation,
+            "automations.groupSkips",
+            open.actor.automation_group_skips(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({ "aheadAtMs": skips.ahead_at_ms, "lateAtMs": skips.late_at_ms }))
+    }
+
     /// One automation's run history: its newest claims in every state,
     /// newest first, without field facts.
     pub(super) async fn automations_list_claims(

@@ -638,6 +638,9 @@ describe("automations wire schemas", () => {
         needsHandover: true,
       }),
     ).toEqual({ needsHandover: true });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsGroupSkips, { aheadAtMs: 5, lateAtMs: null }),
+    ).toEqual({ aheadAtMs: 5, lateAtMs: null });
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {

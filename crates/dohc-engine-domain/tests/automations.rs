@@ -12,15 +12,16 @@ use dohc_engine_domain::{
     AutomationChange, AutomationChangeKind, AutomationClaim, AutomationClaimState,
     AutomationFactValue, AutomationFieldFact, AutomationGroupHandover,
     AutomationGroupHandoverAutomation, AutomationGroupMessage, AutomationGroupRelayRecord,
-    AutomationGroupSubscription, AutomationGroupWatch, AutomationGroupWatched, AutomationRetry,
-    AutomationSettle, AutomationSubscription, AutomationTrigger, ChangeActorKind,
-    ChangeAttribution, ChatActorKind, ChatChannelKind, ChatMessageAutomation, ChatThreadLane,
-    CollectionFieldChangeFact, CollectionRecordApplyFacts, DispatchClaim, DomainError,
-    LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES,
-    MAX_AUTOMATION_SUBSCRIPTION_FIELDS, MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES,
-    NoFaults, SendMessage, StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx,
-    claim_group_message_in_tx, claim_next_pending_automation, list_automation_claims,
-    list_automation_failures, moment_author_attribution, moment_author_json,
+    AutomationGroupSkips, AutomationGroupSubscription, AutomationGroupWatch,
+    AutomationGroupWatched, AutomationRetry, AutomationSettle, AutomationSubscription,
+    AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind, ChatChannelKind,
+    ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
+    DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
+    MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
+    MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES, NoFaults, SendMessage, StartChannelThread,
+    TxnOutcome, claim_automation_triggers_in_tx, claim_group_message_in_tx,
+    claim_next_pending_automation, list_automation_claims, list_automation_failures,
+    moment_author_attribution, moment_author_json, read_automation_group_skips,
     reclaim_running_automations, release_automation_claim, release_automation_groups,
     retry_automation_claim, settle_automation_claim, subscribe_automation, unsubscribe_automation,
     watch_automation_groups,
@@ -2484,9 +2485,31 @@ fn each_decision_keeps_the_coverage_bounded() {
         })
         .expect("coverage");
     assert_eq!(coverage, bound, "the bound, and no more");
-    for (_, since, _) in group_rows(&laptop.store, WS) {
-        assert!(since > 101, "each subscription starts after what went");
-    }
+    let floor: i64 = laptop
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT floor_ms FROM automation_group_state WHERE workspace_id = ?1",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("floor");
+    assert_eq!(floor, 102, "the floor passes what went");
+
+    // A message from before the automations started is not theirs. One
+    // posted after they started that arrives after the floor passed it
+    // claims nothing, and the owner can hear why.
+    laptop.store_message(&post("m-before", "/task Before", 5));
+    assert_eq!(
+        read_automation_group_skips(&laptop.store, WS).expect("skips"),
+        AutomationGroupSkips::default()
+    );
+    laptop.store_message(&post("m-late", "/task Offline all day", 50));
+    assert_eq!(laptop.claimed.len(), 2, "only m-new claimed");
+    let skips = read_automation_group_skips(&laptop.store, WS).expect("skips");
+    assert!(skips.late_at_ms.is_some());
+    assert_eq!(skips.ahead_at_ms, None);
 }
 
 /// A message another host decided for one automation stays decided while
@@ -2601,7 +2624,8 @@ fn a_handover_carries_every_decision_it_keeps_however_it_is_dated() {
 }
 
 /// A message dated more than the allowance past this computer's clock
-/// decides nothing as it arrives, so a forged date cannot hold the coverage.
+/// decides nothing as it arrives, so a forged date cannot hold the coverage,
+/// and the owner can hear why.
 #[test]
 fn a_message_dated_past_the_clock_decides_nothing() {
     let mut laptop = Computer::new();
@@ -2624,6 +2648,9 @@ fn a_message_dated_past_the_clock_decides_nothing() {
         })
         .expect("coverage");
     assert_eq!(coverage, 0);
+    let skips = read_automation_group_skips(&laptop.store, WS).expect("skips");
+    assert!(skips.ahead_at_ms.is_some());
+    assert_eq!(skips.late_at_ms, None);
 }
 
 /// A handover called off before any other computer ran: taking up again,

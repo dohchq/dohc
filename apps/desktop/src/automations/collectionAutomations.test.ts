@@ -109,6 +109,9 @@ async function world(options: {
   // the relay record each new generation read.
   let groupGeneration = 0;
   const relayRecords: AutomationGroupRelayRecord[] = [];
+  const groupSkips: { aheadAtMs: number | null; lateAtMs: number | null } = { aheadAtMs: null, lateAtMs: null };
+  // Each Group message skip the owner was told about.
+  const skipNotices: Array<{ reason: string; atMs: number }> = [];
   const frozenGroups = new Map<string, StoredSubscription>();
   const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
@@ -256,6 +259,8 @@ async function world(options: {
       return claim;
     },
     listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse() }),
+    // When Group messages last started nothing here, as the engine records it.
+    readAutomationGroupSkips: async () => ({ ...groupSkips }),
     // Each automation's failure most recently settled, as the failure notice shows it.
     listAutomationFailures: async () => {
       const newest = new Map<string, AutomationClaim>();
@@ -492,6 +497,7 @@ async function world(options: {
     groupHost: async () => (options.runsGroupTriggers ?? true ? 0 : null),
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     requestHost: async () => { hostRequests += 1; },
+    groupMessagesSkipped: async (reason, atMs) => { skipNotices.push({ reason, atMs }); },
     readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
     postNotice: async (notice, signal) => {
       noticeSignals.push(signal);
@@ -536,6 +542,8 @@ async function world(options: {
     automationsChanged: () => automationsChanged,
     hostRequests: () => hostRequests,
     relayRecords,
+    groupSkips,
+    skipNotices,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
     resumable,
@@ -3292,6 +3300,29 @@ describe("Collection automations that a Group message starts", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+  });
+
+  it("tells the owner once when Group messages started nothing here, and again only after a newer skip", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    w.groupSkips.aheadAtMs = 1_000;
+    await w.executor.groupMessagesArrived();
+    expect(w.skipNotices, "it watches no Group yet").toEqual([]);
+
+    // Its first watch tells, since a replay can skip a message too.
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    await w.until(() => w.skipNotices.length > 0);
+    await w.executor.groupMessagesArrived();
+    expect(w.skipNotices).toEqual([{ reason: "ahead", atMs: 1_000 }]);
+
+    w.groupSkips.aheadAtMs = 2_000;
+    w.groupSkips.lateAtMs = 1_500;
+    await w.executor.groupMessagesArrived();
+    expect(w.skipNotices).toEqual([
+      { reason: "ahead", atMs: 1_000 },
+      { reason: "ahead", atMs: 2_000 },
+      { reason: "late", atMs: 1_500 },
+    ]);
   });
 
   it("before a handover, has the engine stop every Group subscription, tracked or not, and answers its handover once it did", async () => {

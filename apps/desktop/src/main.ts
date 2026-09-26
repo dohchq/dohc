@@ -213,6 +213,7 @@ import {
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "./automations/skippedRunsNotice";
+import { groupMessagesNotice } from "./automations/groupMessagesNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
@@ -1798,6 +1799,7 @@ function engineForWorkspace(
       const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
         runWorkspaceSharedChannelPass(workspace.workspaceId),
       );
+      if (outcome.changed) void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       return outcome.changed;
     },
     // A replicated chat message can mark a live bookmark pending without
@@ -1808,6 +1810,7 @@ function engineForWorkspace(
       void shareRosters.pulled(workspace.workspaceId, recovered);
       automationHosts.relayAnswered(workspace.workspaceId);
       collectionAutomationsOf(workspace.workspaceId)?.relayAnswered();
+      void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       // The relay answers again, so this computer may be the host again.
       if (recovered) withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, (lease) => lease.state.relayedPresses)?.start();
       return withWorkspaceAttachmentAsync(workspace, () =>
@@ -3588,6 +3591,7 @@ function createCollectionAutomationsFor(
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
     groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
+    groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),

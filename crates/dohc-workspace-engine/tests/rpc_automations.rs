@@ -1380,6 +1380,15 @@ async fn group_messages_written_here_claim_through_rpc() {
     )
     .await;
     assert_eq!(released["watchedGeneration"], json!(0));
+    let skips = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.groupSkips",
+        json!({}),
+    )
+    .await;
+    assert_eq!(skips, json!({ "aheadAtMs": null, "lateAtMs": null }));
     let handover = released["handover"].clone();
     assert_eq!(handover["automations"][0]["automationId"], json!(TASK));
     assert_eq!(

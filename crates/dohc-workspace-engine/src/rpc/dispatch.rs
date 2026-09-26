@@ -842,6 +842,10 @@ impl EngineService {
                     .await?
             }
             "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
+            "automations.groupSkips" => {
+                self.automations_group_skips(&ctx, request.workspace)
+                    .await?
+            }
             "automations.listClaims" => {
                 self.automations_list_claims(&ctx, request.workspace, request.params)
                     .await?
@@ -1158,6 +1162,7 @@ mod tests {
             "automations.claimNext",
             "automations.claimSchedule",
             "automations.failures",
+            "automations.groupSkips",
             "automations.listClaims",
             "automations.press",
             "automations.release",

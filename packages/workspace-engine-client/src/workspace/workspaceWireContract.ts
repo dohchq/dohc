@@ -40,6 +40,7 @@ export const WORKSPACE_METHOD = {
   automationsWatchGroups: "automations.watchGroups",
   automationsClaimNext: "automations.claimNext",
   automationsFailures: "automations.failures",
+  automationsGroupSkips: "automations.groupSkips",
   automationsListClaims: "automations.listClaims",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
@@ -321,6 +322,9 @@ export type AutomationClaimNextResult =
 export type AutomationFailuresResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsFailures];
 
+export type AutomationGroupSkipsResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsGroupSkips];
+
 /** One automation's newest claims in every state, newest first (at most 100). */
 export type AutomationListClaimsResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsListClaims];
@@ -383,6 +387,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsWatchGroups]: AutomationWatchGroupsParams;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
   [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsGroupSkips]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
@@ -1143,8 +1148,8 @@ const WorkspaceResultSchemas = {
     unsubscribed: Schema.Boolean,
   }),
   /**
-   * The handover, and the host generation whose handover this computer last
-   * took: the relay keeps the handover it holds when that is older.
+   * The handover, and the host generation this computer last watched at:
+   * the relay keeps its own record when it is newer.
    */
   [WORKSPACE_METHOD.automationsReleaseGroups]: mutableStruct({
     watchedGeneration: Schema.Int,
@@ -1155,6 +1160,15 @@ const WorkspaceResultSchemas = {
     needsHandover: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
+  /**
+   * When Group messages last started nothing here, by this computer's clock:
+   * dated more than an hour ahead of it, or arriving after the coverage
+   * floor passed them. Null when that never happened.
+   */
+  [WORKSPACE_METHOD.automationsGroupSkips]: mutableStruct({
+    aheadAtMs: Schema.NullOr(Schema.Int),
+    lateAtMs: Schema.NullOr(Schema.Int),
+  }),
   /**
    * One automation with at least one failed claim. Mirrors AutomationFailure
    * in crates/dohc-workspace-engine: the newest failed claim, its error and

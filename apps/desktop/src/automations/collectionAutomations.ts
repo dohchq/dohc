@@ -83,6 +83,7 @@ import { datasetPresser, datasetRecordExists, runDatasetAutomation, type Dataset
 import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
+import type { GroupMessagesSkipped } from "./groupMessagesNotice";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
 // 0012). It keeps an index of every Collection's automations.yaml, keeps the
@@ -154,6 +155,8 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
   /** Each automation's newest failed claim, the one its failure notice offers to try again. */
   listAutomationFailures(): Promise<{ failures: Array<{ automationId: string; claimId: string }> }>;
+  /** When Group messages last started nothing here for a reason a person can act on, by this computer's clock. */
+  readAutomationGroupSkips(): Promise<{ aheadAtMs: number | null; lateAtMs: number | null }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
   releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
   /** Claims a schedule's due times and moves its mark, in one transaction. */
@@ -245,6 +248,8 @@ export interface CollectionAutomationsOptions {
    * once when a host is named, or after the read that learns one.
    */
   requestHost(): Promise<unknown>;
+  /** Tells the owner, once a day, that Group messages started no automations here, and why. */
+  groupMessagesSkipped(reason: GroupMessagesSkipped, atMs: number): Promise<void>;
   /** A message's whole body, for a claim that carried it truncated. */
   readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
   /** Sends one notice from this workspace. */
@@ -617,6 +622,8 @@ export class CollectionAutomations {
   private watchedGeneration: number | null = null;
   /** The relay did not answer for a new generation's Group handover: the next sync pull asks again. */
   private handoverUnread = false;
+  // The newest Group message skip of each kind the owner was told about.
+  private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
@@ -2369,6 +2376,36 @@ export class CollectionAutomations {
     this.watchedGeneration = generation;
     this.groupSubscriptionsUncertain = false;
     await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    // A replay can skip a message too.
+    void this.groupMessagesArrived();
+  }
+
+  /**
+   * Group messages may have reached this computer. While it runs Group
+   * triggers, a message that started nothing because it was dated ahead of
+   * this computer's clock, or arrived after the coverage floor passed it,
+   * reaches the owner as one notice a day.
+   */
+  async groupMessagesArrived(): Promise<void> {
+    if (this.watchedGeneration === null) return;
+    let skips: Awaited<ReturnType<CollectionAutomationEngine["readAutomationGroupSkips"]>> | null;
+    try {
+      skips = await this.withLiveEngine((engine) => engine.readAutomationGroupSkips());
+    } catch (error) {
+      this.options.onError("read which Group messages started nothing", error);
+      return;
+    }
+    if (skips === null) return;
+    const newest: Array<[GroupMessagesSkipped, number | null]> = [["ahead", skips.aheadAtMs], ["late", skips.lateAtMs]];
+    for (const [reason, atMs] of newest) {
+      if (atMs === null || atMs <= this.groupSkipsTold[reason]) continue;
+      try {
+        await this.options.groupMessagesSkipped(reason, atMs);
+        this.groupSkipsTold[reason] = Math.max(this.groupSkipsTold[reason], atMs);
+      } catch (error) {
+        this.options.onError("tell the owner which Group messages started nothing", error);
+      }
+    }
   }
 
   /**

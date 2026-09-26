@@ -69,6 +69,7 @@ async function harness(automations: string, run: (context: {
     chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
     groupHost: async () => null,
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => null,
     postNotice: async () => { throw new Error("No notices in this test."); },
