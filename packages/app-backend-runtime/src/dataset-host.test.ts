@@ -1,4 +1,5 @@
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "./protocol.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
 import { createDatasetAttempts, assertDatasetAttemptsCommitted } from "./dataset-attempts.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL);";
 const operationSource = `globalThis.operations={
@@ -685,6 +686,7 @@ it("connects schema history to immutable source and reverses rules forward witho
 async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const f = await fixture(overrides);
   const generated = structuredClone(definition);
+  generated.name = crypto.randomUUID();
   const secret = generated.tables[0]!.fields[2]!;
   if (secret.type !== "button") secret.default = "private";
   generated.tables[0]!.fields.push(
@@ -752,6 +754,27 @@ it("confines approved reads to their own table after a full-table operation", as
   });
   await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
 });
+it("reuses the generated digest verdict across invocations but checks current access", async () => {
+  const f = await linkReadFixture();
+  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  expect(generate).toHaveBeenCalledTimes(1);
+  await f.invoke("friend", id(7));
+  for (const context of ["friend", "helper", "owner"] as const) await f.invoke(context, id(7));
+  expect(generate).toHaveBeenCalledTimes(1);
+  f.db.prepare("UPDATE permissions SET active=0 WHERE user='friend'").run();
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("revoked");
+});
+
+it("refuses changed stored source even after the generated verdict is cached", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  await f.invoke("friend", id(7));
+  const saved = f.host.approvedArtifacts("owner", scope);
+  f.db.prepare("UPDATE dohc_dataset_catalog SET artifacts_json=?").run(JSON.stringify({ schemaSql: saved.schemaSql, operationSource: "tampered" }));
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
+});
+
 it("refuses executable source that differs from the verified generated artifact", async () => {
   const f = await linkReadFixture();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
@@ -771,16 +794,16 @@ it.each<JsonValue>([
   await expect(f.invoke("friend", id(7), result && typeof result === "object" && "groupBy" in result ? { groupBy: id(12), limit: 8 } : {})).rejects.toThrow("access");
 });
 
-it("verifies compiled generated reads and caches only a successful build", async () => {
+it("reads stored generated artifacts without compiling again after a compiler change", async () => {
   const { compileDatasetOperations } = await import("./dataset-compiler.js");
   const compile = vi.fn(compileDatasetOperations);
   const f = await linkReadFixture({ compileOperations: compile });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  compile.mockRejectedValueOnce(new Error("busy compiler"));
-  await expect(f.invoke("friend", id(7))).rejects.toThrow("busy compiler");
+  expect(compile).toHaveBeenCalledTimes(1);
+  compile.mockRejectedValue(new Error("busy or upgraded compiler"));
   await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
   await f.invoke("helper", id(7));
-  expect(compile).toHaveBeenCalledTimes(3);
+  expect(compile).toHaveBeenCalledTimes(1);
 });
 
 it("retains generated read approvals and permits fresh approval after display changes and a button", async () => {

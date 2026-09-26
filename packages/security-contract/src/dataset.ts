@@ -109,7 +109,7 @@ export interface DatasetDescription {
   name: string;
   revision: number;
   revisionSha256: string;
-  tables: Array<{ tableId: string; name: string; fields: DatasetDescribedField[] }>;
+  tables: Array<{ tableId: string; name: string; primaryKeyFieldId?: string; fields: DatasetDescribedField[] }>;
   operations: DatasetOperation[];
 }
 
@@ -296,7 +296,7 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
     ...(row.archived === undefined ? {} : { archived: row.archived }),
     datasetId: uuid(row.datasetId), name: text(row.name), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     tables: boundedArray(row.tables, DATASET_MAX_TABLES).map(value => {
-      const table = record(value, ["tableId", "name", "fields"]);
+      const table = record(value, ["tableId", "name", "fields"], ["primaryKeyFieldId"]);
       const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map((value): DatasetDescribedField => {
         if (isButtonRow(value)) return button(value);
         const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation"]);
@@ -304,7 +304,11 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
         return parsed;
       });
       unique(fields.map(field => field.name));
-      return { tableId: uuid(table.tableId), name: text(table.name), fields };
+      const primaryKeyFieldId = table.primaryKeyFieldId === undefined ? undefined : uuid(table.primaryKeyFieldId);
+      if (primaryKeyFieldId !== undefined && !fields.some(field => field.fieldId === primaryKeyFieldId &&
+          field.type !== "button" && field.required && field.unique)) fail();
+      return { tableId: uuid(table.tableId), name: text(table.name), fields,
+        ...(primaryKeyFieldId === undefined ? {} : { primaryKeyFieldId }) };
     }),
     operations: boundedArray(row.operations, DATASET_MAX_OPERATIONS).map(operation),
   };
@@ -338,13 +342,16 @@ export function describeApprovedDataset(approved: DatasetRevision, operations: D
   const fields = new Set(operations.flatMap(operation => operation.fieldIds));
   const tables = new Set(operations.map(operation => operation.tableId));
   return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
-    tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-      fields: table.fields.filter(field => field.type === "button" || fields.has(field.fieldId)).map((field): DatasetDescribedField => {
-        if (field.type === "button") return { fieldId: field.fieldId, name: field.name, type: "button" };
-        const { sqlColumn: _sqlColumn, ...description } = field;
-        if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
-        return description;
-      }) })), operations };
+    tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => {
+      const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey && fields.has(field.fieldId));
+      return { tableId: table.tableId, name: table.name, ...(primary ? { primaryKeyFieldId: primary.fieldId } : {}),
+        fields: table.fields.filter(field => field.type === "button" || fields.has(field.fieldId)).map((field): DatasetDescribedField => {
+          if (field.type === "button") return { fieldId: field.fieldId, name: field.name, type: "button" };
+          const { sqlColumn: _sqlColumn, ...description } = field;
+          if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
+          return description;
+        }) };
+    }), operations };
 }
 export function parseDatasetRevision(value: unknown): DatasetRevision {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "revision", "revisionSha256", "definitionSha256", "schemaSha256", "operationsSha256", "definition"]);

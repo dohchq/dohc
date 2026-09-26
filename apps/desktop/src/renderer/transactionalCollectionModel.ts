@@ -8,13 +8,13 @@ export interface TransactionalDatasetDescription {
   name: string;
   revision: number;
   revisionSha256: string;
-  tables: Array<{ tableId: string; name: string; fields: TransactionalField[] }>;
+  tables: Array<{ tableId: string; name: string; primaryKeyFieldId?: string; fields: TransactionalField[] }>;
   operations: DatasetOperation[];
 }
 /** The description's column fields, which the table reads and writes. */
 export function transactionalDescription(description: DatasetDescription): TransactionalDatasetDescription {
   return { datasetId: description.datasetId, name: description.name, revision: description.revision, revisionSha256: description.revisionSha256,
-    tables: description.tables.map(table => ({ tableId: table.tableId, name: table.name, fields: datasetColumnFields(table) })),
+    tables: description.tables.map(table => ({ tableId: table.tableId, name: table.name, primaryKeyFieldId: table.primaryKeyFieldId, fields: datasetColumnFields(table) })),
     operations: description.operations };
 }
 export interface TransactionalRow { id: string | number; version: number; values: Record<string, AppBackendJson> }

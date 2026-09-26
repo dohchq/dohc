@@ -300,12 +300,15 @@ describe("dataset buttons", () => {
   it("describes a visible table's buttons, though no operation lists them", () => {
     const approved = approvedWithButton(), [submit, list] = approved.definition.operations;
     const helper = describeApprovedDataset(approved, [list!]);
-    expect(helper.tables).toEqual([{ tableId: id(2), name: "People", fields: [
+    expect(helper.tables).toEqual([{ tableId: id(2), name: "People", primaryKeyFieldId: id(3), fields: [
       { fieldId: id(3), name: "Record ID", type: "text", required: true, unique: true },
       { fieldId: id(4), name: "Name", type: "text", required: true, unique: false },
       button,
     ] }]);
     expect(parseDatasetDescription(helper)).toEqual(helper);
+    for (const primaryKeyFieldId of [id(4), id(20), id(99)]) {
+      expect(() => parseDatasetDescription({ ...helper, tables: [{ ...helper.tables[0]!, primaryKeyFieldId }] })).toThrow();
+    }
     const link = describeApprovedDataset(approved, [submit!]);
     expect(link.tables[0]!.fields.map(field => field.fieldId)).toEqual([id(4), id(20)]);
     expect(parseDatasetDescription(link)).toEqual(link);
@@ -389,6 +392,8 @@ it("permits only display names and source locations in access-preserving revisio
 it("allows only the explicitly approved link reads and their exact fields", () => {
   const approved = revision();
   approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
   const request = binding(approved);
   request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
   const caller = { kind: "link" as const, grantId: "g", principalId: "p" };
@@ -415,12 +420,17 @@ it("rejects authored reads and reads omitting the primary key even with exact fi
   expect(() => parseDatasetBinding(request, approved)).toThrow();
   approved.definition.operations[1]!.fieldIds = [id(4)];
   approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  request.revisionSha256 = approved.revisionSha256;
   request.linkReads[0]!.fieldIds = [id(4)];
   expect(() => parseDatasetBinding(request, approved)).toThrow();
 });
 it("gives named app recipients approved reads alongside link creates without helper access", () => {
   const approved = revision();
   approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
   const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
   expect(effectiveDatasetOperations(request, approved, { kind: "named", userId: "u", grantId: "g", access: "view", helper: false }).map(operation => operation.name)).toEqual(["submit", "list"]);
 });
