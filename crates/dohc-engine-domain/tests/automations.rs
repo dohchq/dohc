@@ -1615,14 +1615,21 @@ fn releasing_group_subscriptions_stops_message_claims_here() {
         .collect::<Vec<_>>();
     assert_eq!(decided, vec![ALL, TASK]);
 
-    let handover = release_automation_groups(&mut store, WS, 50, &NO_FAULTS).expect("release");
+    let released = release_automation_groups(&mut store, WS, 50, &NO_FAULTS).expect("release");
+    assert_eq!(
+        released.taken_generation, 0,
+        "a workspace that never synced took no handover"
+    );
+    let handover = released.handover;
     assert_eq!(
         group_rows(&store, WS),
         vec![(ALL.to_owned(), 10, true), (TASK.to_owned(), 10, true)]
     );
     assert!(posted(&mut store, &post("m2", "/task Pack", 60)).is_empty());
     assert_eq!(
-        release_automation_groups(&mut store, WS, 50, &NO_FAULTS).expect("again"),
+        release_automation_groups(&mut store, WS, 50, &NO_FAULTS)
+            .expect("again")
+            .handover,
         handover,
         "a release repeated after a lost answer answers the same"
     );
@@ -2231,8 +2238,10 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     }
     assert!(desk.claimed.is_empty(), "the desk watches nothing yet");
 
-    let handover =
+    let released =
         release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
+    assert_eq!(released.taken_generation, 1);
+    let handover = released.handover;
     laptop.store_message(&m3);
     laptop.store_message(&m4);
 
@@ -2274,7 +2283,9 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     );
 
     // Back to the laptop: what both decided travels on, so nothing claims twice.
-    let back = release_automation_groups(&mut desk.store, WS, 50, &NO_FAULTS).expect("release");
+    let back = release_automation_groups(&mut desk.store, WS, 50, &NO_FAULTS)
+        .expect("release")
+        .handover;
     let decided = |automation: &str| {
         back.automations
             .iter()
@@ -2310,8 +2321,9 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
     let recent = post("m-recent", "/task Recent", window + 40);
     laptop.store_message(&old);
     laptop.store_message(&recent);
-    let handover =
-        release_automation_groups(&mut laptop.store, WS, window + 30, &NO_FAULTS).expect("release");
+    let handover = release_automation_groups(&mut laptop.store, WS, window + 30, &NO_FAULTS)
+        .expect("release")
+        .handover;
     assert_eq!(handover.floor_ms, 30);
     for automation in &handover.automations {
         assert_eq!(automation.since_ms, 30);
@@ -2352,8 +2364,9 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
             Ok::<_, dohc_engine_storage::StorageError>(())
         })
         .expect("decisions");
-    let handover =
-        release_automation_groups(&mut laptop.store, WS, 5_000, &NO_FAULTS).expect("release");
+    let handover = release_automation_groups(&mut laptop.store, WS, 5_000, &NO_FAULTS)
+        .expect("release")
+        .handover;
     assert_eq!(handover.floor_ms, 101, "the oldest decision is left out");
     let task = handover
         .automations
@@ -2362,4 +2375,111 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
         .expect("task");
     assert_eq!(task.decided.len(), bound as usize);
     assert_eq!(task.since_ms, 101);
+}
+
+/// An automation the handover names that the new host cannot watch yet, as
+/// when its Group has not synced there, keeps its start. Once the new host
+/// watches it, it claims each stored message nobody decided, from that start.
+#[test]
+fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
+    let mut laptop = Computer::new();
+    let mut desk = Computer::new();
+    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    let handover = release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS)
+        .expect("release")
+        .handover;
+    desk.store_message(&post("m1", "/task One", 22));
+    // The desk can watch only ALL for now.
+    watch_at(
+        &mut desk.store,
+        3,
+        &[(ALL, GROUP, None)],
+        AutomationGroupHandoverInput::Fetched(handover),
+        40,
+    )
+    .map(|watched| desk.keep(watched.claims))
+    .expect("watch what it can");
+    assert_eq!(sorted(desk.claimed.clone()), pairs(&[(ALL, "m1")]));
+    assert_eq!(
+        group_rows(&desk.store, WS),
+        vec![(ALL.to_owned(), 10, false), (TASK.to_owned(), 10, true)],
+        "the task automation waits, frozen, with its start"
+    );
+    // Its Group arrives: it starts where the laptop started it.
+    desk.watch(3, AutomationGroupHandoverInput::Unfetched, 50);
+    assert_eq!(
+        sorted(desk.claimed.clone()),
+        pairs(&[(ALL, "m1"), (TASK, "m1")])
+    );
+}
+
+/// A computer that took no handover for the generation it hands over from
+/// ran nothing then, and says so; the relay keeps the handover it holds.
+/// Taking its own handover back, the first computer claims what reached it
+/// while it had stopped.
+#[test]
+fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_back() {
+    let mut laptop = Computer::new();
+    let mut desk = Computer::new();
+    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    laptop.store_message(&post("m1", "/task One", 20));
+    let first = release_automation_groups(&mut laptop.store, WS, 30, &NO_FAULTS).expect("release");
+    // The desk never took generation 3, and is asked to hand over at once.
+    let desk_release =
+        release_automation_groups(&mut desk.store, WS, 35, &NO_FAULTS).expect("release");
+    assert_eq!(
+        desk_release.taken_generation, 0,
+        "older than the relay's generation 3"
+    );
+    laptop.store_message(&post("m2", "/task Two", 36));
+    assert_eq!(
+        sorted(laptop.claimed.clone()),
+        pairs(&[(ALL, "m1"), (TASK, "m1")])
+    );
+    laptop.watch(5, AutomationGroupHandoverInput::Fetched(first.handover), 40);
+    assert_eq!(
+        sorted(laptop.claimed.clone()),
+        pairs(&[(ALL, "m1"), (TASK, "m1"), (ALL, "m2"), (TASK, "m2")])
+    );
+}
+
+/// Settling a Group message claim keeps the host's coverage within its
+/// bound, and starts each subscription after what it leaves out.
+#[test]
+fn settling_a_message_claim_keeps_the_coverage_bounded() {
+    let mut laptop = Computer::new();
+    laptop.watch(1, AutomationGroupHandoverInput::Missing, 10);
+    let bound = MAX_AUTOMATION_GROUP_HANDOVER_MESSAGES as i64;
+    laptop
+        .store
+        .write_with(&NO_FAULTS, |tx| {
+            for index in 0..bound {
+                tx.execute(
+                    "INSERT INTO automation_group_coverage \
+                     (workspace_id, automation_id, message_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![WS, ALL, format!("old{index}"), 100 + index],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            }
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("decisions");
+    laptop.store_message(&post("m-new", "/task New", 10_000));
+    let claim = claim_next(&mut laptop.store, TASK, 10_001).expect("the new claim");
+    settle_done(&mut laptop.store, &claim.claim_id, 10_002);
+    let coverage: i64 = laptop
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM automation_group_coverage WHERE workspace_id = ?1",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("coverage");
+    assert_eq!(coverage, bound, "the bound, and no more");
+    for (_, since, _) in group_rows(&laptop.store, WS) {
+        assert!(since > 100, "each subscription starts after what went");
+    }
 }

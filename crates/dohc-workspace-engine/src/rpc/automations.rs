@@ -344,7 +344,7 @@ impl EngineService {
         let params: AutomationReleaseGroupsParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let handover = Self::read_under_ctx(
+        let released = Self::read_under_ctx(
             &cancellation,
             "automations.releaseGroups",
             open.actor.automation_release_groups(
@@ -355,7 +355,10 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(automation_group_handover_json(&handover))
+        Ok(json!({
+            "takenGeneration": released.taken_generation,
+            "handover": automation_group_handover_json(&released.handover),
+        }))
     }
 
     /// Set every Group subscription this computer watches, taking a new host

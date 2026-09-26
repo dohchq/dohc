@@ -124,6 +124,7 @@ export function createAutomationHostRoutes(
             generation: generation(body.generation),
             releasedThroughMs: nonNegativeInteger(body.releasedThroughMs, "releasedThroughMs"),
             groups: groupHandover(body.groups),
+            groupsTaken: generation(body.groupsTaken),
           });
         case "take-over":
           return storage.takeOverAutomationHost({ ...scope, generation: generation(body.generation) });

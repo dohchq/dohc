@@ -45,14 +45,19 @@ export type HostRequest =
   | { action: "check-in"; body: { installId: string; label: string; claim: boolean } }
   | {
     action: "release";
-    // `groups` is the engine's Group handover, carried to the next host unread.
-    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown };
+    // `groups` is the engine's Group handover, carried to the next host
+    // unread; `groupsTaken` is the generation whose handover it last took.
+    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsTaken: number };
   };
 
-/** What a computer that hands over reports: how far its schedules ran, and its Group handover. */
+/**
+ * What a computer that hands over reports: how far its schedules ran, its
+ * Group handover, and the generation whose handover it last took.
+ */
 export interface FinishedHere {
   throughMs: number;
   groups: unknown;
+  groupsTaken: number;
 }
 
 export interface AutomationHostsDependencies {
@@ -334,6 +339,7 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
           generation: host.generation,
           releasedThroughMs: finished.throughMs,
           groups: finished.groups,
+          groupsTaken: finished.groupsTaken,
         },
       });
       if (states.get(workspaceId) !== state) return;

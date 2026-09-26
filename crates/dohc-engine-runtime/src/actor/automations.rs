@@ -2,7 +2,7 @@ use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
-    AutomationGroupHandover, AutomationGroupWatch, AutomationGroupWatched, AutomationPress,
+    AutomationGroupRelease, AutomationGroupWatch, AutomationGroupWatched, AutomationPress,
     AutomationPressed, AutomationRetry, AutomationRunNow, AutomationScheduleClaim,
     AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle, AutomationSubscription,
 };
@@ -67,7 +67,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<AutomationGroupHandover, RuntimeError> {
+    ) -> Result<AutomationGroupRelease, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)

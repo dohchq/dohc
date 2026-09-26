@@ -131,7 +131,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
-    releaseAutomationGroups: async () => ({ floorMs: 0, automations: [] }),
+    releaseAutomationGroups: async () => ({ takenGeneration: 0, handover: { floorMs: 0, automations: [] } }),
     watchAutomationGroups: async () => ({ needsHandover: false }),
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),

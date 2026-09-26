@@ -74,8 +74,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
-  WORKSPACE_METHOD,
-  decodeWorkspaceResult,
+  decodeAutomationGroupHandover,
   type AutomationGroupHandover,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
@@ -3328,10 +3327,10 @@ const automationHosts = createAutomationHosts({
   // and carries what it decided so the next host claims each one once.
   finishHere: async (workspaceId, stillHandingOver) => {
     const automations = collectionAutomationsOf(workspaceId);
-    const groups = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
-    if (groups === null) return null;
+    const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
+    if (released === null) return null;
     const throughMs = await automationScheduler.finishHere(workspaceId);
-    return throughMs === null ? null : { throughMs, groups };
+    return throughMs === null ? null : { throughMs, groups: released.handover, groupsTaken: released.takenGeneration };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
@@ -3436,7 +3435,7 @@ async function automationGroupHandover(workspaceId: string, generation: number):
     ? (body as { groups?: unknown }).groups
     : undefined;
   if (groups === undefined) throw new Error(`The relay answered the Group handover read with ${response.status}.`);
-  return groups === null ? null : decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, groups);
+  return groups === null ? null : decodeAutomationGroupHandover(groups);
 }
 
 // Whether any computer can run this workspace's schedules and Group

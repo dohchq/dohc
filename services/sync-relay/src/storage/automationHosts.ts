@@ -17,7 +17,7 @@ export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
       workspace_id TEXT NOT NULL PRIMARY KEY
         REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
       generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
-      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 1048576)
+      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 2097152)
     ) STRICT;
   `);
 }
@@ -48,6 +48,8 @@ export interface AutomationHostReleaseInput extends OwnerScope {
   releasedThroughMs: number;
   /** The Group handover, as JSON text. */
   groups: string;
+  /** The generation whose handover the releasing computer last took. */
+  groupsTaken: number;
 }
 
 export interface AutomationGroupHandoverInput extends OwnerScope {
@@ -209,12 +211,23 @@ export function releaseAutomationHost(
       handoverFrom: null,
       releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
     }, host);
-    storage.db.prepare(
-      `INSERT INTO sync_relay_automation_group_handovers (workspace_id, generation, groups_json)
-       VALUES (?, ?, ?)
-       ON CONFLICT(workspace_id) DO UPDATE SET
-         generation = excluded.generation, groups_json = excluded.groups_json`,
-    ).run(input.workspaceId, host.generation + 1, input.groups);
+    // A computer that never took the handover the relay holds ran nothing
+    // since it: that handover stays the one to carry on.
+    const held = storage.db.prepare(
+      "SELECT generation FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+    ).get(input.workspaceId);
+    if (held && input.groupsTaken < Number(held.generation)) {
+      storage.db.prepare(
+        "UPDATE sync_relay_automation_group_handovers SET generation = ? WHERE workspace_id = ?",
+      ).run(host.generation + 1, input.workspaceId);
+    } else {
+      storage.db.prepare(
+        `INSERT INTO sync_relay_automation_group_handovers (workspace_id, generation, groups_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           generation = excluded.generation, groups_json = excluded.groups_json`,
+      ).run(input.workspaceId, host.generation + 1, input.groups);
+    }
     return readState(storage, input.workspaceId);
   });
 }

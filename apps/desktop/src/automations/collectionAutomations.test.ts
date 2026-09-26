@@ -197,10 +197,13 @@ async function world(options: {
       }
       wake();
       return {
-        floorMs: 0,
-        automations: [...frozenGroups.keys()].map((automationId) => ({
-          automationId, sinceMs: 0, decided: [{ messageId: "m-decided", createdAtMs: 1 }],
-        })),
+        takenGeneration: groupGeneration,
+        handover: {
+          floorMs: 0,
+          automations: [...frozenGroups.keys()].map((automationId) => ({
+            automationId, sinceMs: 0, decided: [{ messageId: "m-decided", createdAtMs: 1 }],
+          })),
+        },
       };
     },
     watchAutomationGroups: async ({ generation, subscriptions: watching, handover }) => {
@@ -3308,8 +3311,9 @@ describe("Collection automations that a Group message starts", () => {
     expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
 
     w.engine.releaseAutomationGroups = release;
-    const handover = await w.executor.releaseGroupSubscriptions(() => true);
-    expect(handover?.automations.map((automation) => automation.automationId)).toEqual(["collection:Tasks#task", "collection:Tasks#lost"]);
+    const released = await w.executor.releaseGroupSubscriptions(() => true);
+    expect(released?.handover.automations.map((automation) => automation.automationId)).toEqual(["collection:Tasks#task", "collection:Tasks#lost"]);
+    expect(released?.takenGeneration, "a workspace that never synced took generation 0").toBe(0);
     expect([...w.subscriptions.keys()]).toEqual([]);
   });
 
@@ -3437,8 +3441,8 @@ describe("Collection automations that a Group message starts", () => {
       startedHere: () => undefined,
       hostChanged: () => executor.hostChanged(),
       finishHere: async (_workspaceId, stillHandingOver) => {
-        const groups = await executor.releaseGroupSubscriptions(stillHandingOver);
-        return groups === null ? null : { throughMs: 5_000, groups };
+        const released = await executor.releaseGroupSubscriptions(stillHandingOver);
+        return released === null ? null : { throughMs: 5_000, groups: released.handover, groupsTaken: released.takenGeneration };
       },
       logError: (_workspaceId, error) => { hostErrors.push(error); },
       monotonicMs: () => clock.ms,

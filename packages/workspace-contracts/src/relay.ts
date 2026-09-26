@@ -616,7 +616,10 @@ export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // window of them. The relay keeps it, as a JSON object it does not read, for
 // the host the release names, and answers it to
 // GET /sync/<workspaceId>/automation-host/groups?generation=<generation>.
-export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 1024 * 1024;
+// `groupsTaken` is the generation whose handover the releasing computer last
+// took. When that is older than the handover the relay holds, that computer
+// never ran it, and the relay keeps that handover for the next host instead.
+export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 // GET /sync/<workspaceId>/automation-host/groups?generation=<generation>:
 // the Group handover the release that started this generation carried, or

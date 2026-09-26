@@ -27,6 +27,7 @@ import {
   type AutomationClaim,
   type AutomationClaimSummary,
   type AutomationGroupHandover,
+  type AutomationReleaseGroupsResult,
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
@@ -140,8 +141,11 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   /** Records under a path. */
   subscribeAutomation(input: RecordSubscription): Promise<unknown>;
   unsubscribeAutomation(input: { automationId: string; path: string }): Promise<unknown>;
-  /** Stops every Group subscription here from claiming, and answers what the next host needs. */
-  releaseAutomationGroups(): Promise<AutomationGroupHandover>;
+  /**
+   * Stops every Group subscription here from claiming, and answers what the
+   * next host needs with the generation whose handover this computer last took.
+   */
+  releaseAutomationGroups(): Promise<AutomationReleaseGroupsResult>;
   /** Sets every Group subscription this computer watches, taking a new host generation's handover. */
   watchAutomationGroups(input: AutomationWatchGroupsParams): Promise<{ needsHandover: boolean }>;
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
@@ -833,20 +837,20 @@ export class CollectionAutomations {
    * again. A message claimed here before still runs here, as a claimed
    * schedule does.
    */
-  async releaseGroupSubscriptions(stillHandingOver: () => boolean): Promise<AutomationGroupHandover | null> {
+  async releaseGroupSubscriptions(stillHandingOver: () => boolean): Promise<AutomationReleaseGroupsResult | null> {
     await this.opened;
     if (this.state !== "open") return null;
-    let handover = null as AutomationGroupHandover | null;
+    let released = null as AutomationReleaseGroupsResult | null;
     try {
       await this.enqueue(async () => {
         // Called off while this waited in line: keep them.
-        if (stillHandingOver()) handover = await this.releaseEngineGroups();
+        if (stillHandingOver()) released = await this.releaseEngineGroups();
       });
     } catch (error) {
       this.options.onError("stop Group subscriptions before a handover", error);
       return null;
     }
-    return handover;
+    return released;
   }
 
   /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
@@ -2372,17 +2376,17 @@ export class CollectionAutomations {
    * tracked or not, in one engine write. Answers the Group handover, or null
    * when the engine did not answer.
    */
-  private async releaseEngineGroups(): Promise<AutomationGroupHandover | null> {
+  private async releaseEngineGroups(): Promise<AutomationReleaseGroupsResult | null> {
     // The release may land even when its answer is lost.
     this.groupSubscriptionsUncertain = true;
-    const handover = await this.withLiveEngine((engine) => engine.releaseAutomationGroups());
-    if (handover === null) return null;
+    const released = await this.withLiveEngine((engine) => engine.releaseAutomationGroups());
+    if (released === null) return null;
     const tracked = [...this.subscribed].filter(([, subscription]) => isGroupSubscription(subscription));
     for (const [automationId] of tracked) this.subscribed.delete(automationId);
     this.watchedGeneration = null;
     this.groupSubscriptionsUncertain = false;
     if (tracked.length > 0) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
-    return handover;
+    return released;
   }
 
   /** The same diff against the dataset ledger, which keeps its own subscriptions. */

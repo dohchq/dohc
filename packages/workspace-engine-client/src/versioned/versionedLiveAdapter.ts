@@ -33,7 +33,7 @@ import {
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
-  type AutomationGroupHandover,
+  type AutomationReleaseGroupsResult,
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
@@ -1182,7 +1182,7 @@ export class VersionedLiveAdapter {
    * Stops every Group subscription in the workspace from claiming, in one
    * engine write, and answers what the next automation host needs.
    */
-  async releaseAutomationGroups(): Promise<AutomationGroupHandover> {
+  async releaseAutomationGroups(): Promise<AutomationReleaseGroupsResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsReleaseGroups, {});
   }
 

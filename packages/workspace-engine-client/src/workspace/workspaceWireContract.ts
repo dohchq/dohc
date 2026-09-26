@@ -298,6 +298,9 @@ export type AutomationSubscribeResult =
 export type AutomationUnsubscribeResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsUnsubscribe];
 
+export type AutomationReleaseGroupsResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsReleaseGroups];
+
 export type AutomationWatchGroupsResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsWatchGroups];
 
@@ -1129,7 +1132,14 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.automationsUnsubscribe]: mutableStruct({
     unsubscribed: Schema.Boolean,
   }),
-  [WORKSPACE_METHOD.automationsReleaseGroups]: AutomationGroupHandoverSchema,
+  /**
+   * The handover, and the host generation whose handover this computer last
+   * took: the relay keeps the handover it holds when that is older.
+   */
+  [WORKSPACE_METHOD.automationsReleaseGroups]: mutableStruct({
+    takenGeneration: Schema.Int,
+    handover: AutomationGroupHandoverSchema,
+  }),
   /** A new host generation without its handover changes nothing. */
   [WORKSPACE_METHOD.automationsWatchGroups]: mutableStruct({
     needsHandover: Schema.Boolean,
@@ -1283,6 +1293,11 @@ function decodeCollectionGetRecordResultValues(
       },
     })),
   };
+}
+
+/** A Group handover as the relay carries it to the next host, checked as the engine answered it. */
+export function decodeAutomationGroupHandover(value: JsonValue): AutomationGroupHandover {
+  return decodeWorkspaceSchema(AutomationGroupHandoverSchema, value, "Group handover");
 }
 
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(

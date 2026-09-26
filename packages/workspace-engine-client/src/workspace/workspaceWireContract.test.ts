@@ -7,6 +7,7 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
+  decodeAutomationGroupHandover,
   decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
@@ -623,10 +624,11 @@ describe("automations wire schemas", () => {
       ],
     };
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, handover),
-    ).toEqual(handover);
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { takenGeneration: 3, handover }),
+    ).toEqual({ takenGeneration: 3, handover });
+    expect(decodeAutomationGroupHandover(handover)).toEqual(handover);
     expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, {
+      decodeAutomationGroupHandover({
         ...handover,
         automations: [{ ...handover.automations[0], decided: [{ messageId: "" }] }],
       }),

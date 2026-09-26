@@ -1371,7 +1371,7 @@ async fn group_messages_written_here_claim_through_rpc() {
     )
     .await;
     assert_eq!(stray.code, ErrorCode::InvalidParams, "it names no Group");
-    let handover = call(
+    let released = call(
         &transport,
         &handle,
         &mut id,
@@ -1379,6 +1379,8 @@ async fn group_messages_written_here_claim_through_rpc() {
         json!({ "nowMs": 36 }),
     )
     .await;
+    assert_eq!(released["takenGeneration"], json!(0));
+    let handover = released["handover"].clone();
     assert_eq!(handover["automations"][0]["automationId"], json!(TASK));
     assert_eq!(
         handover["automations"][0]["decided"],
