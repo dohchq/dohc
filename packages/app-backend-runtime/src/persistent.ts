@@ -48,6 +48,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
   const entryPath=trustedPath(options.entryPath ?? fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/persistent-child")));
   const queueDeadlineMs=input.queueDeadlineMs ?? WORKER_WAIT_MS;
   if (!Number.isSafeInteger(queueDeadlineMs) || queueDeadlineMs<1 || queueDeadlineMs>60_000) reject("invalid_input","Invalid worker queue deadline.");
+  input.signal?.throwIfAborted();
   type Entry={id:number;bytes:number;command:PersistentCommand;resolve:(result:PersistentResult)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
   const queue:Entry[]=[];
   let active:Entry | undefined, child:AppRuntimeChild | undefined, stopped:Error | undefined, closing=false, sequence=0;
@@ -89,6 +90,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       queue.push(entry);pump();
     });
   }
+  const cancel=()=>{const reason:unknown=input.signal?.reason;fail(reason instanceof Error ? reason : new PersistentRuntimeError("worker_aborted","The dataset worker was cancelled."));};
+  input.signal?.addEventListener("abort",cancel,{once:true});
   try {
     // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
     child=(options.launch ?? nodeLauncher)({entryPath,cwd:dirname(entryPath),env:{},
@@ -111,6 +114,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     fail(error instanceof Error ? error : new Error(String(error)));
     if(child && !exited) await exitPromise;
     throw error;
+  } finally {
+    input.signal?.removeEventListener("abort",cancel);
   }
 
   return {

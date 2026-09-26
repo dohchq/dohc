@@ -20,6 +20,8 @@ export interface PersistentOpenInput {
   databaseBytes?: number;
   limits?: Partial<Omit<RuntimeLimits, "databaseBytes">>;
   queueDeadlineMs?: number;
+  // Cancels opening: the host kills the starting worker and rejects with the signal's reason.
+  signal?: AbortSignal;
 }
 export interface PersistentPrepareInput {
   expected: DatasetCursor;
@@ -61,7 +63,7 @@ export const REPLAY_BATCH_EVENTS=64;
 export const REPLAY_BATCH_BYTES=32*1024*1024;
 export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string; reportPath?:string }
 export interface MigratedCheckpoint { path:string; cursor:DatasetCursor; report?: { tables:MigrationPreviewTableSummary[]; bytes:number } }
-export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
+export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs" | "signal"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"prepare";expected:DatasetCursor;guest:GuestRequest}
   | {kind:"finalize";input:FinalizeOperation}
