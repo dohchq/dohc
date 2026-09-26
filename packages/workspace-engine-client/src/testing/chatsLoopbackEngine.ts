@@ -54,6 +54,8 @@ interface WorkspaceState {
   runs: Map<string, ChatRun>;
   runLinks: Map<string, string>;
   pauses: Map<string, ChatThreadPause>;
+  // Each automation message's chain depth, which stays in the engine.
+  chainDepths: Map<string, number>;
   scanHighWaterMs: number;
 }
 
@@ -746,6 +748,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run.failureReason = "reclaimed-crashed";
       }
       if (dispatch.attemptCount < 2) {
+        if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
         dispatch.state = "pending";
         delete dispatch.runId;
         delete dispatch.failureReason;
@@ -1544,6 +1547,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     state.messages.set(messageId, message);
+    if (automation) state.chainDepths.set(messageId, (params.automation as { chainDepth: number }).chainDepth);
     const ids = state.threadMessages.get(threadId) ?? [];
     ids.push(messageId);
     state.threadMessages.set(threadId, ids);
@@ -2592,7 +2596,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         (row) => row.state === "running" && row.runId === runId,
       );
       if (existingRun.endedAtMs === undefined && existingDispatch) {
-        return jsonResult({ dispatch: existingDispatch, run: existingRun });
+        return jsonResult({ dispatch: existingDispatch, run: existingRun, chainDepth: this.runChainDepth(state, runId) });
       }
       throw new Error("invalid-input");
     }
@@ -2633,7 +2637,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const logPath = optionalString(params, "logPath");
     if (logPath !== undefined) run.logPath = logPath;
     state.runs.set(runId, run);
-    return jsonResult({ dispatch, run });
+    return jsonResult({ dispatch, run, chainDepth: this.runChainDepth(state, runId) });
+  }
+
+  // The engine's rule: one more than the deepest automation message among
+  // the run's triggers, or 0 when only people's messages started it.
+  private runChainDepth(state: WorkspaceState, runId: string): number {
+    let deepest = 0;
+    for (const dispatch of state.dispatches.values()) {
+      if (dispatch.runId !== runId) continue;
+      const depth = state.chainDepths.get(dispatch.triggerMessageId);
+      if (depth !== undefined) deepest = Math.max(deepest, depth + 1);
+    }
+    return deepest;
   }
 
   private dispatchListPending(
@@ -2660,7 +2676,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       const runs = unended.filter((run) =>
         run.runId === dispatch.runId && run.triggerMessageId === dispatch.triggerMessageId);
       if (runs.length !== 1) throw new Error("state-corrupt");
-      claims.push({ dispatch, run: runs[0]! });
+      claims.push({ dispatch, run: runs[0]!, chainDepth: this.runChainDepth(state, runs[0]!.runId) });
     }
     if (unended.some((run) => !claims.some((claim) => claim.run.runId === run.runId))) {
       throw new Error("state-corrupt");
@@ -2858,11 +2874,25 @@ export class ChatsLoopbackEngine implements EngineTransport {
       dispatch.runId === runId &&
       dispatch.attemptCount < 2;
     if (!applies || !dispatch) return jsonResult(false);
+    const atMs = this.tick();
+    this.requeueCovered(state, runId, 2, atMs);
     dispatch.state = "pending";
     delete dispatch.runId;
     delete dispatch.failureReason;
-    dispatch.updatedAtMs = this.tick();
+    dispatch.updatedAtMs = atMs;
     return jsonResult(true);
+  }
+
+  // The engine's rule: an interrupted run's covered triggers go back to the
+  // queue with its first trigger, unless they have used their attempts.
+  private requeueCovered(state: WorkspaceState, runId: string, maxAttempts: number, atMs: number): void {
+    for (const covered of state.dispatches.values()) {
+      if (covered.runId !== runId || covered.state !== "done" || covered.attemptCount >= maxAttempts) continue;
+      covered.state = "pending";
+      delete covered.runId;
+      delete covered.failureReason;
+      covered.updatedAtMs = atMs;
+    }
   }
 
   private appQuitRecoveries(
@@ -2942,6 +2972,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         runs: new Map(),
         runLinks: new Map(),
         pauses: new Map(),
+        chainDepths: new Map(),
         scanHighWaterMs: -1,
       };
       this.workspaces.set(id, state);

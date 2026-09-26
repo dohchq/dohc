@@ -21,6 +21,8 @@ import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
@@ -2020,6 +2022,10 @@ const activity = {
   hasAgentRun: (workspaceId: string, expectedRootPath?: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.hasAgentRun(lease.state.activity, expectedRootPath),
+    ),
+  agentRunDepth: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.agentRunDepth(lease.state.activity),
     ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
@@ -4940,6 +4946,7 @@ function registerIpcHandlers(): void {
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+    agentRunDepth: (workspace) => activity.agentRunDepth(workspace.workspaceId),
     exportArchive: async (workspace, input, signal, authorize) => {
       if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
       return exportDatasetArchive(workspace, input.datasetId, input.savePath, input.overwrite, signal, authorize);
@@ -4988,19 +4995,26 @@ function registerIpcHandlers(): void {
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
   ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  const undoAcceptedResponse=async(workspace:DesktopRendererWorkspaceOperation["workspace"],input:AppResponseUndoSelection,author?:MomentWriteAuthor)=>{
+    await openWorkspaceActivity(workspace);
+    const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
+    if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
+    return capture.undoAcceptedAppResponse(input,author);
+  };
   const ownerResponseDependencies={
     registerHandler:handleIpc,assertTrustedSender,withRendererWorkspaceOperation,
     remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
-    undoAcceptedResponse:async(workspace,input)=>{
-      await openWorkspaceActivity(workspace);
-      const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
-      if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
-      return capture.undoAcceptedAppResponse(input);
-    },
+    undoAcceptedResponse:(workspace,input)=>undoAcceptedResponse(workspace,input),
   } satisfies Parameters<typeof registerOwnerAppResponsesIpc<WebContents,DesktopRendererWorkspaceOperation["workspace"],DesktopRendererWorkspaceOperation>>[0];
   registerOwnerAppResponsesIpc(ownerResponseDependencies);
   const cliOwnerResponses=createOwnerAppResponsesHandler<string,DesktopRendererWorkspaceOperation["workspace"],WorkspaceAuthorityOperation<RegistryEntry,DesktopWorkspaceAuthorityState>>({
     ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
+    // During a run an automation started, a removal through the CLI is the
+    // run's agent's, so the removed record's claims carry the run's depth.
+    undoAcceptedResponse:(workspace,input)=>{
+      const depth=activity.agentRunDepth(workspace.workspaceId);
+      return undoAcceptedResponse(workspace,input,depth>0?{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth}:undefined);
+    },
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
   const {

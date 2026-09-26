@@ -33,7 +33,7 @@ describe("AgentIntegration", () => {
       const run = await integration.startAgentRun("ws");
       expect(run).toMatchObject({ status: "running", agentId: "dohc-mcp", onBehalfOf: "local" });
       // The watcher slot now carries this run's attribution.
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: run.id });
+      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: run.id, depth: 0 });
 
       // The record is durable and inspectable on disk.
       const persisted = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
@@ -105,7 +105,7 @@ describe("AgentIntegration", () => {
       // End the older run A: B still owns the workspace, so its attribution
       // slot must stay set (not silently cleared to local).
       await integration.endAgentRun("ws", a.id);
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: b.id });
+      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: b.id, depth: 0 });
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
         mcpEnabled: true,
         activeRun: { id: b.id },

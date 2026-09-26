@@ -12,7 +12,7 @@ import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { AGENT_WAKES_AGENT, definitionHash, localIsoTime, stepKey } from "./automationPlan";
+import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore, type StoredSubscription } from "./automationRunStore";
 import { createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, isAutomationHost, type AutomationHosts } from "./automationHost";
@@ -3022,18 +3022,10 @@ describe("Collection automations that wake your agent", () => {
     expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
   });
 
-  it("does not wake an agent for a change an agent made", async () => {
-    const w = await world({ automations: { Tasks: ask } });
-    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }), { actorKind: "agent" });
-    await w.executor.open();
-    await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
-    expect(w.messages).toEqual([]);
-  });
-
-  it("breaks the agent, automation, automation, agent cycle at the wake", async () => {
-    // The agent changes a task; automation A stamps it; automation B, seeing
-    // A's change, would wake the agent, whose writes start again at depth 0.
+  it("wakes the agent for a change an agent or another automation made, one level deeper", async () => {
+    // The woken agent changes a task; Stamp stamps it; Ask, seeing Stamp's
+    // change, wakes the agent again. Each hop carries the chain one deeper,
+    // so the engine stops the loop at the cap.
     const w = await world({ automations: { Tasks: [
       "  - id: stamp",
       "    name: Stamp",
@@ -3043,28 +3035,25 @@ describe("Collection automations that wake your agent", () => {
     ].join("\n") } });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const fromAgent = w.claim("collection:Tasks#stamp", task, { actorKind: "agent", authorOriginId: "dohc-chat-runner" });
+    fromAgent.depth = 1;
     await w.executor.open();
     await w.settledClaim(fromAgent);
     expect(fromAgent.state).toBe("done");
     expect(w.fieldsOf(task).Stamped).toBe(true);
+    expect(w.journaled.at(-1)?.attribution).toMatchObject({ actorKind: "automation", depth: 2 });
 
     const fromStamp = w.claim("collection:Tasks#ask", task, {
       actorKind: "automation", authorOriginId: "collection:Tasks#stamp",
       fields: [{ field: "Stamped", historyId: 99, previous: null, next: { value: true } }],
     });
+    fromStamp.depth = 2;
     w.executor.notifyClaimed();
     await w.settledClaim(fromStamp);
-    expect(fromStamp).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
-    expect(w.messages).toEqual([]);
-
-    // A person's own change still wakes the agent.
-    const fromPerson = w.claim("collection:Tasks#ask", task, {
-      actorKind: "human", fields: [{ field: "Stamped", historyId: 100, previous: { value: true }, next: { value: false } }],
-    });
-    w.executor.notifyClaimed();
-    await w.settledClaim(fromPerson);
-    expect(fromPerson.state).toBe("done");
-    expect(w.messages).toHaveLength(1);
+    expect(fromStamp.state).toBe("done");
+    expect(w.messages).toEqual([expect.objectContaining({
+      target: { kind: "agent" },
+      automation: { automationId: "collection:Tasks#ask", name: "Ask my agent", depth: 3 },
+    })]);
   });
 
   it("fails a wake with the reason when dohc cannot check who can edit, instead of waiting for a sign-in", async () => {

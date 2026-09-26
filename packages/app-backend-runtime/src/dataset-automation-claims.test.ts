@@ -245,6 +245,21 @@ it("never claims an automation's own commit, records it for History, and stops t
   ]);
 });
 
+it("claims an agent's commit at its run's depth, and records nothing for History", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  // An agent run woken by a message at depth 2 writes at depth 3.
+  f.commit("INSERT INTO tasks VALUES('a','Open','')", { kind: "agent", depth: 3 });
+  const [claim, ...rest] = drain(f.claims);
+  expect(rest).toEqual([]);
+  expect(claim).toMatchObject({ automationId: "collection:tasks#a", depth: 3, actor: { kind: "agent", depth: 3 } });
+  f.commit("INSERT INTO tasks VALUES('b','Open','')", { kind: "agent", depth: 4 });
+  expect(f.claims.next(scope.workspaceId)).toBeNull();
+  expect(f.db.prepare("SELECT state,error FROM dohc_dataset_automation_claims WHERE revision=2").get())
+    .toMatchObject({ state: "failed", error: DATASET_AUTOMATION_CHAIN_STOPPED });
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_revisions").get()).toEqual({ count: 0 });
+});
+
 it("charges what it keeps, and keeps each automation's newest settled claims and newest failure", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));

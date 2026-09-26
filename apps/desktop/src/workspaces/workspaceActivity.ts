@@ -567,6 +567,13 @@ export function createWorkspaceActivity(
     );
   }
 
+  // The chain depth an agent's writes declare while a run holds the slot:
+  // the run's depth, or 0 with no run. An agent writing through the CLI or
+  // MCP during the run writes at the run's depth, whichever agent it is.
+  function agentRunDepth(state: WorkspaceActivityState): number {
+    return state.entry?.agentRun?.depth ?? 0;
+  }
+
   // Registers engine-originated disk writes (restore flows, future engine
   // API/MCP writes) so the watcher's engine capture does not re-record them.
   // Returns null when the workspace has no active engine capture — callers
@@ -636,6 +643,7 @@ export function createWorkspaceActivity(
     claimAgentRun,
     clearAgentRun,
     hasAgentRun,
+    agentRunDepth,
     engineCaptureFor,
     workspaceRootPath,
     registerExpectedEngineEvents,

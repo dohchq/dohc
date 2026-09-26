@@ -171,7 +171,8 @@ pub struct AutomationGroupMessage<'a> {
     /// computer has none.
     pub automation_id: Option<&'a str>,
     /// An automation message's chain depth: this computer's, or the one
-    /// another computer sent with the message.
+    /// another computer sent with the message. An agent's message written on
+    /// this computer during an agent run carries that run's depth.
     pub chain_depth: Option<u32>,
 }
 
@@ -775,14 +776,19 @@ pub fn claim_group_message_in_tx(
     let writer = message.automation_id;
     // An automation message claims at its depth, kept within 1 and the cap, so
     // a chain stops at the cap across computers. A forged high depth only
-    // stops a chain early; a missing one counts as 1.
-    let depth = if message.author_kind == "automation" {
-        message
+    // stops a chain early; a missing one counts as 1. An agent's message
+    // claims at its run's depth, so an agent an automation woke cannot start
+    // the chain over by posting.
+    let depth = match message.author_kind {
+        "automation" => message
             .chain_depth
             .unwrap_or(1)
-            .clamp(1, AUTOMATION_CHAIN_DEPTH_CAP)
-    } else {
-        0
+            .clamp(1, AUTOMATION_CHAIN_DEPTH_CAP),
+        "agent" => message
+            .chain_depth
+            .unwrap_or(0)
+            .min(AUTOMATION_CHAIN_DEPTH_CAP),
+        _ => 0,
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
     let mut inserted = Vec::new();
