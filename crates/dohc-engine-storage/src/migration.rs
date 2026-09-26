@@ -2579,6 +2579,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_SHARE_DIRECT_WRITES_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 14,
+        id: "v2-authored-create-intent",
+        sql: "CREATE TABLE authored_create_intent (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), input_json TEXT NOT NULL, stage_id TEXT NOT NULL) STRICT;",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -2857,6 +2863,10 @@ mod tests {
             (
                 "v2-share-direct-writes",
                 "8a34d5488c9313ad8f2ad2b84cb5c274ff1e2a9a06b962a14141e9188b399c46",
+            ),
+            (
+                "v2-authored-create-intent",
+                "be47dca6cca30c2330af64417998687bd61443adf6ad5677325216f63b9a590e",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

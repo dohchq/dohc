@@ -385,6 +385,13 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+// Who asked for a sync pass now. A person's retry counts toward the attempts
+// a failure's notice weighs; a retry on reconnecting or waking does not.
+export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
+  reason: z.enum(["person", "reconnect"]),
+});
+export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
@@ -836,10 +843,23 @@ export const ImportWorkspaceFilesResult = z.object({
   // collision budget exhausted) — surfaced so the import summary can say
   // "2 skipped" instead of the batch silently shrinking.
   skipped: z.number().int().min(0),
-  // Some files landed before the owner lost a trustworthy completion result.
-  // This is not an ordinary skip: the Explorer must refresh before the user
-  // decides what, if anything, to retry.
+  // Some files landed before the import stopped: a copy failed, or the owner
+  // lost a trustworthy completion result. This is not an ordinary skip: the
+  // Explorer must refresh before the user decides what, if anything, to
+  // retry, and importing the same sources again would copy the landed files
+  // a second time.
   interrupted: z.literal(true).optional(),
+  // An ordinary import stopped at a failed copy: the source file's name, and
+  // either the filesystem's error code or a refusal dohc makes itself
+  // (`refusal`), with raw text that only goes into copied details.
+  stop: z
+    .object({
+      file: z.string().min(1).max(4096),
+      code: z.string().min(1).max(64).optional(),
+      detail: z.string().min(1).max(500).optional(),
+      refusal: z.enum(["dangling-link"]).optional(),
+    })
+    .optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
@@ -1223,6 +1243,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     "syncing",
     "local-changes",
     "conflict",
+    "sync-failed",
     "cloud-disconnected",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
@@ -1242,9 +1263,17 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
-  // Additive (0P-B relay sync): true after repeated non-auth sync failures.
-  // Local changes remain safe and the engine keeps retrying with backoff.
-  syncFailing: z.boolean().optional(),
+  // Why the last sync pass failed, present until a pass succeeds. Local work
+  // is saved either way, and the engine keeps retrying with backoff.
+  syncFailure: z
+    .object({
+      cause: z.enum(["server-unreachable", "unknown"]),
+      detail: z.string(),
+      // When this failure began, and how many passes have failed since.
+      sinceMs: z.number(),
+      attempts: z.number().int().positive(),
+    })
+    .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
@@ -6892,6 +6921,8 @@ export interface DohcDesktopBridge
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
+  // Runs a cloud sync pass now and answers with the status after it.
+  retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;

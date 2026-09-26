@@ -381,6 +381,27 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("replays only the exact authored create request", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: (request) => loopback.sendRequest(request), close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const input = {
+      workspaceId: WORKSPACE, versionId: "main", path: "new.md", text: "original",
+      createOnly: true, requestId: "create-request", metadata: { origin: "api" as const },
+    };
+    const first = await adapter.writeTextFile(input);
+    const replay = await adapter.writeTextFile(input);
+    expect(replay.deduped).toBe(true);
+    expect(replay.moment.momentId).toBe(first.moment.momentId);
+    await expect(adapter.writeTextFile({ ...input, text: "changed" })).rejects.toThrow();
+    await expect(adapter.writeTextFile({ ...input, requestId: "other-create" })).rejects.toThrow("target-path-exists");
+    const ordinary = { ...input, createOnly: false, path: "ordinary.md", requestId: "ordinary-request" };
+    await adapter.writeTextFile(ordinary);
+    await expect(adapter.writeTextFile({ ...ordinary, createOnly: true })).rejects.toThrow();
+  });
+
   it("requires a workspace binding before the adapter can issue requests", () => {
     const requests: Request[] = [];
     expect(() => {

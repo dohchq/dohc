@@ -290,7 +290,7 @@ pub struct ListMomentsQuery {
 }
 
 /// Inputs to [`crate::VersionedTextStore::write_text`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WriteText {
     pub workspace_id: String,
     pub version_id: String,

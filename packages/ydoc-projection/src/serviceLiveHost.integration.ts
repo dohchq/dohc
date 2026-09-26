@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { yDocToMarkdown, markdownToYDoc } from "./import-export.js";
 import { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "./liveDocumentValidation.js";
-import { createEngineClient, EngineClient } from "../../workspace-engine-client/src/daemon/engineClient.js";
+import { createEngineClient } from "../../workspace-engine-client/src/daemon/engineClient.js";
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import { startServiceLiveHost } from "../../../services/sync-relay/src/serviceLiveHost.js";
 import {createNamedFrameChanges} from "../../../services/sync-relay/src/liveHostChanges.js";
@@ -151,14 +151,9 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       shareId: "share", grantId: "grant", expectedGrantGeneration: 1, expectedDependentGrantIds: [],
       expectedFence: authority.binding.restoreFenceGeneration, restorePointCursor: 0, restorePointReceiptDigest: hash(baseline)}, Date.now());
     advanceStopRestoreFence(deployment.storage as StorageContext, lookup, Date.now());
-    const originalRequest = EngineClient.prototype.sendRequest;
-    let interrupted = false;
-    const lost = boundary === "after-native-fence"
-      ? vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeStopRestoreFence").mockImplementationOnce(() => {throw new Error("lost native-fence boundary");})
-      : vi.spyOn(EngineClient.prototype, "sendRequest").mockImplementation(function(this: EngineClient, ...args: Parameters<EngineClient["sendRequest"]>) {
-        if (!interrupted && args[0].method === "liveApplication.fenceRestore") {interrupted = true; return Promise.reject(new Error("lost native-fence boundary"));}
-        return originalRequest.apply(this, args);
-      });
+    const lost = vi.spyOn(LiveCommittedDeliveryStore.prototype,
+      boundary === "after-native-fence" ? "acknowledgeStopRestoreFence" : "pendingStopRestoreFence")
+      .mockImplementationOnce(() => {throw new Error("lost native-fence boundary");});
     try {await expect(active.stopRestore(lookup)).rejects.toThrow("lost native-fence boundary");}
     finally {lost.mockRestore();}
     expect(secondReader.capture.invalidated.aborted).toBe(true);
