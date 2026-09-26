@@ -248,6 +248,127 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
+/// Private evidence for an authored create. Publication links this complete file
+/// into an absent workspace path; the link preserves identity across restart.
+pub struct AuthoredCreateStage {
+    root: PathBuf,
+    stage: PathBuf,
+    target: PathBuf,
+}
+
+impl AuthoredCreateStage {
+    pub fn open(root: &Path, path: &str, id: &str) -> Result<Self, MaterializeError> {
+        if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(MaterializeError::UnsafeTargetPath);
+        }
+        let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
+        let target = resolve_target(&root, path)?;
+        walk_target_components(
+            &root,
+            target.parent().ok_or(MaterializeError::UnsafeTargetPath)?,
+            reject_link_or_reparse,
+        )?;
+        let stage = root
+            .join(".dohc/engine/authored-create")
+            .join(format!("{id}.stage"));
+        prepare_target_parent_symlink_free(&root, &stage)?;
+        Ok(Self {
+            root,
+            stage,
+            target,
+        })
+    }
+
+    pub fn prepare(&self, text: &str) -> Result<(), MaterializeError> {
+        use std::io::Write;
+        if text.len() > MAX_MATERIALIZE_BYTES {
+            return Err(MaterializeError::TooLarge { actual: text.len() });
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.stage)
+            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
+        file.sync_all()
+            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
+        sync_parent_dir(self.stage.parent(), DurabilityPolicy::per_os())
+    }
+
+    /// False means an existing entry won. Never overwrite or follow that entry.
+    pub fn publish(&self) -> Result<bool, MaterializeError> {
+        walk_target_components(
+            &self.root,
+            self.target
+                .parent()
+                .ok_or(MaterializeError::UnsafeTargetPath)?,
+            ensure_real_directory,
+        )?;
+        match std::fs::hard_link(&self.stage, &self.target) {
+            Ok(()) => {
+                sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os())?;
+                Ok(true)
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(MaterializeError::io(&self.target, &e)),
+        }
+    }
+
+    pub fn is_published(&self) -> Result<bool, MaterializeError> {
+        // Missing evidence cannot prove either publication or a collision.
+        let stage = same_file::Handle::from_path(&self.stage)
+            .map_err(|e| MaterializeError::io(&self.stage, &e))?;
+        let metadata = match std::fs::symlink_metadata(&self.target) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(MaterializeError::io(&self.target, &e)),
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+        {
+            return Ok(false);
+        }
+        let target = same_file::Handle::from_path(&self.target)
+            .map_err(|e| MaterializeError::io(&self.target, &e))?;
+        Ok(stage == target)
+    }
+
+    pub fn cleanup(&self) -> Result<(), MaterializeError> {
+        match std::fs::remove_file(&self.stage) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(MaterializeError::io(&self.stage, &e)),
+        }
+    }
+}
+
+/// No intent remains when this runs. Only this subsystem owns these private files.
+pub fn cleanup_authored_create_stages(root: &Path) -> Result<(), MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|e| MaterializeError::io(root, &e))?;
+    let dir = root.join(".dohc/engine/authored-create");
+    ensure_target_symlink_free(&root, &dir)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(MaterializeError::io(&dir, &e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| MaterializeError::io(&dir, &e))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == 70
+            && name.ends_with(".stage")
+            && name[..64].bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| MaterializeError::io(&entry.path(), &e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(

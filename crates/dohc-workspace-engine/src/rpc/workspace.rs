@@ -785,6 +785,10 @@ impl EngineService {
                 ),
             )
             .await?;
+            actor
+                .recover_authored_create(params.workspace_id.clone(), root.clone())
+                .await
+                .map_err(map_runtime)?;
             // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),

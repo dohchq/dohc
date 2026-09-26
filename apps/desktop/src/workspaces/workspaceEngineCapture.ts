@@ -3122,9 +3122,6 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
         }
-        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
-          throw new Error(`File already exists: ${path}`);
-        }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         if (writeOptions.signal?.aborted) {
@@ -3142,10 +3139,13 @@ export function createWorkspaceEngineCapture(
           versionId,
           path,
           text,
+          ...(writeOptions.createOnly ? { createOnly: true } : {}),
           metadata,
           author,
         });
-        await materialize([{ kind: "write", path, text }], policy);
+        if (!writeOptions.createOnly) {
+          await materialize([{ kind: "write", path, text }], policy);
+        }
         return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },

@@ -1086,6 +1086,7 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         "versionedText.write",
         json!({
             "versionId": "main",
+            "createOnly": true,
             "objectId": "object-beta",
             "path": "tasks/beta.md",
             "text": "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nstatus: open\n---\n\nBody",
@@ -1100,9 +1101,37 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
         }),
     )
     .await;
+    assert!(
+        std::fs::read_to_string(scratch.path().join("tasks/beta.md"))
+            .expect("published record")
+            .contains("rec_bbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    let before = std::fs::read(scratch.path().join("tasks/beta.md")).expect("before collision");
+    let collision = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        json!({
+            "versionId": "main", "createOnly": true, "path": "tasks/beta.md",
+            "text": "must not replace beta", "momentId": "collision-loser", "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(collision.message, "target-path-exists");
+    assert_eq!(
+        std::fs::read(scratch.path().join("tasks/beta.md")).expect("after collision"),
+        before
+    );
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     {
         let mut store = EngineStore::open(&db, 2).expect("reopen store");
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .get_moment(WORKSPACE_ID, "collision-loser")
+                .expect("loser history")
+                .is_none()
+        );
         store
             .write_with(&NoFaults, |tx| {
                 let reconciliation = reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;

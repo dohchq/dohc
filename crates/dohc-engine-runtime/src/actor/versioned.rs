@@ -99,6 +99,7 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     None,
+                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -135,6 +136,7 @@ impl ActorHandle {
                     &input,
                     root_dir.as_deref(),
                     restore_before_moment_id.as_deref(),
+                    false,
                     faults.as_ref(),
                     &token,
                 )
@@ -565,11 +567,12 @@ pub(super) fn with_local_file_mutation_cache_reset<T>(
     mutation()
 }
 
-fn versioned_text_write_on_store(
+pub(super) fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
     restore_before_moment_id: Option<&str>,
+    finish_create: bool,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -640,6 +643,10 @@ fn versioned_text_write_on_store(
             result.deduped,
         )
         .map_err(RuntimeError::from)?;
+        if finish_create {
+            tx.execute("DELETE FROM authored_create_intent WHERE singleton = 1", [])
+                .map_err(StorageError::persist_public)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {

@@ -459,6 +459,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     text: string;
+    createOnly?: boolean;
     restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentAuthor;

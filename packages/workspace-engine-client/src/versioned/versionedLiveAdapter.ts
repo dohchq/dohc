@@ -395,6 +395,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    createOnly?: boolean;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
@@ -409,6 +410,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         text: input.text,
+        ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
         ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
