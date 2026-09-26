@@ -610,10 +610,10 @@ describe("persistent dataset worker",()=>{
         // This test is about the CPU budget, not the silence watchdog: under a loaded gate the 6 s stop plus the
         // query can pass 30 s without a progress report. 50 s stays inside the test's 60 s limit, so a real stall still fails.
         const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:50_000});
-        // A fraction of a second of CPU even under heavy load, well inside the budget.
-        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000000) SELECT sum(x) AS total FROM n')}}"});
+        // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
+        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
         await stall;
-        expect(prepared.result).toEqual([{total:2000001000000}]);
+        expect(prepared.result).toEqual([{total:50000005000000}]);
         // Stopped for 6 s inside a 5 s budget, and not charged for it.
         expect(suspendedAt).toBeGreaterThan(0);
         expect(repliedAt).toBeGreaterThan(resumedAt);
