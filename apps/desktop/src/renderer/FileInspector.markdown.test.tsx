@@ -54,6 +54,7 @@ const engineDocState: UseEngineDoc = {
   engineMayHoldDocument: false,
   artifactAssetsInvalid: false,
   deletedWhileEditing: false,
+  goneCause: null,
   deletedDraftId: null,
   recoveryAssets: null,
   permanentFailureWhileEditing: false,

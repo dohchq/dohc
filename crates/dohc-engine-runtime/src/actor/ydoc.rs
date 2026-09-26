@@ -53,6 +53,8 @@ pub struct YdocOpenState {
     pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
     /// The Yjs client the seed of `seed_content` must use. Present exactly
@@ -81,6 +83,8 @@ pub struct YdocSeedMaterialization {
 pub struct YdocResyncState {
     pub initial_update: Vec<u8>,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
 }
@@ -822,6 +826,48 @@ impl ActorHandle {
         self.run(move |_store, cache| {
             cache.clear();
             Ok(cache.stats())
+        })
+        .await
+    }
+
+    /// Originate the unclaimed lineage a live session holds, when the
+    /// workspace's relay enrollment is ready. Returns the lineage's claim
+    /// afterwards, which the caller hands to the session, and a decline when
+    /// the base is too large to share.
+    pub async fn ydoc_originate_live_lineage(
+        &self,
+        key: DocKey,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<(Option<String>, Option<SharingDeclined>), RuntimeError> {
+        self.run(move |store, doc_cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let Some(marker) = dohc_engine_collab::read_marker(store, &key)? else {
+                return Ok((None, None));
+            };
+            if marker.lineage_claim_status.has_claimed_base()
+                || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
+                || !store.read_with(|conn| {
+                    dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
+                })?
+            {
+                return Ok((marker.lineage_claim_id, None));
+            }
+            let declined = match store.write_with(&NoFaults, |tx| {
+                dohc_engine_sync::originate_live_ydoc_base_in_tx(tx, &key, now_ms)
+            })? {
+                TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
+                    Some(declined)
+                }
+                TxnOutcome::Committed(_) => None,
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            };
+            doc_cache.remove(&key);
+            let claim = dohc_engine_collab::read_marker(store, &key)?
+                .and_then(|marker| marker.lineage_claim_id);
+            Ok((claim, declined))
         })
         .await
     }
@@ -1695,6 +1741,7 @@ pub(super) fn ydoc_open_state_on_store(
     } else {
         Vec::new()
     };
+    let lineage_originated_here = lineage_originated_here_on_store(store, &key)?;
     let seed = (content_kind != ContentKind::Scene && !lineage_existing)
         .then_some(head.as_ref())
         .flatten();
@@ -1720,6 +1767,7 @@ pub(super) fn ydoc_open_state_on_store(
         initial_update,
         lineage_existing,
         lineage_claim_id,
+        lineage_originated_here,
         restore_generation,
         seed_content: seed_client_id.and(head).map(|snapshot| snapshot.text),
         seed_client_id,
@@ -2800,6 +2848,16 @@ pub(super) fn ydoc_settle_on_store(
     })))
 }
 
+fn lineage_originated_here_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<bool, RuntimeError> {
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(false);
+    };
+    Ok(store.read_with(|conn| dohc_engine_sync::lineage_originated_here(conn, key, &marker))?)
+}
+
 fn ydoc_resync_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -2851,6 +2909,7 @@ fn ydoc_resync_on_store(
     let lineage_claim_id = marker
         .as_ref()
         .and_then(|marker| marker.lineage_claim_id.clone());
+    let lineage_originated_here = lineage_originated_here_on_store(store, key)?;
     let cached_doc = if marker.is_some() {
         store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))?
     } else {
@@ -2887,6 +2946,7 @@ fn ydoc_resync_on_store(
     Ok(YdocResyncState {
         initial_update,
         lineage_claim_id,
+        lineage_originated_here,
         recovered_paths,
         artifact_assets,
     })
@@ -2922,7 +2982,7 @@ fn ydoc_close_session_on_store(
         }
         Err(error) => return Err(error.into()),
     };
-    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+    let Some(mut marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(YdocCloseSessionOutcome {
             outcome: None,
             record_facts: Vec::new(),
@@ -2980,6 +3040,36 @@ fn ydoc_close_session_on_store(
     } else {
         None
     };
+    // The enrolment sweep leaves a lineage alone while a session holds it. If
+    // the workspace now replicates and the file already holds the head, this
+    // close claims the lineage: a local-only close would prune it and keep
+    // the document off the relay. A dirty close claims nothing, so it still
+    // refuses below instead of compacting text the file does not have.
+    if restore_generation.is_none()
+        && !marker.lineage_claim_status.has_claimed_base()
+        && marker.head_update_seq > 0
+        && store.read_with(|conn| {
+            dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
+        })?
+        && dohc_engine_collab::local_close_is_covered(
+            store,
+            key,
+            &marker,
+            authoritative_projection.as_ref(),
+        )?
+    {
+        match store.write_with(faults, |tx| {
+            dohc_engine_sync::originate_closing_ydoc_base_in_tx(tx, key, now_ms)
+        })? {
+            TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
+                eprintln!("engine: {declined}");
+            }
+            TxnOutcome::Committed(_) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        marker = dohc_engine_collab::read_marker(store, key)?
+            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    }
     let outcome = match dohc_engine_collab::close_session(
         store,
         key,

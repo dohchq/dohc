@@ -2294,39 +2294,22 @@ pub struct CloseProjection {
     pub materialized_seed_source_sha256: Option<String>,
 }
 
-/// Close a session: regime-dependent. Replicated (or persist-closed-state)
-/// compacts and keeps the lineage durable; local-only prunes every CRDT row to
-/// the bare marker (the workspace file is the artifact). A caller that uses a
-/// store-backed projector supplies its digest; scenes refuse the generic
-/// projection because their portable files resolve from versioned storage.
-pub fn close_session(
-    store: &mut EngineStore,
+/// Whether a local-only close could prune this lineage without losing text:
+/// the workspace file already holds the head's bytes and no pending job still
+/// has to write them. A doc with no edits (`head_update_seq == 0`) has nothing
+/// to lose. The close hook asks the same question before it claims a lineage
+/// for the relay, so a dirty close keeps refusing instead of claiming.
+pub fn local_close_is_covered(
+    store: &EngineStore,
     key: &DocKey,
-    persist_closed_state: bool,
+    marker: &Marker,
     authoritative_projection: Option<&CloseProjection>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
-    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
-    if marker.regime == Regime::Replicated || persist_closed_state {
-        // Force a compaction (threshold 0) so the lineage is a single snapshot +
-        // no trailing updates, and never prune it.
-        return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
-            TxnOutcome::Committed(outcome) => {
-                TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
-            }
-            TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
-        });
-    }
-    // Local-only prune would discard the CRDT cache. Refuse unless the artifact
-    // already holds the head's bytes (the workspace file is the artifact: it
-    // must exist before the cache is thrown away). A doc with no edits
-    // (`head_update_seq == 0`) has nothing to lose and prunes freely.
+) -> Result<bool, CollabError> {
     if marker.head_update_seq > 0 {
         let content_sha = match authoritative_projection {
             Some(projection) => projection.sha256.clone(),
             None if marker.content_kind == ContentKind::Scene => {
-                return Err(CollabError::UnsettledClose);
+                return Ok(false);
             }
             None => {
                 let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
@@ -2369,7 +2352,7 @@ pub fn close_session(
                         })))
         })?;
         if !covered {
-            return Err(CollabError::UnsettledClose);
+            return Ok(false);
         }
         // The settle may have committed while its materialization failed
         // transiently: last_settled_sha matches the projection but the job
@@ -2403,8 +2386,41 @@ pub fn close_session(
             .map_err(map_sql)
         })?;
         if job_pending {
-            return Err(CollabError::UnsettledClose);
+            return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+/// Close a session: regime-dependent. Replicated (or persist-closed-state)
+/// compacts and keeps the lineage durable; local-only prunes every CRDT row to
+/// the bare marker (the workspace file is the artifact). A caller that uses a
+/// store-backed projector supplies its digest; scenes refuse the generic
+/// projection because their portable files resolve from versioned storage.
+pub fn close_session(
+    store: &mut EngineStore,
+    key: &DocKey,
+    persist_closed_state: bool,
+    authoritative_projection: Option<&CloseProjection>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
+    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime == Regime::Replicated || persist_closed_state {
+        // Force a compaction (threshold 0) so the lineage is a single snapshot +
+        // no trailing updates, and never prune it.
+        return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
+            TxnOutcome::Committed(outcome) => {
+                TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
+            }
+            TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
+        });
+    }
+    // Local-only prune would discard the CRDT cache. Refuse unless the artifact
+    // already holds the head's bytes (the workspace file is the artifact: it
+    // must exist before the cache is thrown away).
+    if !local_close_is_covered(store, key, &marker, authoritative_projection)? {
+        return Err(CollabError::UnsettledClose);
     }
     // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {

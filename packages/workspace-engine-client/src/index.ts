@@ -14,6 +14,7 @@ export {
   isTransientEngineRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocObjectChangedRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
   DAEMON_ERROR_CODES,

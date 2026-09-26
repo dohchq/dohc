@@ -127,6 +127,9 @@ interface EngineYDocIpcOwnedSession {
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
   deleted: boolean;
+  // Another object took this document's path. Implies `deleted`: the
+  // session is gone from this path either way, only the reason differs.
+  objectChanged: boolean;
   emit: (event: SessionEvent) => void;
   // Sends an update that did not come from this editor to its Y.Doc.
   show(update: Uint8Array): void;
@@ -542,6 +545,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           else if (delivery === "pending") pending.push(send);
         };
         let provider: EngineYDocSessionProvider;
+        let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
@@ -565,6 +569,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 }),
               );
             },
+            onObjectChanged: () => {
+              publish(() => markObjectChanged());
+            },
           });
         } catch (error) {
           delivery = "discarded";
@@ -584,6 +591,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           ),
           retiredArtifactAssets: [],
           deleted: false,
+          objectChanged: false,
           emit: signals.emit,
           show: (update) => publish(() => signals.remoteUpdate(update)),
           markDeleted() {
@@ -596,6 +604,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             owned.ownerHandoff = undefined;
             return provider.close(options);
           },
+        };
+        markObjectChanged = () => {
+          if (owned.objectChanged) return;
+          owned.objectChanged = true;
+          owned.deleted = true;
+          owned.emit({ state: "object-changed", seq: owned.saveSeq.dirtySeq });
         };
         if (provider.contentKind === documentKind) {
           delivery = "active";
@@ -698,6 +712,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         lineageGeneration: input.lineageGeneration,
       },
       (owned): ApplyUpdateResult => {
+        if (owned.objectChanged) {
+          owned.emit({ state: "object-changed", seq: input.seq });
+          return { accepted: false, reason: "object-changed" };
+        }
         if (owned.deleted) {
           owned.emit({ state: "deleted", seq: input.seq });
           return { accepted: false, reason: "deleted" };
