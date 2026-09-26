@@ -9,12 +9,6 @@ import type {
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
-import {
-  createCollectionRecord,
-  setCollectionRecordFields,
-  type CollectionRecordEditContext,
-  type SetCollectionRecordFieldsResult,
-} from "../workspaces/collectionRecordEdits";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   definitionHash,
@@ -38,12 +32,12 @@ import { checkAutomationReach, type ReachCollection, type ReachRoster, type Reac
 import {
   AutomationChatSessionWait,
   chatNeedsOf,
+  NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
   type ChatDirectory,
   type ChatNeeds,
 } from "./automationChat";
-import { NoticeNotSentError } from "../notices/noticeStore";
 import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 
 // One run of one claim: check reach, read, evaluate, save the plan, then
@@ -84,11 +78,49 @@ export interface CollectionAutomationReads {
   queryCollectionRecords(input: CollectionQueryParams): Promise<CollectionQueryResult>;
 }
 
+/** What a field write did. */
+interface RecordFieldsWritten {
+  /**
+   * The value each written field held before this write, keyed by field.
+   * A field the record did not have reads as null. Fields that already held
+   * the requested value are absent.
+   */
+  replaced: Record<string, unknown>;
+  /** The current value of each field `expectedBefore` left as it is. */
+  kept: Record<string, unknown>;
+}
+
+/**
+ * Record writes with the workspace's write authority. The desktop binds
+ * them to its live record documents (collectionRecordEdits.ts).
+ */
+export interface CollectionRecordWrites {
+  setFields(input: {
+    recordPath: string;
+    fields: Record<string, unknown>;
+    author: ChangeAuthor;
+    /** Names the write for the engine's idempotency check, one key per field under this prefix. */
+    idempotencyKeyPrefix?: string;
+    /**
+     * The value each field should hold before the write. A field holding
+     * something else changed since the plan: the write keeps it and reports
+     * it in `kept`.
+     */
+    expectedBefore?: Record<string, unknown>;
+  }): Promise<RecordFieldsWritten>;
+  /**
+   * Adds the record `name` with this id, or answers the record the
+   * Collection already has with it. The answer names the id the engine gave
+   * the file.
+   */
+  create(input: { collectionPath: string; name: string; author: ChangeAuthor; recordId: string }): Promise<{ path: string; recordId: string }>;
+}
+
 export interface CollectionAutomationRunDependencies {
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
   /** Record writes with the workspace's write authority, ending at `signal`. */
-  withRecordWrites<T>(signal: AbortSignal, work: (context: CollectionRecordEditContext) => Promise<T>): Promise<T>;
+  withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
   /** Whether a folder is a Collection the engine lists. */
   isCollection(path: string): boolean;
   /** Whether a folder keeps its records in a dataset (it holds dataset.json). */
@@ -599,7 +631,7 @@ type EffectMode = "fresh" | "may-have-landed" | "resumed";
 function fieldWrites(
   target: { recordId: string; path: string },
   fields: readonly PlannedField[],
-  result: Pick<SetCollectionRecordFieldsResult, "replaced" | "kept">,
+  result: RecordFieldsWritten,
   mode: EffectMode,
 ): RunWrite[] {
   const writes: RunWrite[] = [];
@@ -662,8 +694,8 @@ async function applyEffect(
   const { run, author, signal, ordinal } = context;
   if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "notice") return await applyChatEffect(dependencies, context, effect);
   const key = stepKey(run.claimId, run.keySeed, ordinal);
-  const seam = (edit: CollectionRecordEditContext, path: string, recordId: string, fields: readonly PlannedField[]) =>
-    setCollectionRecordFields(edit, {
+  const seam = (edit: CollectionRecordWrites, path: string, recordId: string, fields: readonly PlannedField[]) =>
+    edit.setFields({
       recordPath: path,
       fields: Object.fromEntries(fields.map(({ field, after }) => [field, after])),
       author,
@@ -677,7 +709,7 @@ async function applyEffect(
     // file another id, the one this run recorded is the one to find.
     const known = [...run.created].reverse().find((entry) => entry.ordinal === ordinal);
     const created = await dependencies.withRecordWrites(signal, (edit) =>
-      createCollectionRecord(edit, {
+      edit.create({
         collectionPath: effect.collectionPath,
         name: effect.name,
         author,

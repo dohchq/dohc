@@ -34,8 +34,8 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { expressionProblem } from "../automations/automationPlan";
-import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "../automations/collectionAutomations";
+import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
 // and writes automations.yaml, so the renderer never loads the file contract

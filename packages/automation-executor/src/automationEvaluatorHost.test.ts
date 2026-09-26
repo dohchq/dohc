@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationEvaluator, AutomationOutcome, JsonValue } from "@dohc/app-backend-runtime/automation";
-import { deferred } from "../testing/deferred";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 
 const scope = { trigger: { kind: "record-added" }, person: null, now: "2026-09-25T09:30:00.000+08:00" };
@@ -12,7 +11,7 @@ function fake(evaluate: AutomationEvaluator["evaluate"]): () => AutomationEvalua
 
 describe("the shared formula evaluator", () => {
   it("lets each automation have one request waiting, so one slow automation cannot fill the queue", async () => {
-    const slow = deferred<AutomationOutcome<JsonValue>[]>();
+    const slow = Promise.withResolvers<AutomationOutcome<JsonValue>[]>();
     let calls = 0;
     const shared = createAutomationFormulaEvaluator(fake(async () => (calls += 1) === 1 ? await slow.promise : [{ ok: true, value: 1 }]));
     const evaluator = shared.forWorkspace("trip");
@@ -26,7 +25,7 @@ describe("the shared formula evaluator", () => {
   });
 
   it("keeps each workspace's automations apart, even under the same id", async () => {
-    const slow = deferred<AutomationOutcome<JsonValue>[]>();
+    const slow = Promise.withResolvers<AutomationOutcome<JsonValue>[]>();
     let calls = 0;
     const shared = createAutomationFormulaEvaluator(fake(async () => (calls += 1) === 1 ? await slow.promise : [{ ok: true, value: 1 }]));
     const first = shared.forWorkspace("trip").evaluate("collection:Tasks#bump", scope, formula);

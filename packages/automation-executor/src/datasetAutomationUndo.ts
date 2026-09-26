@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { LocalDatasetInvocation } from "../workspaces/localDatasetHost";
 import type { DatasetUndoRequest, RunWrite, StoredRun } from "./automationRunStore";
 import type { CollectionAutomationUndone } from "./collectionAutomationUndo";
-import { readDatasetRecord, send, type DatasetRunHost } from "./datasetAutomationRun";
+import { readDatasetRecord, send, type DatasetInvocation, type DatasetRunHost } from "./datasetAutomationRun";
 
 // Undo for a dataset automation's run (AGENTS.md: every reversible change
 // gets a way back). Like document Undo, each field the runs wrote goes back
@@ -24,7 +23,7 @@ export const DATASET_UNDO_RULES_CHANGED = "Collection rules changed after this r
 /** The dataset host as an Undo uses it: the person's own invocations and the rules now. */
 export interface DatasetUndoHost extends Pick<DatasetRunHost, "revision" | "resolves"> {
   /** Invokes an operation as the person who clicked Undo. */
-  invokeAsOwner(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
+  invokeAsOwner(input: DatasetInvocation): Promise<DatasetInvocationResult>;
 }
 
 type Edit = Extract<RunWrite, { kind: "dataset-edit" }>;

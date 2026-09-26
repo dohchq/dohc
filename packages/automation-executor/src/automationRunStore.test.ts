@@ -1,7 +1,7 @@
 import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, metadataDirAt, testMetadataDir } from "./testScratch";
 import { createAutomationRunStore, type StoredRun } from "./automationRunStore";
 
 const AUTOMATION = "collection:Tasks#bump";
@@ -19,7 +19,7 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
 describe("the automation run store", () => {
   it("keeps each claim's runs under the workspace's metadata folder and reads them back as written", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     const saved = run("atc_one", null, 1);
     await store.save(saved);
     await store.save({ ...saved, definitionHash: "fedcba9876543210", keySeed: "fedcba9876543210-1" });
@@ -45,14 +45,14 @@ describe("the automation run store", () => {
   });
 
   it("reads one fresh store from two places at once", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
     const reads = await Promise.all([store.runsOf(AUTOMATION, "atc_one"), store.runsOf(AUTOMATION, "atc_two")]);
     expect(reads).toEqual([{ runs: [], unreadable: false }, { runs: [], unreadable: false }]);
   });
 
   it("reports a saved run it cannot read, so the claim never starts over as if it had none", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     await store.save(run("atc_one", null, 1));
     const folder = join(root, ".dohc", "automations", "runs");
     const [automationFolder] = await readdir(folder);
@@ -63,7 +63,7 @@ describe("the automation run store", () => {
 
   it("drops the oldest settled runs, never a run a claim may still resume, and compacts failures history no longer shows", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     for (let index = 0; index < 30; index += 1) await store.save(run(`atc_done${index}`, "done", index));
     // Done here, but the engine has not taken the settle yet.
     await store.save(run("atc_unsettled", "done", 50, false));
@@ -99,7 +99,7 @@ describe("the automation run store", () => {
 
   it("keeps at most 100 compacted failures per automation", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     for (let index = 0; index < 105; index += 1) {
       await store.save({ ...run(`atc_old${String(index).padStart(3, "0")}`, "failed", index), compacted: true, applied: [] });
     }
@@ -115,7 +115,7 @@ describe("the automation run store", () => {
 
   it("appends each effect after the plan, and a line a crash cut short counts as not recorded", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     const saved = { ...run("atc_one", null, 1), applied: [] };
     await store.save(saved);
     const effect = { ordinal: 0, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
@@ -136,14 +136,34 @@ describe("the automation run store", () => {
 
   it("reads runs without making folders", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     await expect(store.runsOf(AUTOMATION, "atc_none")).resolves.toEqual({ runs: [], unreadable: false });
     await expect(readdir(join(root, ".dohc"))).rejects.toThrow();
   });
 
+  it("keeps and finds runs where the host's metadata folder is, even outside the workspace", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const elsewhere = await createTestScratch("dohc-automation-metadata-");
+    const store = createAutomationRunStore(root, metadataDirAt(() => join(elsewhere, "meta")));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: false });
+    await expect(readdir(elsewhere)).resolves.toEqual([]);
+    await store.save(run("atc_one", null, 1));
+    const { runs, unreadable } = await store.runsOf(AUTOMATION, "atc_one");
+    expect(unreadable).toBe(false);
+    expect(runs.map((found) => found.claimId)).toEqual(["atc_one"]);
+    expect(await readdir(join(elsewhere, "meta", "automations"))).toEqual(["runs"]);
+    await expect(readdir(root)).resolves.toEqual([]);
+  });
+
+  it("reports runs it cannot read when the host refuses its metadata folder", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const refused = metadataDirAt(() => { throw new Error("That folder is not a real folder inside this workspace."); });
+    await expect(createAutomationRunStore(root, refused).runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+  });
+
   it("tells a missing reach file from one it cannot read", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
     await writeFile(await store.reachVerdictsPath(), "{ torn");
     await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
@@ -151,7 +171,7 @@ describe("the automation run store", () => {
 
   it("reads a run in another format, a run without its progress, or a renamed run as unreadable", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     const saved = { ...run("atc_one", null, 1), applied: [] };
     await store.save(saved);
     const folder = join(root, ".dohc", "automations", "runs");
@@ -175,7 +195,7 @@ describe("the automation run store", () => {
 
   it("reads an unusable runs folder as unreadable, not as empty history", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     await store.saveTimeouts(new Map());
     await writeFile(join(root, ".dohc", "automations", "runs"), "not a folder");
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
@@ -183,7 +203,7 @@ describe("the automation run store", () => {
 
   it("keeps the newest record a step created", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root);
+    const store = createAutomationRunStore(root, testMetadataDir);
     const saved = { ...run("atc_one", null, 1), applied: [] };
     await store.save(saved);
     await store.recordCreated(saved, { ordinal: 1, recordId: "rec_first", path: "Log/a.md" });

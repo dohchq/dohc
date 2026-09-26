@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Automation } from "@dohc/workspace-contracts/automations";
-import type { CollectionAutomations } from "../automations/collectionAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
 

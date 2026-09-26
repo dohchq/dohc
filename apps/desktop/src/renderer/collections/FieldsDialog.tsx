@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CollectionSchema } from "@dohc/workspace-contracts";
-import type { AutomationButtonState } from "../../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import {

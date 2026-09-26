@@ -8,13 +8,15 @@ import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
-import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
-import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
-import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "./automationReach";
-import { createAutomationRunStore, type AutomationRunStore, type StoredSubscription } from "./automationRunStore";
+import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
+import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
+import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
+import { createAutomationRunStore, type AutomationRunStore, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
 import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import {
@@ -23,22 +25,22 @@ import {
   UNREADABLE_REACH,
   type CollectionAutomationEngine,
   type CollectionAutomationsOptions,
-} from "./collectionAutomations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+} from "@dohc/automation-executor/collection-automations";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, GROUP_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import {
   AutomationChatSessionWait,
   automationMessageId,
   automationNoticeId,
   automationWakeThreadId,
   chatDirectoryOf,
+  NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
   type ChatDirectoryChannel,
   type ChatNeeds,
-} from "./automationChat";
+} from "@dohc/automation-executor/automation-chat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
-import { NoticeNotSentError } from "../notices/noticeStore";
 
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
@@ -411,7 +413,7 @@ async function world(options: {
   let prunes = 0;
   let updates = 0;
   const resumable: Array<ReadonlySet<string> | null> = [];
-  const baseStore = createAutomationRunStore(root);
+  const baseStore = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
   let failRecordAt: number | null = null;
   let beforeRecord: (() => void) | null = null;
   // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
@@ -446,11 +448,11 @@ async function world(options: {
     withEngine: async (work) => await work(engine),
     withRecordWrites: async (signal, work) => {
       await options.withRecordWrites?.(signal, events);
-      return await work({
+      return await work(collectionRecordWrites({
         capture, workspaceRoot: root, signal,
         withAdapter: async (read) => await read(engine),
         onCaptureSettled: (listener) => { settleListeners.add(listener); return () => settleListeners.delete(listener); },
-      });
+      }));
     },
     readText: async (path) => {
       const hook = beforeRead;

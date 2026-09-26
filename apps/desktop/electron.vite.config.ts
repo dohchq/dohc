@@ -12,6 +12,7 @@ const electronRendererTarget = "chrome150";
 export const mainBundledWorkspaceDeps = [
   "@dohc/app-backend-runtime",
   "@dohc/app-browser",
+  "@dohc/automation-executor",
   "@dohc/cli",
   "@dohc/live-session-contract",
   "@dohc/security-contract",

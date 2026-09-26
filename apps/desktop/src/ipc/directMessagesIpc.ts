@@ -8,7 +8,7 @@ import { chatMessageForIpc } from "./chatsIpc";
 import type { createChatScopeCapability } from "./chatScope";
 import {
   dmChannelNameFor, grantDmRecipients, listDmRecords, matchDmChannelByRecipients,
-  parseDmRecipients, peekReceivedGrantKind, runningThread,
+  parseDmRecipients, peekReceivedGrantKind,
   type DmPeekResult, type DmRecordInfo, type ShareLogPage,
 } from "../workspaces/dmChats";
 import { clearDeclinedDm, declineDm, readDeclinedDms } from "../workspaces/dmRequestStore";
@@ -22,6 +22,7 @@ import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import { runningThread } from "@dohc/automation-executor/automation-chat";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChannelSync";

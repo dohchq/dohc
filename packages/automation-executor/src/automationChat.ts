@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { ChatChannelKind, ChatChannelType, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
-import { runningThread } from "../workspaces/dmChats";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { ReachRoster } from "./automationReach";
 
@@ -99,6 +98,23 @@ export function chatDirectoryOf(
   };
 }
 
+// The single running conversation (the anti-forum rule): the oldest thread in
+// the DM channel, deterministically (createdAtMs, then thread id), so every
+// participant picks the same one even if a race ever minted a duplicate. The
+// DM list, startDm, and automations' direct messages all use this one rule
+// (they must never drift).
+export function runningThread<
+  T extends { thread: { id: string; createdAtMs: number } },
+>(threads: T[]): T | undefined {
+  return threads
+    .slice()
+    .sort(
+      (a, b) =>
+        a.thread.createdAtMs - b.thread.createdAtMs ||
+        (a.thread.id < b.thread.id ? -1 : 1),
+    )[0];
+}
+
 /** A notice an automation sends to one person (item 6, section 3). */
 export interface AutomationNotice {
   noticeId: string;
@@ -107,6 +123,14 @@ export interface AutomationNotice {
   body: string;
   target: { path: string; record?: string; automation: string; run: string };
   recipientUserId: string;
+}
+
+// A notice for another person that did not reach them. The message says why.
+export class NoticeNotSentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoticeNotSentError";
+  }
 }
 
 /**
