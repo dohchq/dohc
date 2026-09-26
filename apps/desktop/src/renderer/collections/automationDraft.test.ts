@@ -63,8 +63,12 @@ describe("a new automation", () => {
       { name: "Title", type: "text" },
       { name: "Status", type: "select", options: ["Doing", "Done"] },
       { name: "Finished on", type: "date" },
-    ]);
+    ], null);
     expect(sentenceText(automationSentence(automation))).toBe("When Status changes, set Finished on to today");
+  });
+
+  it("watches the dataset table it starts in", () => {
+    expect(newAutomation([{ name: "Paid", type: "checkbox" }], "Invoices").when).toMatchObject({ kind: "field-changed", field: "Paid", table: "Invoices" });
   });
 
   it("takes an id from its name that no other automation has", () => {

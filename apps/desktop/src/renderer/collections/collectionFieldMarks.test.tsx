@@ -7,6 +7,7 @@ import {
   automationFieldMarkLabel,
   CollectionFieldMarksProvider,
   useCollectionFieldMarks,
+  useDatasetFieldMarks,
 } from "./collectionFieldMarks";
 
 afterEach(() => {
@@ -35,8 +36,8 @@ function wrapperFor(workspace: { id: string }) {
 
 it("reads a Collection once for every view of it, and again only when main's automations change", async () => {
   let names = ["Stamp"];
-  const bridge = stubBridge(async ({ collectionPath }) => ({
-    marks: [{ field: "Finished on", automations: names.map((name) => `${name} ${collectionPath}`) }],
+  const bridge = stubBridge(async (payload) => ({
+    marks: [{ field: "Finished on", automations: names.map((name) => `${name} ${"collectionPath" in payload ? payload.collectionPath : payload.table}`) }],
   }));
   const wrapper = wrapperFor({ id: "ws-1" });
   const { result } = renderHook(() => [useCollectionFieldMarks("Tasks"), useCollectionFieldMarks("Tasks")] as const, { wrapper });
@@ -80,6 +81,22 @@ it("never shows one workspace's marks in another, and asks nothing for null", as
   rerender({ path: null });
   expect(result.current.size).toBe(0);
   expect(bridge.listCollectionFieldMarks).toHaveBeenCalledTimes(reads);
+});
+
+it("reads one dataset table's marks by the dataset's id and the table's name, apart from a folder of the same name", async () => {
+  const bridge = stubBridge(async (payload) => ({
+    marks: [{ field: "Status", automations: ["datasetId" in payload ? `${payload.datasetId} ${payload.table}` : payload.collectionPath] }],
+  }));
+  const { result } = renderHook(() => [useDatasetFieldMarks("dataset-1", "Invoices"), useCollectionFieldMarks("Invoices")] as const, {
+    wrapper: wrapperFor({ id: "ws-1" }),
+  });
+  await act(async () => undefined);
+  expect(bridge.listCollectionFieldMarks.mock.calls.map(([payload]) => payload)).toEqual([
+    { workspaceId: "ws-1", datasetId: "dataset-1", table: "Invoices" },
+    { workspaceId: "ws-1", collectionPath: "Invoices" },
+  ]);
+  expect([...result.current[0]]).toEqual([["Status", ["dataset-1 Invoices"]]]);
+  expect([...result.current[1]]).toEqual([["Status", ["Invoices"]]]);
 });
 
 it("says what is true of the field: which automations set it", () => {

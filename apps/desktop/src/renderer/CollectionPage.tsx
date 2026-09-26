@@ -1,5 +1,4 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -41,6 +40,8 @@ import { withErrorWords } from "../ipc/errorWords";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 import {
   AUTOMATIONS_FILE,
+  automationCount,
+  AutomationsButton,
   AutomationsPanel,
   useCollectionAutomations,
 } from "./collections/AutomationsPanel";
@@ -510,8 +511,6 @@ export function CollectionPage({
     />
   ) : null;
 
-  const automationCount =
-    automations.file?.status === "read" ? automations.file.automations.length : 0;
   // Automations and Fields set up a Collection, so they stay in the header
   // even before it has records.
   const collectionName = (
@@ -521,20 +520,11 @@ export function CollectionPage({
   );
   const setupButtons = (
     <>
-      <SecondaryButton
-        data-testid="collection-automations-button"
-        aria-pressed={automationsOpen}
+      <AutomationsButton
+        open={automationsOpen}
+        count={automationCount(automations.file)}
         onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
-        className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
-      >
-        <Zap size={12} aria-hidden />
-        Automations
-        {automationCount > 0 ? (
-          <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
-            {automationCount}
-          </span>
-        ) : null}
-      </SecondaryButton>
+      />
       <SecondaryButton
         data-testid="collection-fields-button"
         onClick={() => setFieldsOpen(true)}
