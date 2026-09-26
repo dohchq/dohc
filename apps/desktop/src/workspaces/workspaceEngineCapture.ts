@@ -672,6 +672,10 @@ export interface WorkspaceEngineCaptureOptions {
     failure: WorkspaceEngineCaptureFailure,
     detail?: string | null,
   ) => void;
+  // The engine found that this workspace's drive has no rename that refuses
+  // to replace, so a save can lose another program's change made at the same
+  // moment. Sticky: the drive does not change while the workspace is open.
+  onAtomicPlacementUnavailable?: () => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -3276,6 +3280,7 @@ export function createWorkspaceEngineCapture(
       reportCaptureOutcome(async () => {
         const engine = await engineStore();
         const status = await engine.watcherStatus?.();
+        if (status?.noAtomicPlacement) options.onAtomicPlacementUnavailable?.();
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine);
         }

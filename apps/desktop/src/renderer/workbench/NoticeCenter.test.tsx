@@ -708,6 +708,27 @@ describe("notice center", () => {
     expect(notice.textContent).toContain("Restart dohc to try again.");
   });
 
+  it("states the save limit once for a drive that cannot refuse to replace a file", async () => {
+    renderNotices({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        atomicPlacementUnavailable: true,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getAllByTestId("notice-atomic-placement-unavailable");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].textContent).toContain("This drive can't fully protect saves");
+    expect(notices[0].textContent).toContain(
+      "Keep the workspace on your computer's own drive to avoid that.",
+    );
+  });
+
   it.each([
     ["app", "Update dohc to sync", "This server needs a newer version of dohc. Update dohc to sync again."],
     ["server", "Server needs an update", "Ask the person who runs it to update it. Then restart dohc."],

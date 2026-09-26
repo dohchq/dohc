@@ -1264,6 +1264,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
   historyShareView: z.boolean(),
+  // True when the workspace's drive cannot refuse to replace a file (FAT,
+  // exFAT, some network shares), so a save can lose another program's change
+  // made at the same moment. Optional, unlike its neighbours: an omitted
+  // warning reads as "no warning", which is the safe reading.
+  atomicPlacementUnavailable: z.boolean().optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way, and the engine keeps retrying with backoff.
   syncFailure: z

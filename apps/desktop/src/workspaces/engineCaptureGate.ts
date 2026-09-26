@@ -39,6 +39,7 @@ export function captureForWorkspace(
       // Feeds the persistent history-capture notice: a failing engine store
       // must be user-visible, not console-only.
       onCaptureOutcome: hooks.onCaptureOutcome,
+      onAtomicPlacementUnavailable: hooks.onAtomicPlacementUnavailable,
       rustEngineSessions,
       ...testSeams,
     }),

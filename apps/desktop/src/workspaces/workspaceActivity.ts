@@ -48,6 +48,9 @@ interface WatchedWorkspace {
   // The engine's own words for a refusal, for a report. Null when it gave
   // none or nothing is refused.
   historyCaptureDetail: string | null;
+  // True once the engine reports that this workspace's drive cannot refuse to
+  // replace a file. Sticky for the open workspace, so its notice shows once.
+  atomicPlacementUnavailable: boolean;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -117,6 +120,7 @@ export interface WorkspaceCaptureHooks {
     failure: WorkspaceEngineCaptureFailure,
     detail?: string | null,
   ) => void;
+  onAtomicPlacementUnavailable: () => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -184,6 +188,7 @@ export function createWorkspaceActivity(
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
+      atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
@@ -259,6 +264,7 @@ export function createWorkspaceActivity(
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
+        atomicPlacementUnavailable: false,
         agentRun: null,
       };
       state.entry = entry;
@@ -272,6 +278,11 @@ export function createWorkspaceActivity(
             await options.captureFor(workspace, {
               onCaptureOutcome: (failure, detail = null) =>
                 recordCaptureOutcome(entry, failure, detail),
+              onAtomicPlacementUnavailable: () => {
+                if (entry.atomicPlacementUnavailable) return;
+                entry.atomicPlacementUnavailable = true;
+                notify({ workspaceId: entry.workspace.workspaceId });
+              },
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.

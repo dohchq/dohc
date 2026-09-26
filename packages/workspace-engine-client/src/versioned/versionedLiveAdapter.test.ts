@@ -358,7 +358,13 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.watcherStatus,
-    valid: { running: true, degraded: false, terminal: false, phase: "ready" },
+    valid: {
+      running: true,
+      degraded: false,
+      terminal: false,
+      phase: "ready",
+      noAtomicPlacement: false,
+    },
   },
   {
     method: WORKSPACE_METHOD.captureFlush,

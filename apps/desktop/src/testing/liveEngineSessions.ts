@@ -22,6 +22,7 @@ const READY_WATCHER_STATUS = {
   running: true,
   degraded: false,
   terminal: false,
+  noAtomicPlacement: false,
   phase: "ready",
 } satisfies WatcherStatusResult;
 

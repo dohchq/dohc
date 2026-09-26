@@ -40,6 +40,8 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        // A write here found a filesystem with no atomic no-replace rename.
+        let no_atomic_placement = dohc_engine_files::workspace_lacks_atomic_placement(&open.root);
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -52,6 +54,7 @@ impl EngineService {
                     "degraded": snapshot.degraded,
                     "terminal": snapshot.terminal,
                     "phase": snapshot.phase.as_str(),
+                    "noAtomicPlacement": no_atomic_placement,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -61,6 +64,7 @@ impl EngineService {
                 "degraded": true,
                 "terminal": false,
                 "phase": "degraded",
+                "noAtomicPlacement": no_atomic_placement,
             }),
         })
     }

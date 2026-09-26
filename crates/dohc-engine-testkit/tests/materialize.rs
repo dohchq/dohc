@@ -8,7 +8,7 @@
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
     StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
-    run_pending_jobs,
+    run_pending_jobs, workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -2374,24 +2374,21 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
 }
 
 /// A filesystem with neither an exclusive rename nor hard links, as FAT or an
-/// SMB share can be on Linux and macOS.
+/// SMB share can be on Linux and macOS. Its placement is the check-then-rename
+/// fallback, which here is the ordinary no-replace rename.
 struct NoAtomicRename;
 
 impl AtomicReplacer for NoAtomicRename {
     fn check_no_replace(&self, _incoming: &Path) -> std::io::Result<()> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
-
-    fn place(&self, _incoming: &Path, _target: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-    }
 }
 
-/// With no rename that refuses to replace, a write refuses before anything
-/// moves: the target keeps its bytes, the job's content stays in its temp,
-/// and the job stays pending with a named error.
+/// Without an atomic no-replace rename the write still happens, and the
+/// workspace reports the limit. A workspace on an ordinary filesystem never
+/// does.
 #[test]
-fn a_filesystem_without_atomic_no_replace_refuses_the_write() {
+fn a_filesystem_without_atomic_no_replace_writes_and_reports_the_limit() {
     for preimage_on_disk in [true, false] {
         let sc = Scratch::new(if preimage_on_disk {
             "no-atomic-overwrite"
@@ -2405,32 +2402,26 @@ fn a_filesystem_without_atomic_no_replace_refuses_the_write() {
             let job = spec("j1", "a.md", &hex_sha256(OURS), Preimage::Absent, 1, 10);
             stage_job(&mut store, OURS, &job);
         }
+        assert!(!workspace_lacks_atomic_placement(sc.workspace()));
 
-        let err = run_pending_jobs(
-            &store,
-            sc.workspace(),
-            &MaterializeOptions {
-                policy: DurabilityPolicy::none(),
-                replacer: &NoAtomicRename,
-                backoff: &NoBackoff,
-                now_ms: 20,
-                faults: &NoFaults,
-            },
-        )
-        .expect_err("the write refuses");
-
-        assert_eq!(err.code(), "no-atomic-placement");
         assert_eq!(
-            read(&sc, "a.md"),
-            preimage_on_disk.then(|| PREIMAGE.to_vec()),
-            "the target is untouched"
+            drain(&store, &sc, &NoAtomicRename, &NoFaults),
+            vec![JobOutcome::Completed]
         );
-        assert_eq!(
-            read(&sc, ".dohc-write-j1.tmp").as_deref(),
-            Some(OURS),
-            "the job's content stays in its temp"
-        );
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
         assert_nothing_displaced(&sc, &store);
-        assert_eq!(job_status(&store), JobStatus::Pending);
+        assert!(
+            workspace_lacks_atomic_placement(sc.workspace()),
+            "the workspace reports no-atomic-placement"
+        );
     }
+
+    let ordinary = Scratch::new("atomic-ordinary");
+    let mut store = EngineStore::open(&ordinary.db(), 1).expect("open");
+    stage_overwrite(&ordinary, &mut store);
+    assert_eq!(
+        drain(&store, &ordinary, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert!(!workspace_lacks_atomic_placement(ordinary.workspace()));
 }
