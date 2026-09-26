@@ -736,6 +736,10 @@ function makeBaseBridge(
     listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
     revealAutomationHolds: vi.fn(async () => undefined),
+    onAutomationRunSettled: vi.fn(() => () => undefined),
+    onAutomationRunWaiting: vi.fn(() => () => undefined),
+    listAutomationButtons: vi.fn(async () => ({ buttons: [] })),
+    listRecordButtons: vi.fn(async () => ({ record: null })),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
     onCollectionAutomationsChanged: vi.fn(() => () => undefined),
     listCollectionAutomations: vi.fn(

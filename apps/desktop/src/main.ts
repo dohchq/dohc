@@ -19,6 +19,9 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
+import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
+import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
+import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -5364,6 +5367,30 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
+    // A file is a record of the nearest Collection folder above it, when
+    // its frontmatter id names a record the engine indexed at this path.
+    recordAt: async (operation, path) => {
+      const found = await withEngineAdapter(operation.workspace, async (engine) => {
+        const collections = (await engine.listCollections()).collections
+          .map((collection) => collection.path)
+          .filter((collection) => path.startsWith(`${collection}/`))
+          .sort((left, right) => right.length - left.length);
+        const collectionPath = collections[0];
+        if (collectionPath === undefined) return null;
+        const read = await readWorkspaceTextIfPresent(operation.workspace.rootPath, path);
+        const recordId = read && !read.truncated ? parseCollectionRecordFields(read.text)?.[RECORD_ID_FRONTMATTER_KEY] : undefined;
+        if (typeof recordId !== "string") return null;
+        try {
+          const { record } = await engine.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 });
+          return record.path === path ? { collectionPath, record } : null;
+        } catch (error) {
+          // Not indexed yet, or no longer in this Collection.
+          if (error instanceof Error && error.message === RECORD_NOT_FOUND) return null;
+          throw error;
+        }
+      });
+      return found ?? null;
+    },
     buttonFields: async (operation, collectionPath) => {
       const details = await withEngineAdapter(operation.workspace, (engine) => engine.getCollection({ collectionPath }));
       if (details === null) throw new Error("The workspace engine is not running.");
