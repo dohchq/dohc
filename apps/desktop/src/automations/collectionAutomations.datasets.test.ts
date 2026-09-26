@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -124,6 +126,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
   let hostOpen = options.hostOpen ?? true;
+  // Rules the executor sees in place of the approved ones, as after a schema change it indexes.
+  let indexed: DatasetDefinition | null = null;
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
@@ -150,7 +154,11 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     withDatasetHost: async (work, open) => {
       opened.push(open);
       if (!hostOpen && !open) return null;
-      const result = await work(host.automations);
+      const override = indexed;
+      const automations = override === null ? host.automations : { ...host.automations,
+        datasets: () => ({ definitions: [override], failures: [] as Array<{ datasetId: string; error: unknown }> }),
+        revision: (datasetId: string) => ({ ...host.automations.revision(datasetId), definition: override }) };
+      const result = await work(automations);
       wake();
       return result;
     },
@@ -162,6 +170,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     claims: () => host.automations.claims(AUTOMATION),
     setRoster: (next: ReachRoster) => { roster = next; },
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
+    changeRules: (next: DatasetDefinition) => { indexed = next; executor!.datasetsChanged(); },
   };
 }
 
@@ -418,6 +427,75 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.host.automations.subscriptions().length === 0);
     f.host.restore({ datasetId: definition.datasetId });
     await f.until(() => f.host.automations.subscriptions().length === 1);
+    await f.executor.dispose();
+  });
+
+  it("holds a run when a field becomes readable only because an editor left, until a current editor allows it", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };
+    const f = await world({ roster: withAna });
+    // Ana may use the list and the status edit, which show every field but ID.
+    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
+        JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
+    } finally {
+      store.close();
+    }
+    await f.executor.open();
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ cannotRun: null }] });
+    // Ana stops editing: ID becomes readable under the same definition, so it waits.
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    await f.until(() => f.executor.holds().length === 1);
+    const [hold] = f.executor.holds();
+    expect(hold).toMatchObject({ action: "find", stoppedFor: "ana@dohc.test" });
+    const { id: invoice } = await f.create({});
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "pending" && f.host.automations.claims(AUTOMATION)[0]?.attempts === 0);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    expect(await f.executor.confirmReach(hold!)).toBe("confirmed");
+    await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Closed");
+    await f.executor.dispose();
+  });
+
+  it("keeps a held field held when a schema change removes a field before it", async () => {
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
+    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
+        JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
+    } finally {
+      store.close();
+    }
+    // Secret, last, is in no read Ana holds. Spare, before it, is.
+    const SPARE = id(8), SECRET = id(9);
+    const table = definition.tables[0]!;
+    const withSpare = structuredClone(definition);
+    withSpare.tables[0]!.fields = [...table.fields,
+      { fieldId: SPARE, name: "Spare", sqlColumn: "spare", type: "text", required: false, unique: false },
+      { fieldId: SECRET, name: "Secret", sqlColumn: "secret", type: "text", required: false, unique: false }];
+    withSpare.operations = withSpare.operations.map((operation) => operation.operationId === LIST ? { ...operation, fieldIds: [...operation.fieldIds, SPARE] } : operation);
+    f.changeRules(withSpare);
+    await f.executor.open();
+    await f.until(async () => (await f.executor.automationsIn("Budget")).status === "read");
+    // Ana stops editing: Secret, and ID, become readable only because she left.
+    f.setRoster(OWNER);
+    f.executor.rosterChanged();
+    const heldFields = () => f.executor.holds().map((hold) => hold.step).filter((step) => step.startsWith("field:")).sort();
+    await f.until(() => heldFields().length === 2);
+    expect(heldFields()).toEqual([`field:${id(3)}`, `field:${SECRET}`]);
+    // An approved schema change removes Spare. Secret stays held.
+    const withoutSpare = structuredClone(withSpare);
+    withoutSpare.tables[0]!.fields = withoutSpare.tables[0]!.fields.filter((field) => field.fieldId !== SPARE);
+    withoutSpare.operations = withoutSpare.operations.map((operation) => ({ ...operation, fieldIds: operation.fieldIds.filter((fieldId) => fieldId !== SPARE) }));
+    const steps = async () => ((await f.executor.automationsIn("Budget")) as { automations: Array<{ reach: { steps?: unknown[] } }> }).automations[0]!.reach.steps?.length;
+    expect(await steps()).toBe(9);
+    f.changeRules(withoutSpare);
+    // Two operations and six fields, once the change is indexed.
+    await f.until(async () => await steps() === 8);
+    expect(heldFields()).toEqual([`field:${id(3)}`, `field:${SECRET}`]);
     await f.executor.dispose();
   });
 });

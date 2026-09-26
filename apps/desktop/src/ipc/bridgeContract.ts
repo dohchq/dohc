@@ -5433,7 +5433,7 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
   workspaceId: WORKSPACE_ID,
   automationId: COLLECTION_AUTOMATION_ID,
   definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
-  step: z.number().int().nonnegative().max(10_000),
+  step: z.string().min(1).max(512),
   seq: z.number().int().nonnegative(),
 });
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
@@ -5459,7 +5459,7 @@ export const DismissAutomationStopsPayload = z.object({
   stops: z.array(z.object({
     automationId: COLLECTION_AUTOMATION_ID,
     definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
-    step: z.number().int().nonnegative().max(10_000),
+    step: z.string().min(1).max(512),
     seq: z.number().int().nonnegative(),
   })).max(1_000),
 });

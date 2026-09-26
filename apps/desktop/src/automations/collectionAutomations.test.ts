@@ -29,7 +29,7 @@ const evaluator = sharedEvaluator.forWorkspace("workspace");
 
 const OWNER: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [] };
 const editor = (email: string, paths: string[]): RosterGrant => ({
-  recipientUserId: `user-${email}`, recipientEmail: email,
+  grantId: `grant-${email}`, recipientUserId: `user-${email}`, recipientEmail: email,
   files: { paths, versionId: null, access: "edit" }, channel: null,
 });
 
@@ -703,10 +703,10 @@ describe("Collection automations", () => {
 
     const summary = (listed as { automations: Array<{ definitionHash: string; reach: { steps: Array<{ seq: number }> } }> }).automations[0]!;
     await expect(w.executor.confirmReach({
-      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: 0, seq: summary.reach.steps[0]!.seq + 1,
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq + 1,
     })).resolves.toBe("changed");
     await expect(w.executor.confirmReach({
-      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: 0, seq: summary.reach.steps[0]!.seq,
+      automationId: "collection:Trip#spend", definitionHash: summary.definitionHash, step: "0", seq: summary.reach.steps[0]!.seq,
     })).resolves.toBe("confirmed");
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
@@ -1712,8 +1712,8 @@ describe("Collection automations", () => {
     await expect(w.executor.resetHolds()).resolves.toBe("reset");
     const { holds, unreadable } = w.executor.holdState();
     expect(unreadable).toBe(false);
-    expect(holds).toMatchObject([{ automationId: "collection:Tasks#seen", step: 0, stoppedFor: null }]);
-    await w.executor.confirmReach({ automationId: holds[0]!.automationId, definitionHash: holds[0]!.definitionHash, step: 0, seq: holds[0]!.seq });
+    expect(holds).toMatchObject([{ automationId: "collection:Tasks#seen", step: "0", stoppedFor: null }]);
+    await w.executor.confirmReach({ automationId: holds[0]!.automationId, definitionHash: holds[0]!.definitionHash, step: "0", seq: holds[0]!.seq });
     await w.settledClaim(claim);
     expect(w.fieldsOf(task).Seen).toBe(true);
   });

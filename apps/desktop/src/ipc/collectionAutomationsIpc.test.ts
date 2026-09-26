@@ -21,7 +21,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const reindexed: unknown[] = [];
   const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
   const stop = {
-    automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: 0, seq: 3,
+    automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
   };
   const dismissStops = vi.fn(async () => undefined);
@@ -60,7 +60,7 @@ describe("steps a share stops", () => {
   it("lists the stopped steps with the holds, and dismisses the verdicts the person saw", async () => {
     const f = fixture();
     await expect(f.call(CHANNELS.listAutomationHolds, {})).resolves.toEqual({ holds: [], stops: [f.stop], unreadable: false });
-    const seen = { automationId: f.stop.automationId, definitionHash: f.stop.definitionHash, step: 0, seq: 3 };
+    const seen = { automationId: f.stop.automationId, definitionHash: f.stop.definitionHash, step: "0", seq: 3 };
     await f.call(CHANNELS.dismissAutomationStops, { stops: [seen] });
     expect(f.dismissStops).toHaveBeenCalledWith([seen]);
   });

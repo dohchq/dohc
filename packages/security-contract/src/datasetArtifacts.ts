@@ -19,6 +19,16 @@ function source(value: unknown): string {
 }
 
 /** Content identity only. The host must separately obtain owner approval. */
+/**
+ * The principal a named person's data grant on a shared dataset is keyed by:
+ * the workspace, the share grant they reach it through, and their account.
+ * The relay derives it for each request; the owner's computer derives it to
+ * match data grants to the people on its share roster.
+ */
+export function datasetPrincipalKey(workspaceId: string, grantId: string, userId: string): string {
+  return createHash("sha256").update(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId])).digest("hex");
+}
+
 export function describeDatasetRevision(input: {
   definition: DatasetDefinition;
   revision: number;

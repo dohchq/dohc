@@ -114,7 +114,7 @@ function isGroupGrant(grant: ListedGrant): grant is z.infer<typeof GroupGrant> {
 }
 
 function rosterGrantOf(grant: ListedGrant): RosterGrant {
-  const recipient = { recipientUserId: grant.recipientUserId, recipientEmail: grant.recipientEmail };
+  const recipient = { grantId: grant.grantId, recipientUserId: grant.recipientUserId, recipientEmail: grant.recipientEmail };
   if (isFileGrant(grant)) {
     const { paths, versionId } = grant.selector;
     return { ...recipient, files: { paths, versionId, access: grant.access }, channel: null };

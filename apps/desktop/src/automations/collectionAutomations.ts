@@ -35,9 +35,11 @@ import {
 } from "./automationPlan";
 import {
   checkAutomationReach,
+  reachStepId,
   shareImpactOf,
   type ReachCollection,
   type ReachRoster,
+  type ReachDatasetGrants,
   type ReachShare,
 } from "./automationReach";
 import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
@@ -51,8 +53,8 @@ import {
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
-import { datasetAutomationProblem, pinDatasetOperations } from "./datasetAutomationPlan";
-import { datasetReachSteps, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import { datasetAutomationProblem, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
+import { runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
@@ -178,8 +180,11 @@ export interface CollectionAutomationsOptions {
 }
 
 type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
-/** A dataset Collection's approved rules, and whether dohc generated its operations. */
-type IndexedDataset = { definition: DatasetDefinition; generated: boolean };
+/**
+ * A dataset Collection's approved rules, whether dohc generated its
+ * operations, and its data grants, as the reach check reads them.
+ */
+type IndexedDataset = { definition: DatasetDefinition; generated: boolean; grants: ReachDatasetGrants };
 
 /** One step's reach as the ⚡ panel shows it. */
 export type CollectionAutomationStepReach =
@@ -188,7 +193,7 @@ export type CollectionAutomationStepReach =
   // Allowed now, but stopped before under the same definition: it waits
   // for a current editor to confirm it with `seq`. `target` is the
   // Collection the step reaches.
-  | { verdict: "held"; stoppedFor: string | null; seq: number; target: string; action: "change" | "find" };
+  | { verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: "change" | "find" };
 
 /** One automation as the ⚡ panel reads it. */
 export type CollectionAutomationSummary =
@@ -236,7 +241,8 @@ export interface CollectionAutomationHold {
   automationId: string;
   automationName: string;
   definitionHash: string;
-  step: number;
+  /** The step's identity (reachStepId). */
+  step: string;
   seq: number;
   /** The Collection the automation belongs to, and the one the step reaches. */
   collection: string;
@@ -677,12 +683,12 @@ export class CollectionAutomations {
         id: automation.id, collection, codeFiles: [], steps: reachSteps,
       }).map((reach, step): CollectionAutomationStepReach => {
         if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
-        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
+        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)));
         const reached = reachSteps[step];
         return stored?.verdict === "held" && reached && "collection" in reached
           ? {
-              verdict: "held", stoppedFor: stored.stoppedFor, seq: stored.seq,
-              target: reached.collection.name, action: reached.kind === "find-records" ? "find" : "change",
+              verdict: "held", step: stored.step, stoppedFor: stored.stoppedFor, seq: stored.seq,
+              target: reached.collection.name, action: reached.kind === "find-records" || reached.kind === "dataset-field" ? "find" : "change",
             }
           : { verdict: "allowed" };
       });
@@ -737,7 +743,8 @@ export class CollectionAutomations {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
         const steps = this.reachSteps(collectionPath, automation);
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+          const step = reachStepId(steps[index]!, index);
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
             automationId, definitionHash: hash, step,
             ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
@@ -807,7 +814,7 @@ export class CollectionAutomations {
    * verdict they saw by `seq`, so a step that stopped again since keeps its
    * notice.
    */
-  async dismissStops(seen: ReadonlyArray<{ automationId: string; definitionHash: string; step: number; seq: number }>): Promise<void> {
+  async dismissStops(seen: ReadonlyArray<{ automationId: string; definitionHash: string; step: string; seq: number }>): Promise<void> {
     await this.updateVerdicts(() => {
       for (const { automationId, definitionHash: hash, step, seq } of seen) {
         const key = reachVerdictKey(automationId, hash, step);
@@ -835,7 +842,7 @@ export class CollectionAutomations {
     }
     const reach = automations.map(({ automationId, collectionPath, automation }) => {
       const collection = collectionNamed(collectionPath);
-      return { id: automationId, collection, codeFiles: [], steps: reachStepsOf(automation, collection, collectionNamed) };
+      return { id: automationId, collection, codeFiles: [], steps: this.reachSteps(collectionPath, automation) };
     });
     const stopped = shareImpactOf(await this.options.roster(), share, reach);
     return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
@@ -848,7 +855,7 @@ export class CollectionAutomations {
         automationName: owner.automation.name,
         collectionPath: owner.collectionPath,
         target: target.collection.name,
-        action: target.kind === "find-records" ? "find" : "change",
+        action: target.kind === "find-records" || target.kind === "dataset-field" ? "find" : "change",
       }];
     });
   }
@@ -859,13 +866,14 @@ export class CollectionAutomations {
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const hash = definitionHash(automation);
       const collection = collectionNamed(collectionPath);
-      this.reachSteps(collectionPath, automation).forEach((reach, step) => {
+      this.reachSteps(collectionPath, automation).forEach((reach, index) => {
+        const step = reachStepId(reach, index);
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
         if (!stored || !matches(stored, automation) || !("collection" in reach)) return;
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
           collection: collection.name, target: reach.collection.name,
-          action: reach.kind === "find-records" ? "find" : "change", stoppedFor: stored.stoppedFor,
+          action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" : "change", stoppedFor: stored.stoppedFor,
         });
       });
     }
@@ -917,7 +925,7 @@ export class CollectionAutomations {
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
    */
-  async confirmReach(input: { automationId: string; definitionHash: string; step: number; seq: number }): Promise<"confirmed" | "changed"> {
+  async confirmReach(input: { automationId: string; definitionHash: string; step: string; seq: number }): Promise<"confirmed" | "changed"> {
     await this.ready();
     const confirmed = await this.updateVerdicts(() => {
       if (this.verdictsUnreadable) return false;
@@ -1266,13 +1274,15 @@ export class CollectionAutomations {
         // A descriptor that is not JSON names no dataset.
       }
       if (typeof described !== "object" || described === null || !("datasetId" in described) || described.datasetId !== definition.datasetId) continue;
-      // Only a dataset with automations needs its operation source read.
-      const generated = await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`) &&
-        await this.withLiveHost((host) => host.generated(definition.datasetId)).catch((error: unknown) => {
-          this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
-          return false;
-        }) === true;
-      folders.set(folder, { definition, generated });
+      // Only a dataset with automations needs its operation source and grants read.
+      const checked = await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`)
+        ? await this.withLiveHost((host) => ({ generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }))
+          .catch((error: unknown) => {
+            this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
+            return null;
+          })
+        : null;
+      folders.set(folder, { definition, generated: checked?.generated ?? false, grants: checked?.grants ?? { workspaceId: "", grants: [] } });
     }
     return folders;
   }
@@ -1288,8 +1298,9 @@ export class CollectionAutomations {
   /** The Collections each step reaches, for the reach check. */
   private reachSteps(collectionPath: string, automation: Automation) {
     const collection = collectionNamed(collectionPath);
-    return this.datasets.has(collectionPath)
-      ? datasetReachSteps(automation, collection)
+    const dataset = this.datasets.get(collectionPath);
+    return dataset !== undefined
+      ? datasetReachSteps(automation, collection, dataset.definition, dataset.grants)
       : reachStepsOf(automation, collection, collectionNamed);
   }
 
@@ -1334,12 +1345,13 @@ export class CollectionAutomations {
     // Saved verdicts dohc cannot read hold every run until someone resets them.
     if (this.verdictsUnreadable) return false;
     const hash = definitionHash(automation);
-    const steps = reachStepsOf(automation, collectionNamed(collectionPath), collectionNamed);
-    for (const [step, reach] of steps.entries()) {
+    const steps = this.reachSteps(collectionPath, automation);
+    for (const [index, reach] of steps.entries()) {
+      const step = reachStepId(reach, index);
       // A stopped step fails the run, and a held one waits for a current editor.
       const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
       if (verdict === "stopped" || verdict === "held") return false;
-      if ("collection" in reach && !(await writable(reach.collection.path))) return false;
+      if ("collection" in reach && !this.datasets.has(reach.collection.path) && !(await writable(reach.collection.path))) return false;
     }
     return true;
   }
@@ -1451,7 +1463,8 @@ export class CollectionAutomations {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
         const steps = this.reachSteps(collectionPath, automation);
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+          const step = reachStepId(steps[index]!, index);
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
           const next = nextReachVerdict(previous, reach, automation.enabled);

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { datasetFindOf } from "./automationPlan";
-import { datasetAutomationProblem, datasetEffectKey, pinDatasetOperations } from "./datasetAutomationPlan";
+import { datasetAutomationProblem, datasetEffectKey, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const TABLE = id(2), STATUS = id(4), NOTES = id(5), FINISHED = id(6);
@@ -84,5 +84,21 @@ describe("dataset automation steps", () => {
     expect(new Set([key, datasetEffectKey("claim", "hash-1", 2, "rec/1", 1), datasetEffectKey("claim", "hash-1", 2, 5, 0),
       datasetEffectKey("claim", "hash-1", 2, null, 0), datasetEffectKey("claim", "hash-2", 2, "rec/1", 0)]).size).toBe(5);
     expect(datasetEffectKey("claim", "hash-1", 2, "rec/1", 0)).toBe(key);
+  });
+
+  it("checks every operation a run can call, the read a stale record needs included, and every field its formulas could see", () => {
+    const addThenSet = automation(`      - add-record:
+          Status: New
+        as: added
+        operation: invoices.create
+      - set:
+          Notes: seen
+        records: added
+        operation: invoices.edit
+`, "record-removed: null");
+    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] });
+    // No trigger record to read: the create, the edit, and the read that checks the added record again.
+    expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.create", "invoices.edit", "invoices.list"]);
+    expect(steps.flatMap((step) => step.kind === "dataset-field" ? [step.field.name] : [])).toEqual(["ID", "Status", "Notes", "Finished on"]);
   });
 });

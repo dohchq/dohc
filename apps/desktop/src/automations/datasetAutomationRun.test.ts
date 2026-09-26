@@ -6,10 +6,11 @@ import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
 import { createTestScratch } from "../workspaces/testTemp";
+import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { definitionHash } from "./automationPlan";
 import { createAutomationRunStore } from "./automationRunStore";
 import { datasetEffectKey } from "./datasetAutomationPlan";
-import { RULES_CHANGED_ERROR, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import { ACCESS_NARROWED_ERROR, RULES_CHANGED_ERROR, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
 
 // A dataset run against a scripted host: what it sends, under which key,
 // and what it does when the approved rules change under a saved plan.
@@ -52,6 +53,7 @@ function host(script: { resolves: () => boolean; edit: (input: LocalDatasetInvoc
     context: (input) => Object.freeze({ ...input }) satisfies LocalDatasetAutomationContext,
     revision: () => revision,
     generated: () => true,
+    dataGrants: () => ({ workspaceId: "workspace", grants: [] }),
     resolves: script.resolves,
     invoke: async (_context, input) => {
       sent.push(input);
@@ -101,6 +103,24 @@ describe("a dataset automation run", () => {
     expect(await runDatasetAutomation(dependencies(third.surface), { ...input(new AbortController().signal), claim: later }))
       .toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
     expect(third.sent).toEqual([]);
+  });
+});
+
+describe("the rules a dataset run uses", () => {
+  it("plans under the rules reach checked, not a newer approval that lands between them", async () => {
+    // The newer rules add a read that shows the record's id, which the plan would prefer for the trigger record.
+    const WIDE = id(12);
+    const newer = { ...revision, revision: 4, revisionSha256: "s".repeat(64), definition: { ...definition, operations: [...definition.operations,
+      { operationId: WIDE, name: "invoices.byId", label: "By id", tableId: TABLE, kind: "read" as const, access: "owner" as const, readOnly: true, fieldIds: [id(3), STATUS] }] } };
+    const script = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
+    let reads = 0;
+    const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1 }, {
+      claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    })).toEqual({ kind: "done" });
+    expect(script.sent.map((sent) => [sent.operationId, sent.revision])).toEqual([[LIST, 3], [EDIT, 3]]);
   });
 });
 
@@ -185,6 +205,7 @@ automations:
       context: (input) => Object.freeze({ ...input }),
       revision: () => ({ ...revision, definition: two }),
       generated: () => true,
+      dataGrants: () => ({ workspaceId: "workspace", grants: [] }),
       resolves: () => true,
       invoke: async (_context, input): Promise<DatasetInvocationResult> => {
         sent.push(input);
@@ -211,5 +232,94 @@ automations:
       expect.objectContaining({ tableId: A, recordId: "1", version: 6, fields: [expect.objectContaining({ before: "New", after: "Shipped" })] }),
       expect.objectContaining({ tableId: B, recordId: "1", version: 10, fields: [expect.objectContaining({ before: "Waiting", after: "Packed" })] }),
     ]);
+  });
+});
+
+describe("reach in a dataset run", () => {
+  const SECRET = id(40);
+  // The read shows Status only; Secret is in no read, but an added record's claim carries it.
+  const wide: DatasetDefinition = { ...definition,
+    tables: [{ ...definition.tables[0]!, fields: [...definition.tables[0]!.fields, { fieldId: SECRET, name: "Secret", sqlColumn: "secret", type: "text", required: false, unique: false }] }],
+    operations: [{ ...definition.operations[0]!, access: "helper" }, { ...definition.operations[1]!, access: "helper" }] };
+  const parsedStamp = parseAutomationsFile(`version: 1
+automations:
+  - id: close
+    name: Close
+    when: record-added
+    do:
+      - set:
+          Status: '=trigger.fields.join(",")'
+        operation: invoices.edit
+`);
+  if (parsedStamp.status !== "read" || parsedStamp.entries[0]?.status !== "valid") throw new Error("fixture");
+  const stamp = parsedStamp.entries[0].automation;
+  const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+  const anaKey = datasetPrincipalKey("workspace", "g-ana", "u-ana");
+
+  async function run(editors: typeof ana[], operationIds: string[]) {
+    const scopes: unknown[] = [];
+    const surface: DatasetRunHost = {
+      context: (input) => Object.freeze({ ...input }),
+      revision: () => ({ ...revision, definition: wide }),
+      generated: () => true,
+      dataGrants: () => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds }] }),
+      resolves: () => true,
+      invoke: async (_context, input): Promise<DatasetInvocationResult> => {
+        if (input.operationId === LIST) return { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false };
+        return { result: { id: "a", version: 2, priorValues: { [STATUS]: "Open" } }, revision: 8, replayed: false };
+      },
+    };
+    const outcome = await runDatasetAutomation({
+      withHost: async (work) => await work(surface),
+      evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "x" }]; } },
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1,
+    }, {
+      claim: { ...claim, fact: { ...claim.fact!, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
+      automation: stamp, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: "u-owner", grants: editors }, signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    return { outcome, scopes };
+  }
+
+  it("stops a run that uses an operation another editor holds no grant for", async () => {
+    expect((await run([ana], [LIST])).outcome).toEqual({ kind: "failed", error: "ana@dohc.test has no grant to use invoices.edit in Budget.", timedOut: false });
+  });
+
+  it("shows formulas only the fields every other editor can read through a granted read", async () => {
+    const shared = await run([ana], [LIST, EDIT]);
+    expect(shared.outcome).toEqual({ kind: "done" });
+    expect(shared.scopes).toEqual([expect.objectContaining({ trigger: expect.objectContaining({ fields: ["Status"] }) })]);
+    // Only the owner edits these automations: every field the claim carries.
+    const own = await run([], []);
+    expect(own.scopes).toEqual([expect.objectContaining({ trigger: expect.objectContaining({ fields: ["Status", "Secret"] }) })]);
+  });
+
+  it("stops a resumed plan once an editor can no longer read a field it was planned with, and keeps what landed", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"));
+    const stop = new AbortController();
+    const host = (edit: () => Promise<JsonValue>): DatasetRunHost => ({
+      context: (input) => Object.freeze({ ...input }),
+      revision: () => ({ ...revision, definition: wide }),
+      generated: () => true,
+      dataGrants: () => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds: [LIST, EDIT] }] }),
+      resolves: () => true,
+      invoke: async (_context, input): Promise<DatasetInvocationResult> => input.operationId === LIST
+        ? { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }
+        : { result: await edit(), revision: 8, replayed: false },
+    });
+    const input = (editors: typeof ana[], stopped: AbortSignal) => ({
+      claim: { ...claim, fact: { ...claim.fact!, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
+      automation: stamp, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner" as const, ownerUserId: "u-owner", grants: editors }, signal: new AbortController().signal, stopped,
+    });
+    const dependencies = (surface: DatasetRunHost) => ({ withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
+      evaluator: { evaluate: async () => [{ ok: true as const, value: "x" }] }, store, nowMs: () => 1 });
+    // Planned while only the owner edits: every field was readable. It stops mid-edit.
+    const first = host(async () => { stop.abort(); throw new Error("The host closed."); });
+    expect(await runDatasetAutomation(dependencies(first), input([], stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
+    // Ana now edits the automation and cannot read Secret: the rest stops.
+    const second = host(async () => { throw new Error("unreachable"); });
+    expect(await runDatasetAutomation(dependencies(second), input([ana], new AbortController().signal)))
+      .toEqual({ kind: "failed", error: ACCESS_NARROWED_ERROR, timedOut: false });
   });
 });

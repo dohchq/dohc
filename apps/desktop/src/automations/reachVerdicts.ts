@@ -21,8 +21,8 @@ export interface StoredReachVerdict {
   /** The engine automation id. */
   automationId: string;
   definitionHash: string;
-  /** The step's place among the steps the reach check sees. */
-  step: number;
+  /** The step's identity among the steps the reach check sees (reachStepId). */
+  step: string;
   verdict: ReachVerdict;
   /** The editor whose reach stopped the step, kept while it is held. */
   stoppedFor: string | null;
@@ -50,6 +50,6 @@ export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach
   return { verdict: "allowed", stoppedFor: null };
 }
 
-export function reachVerdictKey(automationId: string, definitionHash: string, step: number): string {
+export function reachVerdictKey(automationId: string, definitionHash: string, step: string): string {
   return JSON.stringify([automationId, definitionHash, step]);
 }

@@ -133,7 +133,7 @@ async function restoreAutomation(
 function ReachStatus(props: {
   summary: ValidAutomationSummary;
   collectionPath: string;
-  onAllow: (step: number, seq: number) => void;
+  onAllow: (step: string, seq: number) => void;
 }) {
   const { summary } = props;
   if (summary.cannotRun !== null) {
@@ -160,7 +160,7 @@ function ReachStatus(props: {
               A step can now {step.action === "find" ? `find records in ${step.target}` : `change ${step.target}`}.{" "}
               {step.stoppedFor ? `It stopped before because ${step.stoppedFor} could not.` : "It could not before."}
             </p>
-            <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(index, step.seq)}>
+            <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(step.step, step.seq)}>
               Allow
             </SecondaryButton>
           </StatusLine>
@@ -527,7 +527,7 @@ export function AutomationsPanel(props: {
       });
   };
 
-  const allow = (automationId: string, definitionHash: string, step: number, seq: number) => {
+  const allow = (automationId: string, definitionHash: string, step: string, seq: number) => {
     const epoch = scope.current();
     void bridge()
       .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq })
