@@ -141,6 +141,10 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
   const makeExecutor = () => executor = new CollectionAutomations({
+    personName: (userId) => userId,
+    mayRetryPress: async () => false,
+    onPressSettled: () => undefined,
+    onPressWaiting: () => undefined,
     runsGroupTriggers: () => options.groups ?? false,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async () => { throw new Error("Dataset automations cannot notify people."); },
@@ -417,7 +421,7 @@ describe("Collection automations on a dataset", () => {
     for (let index = 0; index <= DATASET_AUTOMATION_HISTORY; index += 1) await setPaid(index % 2 === 1);
     await f.until(() => f.claims().filter((claim) => claim.state === "done").length >= DATASET_AUTOMATION_HISTORY);
     expect(f.claims().some((claim) => claim.claimId === failed)).toBe(false);
-    expect(await f.executor.retry({ automationId: AUTOMATION, claimId: failed, startOver: false })).toEqual({ status: "queued" });
+    expect(await f.executor.retry({ automationId: AUTOMATION, claimId: failed, startOver: false })).toEqual({ status: "queued", press: false });
     await f.until(() => f.host.automations.failures().length === 0);
     await f.executor.dispose();
   }, 60_000);

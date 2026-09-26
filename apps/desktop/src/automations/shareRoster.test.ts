@@ -332,6 +332,19 @@ describe("keeping the roster current", () => {
     expect(list).toHaveBeenCalledTimes(2);
   });
 
+  it("shows the cached roster without listing; a run refreshes after a pull", async () => {
+    seed();
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    r.pullStarting(WORKSPACE)();
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    expect(list).not.toHaveBeenCalled();
+    // A run lists first, and the listing clears the pull.
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
   it("lists again before a run only when the last listing is older than a minute", async () => {
     const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
     expect(await r.forRun(WORKSPACE)).toEqual(cached);

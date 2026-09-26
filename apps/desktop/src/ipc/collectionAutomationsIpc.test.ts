@@ -43,6 +43,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     writeText,
     showItemInFolder: () => undefined,
     deletePath: async () => undefined,
+    watchPress: () => undefined,
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {

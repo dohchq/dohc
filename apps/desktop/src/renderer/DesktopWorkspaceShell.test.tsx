@@ -745,7 +745,7 @@ function makeBaseBridge(
       async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
     ),
     retryCollectionAutomation: vi.fn(
-      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" }),
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);

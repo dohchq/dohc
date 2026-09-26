@@ -50,7 +50,7 @@ describe("Try again for an automation run", () => {
 
   it.each([false, true])("confirms a changed automation and warns when it repeats messages: %s", async (repeatsMessages) => {
     const retryCollectionAutomation = vi.fn(async (payload: { startOver: boolean }): Promise<RetryCollectionAutomationResult> =>
-      payload.startOver ? { status: "queued" } : { status: "definition-changed", repeatsMessages });
+      payload.startOver ? { status: "queued", press: false } : { status: "definition-changed", repeatsMessages });
     vi.stubGlobal("dohcDesktop", { retryCollectionAutomation });
     const onQueued = vi.fn();
     render(<Retry workspaceId="ws-a" onError={() => undefined} onQueued={onQueued} />);
@@ -64,7 +64,7 @@ describe("Try again for an automation run", () => {
 
   it.each([false, true])("confirms lost progress and warns when it repeats messages: %s", async (repeatsMessages) => {
     const retryCollectionAutomation = vi.fn(async (payload: { startOver: boolean }): Promise<RetryCollectionAutomationResult> =>
-      payload.startOver ? { status: "queued" } : { status: "progress-gone", repeatsMessages });
+      payload.startOver ? { status: "queued", press: false } : { status: "progress-gone", repeatsMessages });
     vi.stubGlobal("dohcDesktop", { retryCollectionAutomation });
     const onQueued = vi.fn();
     render(<Retry workspaceId="ws-a" onError={() => undefined} onQueued={onQueued} />);

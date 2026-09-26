@@ -486,6 +486,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
   writeCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
+  listAutomationButtons: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationButtons, payload),
+  pressAutomationButton: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pressAutomationButton, payload),
   listAutomationHolds: (payload) =>
     ipcRenderer.invoke(CHANNELS.listAutomationHolds, payload),
   resetAutomationHolds: (payload) =>
@@ -544,6 +548,30 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.automationHoldsChanged, handler);
     return () =>
       ipcRenderer.removeListener(CHANNELS.automationHoldsChanged, handler);
+  },
+  onAutomationRunSettled: (listener) => {
+    // Validated at the boundary: anything that is not a settled run is dropped.
+    const handler = (_event: unknown, payload: unknown) => {
+      if (typeof payload !== "object" || payload === null) return;
+      const { workspaceId, claimId, outcome, error } = payload as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || typeof claimId !== "string") return;
+      if (outcome !== "done" && outcome !== "skipped" && outcome !== "failed" && outcome !== "ended") return;
+      if (error !== null && typeof error !== "string") return;
+      listener({ workspaceId, claimId, outcome, error });
+    };
+    ipcRenderer.on(CHANNELS.automationRunSettled, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.automationRunSettled, handler);
+  },
+  onAutomationRunWaiting: (listener) => {
+    const handler = (_event: unknown, payload: unknown) => {
+      if (typeof payload !== "object" || payload === null) return;
+      const { workspaceId, claimId, reason } = payload as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || typeof claimId !== "string") return;
+      if (reason !== "roster" && reason !== "held" && reason !== "busy") return;
+      listener({ workspaceId, claimId, reason });
+    };
+    ipcRenderer.on(CHANNELS.automationRunWaiting, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.automationRunWaiting, handler);
   },
   listShareProposals: (payload) =>
     ipcRenderer.invoke(CHANNELS.listShareProposals, payload),

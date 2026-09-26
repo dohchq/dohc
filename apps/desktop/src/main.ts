@@ -18,6 +18,7 @@ import {
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
+import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -645,6 +646,29 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
     }
     win.webContents.send(CHANNELS.automationFailuresChanged, { workspaceId });
   }
+}
+
+// The windows that pressed a Button field hear how its run went, while they
+// still show the workspace they pressed in.
+const pressWindows = createPressWindows<WebContents>(
+  (sender) => rendererWorkspaceSessions.current(sender)?.workspaceId ?? null,
+);
+
+// The person a press acts for: the signed-in account, read after the
+// credential cache is warm, or this computer's own id when signed out.
+async function pressingPerson(): Promise<string> {
+  await warmCredentialCache();
+  return localUserId();
+}
+
+// Whether this computer's person owns the workspace: a workspace that does
+// not sync is its computer's person's, and a synced one is its owner
+// account's. A shared view is never this person's.
+async function localPersonOwns(workspaceId: string): Promise<boolean> {
+  await warmCredentialCache();
+  const entry = findWorkspace(workspaceId);
+  if (!entry || shareViewIsPresent(entry.shareView)) return false;
+  return !entry.remote || cachedCredentials?.userId === entry.remote.ownerUserId;
 }
 
 // A Collection automation step started or stopped waiting for a current
@@ -1452,6 +1476,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     shareRosters.close(binding.workspaceId);
     automationScheduler.remove(binding.workspaceId);
     automationHosts.close(binding.workspaceId);
+    pressWindows.forget(binding.workspaceId);
     const results = await Promise.allSettled([
       // The executor hands its held dataset claims back before the host closes.
       state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
@@ -3806,6 +3831,10 @@ function createCollectionAutomationsFor(
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
     runsSchedules: () => schedulesCanRun(workspaceId),
+    personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
+    mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
+    onPressSettled: (event) => pressWindows.settled(workspaceId, event),
+    onPressWaiting: (event) => pressWindows.waiting(workspaceId, event),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {
@@ -5328,6 +5357,25 @@ function registerIpcHandlers(): void {
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
+    watchPress: (workspaceId, claimId, sender) => pressWindows.watch(workspaceId, claimId, sender, null),
+  });
+
+  registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation,
+    readText: readWorkspaceTextIfPresent,
+    buttonFields: async (operation, collectionPath) => {
+      const details = await withEngineAdapter(operation.workspace, (engine) => engine.getCollection({ collectionPath }));
+      if (details === null) throw new Error("The workspace engine is not running.");
+      return details.schema.fields.flatMap((field) => (field.type === "button" ? [field.name] : []));
+    },
+    describeDataset: async (sender, workspaceId, datasetId) => {
+      const described = await datasetHandler(sender, { action: "describe", workspaceId, datasetId });
+      if (described.kind !== "description") throw new Error("dohc could not read this Collection.");
+      return described.dataset;
+    },
+    pressedBy: pressingPerson,
+    pressWindows,
   });
 
   registerStopAndRestoreIpc<

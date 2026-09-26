@@ -295,15 +295,23 @@ const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
   "record-added", "record-changed", "field-changed", "record-removed", "starts-matching",
 ]);
 
+/** The dataset operations an automation's steps invoke, by name, once each. */
+export function operationsOf(automation: Automation): string[] {
+  const names = new Set<string>();
+  for (const { step } of everyStep(orderSteps(automation.do))) {
+    if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) names.add(step.operation);
+  }
+  return [...names];
+}
+
 const DATASET_GROUP_TRIGGER_UNSUPPORTED = "Automations on dataset Collections can't start from Group messages.";
-const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
+export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
 
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
  * executor subscribes only automations it can run; the ⚡ panel shows the
  * reason for the rest.
  */
-
 export function unsupportedReason(automation: Automation): string | null {
   const DATASET = "Only a dataset Collection's automations can name tables and operations.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
@@ -323,9 +331,6 @@ export function unsupportedReason(automation: Automation): string | null {
  */
 export function shapeProblem(automation: Automation, findProblem: (condition: string) => string | null): string | null {
   const scheduled = automation.when.kind === "schedule";
-  if (!scheduled && automation.when.kind !== "group-message" && !RECORD_TRIGGERS.has(automation.when.kind)) {
-    return "dohc can run automations that start from a record change or a schedule, or from a Group message.";
-  }
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -418,10 +423,11 @@ export function fieldsNamedBy(automation: Automation, collectionPath: string): A
   return named;
 }
 
-/** The engine subscription an automation's trigger needs, or null: a schedule claims when it is due. */
+/** The engine subscription an automation's trigger needs, or null when a press or a due time claims instead of a change. */
 export function subscriptionFor(trigger: AutomationTrigger): { kinds: AutomationChangeKind[]; fields?: string[] } | null {
   switch (trigger.kind) {
     case "schedule":
+    case "button":
       return null;
     case "record-added":
       return { kinds: ["added"] };
@@ -630,6 +636,7 @@ type Fact = AutomationClaim["change"]["fields"][number];
 export interface RunClaim {
   automationId: string;
   claimId: string;
+  createdAtMs: number;
   trigger?: AutomationClaim["trigger"];
   collectionPath: string;
   change: {
@@ -657,6 +664,8 @@ export interface RunInputs {
   message: JsonObject | null;
   /** Where posts and direct messages go; null when the automation sends none. */
   chat: ChatDirectory | null;
+  /** The person who pressed the button, or null for a change. */
+  person: AutomationScope["person"];
 }
 
 /**
@@ -682,6 +691,8 @@ export function triggerMatches(inputs: RunInputs): boolean {
       return change.kind === "message";
     case "schedule":
       return change.kind === "schedule" && (scheduleDueAt(claim) !== null || runNowSkippedFrom(claim) !== null);
+    case "button":
+      return change.kind === "button";
     case "field-changed": {
       if (change.kind !== "changed") return false;
       const fact = change.fields.find((candidate) => candidate.field === trigger.field);
@@ -741,7 +752,7 @@ function recordBefore(record: RunRecord, claim: RunClaim): JsonObject {
 
 /** One evaluator request for every formula in the run. `nowMs` is when the change was claimed, or a schedule's due time. */
 export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationRequest {
-  const { automation, claim, record, found } = inputs;
+  const { automation, claim, record, found, person } = inputs;
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
   const findGuards: NonNullable<AutomationFormula["when"]> = [];
@@ -833,14 +844,16 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
         // Run now from a skipped-run notice: when the skipped runs began.
         ...(skippedFrom !== null ? { skipped: localIsoTime(skippedFrom, trigger.timezone) } : {}),
       }
-      : {
+      : trigger.kind === "button"
+        ? { kind: "button", field: trigger.field, pressedAt: localIsoTime(claim.createdAtMs), record: triggerRecord }
+        : {
           kind: trigger.kind,
           change: claim.change.kind,
           fields: claim.change.fields.map((fact) => fact.field),
           record: triggerRecord,
         },
-    // A Group message names its author; record claims do not yet name the person.
-    person: author,
+    // A press or Group message names the person who started it.
+    person: person ?? author,
     bindings: bound,
     now: localIsoTime(nowMs),
   };

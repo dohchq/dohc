@@ -88,6 +88,10 @@ async function harness(automations: string, run: (context: {
     onFailuresChanged: () => undefined,
     onHoldsChanged: () => undefined,
     onAutomationsChanged: () => undefined,
+    personName: (userId) => userId,
+    mayRetryPress: async () => true,
+    onPressSettled: () => undefined,
+    onPressWaiting: () => undefined,
     onError: (context, error) => { errors.push(`${context}: ${String(error)}`); },
     withDatasetHost: async () => null,
   });
