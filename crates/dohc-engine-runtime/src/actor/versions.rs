@@ -14,14 +14,14 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
-    remove_empty_directory_target, target_has_requested_name,
+    remove_empty_directory_target,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -355,60 +355,10 @@ pub(super) fn switch_projection_job_id(
 }
 
 /// Whether `path` lies strictly inside the directory `ancestor`.
-fn is_inside(root: &std::path::Path, path: &str, ancestor: &str) -> bool {
-    let Some((end, _)) = path
-        .match_indices('/')
-        .nth(ancestor.bytes().filter(|byte| *byte == b'/').count())
-    else {
-        return false;
-    };
-    let prefix = &path[..end];
-    if prefix.is_ascii()
-        && ancestor.is_ascii()
-        && !prefix.split('/').zip(ancestor.split('/')).all(|(a, b)| {
-            a.trim_end_matches(['.', ' '])
-                .eq_ignore_ascii_case(b.trim_end_matches(['.', ' ']))
-        })
-    {
-        return false;
-    }
-    prefix == ancestor
-        || (prefix
-            .split('/')
-            .map(dohc_engine_sync::path_component_collision_key)
-            .eq(ancestor
-                .split('/')
-                .map(dohc_engine_sync::path_component_collision_key))
-            && same_projection_file(root, prefix, ancestor))
-}
-
-fn same_projection_file(root: &std::path::Path, source: &str, target: &str) -> bool {
-    dohc_engine_files::materialize::same_existing_file(&root.join(source), &root.join(target))
-}
-
-fn relay_case_replacement_paths(
-    changes: &[dohc_engine_sync::MomentMaterializationChange],
-) -> HashMap<String, String> {
-    use dohc_engine_sync::path_component_collision_key;
-    changes
-        .iter()
-        .filter(|change| change.operation == "delete")
-        .filter_map(|change| {
-            changes
-                .iter()
-                .find(|other| {
-                    other.operation == "write"
-                        && other.version_id == change.version_id
-                        && other.path != change.path
-                        && other
-                            .path
-                            .split('/')
-                            .map(path_component_collision_key)
-                            .eq(change.path.split('/').map(path_component_collision_key))
-                })
-                .map(|other| (change.path.clone(), other.path.clone()))
-        })
-        .collect()
+fn is_inside(path: &str, ancestor: &str) -> bool {
+    path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
 }
 
 /// Enqueue one batch of a sync page in one transaction and materialize it in
@@ -1000,9 +950,8 @@ impl ActorHandle {
             // displacement commit.
             let mut changes = changes;
             changes.retain(|change| change.version_id == active);
-            let case_replacements = relay_case_replacement_paths(&changes);
             let inside_another = |path: &str, all: &[dohc_engine_sync::MomentMaterializationChange]| {
-                all.iter().any(|other| is_inside(&root_dir, path, &other.path))
+                all.iter().any(|other| is_inside(path, &other.path))
             };
             let first: Vec<bool> = changes
                 .iter()
@@ -1021,15 +970,15 @@ impl ActorHandle {
             for (_, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                 if projections.iter().any(|planned| {
-                    is_inside(&root_dir, &planned.spec.target_path, &change.path)
-                        || is_inside(&root_dir, &change.path, &planned.spec.target_path)
+                    is_inside(&planned.spec.target_path, &change.path)
+                        || is_inside(&change.path, &planned.spec.target_path)
                 }) {
                     run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
                 }
                 // A file replacing a directory whose tracked files this page
                 // deleted: the empty directory gives way.
                 if root_dir.join(&change.path).is_dir() {
-                    for path in deleted.iter().filter(|path| is_inside(&root_dir, path, &change.path)) {
+                    for path in deleted.iter().filter(|path| is_inside(path, &change.path)) {
                         let mut parent = path.as_str();
                         while let Some((directory, _)) = parent.rsplit_once('/') {
                             remove_empty_directory_target(&root_dir, directory)?;
@@ -1041,9 +990,6 @@ impl ActorHandle {
                 let secret = change.content_kind == "secret";
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
                     return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
-                }
-                if let Some((source, _)) = case_replacements.iter().find(|(_, destination)| *destination == &change.path) {
-                    dohc_engine_files::materialize::restore_parent_spelling(&root_dir, source, &change.path)?;
                 }
                 let state = probe_projection_target(&root_dir, &change.path,
                     if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext });
@@ -1069,16 +1015,12 @@ impl ActorHandle {
                             (head.blob_sha256, Some(head.text.into_bytes()), equal) })
                 } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
                 let (operation, sha, inline) = match (change.operation, desired) {
-                    ("write" | "delete", Some((_, _, true))) if target_has_requested_name(&root_dir, &root_dir.join(&change.path)) => continue,
-                    ("write" | "delete", Some((sha, inline, _))) => (MaterializationOperation::Write, sha, inline),
+                    ("write" | "delete", Some((_, _, true))) => continue,
+                    ("write" | "delete", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
                     ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => {
                         deleted.push(change.path);
                         continue;
                     }
-                    ("delete", None) if case_replacements.get(&change.path).is_some_and(|destination| {
-                        // Collision keys can also group distinct files.
-                        dohc_engine_files::materialize::same_existing_entry(&root_dir.join(&change.path), &root_dir.join(destination))
-                    }) => continue,
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
@@ -1095,64 +1037,12 @@ impl ActorHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_inside, relay_case_replacement_paths, same_projection_file};
-    use dohc_engine_sync::MomentMaterializationChange;
+    use super::is_inside;
 
     #[test]
-    fn replacement_identity_distinguishes_aliases_from_equal_bytes() {
-        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let root = scratch.path();
-        std::fs::write(root.join("original"), "same").unwrap();
-        std::fs::hard_link(root.join("original"), root.join("alias")).unwrap();
-        std::fs::write(root.join("distinct"), "same").unwrap();
-        assert!(same_projection_file(root, "original", "alias"));
-        assert!(!same_projection_file(root, "original", "distinct"));
-        assert!(!same_projection_file(root, "missing", "missing"));
-    }
-
-    #[test]
-    fn containment_respects_component_boundaries_and_filesystem_aliases() {
-        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let root = scratch.path();
-        std::fs::create_dir(root.join("D")).unwrap();
-        assert!(is_inside(root, "D/sub/a.md", "D"));
-        assert!(!is_inside(root, "Dog/a.md", "D"));
-        assert!(!is_inside(root, "D", "D"));
-        assert_eq!(
-            is_inside(root, "D/a.md", "d"),
-            same_projection_file(root, "D", "d")
-        );
-        std::fs::create_dir(root.join("\u{1e9e}")).unwrap();
-        std::fs::create_dir(root.join("ss")).unwrap();
-        assert!(!is_inside(root, "\u{1e9e}/a.md", "ss"));
-    }
-
-    #[test]
-    fn case_replacement_planning_uses_collision_keys_and_keeps_other_deletes() {
-        let change = |version: &str, path: &str, operation| MomentMaterializationChange {
-            version_id: version.into(),
-            path: path.into(),
-            operation,
-            content_kind: "text",
-        };
-        let changes = vec![
-            change("main", "dir/File.md", "delete"),
-            change("main", "dir/FILE.md", "write"),
-            change("main", "\u{1e9e}.md", "delete"),
-            change("main", "ss.md", "write"),
-            change("main", "same.md", "delete"),
-            change("main", "same.md", "write"),
-            change("main", "other.md", "delete"),
-            change("main", "version.md", "delete"),
-            change("inactive", "VERSION.md", "write"),
-        ];
-        assert_eq!(
-            relay_case_replacement_paths(&changes),
-            [
-                ("dir/File.md".into(), "dir/FILE.md".into()),
-                ("\u{1e9e}.md".into(), "ss.md".into()),
-            ]
-            .into()
-        );
+    fn containment_respects_component_boundaries() {
+        assert!(is_inside("D/sub/a.md", "D"));
+        assert!(!is_inside("Dog/a.md", "D"));
+        assert!(!is_inside("D", "D"));
     }
 }

@@ -504,7 +504,7 @@ fn is_markdown(name: &str) -> bool {
 /// The relay's key for one path component
 /// (`services/sync-relay/src/pathCollisionKey.ts`): NFKC, folded lower,
 /// upper, then lower, without the trailing dots and spaces Windows drops.
-pub fn collision_key(name: &str) -> String {
+fn collision_key(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let folded = name
         .nfkc()
