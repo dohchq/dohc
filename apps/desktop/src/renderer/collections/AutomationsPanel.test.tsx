@@ -693,16 +693,19 @@ describe("the builder", () => {
     await waitFor(() => expect(name.matches(":disabled")).toBe(false));
     await user.clear(name);
     await user.type(name, "Draft B");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Doing");
 
     await act(async () => tryAgain());
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations[0]!.name).toBe("Draft A");
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
     expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Draft B");
+    expect(within(screen.getByTestId("collection-automations-panel")).getByText("Draft A")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(2));
     expect(written[1]!.automations[0]!.name).toBe("Draft B");
+    expect(written[1]!.automations[0]!.when).toMatchObject({ to: { kind: "literal", value: "Doing" } });
     expect(written[1]!.automations).toHaveLength(1);
     expect(written[1]!.automations[0]!.id).toBe(written[0]!.automations[0]!.id);
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull());

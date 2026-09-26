@@ -619,7 +619,7 @@ export function AutomationsPanel(props: {
         if (JSON.stringify(latestDraft.current?.automation) !== JSON.stringify(submittedDraft)) {
           setEditing({
             ...current,
-            start: { ...current.start, id: automation.id },
+            start: automation,
             original: automation,
             baseline: automation,
           });
