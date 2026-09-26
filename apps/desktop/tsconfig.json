@@ -9,5 +9,5 @@
       "react-dom/*": ["./node_modules/@types/react-dom/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts", "plugins/**/*.ts", "electron.vite.config.ts", "playwright.config.ts", "vitest.config.ts", "vitest.setup.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts", "electron.vite.config.ts", "playwright.config.ts", "vitest.config.ts", "vitest.setup.ts"]
 }

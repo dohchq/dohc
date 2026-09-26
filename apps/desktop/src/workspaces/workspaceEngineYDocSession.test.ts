@@ -35,6 +35,9 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import { createEngineYDocSessionIpc, DOCUMENT_EDIT_SHARED_WARNING } from "./engineYDocSessionIpc";
+import { CHANNELS } from "../ipc/channels";
+import { documentEditUpdate, documentMarkdown } from "@dohc/ydoc-projection";
 import {
   createFakeDaemonCapture,
   type FakeDaemonCapture,
@@ -248,6 +251,39 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   await capture.flush();
 
   expect(daemonWriteCount()).toBe(writesBeforeWatcher);
+  await session.close({ settle: false });
+});
+
+it("decides a local update at its turn, against the canonical doc as it stands then", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const seen: unknown[] = [];
+  const skipped = session.applyDecidedLocalUpdate((doc) => {
+    seen.push(doc.getMap("frontmatter").get("Note"));
+    return null;
+  });
+  // A remote update lands on the canonical doc before that update's turn.
+  const remote = new Y.Doc();
+  Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.doc));
+  remote.getMap("frontmatter").set("Note", "theirs");
+  Y.applyUpdate(session.doc, Y.encodeStateAsUpdate(remote, Y.encodeStateVector(session.doc)));
+  await expect(skipped).resolves.toBe(false);
+  expect(seen).toEqual(["theirs"]);
+
+  const journaledBefore = ydoc.recordedUpdates.length;
+  const written = session.applyDecidedLocalUpdate((doc) => {
+    const scratch = new Y.Doc();
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+    const before = Y.encodeStateVector(scratch);
+    scratch.getMap("frontmatter").set("Note", "mine");
+    return Y.encodeStateAsUpdate(scratch, before);
+  });
+  await expect(written).resolves.toBe(true);
+  await session.settleNow();
+  expect(ydoc.recordedUpdates.length).toBe(journaledBefore + 1);
+  expect(session.doc.getMap("frontmatter").get("Note")).toBe("mine");
   await session.close({ settle: false });
 });
 
@@ -1037,4 +1073,75 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     "Typed before the crash.",
   );
   await session.close({ settle: false });
+});
+
+it("merges an agent's edit with typing the editor had not sent yet, through a real provider", async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const sender = {
+    id: 1,
+    isDestroyed: () => false,
+    send: (channel: string, payload: unknown) => {
+      sent.push({ channel, payload });
+    },
+    once() {
+      return this;
+    },
+  };
+  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
+  const ipc = createEngineYDocSessionIpc({
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    acquireWorkspace: () => ({ workspace, assertCurrent: () => undefined, release: () => undefined }),
+    captureFor: () => capture,
+    ensureCaptureFor: async () => undefined,
+    isSharedView: () => false,
+    resolveDocumentPath: async (_workspace, path) => path,
+    onError: (message) => captureErrors.push(message),
+  });
+  const opened = await ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "editor", path: PATH });
+  if (!opened.available) throw new Error("The editor session did not open.");
+  const editor = new Y.Doc();
+  Y.applyUpdate(editor, opened.initialUpdate!);
+
+  // The person types at the end of the paragraph. The editor holds the
+  // update, as it does while its send batch is open.
+  let typed: Uint8Array | null = null;
+  editor.once("update", (update: Uint8Array) => {
+    typed = update;
+  });
+  const paragraph = editor.getXmlFragment("body").get(1) as Y.XmlElement;
+  const run = paragraph.get(0) as Y.XmlText;
+  run.insert(run.length, " PERSON");
+
+  // The agent edits that paragraph and adds a section, computed against the
+  // provider's state, which does not have the typing yet.
+  const origin = { actorOriginId: "claude-code", attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+  await expect(ipc.editDocument({
+    workspaceId: WORKSPACE_ID,
+    path: PATH,
+    origin,
+    change: async (state, options) =>
+      documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
+  })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+
+  // Now the editor sends its typing and takes the agent's edit.
+  expect(ipc.applyUpdate(sender, { sessionId: "editor", update: typed!, seq: 1, lineageGeneration: 1 }))
+    .toEqual({ accepted: true });
+  for (const { channel, payload } of sent) {
+    if (channel === CHANNELS.engineYDocRemoteUpdate) {
+      Y.applyUpdate(editor, (payload as { update: Uint8Array }).update);
+    }
+  }
+
+  const expected = "# Solo\n\nStart over here. PERSON\n\n## Added";
+  expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe(expected);
+  await expect.poll(async () => {
+    const read = await ipc.readDocument({ workspaceId: WORKSPACE_ID, path: PATH });
+    return documentMarkdown(read.state!);
+  }).toBe(expected);
+  await ipc.close(sender, { sessionId: "editor" });
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Start over here. PERSON");
+  // The engine journaled the agent's update under the agent's name.
+  expect(requests.some((request) =>
+    request.method === YDOC_METHOD.recordUpdate &&
+    (request.params as { actorOriginId?: string }).actorOriginId === "claude-code")).toBe(true);
 });

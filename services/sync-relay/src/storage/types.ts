@@ -571,6 +571,17 @@ export interface SyncRelayStorage {
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  postNotice(input: import("./notices").PostNoticeInput): void;
+  readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
+  markNotices(input: import("./notices").MarkNoticesInput): void;
+  noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
+  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
+  readAutomationHost(input: {workspaceId: string; ownerUserId: string}): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  checkInAutomationComputer(input: import("./automationHosts").AutomationHostCheckInInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  chooseAutomationHost(input: import("./automationHosts").AutomationHostChooseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  releaseAutomationHost(input: import("./automationHosts").AutomationHostReleaseInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
+  commitCollectionWrite(input: import("./collectionWrites").CommitCollectionWriteInput): import("./collectionWrites").CommittedCollectionWrite;
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
   acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;

@@ -11,7 +11,7 @@ export function registerAppPreviewIpcHandlers<
   Workspace extends { workspaceId: string; rootPath: string },
   Operation extends {
     readonly workspace: Workspace;
-    readonly state: { sitePreviews: Pick<ReturnType<typeof createSitePreviewLifecycle>, "status" | "stop"> };
+    readonly state: { sitePreviews: Pick<ReturnType<typeof createSitePreviewLifecycle>, "status" | "release"> };
     isCurrent(): boolean;
     assertCurrent(): void;
   },
@@ -95,7 +95,8 @@ export function registerAppPreviewIpcHandlers<
       input.workspaceId,
       "The app preview stop request does not target the active workspace. Open the workspace and try again.",
       (operation) =>
-        operation.state.sitePreviews.stop({
+        operation.state.sitePreviews.release({
+          holderId: input.holderId,
           getActiveWorkspaceId: () => {
             try {
               operation.assertCurrent();

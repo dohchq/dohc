@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../src/ipc/channels.ts";
 
 // Static packaging gate: asserts the built tree and electron-builder config
 // are release-ready without running electron-builder (no network, no heavy
@@ -24,10 +23,12 @@ check(
   existsSync(join(desktopDir, "dist/main/plugin-host.js")),
   "build output exists: dist/main/plugin-host.js",
 );
-check(
-  existsSync(join(desktopDir, "dist/main/workspace-database-worker.js")),
-  "build output exists: dist/main/workspace-database-worker.js",
-);
+for (const worker of ["workspace-database-worker", "document-projection-worker"]) {
+  check(
+    existsSync(join(desktopDir, `dist/main/${worker}.js`)),
+    `build output exists: dist/main/${worker}.js`,
+  );
+}
 for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png"]) {
   check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
 }
@@ -120,19 +121,6 @@ if (config) {
     check(
       cliBinResource?.filter?.includes(launcher) === true,
       `cli-bin extraResource ships ${launcher}`,
-    );
-  }
-  // The only tie between this config and BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES:
-  // a driver added there without a matching extraResources entry ships in dev
-  // but silently disappears from a packaged app's Offered section.
-  for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
-    check(
-      extraResources.some(
-        (entry) =>
-          entry?.from === `plugins/${directoryName}` &&
-          entry?.to === `builtin-plugins/${directoryName}`,
-      ),
-      `built-in ${directoryName} plugin ships as an extraResource`,
     );
   }
 

@@ -12,7 +12,10 @@ await build({
     "dataset-host": fileURLToPath(new URL("../src/dataset-host.ts", import.meta.url)),
     "dataset-compiler": fileURLToPath(new URL("../src/dataset-compiler.ts", import.meta.url)),
     "dataset-attempts": fileURLToPath(new URL("../src/dataset-attempts.ts", import.meta.url)),
+    "dataset-automation-claims": fileURLToPath(new URL("../src/dataset-automation-claims.ts", import.meta.url)),
     index: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
+    automation: fileURLToPath(new URL("../src/automation.ts", import.meta.url)),
+    "automation-worker": fileURLToPath(new URL("../src/automation-worker.ts", import.meta.url)),
     child: fileURLToPath(new URL("../src/child.ts", import.meta.url)),
     persistent: fileURLToPath(new URL("../src/persistent.ts", import.meta.url)),
     journal: fileURLToPath(new URL("../src/journal.ts", import.meta.url)),
@@ -25,5 +28,5 @@ await build({
   platform: "node",
   format: "esm",
   target: "node24",
-  external: ["quickjs-emscripten", "@dohc/app-backend-runtime/child", "@dohc/app-backend-runtime/persistent-child"],
+  external: ["quickjs-emscripten", "@dohc/app-backend-runtime/child", "@dohc/app-backend-runtime/persistent-child", "@dohc/app-backend-runtime/automation-worker"],
 });

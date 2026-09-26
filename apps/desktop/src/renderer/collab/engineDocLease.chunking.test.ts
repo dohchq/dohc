@@ -5,7 +5,7 @@ import * as Y from "yjs";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
-import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
+import { ORPHANED_DRAFT_STORAGE_PREFIX } from "../orphanedDraftStorage";
 import { harnessBridge } from "./engineDocChunkingTestHarness";
 
 let projectionShouldFail = false;
@@ -137,9 +137,11 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
   // renderer process would, instead of consulting this run's in-memory store.
   let storedText = "";
   await waitFor(() => {
-    const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
+    const keys = Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX));
+    expect(keys).toHaveLength(1);
+    const raw = localStorage.getItem(keys[0]!);
     expect(raw).not.toBeNull();
-    storedText = (JSON.parse(raw!) as Array<{ text: string }>)[0]?.text ?? "";
+    storedText = (JSON.parse(raw!) as { text: string }).text;
     expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
   });
 
@@ -198,9 +200,11 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
   // row, as the next renderer process would.
   let storedText = "";
   await waitFor(() => {
-    const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
+    const keys = Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX));
+    expect(keys).toHaveLength(1);
+    const raw = localStorage.getItem(keys[0]!);
     expect(raw).not.toBeNull();
-    storedText = (JSON.parse(raw!) as Array<{ text: string }>)[0]?.text ?? "";
+    storedText = (JSON.parse(raw!) as { text: string }).text;
     expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
   });
 
@@ -260,7 +264,6 @@ it("persists a crude-text draft synchronously, before the held projection import
       expect(drafts.result.current.length).toBe(1);
       expect(drafts.result.current.at(-1)?.text).toBe("# My Heading");
     },
-    { timeout: 10_000 },
   );
   // Upgraded in place, not appended: still exactly one row for this path.
   expect(drafts.result.current.length).toBe(1);

@@ -226,7 +226,9 @@ export function registerNativeMenusIpcHandlers<
                   separator,
                   item("Toggle Theme", "toggle-theme"),
                 ]
-              : [...editRoles];
+              : input.context === "pinned-app"
+                ? [item("Unpin", "unpin-app")]
+                : [...editRoles];
         },
       });
     })();

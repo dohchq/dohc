@@ -74,6 +74,18 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
       source: `globalThis.operations={insert(ctx){return ctx.db.query('SELECT * FROM items');}}` });
     assert.deepEqual(read.result, [{ id: 'persistent-relocated', value: 42 }]);
   } finally { await worker.close(); }
+  // The automation evaluator's worker loads QuickJS's Wasm from the relocated closure, as main starts it.
+  await cp(new URL('../../../packages/app-backend-runtime/dist/automation.mjs', import.meta.url), join(root, 'automation-client.mjs'));
+  const { createAutomationEvaluator } = await import(pathToFileURL(join(root, 'automation-client.mjs')).href);
+  const evaluator = createAutomationEvaluator({ entryPath: join(staged, 'automation-worker.mjs') });
+  try {
+    assert.deepEqual(await evaluator.evaluate({ trigger: { kind: 'record-added' }, person: null, now: '2026-09-25T09:30:00.000+08:00' },
+      [{ kind: 'expression', source: 'dateAdd(today(), 3, "days")' }]), [{ ok: true, value: '2026-09-28' }]);
+  } finally { await evaluator.close(); }
+  const automationWorker = await readFile(join(staged, 'automation-worker.mjs'));
+  await rm(join(staged, 'automation-worker.mjs'));
+  await assert.rejects(requireAppBackendRuntime(staged), /resources changed/);
+  await writeFile(join(staged, 'automation-worker.mjs'), automationWorker);
   const persistentChild = await readFile(join(staged, 'persistent-child.mjs'));
   await writeFile(join(staged, 'persistent-child.mjs'), '// changed');
   await assert.rejects(requireAppBackendRuntime(staged), /resources changed/);

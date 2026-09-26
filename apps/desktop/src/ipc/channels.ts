@@ -54,6 +54,7 @@ export const WORKBENCH_MENU_COMMANDS = [
   "install-update",
   "settings",
   "toggle-theme",
+  "unpin-app",
 ] as const;
 
 export const PLUGIN_PIPELINE_STATUSES = [
@@ -84,8 +85,6 @@ export const PLUGIN_PIPELINE_ERROR_STAGES = [
   "runtime",
   "uninstall",
 ] as const;
-
-export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = ["agent-chat"] as const;
 
 // How many unrecoverable paths the uninstall preflight sends to the renderer.
 // The dialog lists this sample and says how many more there are; a plugin
@@ -191,6 +190,7 @@ export const CHANNELS = {
   startSitePreview: "desktop:start-site-preview",
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
+  sitePreviewReplaced: "desktop:site-preview-replaced",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",
@@ -203,8 +203,6 @@ export const CHANNELS = {
   stopPluginWebApp: "desktop:stop-plugin-web-app",
   pluginWebAppFailed: "desktop:plugin-web-app-failed",
   listPlugins: "desktop:list-plugins",
-  listOfferedPlugins: "desktop:list-offered-plugins",
-  addOfferedPlugin: "desktop:add-offered-plugin",
   installPlugin: "desktop:install-plugin",
   disablePlugin: "desktop:disable-plugin",
   enablePlugin: "desktop:enable-plugin",
@@ -278,6 +276,24 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  noticesChanged: "desktop:notices-changed",
+  // Collection automations: main parses and writes automations.yaml.
+  listCollectionAutomations: "desktop:list-collection-automations",
+  listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  retryCollectionAutomation: "desktop:retry-collection-automation",
+  undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
+  listAutomationTargets: "desktop:list-automation-targets",
+  checkCollectionAutomation: "desktop:check-collection-automation",
+  confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
+  writeCollectionAutomations: "desktop:write-collection-automations",
+  listAutomationHolds: "desktop:list-automation-holds",
+  resetAutomationHolds: "desktop:reset-automation-holds",
+  revealAutomationHolds: "desktop:reveal-automation-holds",
+  dismissAutomationStops: "desktop:dismiss-automation-stops",
+  automationShareImpact: "desktop:automation-share-impact",
+  automationHoldsChanged: "desktop:automation-holds-changed",
+  listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
@@ -285,6 +301,8 @@ export const CHANNELS = {
   readShareProposalFileContent: "desktop:read-share-proposal-file-content",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
+  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   listMyShareChanges: "desktop:list-my-share-changes",
   withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",
@@ -344,6 +362,11 @@ export const CHANNELS = {
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
+  reloadUserSettings: "desktop:reload-user-settings",
+  setAppPinned: "desktop:set-app-pinned",
+  getUserSettingsFilePath: "desktop:get-user-settings-file-path",
+  openUserSettingsFile: "desktop:open-user-settings-file",
+  openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",
   getWorkspaceSettings: "desktop:get-workspace-settings",
   setWorkspaceSettings: "desktop:set-workspace-settings",
   resetWorkspaceSettings: "desktop:reset-workspace-settings",

@@ -8,9 +8,11 @@ import {
   type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { applyAppearanceSettings } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import { useSentNotices } from "./shell/useSentNotices";
 
 export function DesktopRoot() {
   const [loaded, setLoaded] = useState(false);
@@ -27,6 +29,12 @@ export function DesktopRoot() {
   const committedRegistryRequest = useRef(0);
   const userSettingsRequests = useRequestSequence();
   const shareHandoffRevision = useRef(0);
+  const sentNotices = useSentNotices(!isManagerWindow);
+  // A file to open once the workspace a notice's Open switched to is ready.
+  const [openOnSwitch, setOpenOnSwitch] = useState<{
+    workspaceId: string;
+    path: string;
+  } | null>(null);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
     const request = ++registryRequest.current;
@@ -153,6 +161,12 @@ export function DesktopRoot() {
     };
   }, [refreshUserSettings]);
 
+  // The theme follows the settings file, including an edit made outside dohc.
+  const appearance = userSettings?.settings.appearance;
+  useEffect(() => {
+    if (appearance) applyAppearanceSettings(appearance);
+  }, [appearance]);
+
   useEffect(
     () =>
       bridge().onWorkspaceActivity((event) => {
@@ -169,6 +183,7 @@ export function DesktopRoot() {
           ? known
           : [...known, next],
       );
+      setOpenOnSwitch(null);
       setWorkspace(next);
     });
   }, []);
@@ -254,7 +269,11 @@ export function DesktopRoot() {
       onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
       onManageWorkspaces={() => bridge().openWorkspaceManager()}
-      onSwitchWorkspace={(next) => {
+      sentNotices={sentNotices}
+      {...(openOnSwitch?.workspaceId === workspace.workspaceId
+        ? { openPathOnReady: openOnSwitch.path }
+        : {})}
+      onSwitchWorkspace={(next, openPath) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.
         setWorkspaces((known) =>
@@ -262,6 +281,7 @@ export function DesktopRoot() {
             ? known
             : [...known, next],
         );
+        setOpenOnSwitch(openPath ? { workspaceId: next.workspaceId, path: openPath } : null);
         setWorkspace(next);
       }}
     />

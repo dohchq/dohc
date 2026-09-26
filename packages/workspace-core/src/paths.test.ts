@@ -89,10 +89,10 @@ describe("reserved paths", () => {
   });
 
   it("read validation allows shared-with-me (write reservation, not a secret)", () => {
-    const read = validateUserReadPath("shared-with-me/alex/brief.md");
+    const read = validateUserReadPath("shared-with-me/alex/brief.md", { platform: "win32" });
     expect(read).toEqual({ ok: true, normalized: "shared-with-me/alex/brief.md" });
     // Case/alias variants normalize the same way they do on the write side.
-    expect(validateUserReadPath("Shared-With-Me./alex/brief.md").ok).toBe(true);
+    expect(validateUserReadPath("Shared-With-Me./alex/brief.md", { platform: "win32" }).ok).toBe(true);
   });
 
   it("read validation still refuses .dohc, traversal, and ignored segments", () => {
@@ -104,7 +104,7 @@ describe("reserved paths", () => {
       "%2e%2e/sneak.md",
       "node_modules/pkg/index.js",
     ]) {
-      expect(validateUserReadPath(candidate).ok).toBe(false);
+      expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(false);
     }
   });
 });
@@ -182,7 +182,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
   it("rejects `.dohc` 8.3 aliases as reserved on write, read, and materialize", () => {
     for (const candidate of dohcAliases) {
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
-      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserReadPath(candidate, { platform: "linux" })).toEqual({ ok: false, reason: "reserved" });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
         ok: false,
         reason: "reserved",
@@ -204,7 +204,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
         reason: "reserved",
       });
       // Readable, exactly like the long-form shared-with-me projection.
-      expect(validateUserReadPath(candidate).ok).toBe(true);
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
 
@@ -219,7 +219,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
     ]) {
       expect(isReservedPath(candidate)).toBe(false);
       expect(validateUserWritePath(candidate).ok).toBe(true);
-      expect(validateUserReadPath(candidate).ok).toBe(true);
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
 });

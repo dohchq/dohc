@@ -156,13 +156,15 @@ export function SwitchControl(props: {
         if (!props.disabled) props.onChange(!props.checked);
       }}
       className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${
-        props.checked ? "border-accent bg-accent" : "border-line bg-panel-2"
+        props.checked ? "border-accent bg-accent" : "border-line bg-line"
       }`}
     >
+      {/* Anchored at the track's left edge: without left-0.5 the thumb
+          started from the button's centered content and slid off the end. */}
       <span
         aria-hidden
-        className={`absolute top-0.5 size-3.5 rounded-full bg-bg transition-transform ${
-          props.checked ? "translate-x-4" : "translate-x-0.5"
+        className={`absolute left-0.5 top-0.5 size-3.5 rounded-full transition-transform ${
+          props.checked ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
         }`}
       />
     </button>

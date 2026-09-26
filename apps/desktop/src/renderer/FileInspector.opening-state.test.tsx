@@ -53,6 +53,7 @@ describe("markdown document opening state", () => {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
     const bridgeMock = {
+      platform: "linux" as const,
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: DOC_MARKDOWN,
@@ -194,7 +195,7 @@ describe("markdown document opening state", () => {
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
-      (screen.getByTestId("page-title") as HTMLInputElement).readOnly,
+      (screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly,
     ).toBe(true);
 
     // The open answers: the session is live, and the same keystroke now goes
@@ -211,7 +212,7 @@ describe("markdown document opening state", () => {
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
     );
     bind();
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
     await user.type(screen.getByTestId("page-title"), "Retitled");
     await waitFor(() =>
       expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled(),
@@ -243,7 +244,7 @@ describe("markdown document opening state", () => {
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
     );
     answerNotEngineBacked();
-    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await screen.findByTestId("properties-panel");
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {
@@ -260,7 +261,7 @@ describe("markdown document opening state", () => {
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
     );
     bind();
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     // The shell switches the active version under the open document. It keys
     // the inspector by tab, so this is a prop change, not a remount — and the
@@ -283,7 +284,7 @@ describe("markdown document opening state", () => {
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
     );
     bind();
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
   });
 
   it("restores the writable plain editor once the open answers 'not engine-backed'", async () => {
@@ -322,7 +323,6 @@ describe("markdown document opening state", () => {
           text: "# Plan\n\nBase paragraph.\nDraft!",
           expectedContentHash: TEST_CONTENT_HASH,
         }),
-      { timeout: 5_000 },
     );
   });
 
@@ -358,7 +358,7 @@ describe("markdown document opening state", () => {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      await screen.findByTestId("markdown-editor"),
       "Draft!",
     );
     expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
@@ -455,7 +455,6 @@ describe("markdown document opening state", () => {
           text: "# Plan\n\nBase paragraph.\nNew!",
           expectedContentHash: TEST_CONTENT_HASH,
         }),
-      { timeout: 5_000 },
     );
   });
 
@@ -713,13 +712,10 @@ describe("markdown document opening state", () => {
       .mockImplementationOnce(() => heldFirst)
       .mockImplementationOnce(() => heldSecond);
     await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "First title" } });
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     fireEvent.change(title, { target: { value: "Second title" } });
     fireEvent.blur(title);
@@ -728,10 +724,7 @@ describe("markdown document opening state", () => {
       releaseFirst();
       await heldFirst;
     });
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
     ).toBe("saving");
@@ -796,14 +789,11 @@ describe("markdown document opening state", () => {
       flush = next;
     };
     const view = await renderLegacyMarkdown(bridge, registerFlush);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local title" } });
     fireEvent.blur(title);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
       workspaceId: "ws-1",
       relativePath: "a.md",
@@ -847,7 +837,7 @@ describe("markdown document opening state", () => {
     expect(flushSettled).toBe(false);
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External title",
       ),
     );
@@ -863,14 +853,11 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
-    const recoveredTitle = screen.getByTestId("page-title") as HTMLInputElement;
+    const recoveredTitle = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(recoveredTitle);
     fireEvent.change(recoveredTitle, { target: { value: "Fresh title" } });
     fireEvent.blur(recoveredTitle);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
       workspaceId: "ws-1",
       relativePath: "a.md",
@@ -1069,10 +1056,7 @@ describe("markdown document opening state", () => {
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     replaceCodeEditorText(source, `${source.value}First`);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     const newestBody = `${source.value}Second`;
     replaceCodeEditorText(source, newestBody);
     view.unmount();
@@ -1149,14 +1133,11 @@ describe("markdown document opening state", () => {
     });
     bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
     const view = await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local" } });
     fireEvent.blur(title);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     view.rerender(
       <FileInspector
@@ -1173,7 +1154,7 @@ describe("markdown document opening state", () => {
       resolveSecondRead();
       await heldSecondRead;
     });
-    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
       "Local",
     );
 
@@ -1187,7 +1168,7 @@ describe("markdown document opening state", () => {
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
     ).not.toBe("saved");
-    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
       "Local",
     );
 
@@ -1196,7 +1177,7 @@ describe("markdown document opening state", () => {
       await heldThirdRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External",
       ),
     );
@@ -1245,14 +1226,11 @@ describe("markdown document opening state", () => {
     });
     bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
     const view = await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local" } });
     fireEvent.blur(title);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     const issuedLocalBody = bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]
       .text;
     expect(issuedLocalBody).toContain("title: Local");
@@ -1282,7 +1260,7 @@ describe("markdown document opening state", () => {
       await heldThirdRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External",
       ),
     );
@@ -1320,29 +1298,26 @@ describe("markdown document opening state", () => {
     await renderLegacyMarkdown(bridge);
 
     const editTitle = async () => {
-      const title = screen.getByTestId("page-title") as HTMLInputElement;
+      const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
       fireEvent.focus(title);
       fireEvent.change(title, { target: { value: "Local" } });
       fireEvent.blur(title);
     };
     await editTitle();
-    await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 5_000 });
+    await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Base",
       ),
     );
 
     await editTitle();
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     await screen.findByTestId("orphaned-draft-notice");
   });
 
@@ -1464,10 +1439,7 @@ describe("markdown document opening state", () => {
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     replaceCodeEditorText(source, `${source.value}First`);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     const newestBody = `${source.value}Second`;
     replaceCodeEditorText(source, newestBody);
     view.unmount();
@@ -1511,10 +1483,7 @@ describe("markdown document opening state", () => {
     const source = await enterLegacySourceMode();
     const localBody = `${source.value}Draft`;
     replaceCodeEditorText(source, localBody);
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     view.unmount();
 
     await act(async () => {
@@ -1615,14 +1584,13 @@ describe("markdown document opening state", () => {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      await screen.findByTestId("markdown-editor"),
       "Draft!",
     );
     // The 800ms timer fires; the write is now in flight, held by the mock.
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
     );
     await waitFor(() => expect(flush).not.toBeNull());
 
@@ -1706,13 +1674,12 @@ describe("markdown document opening state", () => {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      await screen.findByTestId("markdown-editor"),
       "One",
     );
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
     );
 
     // The user keeps typing while write one is still in flight; a second
@@ -1732,7 +1699,6 @@ describe("markdown document opening state", () => {
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
     );
     // The serialized second write carries the newest text.
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
@@ -1824,13 +1790,12 @@ describe("markdown document opening state", () => {
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      await screen.findByTestId("markdown-editor"),
       "One",
     );
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
     );
     // B arms and fires while A holds the slot: B is parked in the queue.
     await typeInMarkdownEditor(
@@ -1898,11 +1863,7 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    const editor = await screen.findByTestId(
-      "markdown-editor",
-      {},
-      { timeout: 5_000 },
-    );
+    const editor = await screen.findByTestId("markdown-editor");
     await textEditorContent(editor);
     appendCodeEditorText(editor, " Late draft");
     const exactDraft = codeEditorText(editor);
@@ -1969,7 +1930,6 @@ describe("markdown document opening state", () => {
         await waitFor(
           () =>
             expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-          { timeout: 5_000 },
         );
         await waitFor(() => expect(flush).not.toBeNull());
         const operationResult = flush!({ captureOnFailure: true }).then(
@@ -2041,18 +2001,13 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    const editor = await screen.findByTestId(
-      "markdown-editor",
-      {},
-      { timeout: 5_000 },
-    );
+    const editor = await screen.findByTestId("markdown-editor");
     await textEditorContent(editor);
     appendCodeEditorText(editor, "One");
     // Autosave A issues and holds. It cleared `unsavedDraft` at issue time.
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
     );
     await waitFor(() => expect(flush).not.toBeNull());
 
@@ -2125,15 +2080,12 @@ describe("markdown document opening state", () => {
     );
 
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value, "read-mode reset: drop the capture's setDraft/setSavedBody/ latestDraft reset. The title keeps painting the set-aside edit and the next property save writes the set-aside document.").toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value, "read-mode reset: drop the capture's setDraft/setSavedBody/ latestDraft reset. The title keeps painting the set-aside edit and the next property save writes the set-aside document.").toBe(
         "",
       ),
     );
     await user.type(screen.getByTestId("page-title"), "New");
-    await waitFor(
-      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalled());
     const writes = bridge.bridgeMock.writeWorkspaceText.mock
       .calls as unknown as ReadonlyArray<[{ text: string }]>;
     const written = writes.at(-1)![0];
@@ -2224,7 +2176,7 @@ describe("markdown document opening state", () => {
       await switchedRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "New baseline",
       ),
     );
@@ -2273,7 +2225,7 @@ describe("markdown document opening state", () => {
     );
     bridge.answerNotEngineBacked();
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Old",
       ),
     );
@@ -2314,7 +2266,7 @@ describe("markdown document opening state", () => {
     );
 
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Peer",
       ),
     );
@@ -2353,7 +2305,7 @@ describe("markdown document opening state", () => {
 
     // The reopen resolves BOUND: the engine branch renders with the notice.
     bridge.bind();
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
     await screen.findByTestId("orphaned-draft-notice");
 
     expect(

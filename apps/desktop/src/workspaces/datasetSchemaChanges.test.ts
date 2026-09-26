@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSchemaChange } from "./datasetSchemaChanges";
@@ -13,7 +13,6 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHos
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
 
-vi.setConfig({ testTimeout: 20_000 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",
@@ -101,6 +100,46 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   await expect(f.host.query(call(f.revision, id(5)))).rejects.toThrow("Dataset access needs approval for the current revision.");
 });
 
+it("adds a button through owner approval without SQL, operation changes, or new access", async () => {
+  const f = await fixture();
+  const created = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "first"));
+  const review = await f.prepare({ kind: "addButton", tableId: id(2), name: "Send receipt" });
+  expect(review.migrationSql).toBe("SELECT 1;");
+  const next = await approve(f, review);
+  const button = next.revision.definition.tables[0]!.fields.at(-1)!;
+  expect(button).toEqual({ fieldId: expect.stringMatching(/^[0-9a-f-]{36}$/), name: "Send receipt", type: "button" });
+  expect(next.revision.definition.operations).toEqual(f.revision.definition.operations);
+  expect([next.revision.schemaSha256, next.revision.operationsSha256]).toEqual([f.revision.schemaSha256, f.revision.operationsSha256]);
+  expect(datasetRevisionsPreserveAccess(f.revision, next.revision)).toBe(true);
+  expect(f.host.describe(id(1)).tables[0]!.fields.at(-1)).toEqual(button);
+  const rows = (await f.host.query(call(next.revision, id(5)))).result as { rows: Array<{ id: string; values: Record<string, unknown> }> };
+  expect(rows.rows).toEqual([expect.objectContaining({ id: (created.result as { id: string }).id, values: { [id(3)]: (created.result as { id: string }).id, [id(4)]: "Ada" } })]);
+  await expect(f.prepare({ kind: "changeField", tableId: id(2), fieldId: button.fieldId, type: "text", required: false })).rejects.toThrow("Send receipt is a button.");
+  await expect(f.prepare({ kind: "addButton", tableId: id(2), name: "Name" })).rejects.toThrow();
+  const renamed = await f.prepare({ kind: "renameField", tableId: id(2), fieldId: button.fieldId, name: "Email receipt" });
+  expect(renamed.migrationSql).toBe("SELECT 1;");
+  expect((await approve(f, renamed)).revision.definition.tables[0]!.fields.at(-1)).toEqual({ ...button, name: "Email receipt" });
+  const added = await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: false } }));
+  const email = datasetColumnFields(added.revision.definition.tables[0]!).at(-1)!;
+  expect(added.revision.definition.operations.find(operation => operation.operationId === id(5))!.fieldIds).toEqual([id(3), id(4), email.fieldId]);
+  expect(added.revision.definition.tables[0]!.fields.map(field => field.name)).toEqual(["ID", "Name", "Email receipt", "Email"]);
+});
+
+it("refuses a button from a shared view before writing any source", async () => {
+  const f = await fixture();
+  const written: string[] = [];
+  const shareView = { shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false,
+    grantedSelector: { paths: ["people"], versionId: null, access: "edit" } };
+  const recipient = createDatasetHandler({ flushSourceCapture: async () => {}, hostForWorkspace: async () => f.host,
+    withWorkspaceOperation: async (_caller, _id, work) => work({ workspace: { workspaceId: "w", shareView }, signal: new AbortController().signal, assertCurrent() {} }),
+    withAdapter: async () => { throw new Error("A shared view has no source to capture."); },
+    createSources: async (_workspace, sources) => { written.push(...Object.keys(sources)); } });
+  await expect(recipient("editor", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: f.revision.revision,
+    revisionSha256: f.revision.revisionSha256, change: { kind: "addButton", tableId: id(2), name: "Send receipt" } })).rejects.toThrow("Open the original workspace to manage this Collection.");
+  expect(written).toEqual([]);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
 it("keeps stable field/table IDs across consecutive add and label changes", async () => {
   const f = await fixture();
   await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "first"));
@@ -179,13 +218,13 @@ it("refuses invalid numeric values with the affected record ID and leaves live d
 });
 
 it("refuses a required field change until missing values are filled", async () => {
-  const optional=structuredClone(definition); optional.tables[0]!.fields[1]!.required=false;
+  const optional=structuredClone(definition); datasetColumnFields(optional.tables[0]!)[1]!.required=false;
   const f = await fixture(optional);
   const created=await f.host.action(call(f.revision,id(6),{values:{}},"first"));
   await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true})).rejects.toThrow(/Fix record/);
   await f.host.action(call(f.revision,id(7),{id:(created.result as {id:string}).id,expectedVersion:1,values:{[id(4)]:"Ada"}},"filled"));
   const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
-  expect(next.revision.definition.tables[0]!.fields[1]!.required).toBe(true);
+  expect(datasetColumnFields(next.revision.definition.tables[0]!)[1]!.required).toBe(true);
 });
 
 it("allows generated field edits after a metadata rename without replacing custom SQL constraints", async () => {
@@ -225,10 +264,10 @@ it("preserves convertible defaults and refuses incompatible defaults", async () 
   const added=await approve(f,await f.prepare({kind:"addField",tableId:id(2),field:{name:"Amount",type:"text",required:false,unique:false,default:"5"}}));
   const field=added.revision.definition.tables[0]!.fields.at(-1)!;
   const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:field.fieldId,type:"number",required:false}));
-  expect(next.revision.definition.tables[0]!.fields.at(-1)!.default).toBe(5);
+  expect(datasetColumnFields(next.revision.definition.tables[0]!).at(-1)!.default).toBe(5);
   const artifacts=f.host.approvedArtifacts(id(1));
   const initial=generateDatasetSources(definition), bad=structuredClone(initial.definition);
-  bad.tables[0]!.fields[1]!.default="pay later";
+  datasetColumnFields(bad.tables[0]!)[1]!.default="pay later";
   const generated=generateDatasetSources(bad), schemaSql=generated.files[bad.schemaPath]!,operationSource=generated.files[bad.operationsPath]!;
   const revision=describeDatasetRevision({definition:bad,revision:1,schemaSql,operationSource});
   expect(()=>generateDatasetSchemaChange({revision,schemaSql,operationSource,change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true}})).toThrow(/without losing information/);

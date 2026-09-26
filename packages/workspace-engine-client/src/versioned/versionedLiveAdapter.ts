@@ -13,13 +13,23 @@ import {
   decodeCollectionBlobResult,
   decodeWorkspaceResult,
   encodeCollectionQueryParams,
-  type AutomationClaim,
   type AutomationClaimNextParams,
   type AutomationClaimNextResult,
+  type AutomationClaimScheduleParams,
+  type AutomationClaimScheduleResult,
+  type AutomationClaimSummary,
   type AutomationFailuresResult,
+  type AutomationListClaimsParams,
+  type AutomationListClaimsResult,
+  type AutomationPressParams,
+  type AutomationPressResult,
+  type AutomationReleaseParams,
+  type AutomationRetryParams,
+  type AutomationScheduleMarksResult,
   type AutomationSettleParams,
+  type AutomationSubscribeParams,
   type AutomationSubscribeResult,
-  type AutomationSubscriptionParams,
+  type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
   type CaptureFlushResult,
   type CollectionGetParams,
@@ -49,6 +59,7 @@ import {
   VERSIONED_METHOD,
   decodeVersionedResult,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretCompareEntry,
   type SecretMomentRecord,
@@ -386,7 +397,7 @@ export class VersionedLiveAdapter {
     text: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
@@ -420,7 +431,7 @@ export class VersionedLiveAdapter {
     path: string;
     bytes: Uint8Array;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
@@ -987,7 +998,7 @@ export class VersionedLiveAdapter {
     expectedObjectId?: string;
     requestId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
@@ -1131,16 +1142,19 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsGetRecord, input);
   }
 
-  /** Registers one (automationId, collection path) pair; idempotent. */
+  /**
+   * Registers one (automationId, collection path) pair with the change
+   * kinds and fields it wants; a new filter replaces the pair's old one.
+   */
   async subscribeAutomation(
-    input: AutomationSubscriptionParams,
+    input: AutomationSubscribeParams,
   ): Promise<AutomationSubscribeResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSubscribe, input);
   }
 
   /** Removes one exact (automationId, collection path) pair. */
   async unsubscribeAutomation(
-    input: AutomationSubscriptionParams,
+    input: AutomationUnsubscribeParams,
   ): Promise<AutomationUnsubscribeResult> {
     return this.workspaceRequest(
       WORKSPACE_METHOD.automationsUnsubscribe,
@@ -1148,9 +1162,12 @@ export class VersionedLiveAdapter {
     );
   }
 
-  /** Takes the oldest pending claim (pending -> running), or null. */
+  /**
+   * Takes the oldest pending claim in the executor's namespace (pending ->
+   * running) with its field facts, or null.
+   */
   async claimNextAutomation(
-    input: AutomationClaimNextParams = {},
+    input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
   }
@@ -1158,8 +1175,66 @@ export class VersionedLiveAdapter {
   /** Settles a running claim as done, or failed with its error text. */
   async settleAutomationClaim(
     input: AutomationSettleParams,
-  ): Promise<AutomationClaim> {
+  ): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSettle, input);
+  }
+
+  /**
+   * Queues a failed claim as its next run, with its facts. A pending or
+   * running claim comes back unchanged; a done or chain-stopped claim is
+   * refused. The engine announces a requeued claim with
+   * `automation.claimed`, but that event can drop under backpressure and a
+   * repeated retry announces nothing, so after this resolves the caller
+   * wakes its executor's drain and re-reads `automations.failures` itself.
+   */
+  async retryAutomationClaim(
+    input: AutomationRetryParams,
+  ): Promise<AutomationClaimSummary> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRetry, input);
+  }
+
+  /**
+   * Hands back a running claim the executor cannot run yet. It is pending
+   * again with its attempts as they were before `claimNext` served it, and
+   * the same run. A claim that is not running is refused. The engine
+   * announces nothing, so the executor drains again when what held the
+   * claim clears.
+   */
+  async releaseAutomationClaim(
+    input: AutomationReleaseParams,
+  ): Promise<AutomationClaimSummary> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRelease, input);
+  }
+
+  /**
+   * Records a Button field press and answers the claim that runs it, or
+   * busy while the button runs on the record for someone else. The engine
+   * announces a new claim with `automation.claimed`.
+   */
+  async pressAutomation(input: AutomationPressParams): Promise<AutomationPressResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsPress, input);
+  }
+
+  /**
+   * Claims a schedule's due times and moves its mark, in one transaction.
+   * The engine announces each new claim with `automation.claimed`.
+   */
+  async claimAutomationSchedule(
+    input: AutomationClaimScheduleParams,
+  ): Promise<AutomationClaimScheduleResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimSchedule, input);
+  }
+
+  /** Every schedule's mark, for the scheduler's start. */
+  async listAutomationScheduleMarks(): Promise<AutomationScheduleMarksResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsScheduleMarks, {});
+  }
+
+  /** One automation's run history: its newest claims, newest first. */
+  async listAutomationClaims(
+    input: AutomationListClaimsParams,
+  ): Promise<AutomationListClaimsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsListClaims, input);
   }
 
   /**
@@ -1168,6 +1243,19 @@ export class VersionedLiveAdapter {
    */
   async listAutomationFailures(): Promise<AutomationFailuresResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
+  }
+
+  /**
+   * How many changes that did not originate on this computer the engine has
+   * applied to the workspace. Record it with a decision; an equal count
+   * later proves no one else's change arrived in between.
+   */
+  async remoteChangesApplied(): Promise<number> {
+    const result = await this.workspaceRequest(
+      WORKSPACE_METHOD.syncRemoteChanges,
+      {},
+    );
+    return result.applied;
   }
 
   async writeSecretFile(input: {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { datasetRevisionsPreserveAccess, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetRevisionsPreserveAccess, describeApprovedDataset, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
@@ -17,6 +17,7 @@ import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
 import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
+import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor } from "./dataset-automation-claims.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -51,6 +52,12 @@ export interface DatasetAuthority {
   appId?: string;
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
+  /**
+   * Set only when an automation writes, with the depth its write declares.
+   * Attribution that grants nothing: it requires the owner caller, and owner
+   * administration refuses it.
+   */
+  automation?: { automationId: string; depth: number };
 }
 export interface DatasetDataGrant { operationIds: string[]; discover: boolean; revision: number; revisionSha256: string }
 export interface DatasetHostOptions<Context> {
@@ -77,6 +84,13 @@ export interface DatasetHostOptions<Context> {
   accountCheckpointStage?(context: Context, allocation: Readonly<CheckpointStageAllocation>): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
+  /**
+   * Signed retained bytes of automation claims and History rows, in the ledger's
+   * transaction. It takes no context: the executor settles claims outside any request.
+   */
+  accountAutomations?(allocation: DatasetScope & { bytes: number }): void;
+  /** Called after a commit that made automation claims. A hint: the executor also drains at open. */
+  wakeAutomations?(scope: DatasetScope): void;
   recovery?: {
     directory: string;
     limits: RecoveryLimits;
@@ -120,6 +134,18 @@ function synchronous<T>(run: () => T): T {
   return result;
 }
 function denied(): never { throw new DatasetHostError("not_authorized", "Dataset access is not permitted."); }
+function automation(value: DatasetAuthority["automation"], caller: AppBackendCaller): DatasetAuthority["automation"] {
+  if (value === undefined) return undefined;
+  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > DATASET_AUTOMATION_CHAIN_DEPTH) denied();
+  return { automationId: text(value.automationId, 1024), depth: value.depth };
+}
+/** Who made a commit, from the authority the host derived. */
+function actor(authority: DatasetAuthority): DatasetActor {
+  if (authority.automation) return { kind: "automation", ...authority.automation };
+  const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
+  if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
+  return caller.kind === "owner" ? { kind: "owner", ...app } : { kind: "link", ...app };
+}
 function scope(input: DatasetScope): DatasetScope { return { workspaceId: text(input.workspaceId), datasetId: text(input.datasetId) }; }
 function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
   if (input.kind === "data" && Object.keys(input).length === 1) return { kind: "data" };
@@ -129,13 +155,16 @@ function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
-  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources]) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources, options.accountAutomations]) {
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
   const migrationCandidates=new Map<string,{candidate:DatasetMigrationCandidate;authorityKey:string;approved:DatasetRevision;previous:DatasetRevision;schemaSql:string;source:string}>();
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
+  // The journal's own database, so each commit's claims are part of it.
+  const automations = createDatasetAutomationClaims({ db, transaction, wake: options.wakeAutomations,
+    account(key, bytes) { if (options.accountAutomations) synchronous(() => options.accountAutomations!({ ...key, bytes })); } });
   transaction(() => db.exec(`
     CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoint_approval ON dohc_dataset_checkpoint_history(workspace_id,dataset_id,json_extract(cursor_json,'$.approvedRevisionHash'));
     CREATE TABLE IF NOT EXISTS dohc_dataset_catalog (
@@ -178,15 +207,17 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   function authority(context: Context, key: { workspaceId: string; datasetId?: string }, through: DatasetAccess): DatasetAuthority {
     const result = synchronous(() => options.resolveAuthority(context, { ...key, access: through }));
-    const verified = { caller: parseAppBackendCaller(result.caller), principalKey: text(result.principalKey),
+    const caller = parseAppBackendCaller(result.caller);
+    const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
-      authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024) };
+      authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
+      automation: automation(result.automation, caller) };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     return verified;
   }
   function owner(context: Context, key: { workspaceId: string; datasetId?: string }): DatasetAuthority {
     const result = authority(context, key, { kind: "data" });
-    if (result.caller.kind !== "owner") denied();
+    if (result.caller.kind !== "owner" || result.automation) denied();
     return result;
   }
   function revision(key: DatasetScope): DatasetRevision {
@@ -255,18 +286,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields };
   }
   function describePermission(permission: Permission): DatasetDescription {
-    const { revision: approved, operations } = permission;
-    const fields = new Set(operations.flatMap(operation => operation.fieldIds));
-    const tables = new Set(operations.map(operation => operation.tableId));
-    return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
-      tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-        fields: table.fields.filter(field => fields.has(field.fieldId)).map(field => {
-          const { sqlColumn: _sqlColumn, ...description } = field;
-          if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
-          return description;
-        }) })), operations };
+    return describeApprovedDataset(permission.revision, permission.operations);
   }
   const host = {
+    /** For the trusted executor. Commits claim through the host; deleting a dataset forgets its claims. */
+    automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
+      next: automations.next, settle: automations.settle, retry: automations.retry },
     deletionStatus(context: Context, raw: DatasetScope) {
       const key = scope(raw); owner(context,key);
       return { deleted: Boolean(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) };
@@ -288,6 +313,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           revision(key);
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
+          automations.forget(key);
           if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_imports'").get()) {
             for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
               db.prepare(`DELETE FROM ${table} WHERE import_id IN(SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
@@ -419,6 +445,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         const key = scope(validated.manifest.cursor);
         if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
+        const installer = createRecoveryInstaller({ ...recovery.install!, db, transaction, journal });
+        // Installation and authority claim are separate durable steps. Opening
+        // the identical archive recovers the saved identity after a restart;
+        // the owner still must confirm the old host stopped before claiming.
+        const installed = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND manifest_hash=? AND phase='installed'")
+          .get(key.workspaceId, key.datasetId, raw.manifestSha256);
+        const saved = installed ? installer.status({ ...key, transferId: String(installed.import_id), authorize }) : null;
+        if (saved && equalRecoveryCursor(saved.sourceCursor, validated.manifest.cursor)) {
+          return { ...saved, revision: parseDatasetRevision(JSON.parse(validated.catalog.revisionJson)),
+            dispose: () => validated.dispose(),
+            async install() {
+              const current = installer.status({ ...key, transferId: saved.transferId, authorize });
+              if (!current || current.manifestSha256 !== saved.manifestSha256 || !equalRecoveryCursor(current.sourceCursor, saved.sourceCursor)) {
+                throw new DatasetHostError("conflict", "Recovery transfer differs from its saved receipt.");
+              }
+              return current;
+            } };
+        }
         const assertAbsent = () => { journal.assertNotDeleted(key,authorize); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
         assertAbsent();
         return { transferId: raw.transferId, manifestSha256: raw.manifestSha256, sourceCursor: structuredClone(validated.manifest.cursor),
@@ -705,10 +749,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       };
       authorize();
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
+      const committedBy = actor(permitted.authority);
       return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
         operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
-        files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize });
+        files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize,
+        recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }) });
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */
     async readOperation<T>(context: Context, raw: InvokeDatasetInput, read: (result: JsonValue, revision: number) => T): Promise<T> {

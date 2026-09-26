@@ -31,12 +31,13 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
-    ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, HistoryPageRead, LifecycleState,
-    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    WorkspaceActor, WorkspaceRootGuard, YdocAppend, YdocCloseSessionOutcome, YdocOpenState,
-    YdocSettleOutcome, YdocSettlement,
+    ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
+    CollectionReconciliation, HistoryPageRead, LifecycleState, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult, PostCommitMaterializeOutcome,
+    RelayConfiguration, RelayOperation, RelayOperationOutcome, RollbackExecutionResult,
+    SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined, WorkspaceActor,
+    WorkspaceRootGuard, YdocAppend, YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome,
+    YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;

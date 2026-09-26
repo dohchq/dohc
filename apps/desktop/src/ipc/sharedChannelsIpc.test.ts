@@ -71,6 +71,7 @@ async function harness() {
   const push = vi.fn(async () => undefined);
   const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
+  const sharesChanged = vi.fn<(workspaceId: string) => void>();
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
     getChannelWireId: vi.fn(async (_input: { workspaceId: string; channelId: string }): Promise<string | null> => null),
@@ -105,12 +106,13 @@ async function harness() {
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
     notifyRenderer: notify, mountShareFolder: mount, unmountShareFolder: unmount,
+    sharesChanged,
   });
   const invoke = async (channel: string, payload: unknown, trusted = true) =>
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, unmount, push, rotateAfterLookup, store, relayCalls,
+    mount, unmount, push, rotateAfterLookup, store, relayCalls, sharesChanged,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -157,7 +159,7 @@ describe("registered shared-channel handlers", () => {
     if (reason === "credentials") h.rotateCredentials();
     else if (reason === "renderer") h.retireRenderer();
     else drained = h.authorities.invalidate("workspace");
-    held.resolve({ received: [{ shareId: "late", selector: { kind: "chat-channel", channelWireId: "late-wire" } }] });
+    held.resolve({ received: [{ shareId: "late", selector: { kind: "chat", channelWireId: "late-wire" } }] });
     await expect(result).rejects.toThrow();
     await drained;
     expect(h.peek).not.toHaveBeenCalled();
@@ -202,7 +204,7 @@ describe("registered shared-channel handlers", () => {
   it("does not cache an invitation kind returned after the account changes", async () => {
     const h = await harness();
     h.relayListing.mockResolvedValue({ received: [{
-      shareId: "late", selector: { kind: "chat-channel", channelWireId: "late-wire" },
+      shareId: "late", selector: { kind: "chat", channelWireId: "late-wire" },
     }] });
     const started = deferred();
     const held = deferred<"not-dm">();
@@ -233,6 +235,8 @@ describe("registered shared-channel handlers", () => {
     // The group's channel must already be on the relay, so the share pushes
     // first; a chat-only share leaves that to the next sync pass.
     expect(h.push).toHaveBeenCalledOnce();
+    // Each new grant refreshes the workspace's share roster.
+    expect(h.sharesChanged.mock.calls).toEqual([["workspace"], ["workspace"]]);
   });
 
   it("a session change before the share runs stops a plain channel share too", async () => {
@@ -244,6 +248,7 @@ describe("registered shared-channel handlers", () => {
       workspaceId: "workspace", channelId: "bare", recipientEmail: "ana@example.test",
     })).rejects.toThrow("session changed");
     expect(h.relayCalls).toHaveLength(0);
+    expect(h.sharesChanged).not.toHaveBeenCalled();
   });
 
   it("a session change during the pre-share push stops the share before the relay hears of it", async () => {
@@ -276,7 +281,7 @@ describe("registered shared-channel handlers", () => {
       shareId: "share-g", relayUrl: "https://relay.test", labelHint: "Launch team", assertCurrent: expect.any(Function),
     });
     // A plain channel has no folder to mount.
-    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({ ...info, shareId: "share-c", channelWireId: "wire-c", kind: "chat-channel" });
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({ ...info, shareId: "share-c", channelWireId: "wire-c", kind: "chat" });
     await h.invoke(CHANNELS.joinSharedChannel, { workspaceId: "workspace", shareId: "share-c" });
     expect(h.mount).toHaveBeenCalledOnce();
     // The folder failing leaves the channel joined and names the failure.

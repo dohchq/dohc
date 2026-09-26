@@ -76,7 +76,7 @@ describe("JoinSyncedWorkspace", () => {
       .mockRejectedValueOnce(
         new Error(
           "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
-            "Passphrase required to unlock synced secrets.",
+            "Passphrase required to unlock synced secrets. Files remain in /home/sam/dohc/notes. Choose another empty folder to try again.",
         ),
       )
       .mockResolvedValueOnce({ workspace: JOINED });
@@ -93,11 +93,18 @@ describe("JoinSyncedWorkspace", () => {
     );
 
     await user.type(passphrase, "shared protected-files passphrase");
+    expect(screen.getByTestId("join-error").textContent).toContain("Files remain in /home/sam/dohc/notes.");
+    expect(screen.getByTestId("join-error").textContent).toContain("Choose another empty folder");
+    expect((screen.getByTestId("join-workspace-start") as HTMLButtonElement).disabled).toBe(true);
+    await user.type(passphrase, "{Enter}");
+    expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1);
+    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
+    await user.click(screen.getByTestId("join-choose-folder"));
     await user.click(screen.getByTestId("join-workspace-start"));
     await waitFor(() =>
       expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
         syncCode: "dohc-sync:ws-joined:http://localhost:1788",
-        rootPath: "/home/sam/dohc/notes",
+        rootPath: "/home/sam/dohc/retry",
         passphrase: "shared protected-files passphrase",
       }),
     );
@@ -125,11 +132,13 @@ describe("JoinSyncedWorkspace", () => {
     await user.type(code, "dohc-sync:ws-other:http://localhost:1788");
     expect(screen.queryByTestId("join-sync-passphrase")).toBeNull();
 
+    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/other");
+    await user.click(screen.getByTestId("join-choose-folder"));
     await user.click(screen.getByTestId("join-workspace-start"));
     await waitFor(() =>
       expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
         syncCode: "dohc-sync:ws-other:http://localhost:1788",
-        rootPath: "/home/sam/dohc/notes",
+        rootPath: "/home/sam/dohc/other",
       }),
     );
   });
@@ -260,6 +269,6 @@ describe("JoinSyncedWorkspace", () => {
 
     await user.click(await screen.findByTestId("cloud-connect-start"));
     // CloudLogin polls every 3s; the completion callback re-checks the gate.
-    await screen.findByTestId("join-sync-code", undefined, { timeout: 6000 });
-  }, 10_000);
+    await screen.findByTestId("join-sync-code");
+  });
 });

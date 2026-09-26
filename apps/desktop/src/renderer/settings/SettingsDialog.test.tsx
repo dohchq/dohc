@@ -146,6 +146,8 @@ const bridge = {
     settings: DEFAULT_USER_SETTINGS,
     source: "stored" as const,
   })),
+  getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
+  openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
@@ -275,6 +277,7 @@ describe("SettingsDialog", () => {
 
     await user.click(await screen.findByRole("radio", { name: "Dark" }));
     expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      base: DEFAULT_USER_SETTINGS,
       settings: expect.objectContaining({
         appearance: expect.objectContaining({ themeMode: "dark" }),
       }),
@@ -451,6 +454,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({ profile: { preferredName: "Sam" } }),
       }),
     );
@@ -525,6 +529,7 @@ describe("SettingsDialog", () => {
       ),
     );
     expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      base: expect.any(Object),
       settings: expect.objectContaining({
         appearance: expect.objectContaining({ themeMode: "light" }),
       }),
@@ -619,6 +624,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: {
             command: "codex exec --sandbox workspace-write",
@@ -660,6 +666,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: {
             // Persisted commands are trimmed; the draft's leading whitespace
@@ -694,6 +701,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: expect.objectContaining({ command: "claude -p" }),
         }),
@@ -1467,6 +1475,50 @@ describe("SettingsDialog", () => {
     expect(within(workspaceRow).getByRole("button").textContent).toBe(
       "Reset workspace",
     );
+  });
+
+  it("opens the settings file shown beside its path, and reports a failure through the shell", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-settings-file");
+    await within(row).findByText("/state/dohc-settings.json");
+    await user.click(within(row).getByRole("button", { name: "Open settings file" }));
+    expect(bridge.openUserSettingsFile).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+
+    bridge.openUserSettingsFile.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-user-settings-file': Error: dohc could not open /state/dohc-settings.json. No application is associated with this file.",
+    ));
+    await user.click(within(row).getByRole("button", { name: "Open settings file" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
+      "dohc could not open /state/dohc-settings.json. No application is associated with this file.",
+    ));
+  });
+
+  it("hands every workspace settings answer to the shell", async () => {
+    const onWorkspaceSettingsRead = vi.fn();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+        onWorkspaceSettingsRead={onWorkspaceSettingsRead}
+      />,
+    );
+    await waitFor(() => expect(onWorkspaceSettingsRead).toHaveBeenCalledOnce());
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Reset workspace" }));
+    await waitFor(() => expect(onWorkspaceSettingsRead).toHaveBeenCalledTimes(2));
   });
 
   it("persists an edited attachment folder name", async () => {

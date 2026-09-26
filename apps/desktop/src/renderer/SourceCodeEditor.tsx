@@ -12,12 +12,13 @@ import { javascript } from "@codemirror/lang-javascript";
 import { json as jsonLanguage } from "@codemirror/lang-json";
 import {
   bracketMatching,
-  defaultHighlightStyle,
   foldGutter,
   foldKeymap,
+  HighlightStyle,
   indentOnInput,
   syntaxHighlighting,
 } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 import { Compartment, EditorState, Transaction, type Extension } from "@codemirror/state";
 import {
   drawSelection,
@@ -88,6 +89,27 @@ const CODEMIRROR_THEME = EditorView.theme({
     outline: "none",
   },
 });
+
+// The same palette as code blocks in documents (the .hljs-* rules in
+// styles.css), from theme tokens, so code reads in both themes.
+export const CODE_HIGHLIGHT_STYLE = HighlightStyle.define([
+  { tag: [tags.keyword, tags.tagName], color: "var(--dohc-ink)", fontWeight: "600" },
+  { tag: [tags.string, tags.regexp], color: "var(--dohc-success)" },
+  { tag: tags.comment, color: "var(--dohc-muted)", fontStyle: "italic" },
+  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: "var(--dohc-warning)" },
+  {
+    tag: [
+      tags.typeName,
+      tags.className,
+      tags.namespace,
+      tags.function(tags.definition(tags.variableName)),
+      tags.standard(tags.variableName),
+    ],
+    color: "var(--dohc-agent)",
+  },
+  { tag: [tags.attributeName, tags.meta], color: "var(--dohc-muted)" },
+  { tag: tags.invalid, color: "var(--dohc-danger)" },
+]);
 
 function codeMirrorLanguage(path: string, language: string): Extension {
   const ext = extensionOf(path) || language.toLowerCase();
@@ -165,7 +187,7 @@ export function SourceCodeEditor(props: {
           indentOnInput(),
           bracketMatching(),
           highlightActiveLine(),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          syntaxHighlighting(CODE_HIGHLIGHT_STYLE),
           EditorState.allowMultipleSelections.of(true),
           EditorState.tabSize.of(2),
           EditorView.lineWrapping,

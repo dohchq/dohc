@@ -1,9 +1,11 @@
 import { rm } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
+  RelayApiVersionError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import {
   CHATS_METHOD,
   type Request,
@@ -16,6 +18,7 @@ import {
   endJoinedChannel,
   joinedSharedChannelForTarget,
   mergeJoinedChannel,
+  relayApiFetch,
   relayFetchWithTimeout,
   scopeJoinedChannels,
   syncJoinedSharedChannels,
@@ -582,6 +585,31 @@ describe("syncJoinedSharedChannels", () => {
     errorSpy.mockRestore();
   });
 
+  it("keeps the pages a failed pull applied, and an empty retry reports no change", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const push = vi.fn(async () => ({ pushed: 0 }));
+    const pull = vi.fn<(input: { onApplied: () => void }) => Promise<ReturnType<typeof pullResult>>>(
+      async (input) => {
+        // The engine committed the first page before the second failed.
+        input.onApplied();
+        throw new Error("ECONNRESET");
+      },
+    );
+    const pass = () => syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver([joined()]),
+      passRows: 1,
+      pull,
+      push,
+    });
+    await expect(pass()).resolves.toMatchObject({ changed: true, failedRows: 1, uncovered: 0 });
+    pull.mockImplementation(async () => pullResult(0));
+    await expect(pass()).resolves.toMatchObject({ changed: false, failedRows: 0, uncovered: 0 });
+    errorSpy.mockRestore();
+  });
+
   it("skips shares already marked ended", async () => {
     const push = vi.fn(async () => ({ pushed: 0 }));
     const pull = vi.fn(async () => pullResult(0));
@@ -681,6 +709,42 @@ describe("relayFetchWithTimeout", () => {
     const fetchWithTimeout = relayFetchWithTimeout(1000, fastFetch);
     const response = await fetchWithTimeout("http://relay.test/sync/shares");
     expect(((await response.json()) as { ok: boolean }).ok).toBe(true);
+  });
+});
+
+describe("relayApiFetch", () => {
+  it("names the relay API version this build speaks and keeps the caller's headers", async () => {
+    const seen: Headers[] = [];
+    const recordingFetch: typeof fetch = async (_input, init) => {
+      seen.push(new Headers(init?.headers));
+      return Response.json({ ok: true });
+    };
+    await relayFetchWithTimeout(1000, recordingFetch)("http://relay.test/sync/shares", {
+      headers: { authorization: "Bearer token" },
+    });
+    await relayApiFetch(recordingFetch)(
+      new Request("http://relay.test/sync/shares", { headers: { authorization: "Bearer request" } }),
+    );
+    expect(seen.map((headers) => [headers.get("authorization"), headers.get(RELAY_API_VERSION_HEADER)])).toEqual([
+      ["Bearer token", String(RELAY_API_VERSION)],
+      ["Bearer request", String(RELAY_API_VERSION)],
+    ]);
+  });
+
+  it("turns a version refusal into one error that names the side to update", async () => {
+    const refusing = (code: string): typeof fetch => async () =>
+      Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
+    const old = await relayApiFetch(refusing("api_version_too_old"))("http://relay.test/sync/shares")
+      .catch((error: unknown) => error);
+    expect(old).toBeInstanceOf(RelayApiVersionError);
+    expect((old as RelayApiVersionError).update).toBe("app");
+    const newer = await relayApiFetch(refusing("api_version_too_new"))("http://relay.test/sync/shares")
+      .catch((error: unknown) => error);
+    expect((newer as RelayApiVersionError).update).toBe("server");
+
+    const other = await relayApiFetch(refusing("invalid_path"))("http://relay.test/sync/shares");
+    expect(other.status).toBe(400);
+    expect(((await other.json()) as { code: string }).code).toBe("invalid_path");
   });
 });
 

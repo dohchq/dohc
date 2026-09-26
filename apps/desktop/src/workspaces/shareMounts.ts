@@ -272,7 +272,7 @@ export async function resolveShareProjectionPath<Mount>(
   relativePath: string,
   mounts: readonly Mount[],
 ): Promise<ResolvedShareProjectionPath<Mount>> {
-  const validated = validateUserReadPath(relativePath);
+  const validated = validateUserReadPath(relativePath, { platform: process.platform });
   if (!validated.ok) return { kind: "local" };
   const resolved = await assertResolvedWorkspacePath({
     rootPath: hostRoot,
@@ -486,7 +486,7 @@ async function createMountDirectory(
 }
 
 // A mount needs file content to follow. A null selector is a different grant
-// kind (a chat-channel share, which carries no file selector at all) and must
+// kind (a chat share, which carries no file selector at all) and must
 // be joined from Chats, not mounted as an (empty) folder. An unreadable
 // selector never reaches here — `fetchShareViewInfo` refuses it outright,
 // because softening one into "grants everything" is exactly the widening this
@@ -496,7 +496,7 @@ export function assertMountableSelector(
 ): asserts selector is ShareViewSelector {
   if (selector === null) {
     throw new Error(
-      "This code is for a shared chat channel — join it from Chats instead of mounting it.",
+      "This code is for a shared group. Join it from Chats instead of mounting it.",
     );
   }
 }

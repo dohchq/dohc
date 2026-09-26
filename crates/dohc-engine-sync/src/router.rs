@@ -17,6 +17,9 @@ pub struct RoutedApply {
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// Group automation claims the applied messages took, for the
+    /// post-commit `automation.claimed` wake.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -107,6 +110,24 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    if envelope
+        .origin_id
+        .starts_with(crate::moment_apply::COLLECTION_FILE_ORIGIN_PREFIX)
+        && envelope.op_kind != "moment.append"
+    {
+        // Only a moment.append passes the named author's path check, so no
+        // other operation, such as a conflict resolution, may use this origin.
+        return plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::InvalidInput {
+                    reason: "relay collection-file origin carries only moment.append",
+                })
+            },
+        ));
+    }
     let Some(route) = OWNED_OP_ROUTES
         .iter()
         .find_map(|(kind, route)| (*kind == envelope.op_kind).then_some(*route))
@@ -128,7 +149,13 @@ pub fn apply_replication_envelope(
         cache.clear();
     }
     match route {
-        OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
+        OwnedRoute::Chat => map_applied(
+            crate::apply_chat_envelope(store, envelope, faults),
+            |automation_claims| RoutedApply {
+                automation_claims,
+                ..RoutedApply::default()
+            },
+        ),
         OwnedRoute::LiveAudit => plain(crate::live_audit::apply_audit_envelope(
             store, envelope, faults,
         )),

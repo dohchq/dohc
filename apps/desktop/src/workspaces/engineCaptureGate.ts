@@ -52,7 +52,8 @@ export type EngineFeature =
   | "Chats"
   | "Plugins"
   | "Engine history"
-  | "Chat mentions";
+  | "Chat mentions"
+  | "Automations";
 
 // A workspace without a capture had its recorder fail to build at open. Main
 // builds the recorder once per workspace per app session, so a restart is the

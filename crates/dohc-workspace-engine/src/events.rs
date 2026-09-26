@@ -38,17 +38,11 @@ pub const RECORD_FIELD_CHANGED_EVENT: &str = "record.field.changed";
 /// inserted (ADR 0008: only the origin device claims). A wake-up, not the
 /// claim transport: delivery is at most once, and the durable claim row is
 /// what `automations.claimNext` and `automations.failures` serve — a missed
-/// event costs a poll, never a claim. A pending claim wakes the desktop's
-/// drain loop; a claim inserted already failed (`chain-stopped`, the depth
-/// cap's stop report) tells the owner surface to re-read
-/// `automations.failures`.
+/// event costs a poll, never a claim. The payload is the claim without its
+/// field facts. A pending claim wakes the desktop's drain loop; a claim
+/// inserted already failed (`chain-stopped`, the depth cap's stop report)
+/// tells the owner surface to re-read `automations.failures`.
 pub const AUTOMATION_CLAIMED_EVENT: &str = "automation.claimed";
-
-/// A previous/next value travels whole up to this many bytes of JSON; a
-/// larger one is replaced by `{ "truncated": true, "bytes": N }` and the
-/// subscriber reads the record for the whole value. History keeps every
-/// value whole; this bounds the event transport, not the data.
-const RECORD_EVENT_VALUE_CAP_BYTES: usize = 8 * 1024;
 
 /// An engine-initiated notification for the transport host to deliver as a
 /// wire `Event` envelope. The service assigns only the NAME and PAYLOAD;
@@ -106,30 +100,20 @@ impl EngineEvents {
     }
 }
 
-/// One event value: the stored history JSON parsed whole, or the truncated
-/// marker past the cap, or `null` for an absent side of the change.
-/// A field value nests inside Event -> payload -> value on the wire, so the
-/// value itself may use only the depth the frame limit leaves for it. A
-/// deeper value travels as the truncated marker, exactly like an oversized
-/// one: the subscriber reads the record for the whole value.
-const RECORD_EVENT_VALUE_MAX_DEPTH: usize = 16;
-
+/// One event value: the stored history JSON parsed whole, `null` for an
+/// absent side of the change, or `{ "truncated": true, "bytes": N }` for a
+/// value past the field fact bounds (`field_fact_value`): the subscriber
+/// reads the record for the whole value.
 fn record_event_value(json: Option<&str>) -> Value {
     let Some(json) = json else {
         return Value::Null;
     };
-    if json.len() > RECORD_EVENT_VALUE_CAP_BYTES {
-        return json!({ "truncated": true, "bytes": json.len() });
-    }
-    let value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
-    if dohc_engine_domain::collection_value_exceeds_depth(&value, RECORD_EVENT_VALUE_MAX_DEPTH) {
-        return json!({ "truncated": true, "bytes": json.len() });
-    }
-    value
+    dohc_engine_domain::field_fact_value(json)
+        .unwrap_or_else(|| json!({ "truncated": true, "bytes": json.len() }))
 }
 
-/// Emit `automation.claimed` post-commit for each pending claim a local
-/// apply inserted, in insertion order. The payload is the claim row plus its
+/// Emit `automation.claimed` post-commit for each claim a local apply
+/// inserted or a retry requeued, in order. The payload is the claim row plus its
 /// workspace — enough for the desktop to route the wake-up without a read.
 pub(super) fn emit_automation_claimed(
     events: &EngineEvents,
@@ -256,11 +240,18 @@ mod tests {
                     origin_id: "origin-a".to_owned(),
                     origin_seq: 41,
                 },
-                record_id: "rec_a".to_owned(),
+                record_id: Some("rec_a".to_owned()),
                 collection_path: "tasks".to_owned(),
                 depth: 1,
+                change: dohc_engine_domain::AutomationChange {
+                    kind: dohc_engine_domain::AutomationChangeKind::Changed,
+                    author_origin_id: Some("agent-editor".to_owned()),
+                    actor_kind: Some(dohc_engine_domain::ChangeActorKind::Agent),
+                    on_behalf_of: Some("user:ice".to_owned()),
+                },
                 state: dohc_engine_domain::AutomationClaimState::Pending,
                 attempts: 0,
+                run: 1,
                 error: None,
                 created_at_ms: 1_100,
                 updated_at_ms: 1_100,
@@ -269,11 +260,18 @@ mod tests {
                 claim_id: "atc_two".to_owned(),
                 automation_id: "plugin:janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },
-                record_id: "rec_a".to_owned(),
+                record_id: Some("rec_a".to_owned()),
                 collection_path: "tasks".to_owned(),
                 depth: 0,
+                change: dohc_engine_domain::AutomationChange {
+                    kind: dohc_engine_domain::AutomationChangeKind::Added,
+                    author_origin_id: None,
+                    actor_kind: None,
+                    on_behalf_of: None,
+                },
                 state: dohc_engine_domain::AutomationClaimState::Pending,
                 attempts: 0,
+                run: 1,
                 error: None,
                 created_at_ms: 1_100,
                 updated_at_ms: 1_100,
@@ -302,16 +300,34 @@ mod tests {
                 "recordId": "rec_a",
                 "collectionPath": "tasks",
                 "depth": 1,
+                "change": {
+                    "kind": "changed",
+                    "authorOriginId": "agent-editor",
+                    "actorKind": "agent",
+                    "onBehalfOf": "user:ice",
+                },
                 "state": "pending",
                 "attempts": 0,
+                "run": 1,
                 "createdAtMs": 1_100,
                 "updatedAtMs": 1_100,
-            })
+            }),
+            "the wake-up carries the claim without its field facts"
         );
         assert_eq!(
             notices[1].payload["trigger"],
             json!({ "historyId": 7 }),
             "a never-synced trigger names its history row id"
+        );
+        assert_eq!(
+            notices[1].payload["change"],
+            json!({
+                "kind": "added",
+                "authorOriginId": null,
+                "actorKind": null,
+                "onBehalfOf": null,
+            }),
+            "an undeclared actor travels as nulls"
         );
     }
 
@@ -319,7 +335,10 @@ mod tests {
     fn record_events_emit_in_settled_order_and_cap_oversized_values() {
         let events = EngineEvents::default();
         let mut rx = events.subscribe();
-        let big = format!("\"{}\"", "x".repeat(RECORD_EVENT_VALUE_CAP_BYTES));
+        let big = format!(
+            "\"{}\"",
+            "x".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES)
+        );
         let facts = dohc_engine_domain::CollectionRecordApplyFacts {
             collection_path: "tasks".to_owned(),
             record_id: "rec_a".to_owned(),
@@ -408,8 +427,8 @@ mod tests {
         // too: an unencodable event must never reach the transport.
         let deep = format!(
             "{}1{}",
-            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH),
-            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH)
+            "[".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_DEPTH),
+            "]".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_DEPTH)
         );
         assert_eq!(
             record_event_value(Some(&deep)),
@@ -419,8 +438,8 @@ mod tests {
         // value that still travels whole nests one level fewer than the cap.
         let shallow = format!(
             "{}1{}",
-            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1),
-            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1)
+            "[".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_DEPTH - 1),
+            "]".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_DEPTH - 1)
         );
         assert_eq!(
             record_event_value(Some(&shallow)),
@@ -434,11 +453,14 @@ mod tests {
 
     #[test]
     fn record_event_values_at_the_cap_travel_whole() {
-        let at_cap = format!("\"{}\"", "x".repeat(RECORD_EVENT_VALUE_CAP_BYTES - 2));
-        assert_eq!(at_cap.len(), RECORD_EVENT_VALUE_CAP_BYTES);
+        let at_cap = format!(
+            "\"{}\"",
+            "x".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES - 2)
+        );
+        assert_eq!(at_cap.len(), dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES);
         assert_eq!(
             record_event_value(Some(&at_cap)),
-            Value::String("x".repeat(RECORD_EVENT_VALUE_CAP_BYTES - 2)),
+            Value::String("x".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_BYTES - 2)),
             "a value at the cap travels whole"
         );
     }

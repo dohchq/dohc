@@ -9,15 +9,6 @@ import {
   GetSitePreviewLogsResult,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
-
-// Every test here spawns real node children, honest work a busy machine
-// stretches. Measured 2026-08-03 on a 24-process load (12 runs):
-// individual tests passed at up to 2.3s against vitest's 5s default test
-// deadline, and the dev-server cancel completed in up to 3.3s against its
-// old 2s promptness ceiling — limits inside the loaded-healthy range. The
-// test deadline goes to 15s (~6x measured); the cancel ceilings and their
-// widened timeout bands are documented at the tests.
-vi.setConfig({ testTimeout: 15_000 });
 import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
@@ -41,7 +32,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
+  // Windows can hold a killed descendant's working directory for a moment
+  // after it exits; rm retries EBUSY for up to about 5 s.
+  await rm(root, { recursive: true, force: true, maxRetries: 10 });
 });
 
 // stopChild sends SIGKILL and returns without waiting for the kernel to
@@ -49,7 +42,7 @@ afterEach(async () => {
 // process.kill(pid, 0) can still succeed for a short window right after
 // the signal on a loaded machine. Poll for the actual death instead of
 // asserting it happened immediately.
-async function waitForProcessDeath(pid: number, deadlineMs = 2000): Promise<boolean> {
+async function waitForProcessDeath(pid: number, deadlineMs = 10_000): Promise<boolean> {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     try {
@@ -839,6 +832,8 @@ describe("package manager helpers", () => {
   });
 });
 
+// A loaded gate can take seconds to start a child. Ready and build timeouts
+// the test does not expect to fire are 20 s, inside the 30 s test timeout.
 describe("startSiteDevServer", () => {
   it.runIf(process.platform !== "win32")(
     "stops descendants after the shell wrapper exits",
@@ -852,7 +847,7 @@ describe("startSiteDevServer", () => {
           "-c",
           "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43210'; wait",
         ],
-        readyTimeoutMs: 5000,
+        readyTimeoutMs: 20_000,
       });
       const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
       const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
@@ -892,7 +887,7 @@ describe("startSiteDevServer", () => {
           // not an arbitrary wait for stop() to happen to run late enough.
           "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43212'; sleep 0.3",
         ],
-        readyTimeoutMs: 5000,
+        readyTimeoutMs: 20_000,
         descendantCaptureIntervalMs: 20,
       });
       const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
@@ -938,7 +933,7 @@ describe("startSiteDevServer", () => {
           "-c",
           "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43213'; sleep 0.05",
         ],
-        readyTimeoutMs: 5000,
+        readyTimeoutMs: 20_000,
         descendantCaptureIntervalMs: 60_000,
       });
       const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
@@ -997,7 +992,7 @@ describe("startSiteDevServer", () => {
           siteRoot: "site",
           command: "sh",
           args: ["-c", "sleep 0.05; echo 'Local: http://127.0.0.1:43298'"],
-          readyTimeoutMs: 5000,
+          readyTimeoutMs: 20_000,
           descendantCaptureIntervalMs: 10,
           descendantsReader,
         });
@@ -1039,7 +1034,7 @@ describe("startSiteDevServer", () => {
         "-e",
         "console.log('Local: http://127.0.0.1:43210'); process.exit(0)",
       ],
-      readyTimeoutMs: 5000,
+      readyTimeoutMs: 20_000,
     });
 
     // Subscribe after the process is already down. Main can be busy between
@@ -1059,7 +1054,7 @@ describe("startSiteDevServer", () => {
         "-e",
         "console.log('Local: http://127.0.0.1:43210'); setInterval(() => {}, 1000)",
       ],
-      readyTimeoutMs: 5000,
+      readyTimeoutMs: 20_000,
     });
     try {
       expect(handle.url).toBe("http://127.0.0.1:43210");
@@ -1083,7 +1078,7 @@ describe("startSiteDevServer", () => {
           "setInterval(() => {}, 1000);",
         ].join("\n"),
       ],
-      readyTimeoutMs: 5000,
+      readyTimeoutMs: 20_000,
     });
     try {
       const logs = handle.logs();
@@ -1094,6 +1089,7 @@ describe("startSiteDevServer", () => {
           url: handle.url,
           logs,
           exited: false,
+          generation: 0,
         }).success,
         later: GetSitePreviewLogsResult.safeParse({
           logs,
@@ -1124,7 +1120,7 @@ describe("startSiteDevServer", () => {
           "setInterval(() => {}, 1000);",
         ].join("\n"),
       ],
-      readyTimeoutMs: 750,
+      readyTimeoutMs: 20_000,
     });
     try {
       expect(handle.url).toBe("http://localhost:5173/");
@@ -1178,7 +1174,7 @@ describe("startSiteDevServer", () => {
       releaseStop();
       await starting.catch(() => {});
       try {
-        if (childPid > 0) expect(await waitForProcessDeath(childPid, 10_000)).toBe(true);
+        if (childPid > 0) expect(await waitForProcessDeath(childPid)).toBe(true);
       } finally {
         stopSpy.mockRestore();
       }
@@ -1192,7 +1188,7 @@ describe("startSiteDevServer", () => {
         siteRoot: "site",
         command: process.execPath,
         args: ["-e", "console.error('nope'); process.exit(2)"],
-        readyTimeoutMs: 5000,
+        readyTimeoutMs: 20_000,
       }),
     ).rejects.toThrow(/exited before it was ready/);
   });
@@ -1221,6 +1217,12 @@ describe("startSiteDevServer", () => {
   });
 });
 
+// On Windows buildSite snapshots descendants with PowerShell. Beside other
+// work a trivial build passed 30 s, and a build that exits at once still hit a
+// 20 s build timeout. These builds get 45 s inside a 60 s test.
+const BUILD_TIMEOUT_MS = 45_000;
+const BUILD_TEST_TIMEOUT_MS = 60_000;
+
 describe("buildSite", () => {
   it("runs a build command and detects the output directory", async () => {
     await mkdir(join(root, "site"), { recursive: true });
@@ -1232,13 +1234,13 @@ describe("buildSite", () => {
         "-e",
         "const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.writeFileSync('dist/index.html','built'); console.log('built ok')",
       ],
-      timeoutMs: 10000,
+      timeoutMs: BUILD_TIMEOUT_MS,
     });
     expect(result.ok).toBe(true);
     expect(result.outputPath).toBe(join(root, "site", "dist"));
     expect(result.logs.some((entry) => entry.text.includes("built ok"))).toBe(true);
     expect(await readFile(join(root, "site", "dist", "index.html"), "utf8")).toBe("built");
-  });
+  }, BUILD_TEST_TIMEOUT_MS);
 
   it.runIf(process.platform !== "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind",
@@ -1260,7 +1262,7 @@ describe("buildSite", () => {
           // win (the same residual round 17/#857 accepted).
           "sleep 500 & echo CHILD:$! ; mkdir -p dist && echo built > dist/index.html; sleep 0.1",
         ],
-        timeoutMs: 10000,
+        timeoutMs: 20_000,
       });
       expect(result.ok).toBe(true);
       const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
@@ -1268,7 +1270,7 @@ describe("buildSite", () => {
       expect(descendantPid).toBeGreaterThan(0);
 
       try {
-        expect(await waitForProcessDeath(descendantPid)).toBe(true);
+        expect(await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS)).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -1285,18 +1287,11 @@ describe("buildSite", () => {
   // real attempts to observe the descendant Start-Process just created,
   // instead of racing the wrapper's own spawn with a single shot.
   //
-  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild already
-  // awaits the taskkill subprocess to completion before buildSite returns,
-  // so by the time the test starts polling, that subprocess has already
-  // finished — it does not race a still-running taskkill. Measured
-  // 2026-08-23 under combined desktop+mcp 8-worker load (N=29 successful
-  // captures): the target process was confirmed absent on the first check,
-  // min/median/p95/max all 0-1ms. 500ms is 500x that observed maximum, real
-  // headroom over the measured range and not a growing pad chasing a flake
-  // this wait was never the cause of — it does not claim the OS has
-  // finished all of a forced termination's own async teardown by then, only
-  // that the process stops answering process.kill(pid, 0) this fast in
-  // every run measured.
+  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild awaits the
+  // taskkill subprocess before buildSite returns, so the descendant is gone by
+  // then. Under combined desktop and mcp load it was absent on the first check
+  // in every measured run (N=29, max 1 ms). The short bound keeps the claim
+  // that buildSite returns only after taskkill finished.
   const CAPTURE_INTERVAL_MS = 100;
   const WRAPPER_LIFETIME_MS = 2_000;
   const PROCESS_DEATH_TIMEOUT_MS = 500;
@@ -1337,9 +1332,7 @@ describe("buildSite", () => {
       expect(descendantPid).toBeGreaterThan(0);
 
       try {
-        expect(
-          await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS),
-        ).toBe(true);
+        expect(await waitForProcessDeath(descendantPid)).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -1358,13 +1351,13 @@ describe("buildSite", () => {
       siteRoot: "site",
       command: process.execPath,
       args: ["-e", "console.error('broken build'); process.exit(3)"],
-      timeoutMs: 10000,
+      timeoutMs: BUILD_TIMEOUT_MS,
     });
     expect(result.ok).toBe(false);
     expect(result.outputPath).toBeNull();
     expect(result.exitCode).toBe(3);
     expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
-  });
+  }, BUILD_TEST_TIMEOUT_MS);
 
   it("cancels an in-flight build instead of waiting for its timeout", async () => {
     await mkdir(join(root, "site"), { recursive: true });

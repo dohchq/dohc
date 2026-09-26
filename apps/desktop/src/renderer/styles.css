@@ -16,7 +16,7 @@
  * static block exists so first paint never waits on JS — edit values in BOTH
  * files or the sync test fails. */
 :root {
-  --font-sans: "InterVariable", system-ui, "Segoe UI", sans-serif;
+  --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
   --dohc-bg: #faf9f5;
@@ -297,6 +297,11 @@ body {
   -webkit-app-region: drag;
 }
 .titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+/* While a menu is open (useDismiss), a press on the titlebar must reach the
+ * page so it can close the menu. */
+:root[data-menu-open] .titlebar-drag {
   -webkit-app-region: no-drag;
 }
 
@@ -2565,7 +2570,11 @@ body {
 }
 
 .dohc-page-identity__title {
+  display: block;
   width: 100%;
+  field-sizing: content;
+  resize: none;
+  overflow: hidden;
   border: 0;
   background: transparent;
   padding: 0;

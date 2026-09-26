@@ -82,7 +82,6 @@ describe("discoverInstalledPlugins", () => {
           "nested manifest ignored at plugins/directory-name/panel/dohc-plugin.json",
         ],
         valid: true,
-        supersededPluginId: null,
       },
     ]);
   });
@@ -99,18 +98,13 @@ describe("discoverInstalledPlugins", () => {
       id: "shared-id",
       rootPath: alphaRoot,
       valid: true,
-      supersededPluginId: null,
     });
     // The loser keeps no claim on the shared id: its directory names it, so
-    // no two records ever report one id. It carries the
-    // lost id structurally too, not only in its diagnostics text — a
-    // caller that needs to detect this collision reads that field, never
-    // scans diagnostic prose.
+    // no two records ever report one id.
     expect(records[1]).toMatchObject({
       id: "zeta",
       rootPath: zetaRoot,
       valid: false,
-      supersededPluginId: "shared-id",
     });
     expect(records[1]?.diagnostics).toContain(
       `duplicate plugin id "shared-id": also declared at ${alphaRoot}`,
@@ -188,7 +182,6 @@ describe("discoverInstalledPlugins", () => {
           `plugin root at ${linkedRoot} is a symlink; plugin roots must be real directories`,
         ],
         valid: false,
-        supersededPluginId: null,
       },
     ]);
   });

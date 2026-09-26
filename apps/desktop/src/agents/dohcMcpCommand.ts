@@ -54,26 +54,3 @@ export function resolveDohcMcpCommand(input: {
     platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
   );
 }
-
-/**
- * The plugin host's own env, layered onto the ambient process env: the
- * resolved dohc-mcp command when one exists, or an explicit "unavailable"
- * marker when it doesn't -- never both, and never a stale leftover of
- * whichever one applied on a previous call (a workspace's plugin host can
- * respawn after this install's launcher availability changes, e.g. once a
- * boot's stable-copy refresh finally succeeds).
- */
-export function pluginHostEnvFor(
-  dohcMcpCommand: string | null,
-  baseEnv: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
-  const env = { ...baseEnv };
-  if (dohcMcpCommand === null) {
-    delete env.DOHC_MCP_COMMAND;
-    env.DOHC_MCP_COMMAND_UNAVAILABLE = "1";
-  } else {
-    env.DOHC_MCP_COMMAND = dohcMcpCommand;
-    delete env.DOHC_MCP_COMMAND_UNAVAILABLE;
-  }
-  return env;
-}

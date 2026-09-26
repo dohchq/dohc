@@ -4,12 +4,12 @@ import {
   act,
   cleanup,
   fireEvent,
+  getConfig,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
-import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "./CollectionPage";
@@ -33,22 +33,19 @@ import {
   SetWorkspaceUiStatePayload,
 } from "../ipc/bridgeContract";
 
-// These drive userEvent through async UI settles — 67 findBy* awaits across 47
-// tests — so the wall-clock profile is the file, not one test.
-//
-// asyncUtilTimeout is the constraint that actually bit: findBy* rejects on RTL's
-// own 1000ms default, so these failed at ~1-3s with "Unable to find
-// [data-testid=...]" while the test budget was never reached. Raising testTimeout
-// alone fixed nothing here.
-configure({ asyncUtilTimeout: 5_000 });
-vi.setConfig({ testTimeout: 15_000 });
 import type {
+  SitePackageInfo,
   AgentRunStatusResult,
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  ListCollectionAutomationRunsResult,
+  ListCollectionAutomationsResult,
+  RetryCollectionAutomationResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
+  MountShareResult,
+  GetRelayReceivedShareResult,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -76,8 +73,11 @@ import type {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
+  PushShareDirectWritesResult,
+  ShareDirectWritesPushedEvent,
   WithdrawShareChangesResult,
   McpConfigResult,
+  NoticeRow,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
   PluginStatusRecord,
@@ -107,6 +107,7 @@ import type {
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import type { SentNotices } from "./shell/useSentNotices";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   type WorkspaceSettingsResult,
@@ -133,6 +134,7 @@ import {
   pluginPanelTabPath,
   pluginWebAppTabPath,
   versionCompareTabPath,
+  VIEW_IDS,
 } from "./workbench/workbenchState";
 import {
   captureOrphanedDraft,
@@ -276,7 +278,7 @@ function dmSyncResult(
   dms: DmRecord[] = [],
   available = true,
 ): SyncDmsResult {
-  return { available, dms, pending: [], declined: [] };
+  return { available, dms, pending: [], declined: [], failed: false };
 }
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -349,6 +351,7 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
@@ -470,6 +473,8 @@ function makeBaseBridge(
       settings: DEFAULT_USER_SETTINGS,
       source: "stored" as const,
     })),
+    getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
+    openUserSettingsFile: vi.fn(async () => undefined),
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
@@ -629,8 +634,27 @@ function makeBaseBridge(
     withdrawShareChanges: vi.fn(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
+    pushShareDirectWrites: vi.fn(
+      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+    ),
+    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
+      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    },
+    onShareDirectWritesPushed: vi.fn(
+      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+        directWritesPushedCallbacks.add(listener);
+        return () => directWritesPushedCallbacks.delete(listener);
+      },
+    ),
     pickWorkspaceRoot: vi.fn(async () => null),
-    mountShare: vi.fn(async () => {
+    getRelayReceivedShare: vi.fn(
+      async (): Promise<GetRelayReceivedShareResult> => ({ found: false }),
+    ),
+    getDefaultShareRoot: vi.fn(
+      async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
+    ),
+    // Typed to the contract so a test that adds a share can answer it.
+    mountShare: vi.fn(async (): Promise<MountShareResult> => {
       throw new Error("not used in shell tests");
     }),
     openSharedView: vi.fn(async () => {
@@ -702,6 +726,20 @@ function makeBaseBridge(
     ),
     dismissAutomationFailure: vi.fn(
       async (_payload: DismissAutomationFailurePayload) => undefined,
+    ),
+    listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
+    resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
+    revealAutomationHolds: vi.fn(async () => undefined),
+    onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+    listCollectionAutomations: vi.fn(
+      async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
+    ),
+    listCollectionAutomationRuns: vi.fn(
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
+    ),
+    retryCollectionAutomation: vi.fn(
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" }),
     ),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);
@@ -988,6 +1026,73 @@ describe("workspace share handoff placement", () => {
   });
 });
 
+describe("adding a share to this workspace", () => {
+  // The folder under shared-with-me is read-only at every level, so the
+  // message names the level only where it has somewhere else to go. An
+  // Edit code defaults to Open separately; this person chose Add.
+  it.each([
+    [
+      "edit",
+      "Added sam to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
+    ],
+    [
+      "view",
+      "Added sam to shared-with-me. Its files are read-only and stay up to date.",
+    ],
+  ] as const)(
+    "announces an added %s share in a toast and a Notices row, not a bar",
+    async (access, message) => {
+      const user = userEvent.setup();
+      const bridge = makeBridge(Promise.resolve(null));
+      bridge.mountShare.mockResolvedValue({
+        workspace: {
+          ...WORKSPACE,
+          shareMounts: [
+            { shareId: "share-1", label: "sam", granterEmail: "sam@dohc.test", access },
+          ],
+        },
+        mount: { shareId: "share-1", label: "sam", status: "updated", changedPaths: 1 },
+      });
+      bridge.getRelayReceivedShare.mockResolvedValue({
+        found: true,
+        share: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          genericChatWritable: false,
+          grantId: "grant-1",
+          generation: 1,
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-1:https://relay.dohc.test",
+          selector: { paths: ["docs"], versionId: null },
+          access,
+        },
+      });
+      renderShell(bridge);
+
+      await user.click(await screen.findByTestId("workspace-switcher"));
+      await user.click(screen.getByTestId("workspace-switcher-open-share"));
+      await user.type(
+        await screen.findByTestId("open-share-code"),
+        "dohc-share:share-1:https://relay.dohc.test",
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe(
+          access === "edit" ? "true" : "false",
+        ),
+      );
+      await user.click(screen.getByTestId("open-share-mode-mount"));
+      await user.click(screen.getByTestId("open-share-start"));
+
+      expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(
+        message,
+      );
+      expect(screen.queryByTestId("shell-notice")).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect((await screen.findByTestId("notice-center")).textContent).toContain(message);
+    },
+  );
+});
+
 describe("workspace manager route", () => {
   it("shows a failed manager open in the shell error with a retry", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -1073,6 +1178,7 @@ describe("direct message workspace picker", () => {
         { shareId: "share-request", granterEmail: "alice@example.com" },
       ],
       declined: [],
+      failed: false,
     }));
     const sharedView: Workspace = {
       ...SHARE_VIEW,
@@ -1337,6 +1443,14 @@ describe("plugin web app tabs", () => {
         activeEditorGroup: "group-0",
       }),
     );
+    // The files exist, so the listing does not prune the restored tabs.
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: editorGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
     renderShell(bridge);
     await screen.findByTestId("tab-file-0.md");
 
@@ -1814,8 +1928,8 @@ describe("plugin details tabs", () => {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
       plugins: [
-        { ...rowFields, id: "agent-chat", directoryName: "chat-a", displayName: "Chat A" },
-        { ...rowFields, id: "agent-chat", directoryName: "chat-b", displayName: "Chat B" },
+        { ...rowFields, id: "chat-plugin", directoryName: "chat-a", displayName: "Chat A" },
+        { ...rowFields, id: "chat-plugin", directoryName: "chat-b", displayName: "Chat B" },
       ] as PluginStatusRecord[],
     }));
     renderShell(bridge);
@@ -2222,8 +2336,8 @@ describe("collection folders", () => {
 
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
     // The surface is a lazy chunk (@dohc/collection-views pulls the table,
-    // board, and calendar libraries) plus two bridge round trips; under a
-    // loaded worker that outlasts findBy's default second.
+    // board, and calendar libraries) plus two bridge round trips; on a
+    // loaded worker that cold load can outlast the default wait.
     expect(
       await screen.findByText("No records in this collection yet.", undefined, {
         timeout: 15_000,
@@ -2390,10 +2504,7 @@ describe("collection folders", () => {
     });
 
     // The second accepted edit still reaches its record's live document.
-    await waitFor(
-      () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(sessionsByPath.has("tasks/two.md")).toBe(true));
     await waitFor(() => {
       const updates =
         updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
@@ -2956,12 +3067,26 @@ describe("editor groups", () => {
           );
         expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
       },
-      { timeout: 2_000 },
     );
+    // Press Ctrl+W again the moment the first close shows, before React runs
+    // that commit's passive effects. A loaded machine produced this order.
+    const tabsLeftAfterFirstClose = new Promise<string[]>((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (within(right).queryByTestId("tab-b.md") !== null) return;
+        observer.disconnect();
+        clearTimeout(timeout);
+        const tabs = within(right).queryAllByRole("tab").map((tab) => tab.dataset.testid ?? "");
+        fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+        resolve(tabs);
+      });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("tab-b.md never closed"));
+      }, getConfig().asyncUtilTimeout);
+      observer.observe(right, { childList: true, subtree: true });
+    });
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
-    await waitFor(() => expect(within(right).queryByTestId("tab-b.md")).toBeNull());
-    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
-    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    expect(await tabsLeftAfterFirstClose).toEqual(["tab-a.md"]);
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
     );
@@ -3801,7 +3926,7 @@ describe("editor groups", () => {
       })),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
 
@@ -4629,7 +4754,6 @@ describe("ui-state merge-on-load", () => {
           states.some((state) => storedTabs(state).includes("a.md")),
         ).toBe(true);
       },
-      { timeout: 2000 },
     );
   });
 
@@ -5498,7 +5622,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("tab-a.md")).toBeNull();
     });
-  }, 20_000);
+  });
 
   // A provisional display-fill must not drive a destructive close: the pull
   // still in flight can carry back a file the older listing predates.
@@ -5703,15 +5827,11 @@ describe("ui-state merge-on-load", () => {
         expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
         expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
       },
-      { timeout: 10_000 },
     );
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(
-      () => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
-      { timeout: 10_000 },
-    );
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
 
     // The pre-pull snapshot commits; it predates the file coming back.
     await act(async () => {
@@ -5808,7 +5928,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // The same invalidation from the other side: mutateWb is the seam every
   // user-driven transition routes through, so a file click has to cancel a
@@ -5851,7 +5971,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // A chat thread opening in the panel moves no tab either, and it is the
   // destination change that conflicts most directly: the user chose another
@@ -5899,7 +6019,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
-  }, 20_000);
+  });
 
   // The third seam of the same kind, and the reason the predicate now lives at
   // the destination write: with the Chats tab already active, moving to
@@ -5975,7 +6095,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByText("Hiring discussion")).toBeTruthy();
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
-  }, 20_000);
+  });
 
   // The positive direction, and the reason it is not optional: every
   // cancellation test above also passes when nothing ever lands, so a fix that
@@ -6007,7 +6127,7 @@ describe("ui-state merge-on-load", () => {
     });
 
     expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
-  }, 20_000);
+  });
 
   // Cancelling on every workbench write would make this seam hostile: a user
   // who clicks a DM and then adjusts the sidebar would lose the click when the
@@ -6055,7 +6175,7 @@ describe("ui-state merge-on-load", () => {
     });
 
     expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
-  }, 20_000);
+  });
 
   // A destination change inside the active file moves no tab, so the check
   // above cannot see it — but the user did navigate, and a late DM would open
@@ -6120,7 +6240,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // The residual window the destination KEY cannot see: opening the chat
   // destination that is already open. Nothing about the key changed, the tab
@@ -6192,7 +6312,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByText("Planning discussion")).toBeTruthy();
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
-  }, 20_000);
+  });
 
   // The session signal reaches the SHELL: cloudStatus derives the presence
   // collaboration, so a sign-out must tear the old account's presence down
@@ -6275,7 +6395,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() =>
       expect(bridge.cloudStatus.mock.calls.length).toBeGreaterThan(statusQueries),
     );
-  }, 20_000);
+  });
 
   // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
   // engine bridge only stubs the navigator's overview surface.
@@ -6470,7 +6590,7 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
     expect(screen.queryByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeNull();
 
-  }, 20_000);
+  });
 
   // The same race through the back button: every BackHeader and the keyboard
   // shortcut route through goBack, which must issue the same synchronous
@@ -6516,7 +6636,7 @@ describe("ui-state merge-on-load", () => {
     // page, which loads the overview again. The cancel won only if it
     // did not.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
-  }, 20_000);
+  });
 
   // The same race through "New message": the compose screen opens with a
   // direct nav write, and a DM answer queued in the same tick would remount
@@ -6561,7 +6681,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
     // The sidebar command mounts once; a late DM must not remount it again.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-  }, 20_000);
+  });
 
   // The awaited form of the same click: a feed item carrying a focus target
   // navigates in place (openConversation -> command + report), and the DM
@@ -6593,7 +6713,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-  }, 20_000);
+  });
 
   // The in-thread reply-parent jump. It is the one command in the page
   // that writes NO navigation — it only scrolls — so every other seam here
@@ -6670,7 +6790,7 @@ describe("ui-state merge-on-load", () => {
     // The proof, as in the feed-click race: a DM answer that wins remounts the
     // page and loads the overview again. The cancel won only if it did not.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
-  }, 20_000);
+  });
 
   // The surviving mutant from the review: openFile's heading-target
   // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
@@ -6727,7 +6847,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
@@ -7208,11 +7328,7 @@ describe("engine store recovery", () => {
         })),
       });
       const { user, dialog } = await openRebuildDialog(bridge);
-      await screen.findByTestId(
-        "markdown-source-toggle",
-        {},
-        { timeout: 5_000 },
-      );
+      await screen.findByTestId("markdown-source-toggle");
       await waitFor(() =>
         expect(openEngineYDocSession).toHaveBeenCalledTimes(1),
       );
@@ -7484,7 +7600,7 @@ describe("engine store recovery", () => {
       })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
 
     await user.click(
@@ -8863,6 +8979,37 @@ describe("shared view send changes", () => {
     );
   });
 
+  // After a save in an Edit share view, main pushes a Collection's own files
+  // straight to the owner. A write the relay refuses stays for Send changes,
+  // and its notice sends it.
+  it("shows a push main ran after a save and offers a refused write as a proposal", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: SHARE_VIEW.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-action"));
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+  });
+
+  it("pushes nothing from a share view that cannot write", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
+    await screen.findByTestId("shared-view-banner");
+    // It does not listen for pushes at all.
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
+  });
+
   // What a submit did not take. Both are things the recipient would otherwise
   // discover by their work simply not arriving.
   it("states the files a submit left outside the share", async () => {
@@ -9270,6 +9417,9 @@ describe("share changes review", () => {
 describe("automation failure notices", () => {
   const FAILURE = {
     automationId: "hello-plugin/triage",
+    claimId: "atc_failed",
+    chainStopped: false,
+    name: null,
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,
@@ -9320,7 +9470,13 @@ describe("automation failure notices", () => {
     // is unacknowledged again.
     bridge.listAutomationFailures.mockResolvedValue({
       failures: [
-        { ...FAILURE, error: "chain-stopped", generation: 2, updatedAtMs: 9_000 },
+        {
+          ...FAILURE,
+          chainStopped: true,
+          error: "chain-stopped",
+          generation: 2,
+          updatedAtMs: 9_000,
+        },
       ],
     });
     act(() => {
@@ -9333,6 +9489,100 @@ describe("automation failure notices", () => {
     expect(notice.textContent).toContain("An automation chain stopped");
     expect(notice.textContent).toContain("did not run");
     expect(notice.textContent).toContain("2 failures so far.");
+  });
+
+  it("tries a failed Collection automation again from its notice, and opens its runs", async () => {
+    const failure = {
+      automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
+      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+    };
+    const noticeId = "notice-automation-failure-collection:tasks#stamp";
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
+    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [{
+      claimId: "atc_failed", state: "failed", error: failure.error, createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId(noticeId);
+    expect(notice.textContent).toContain('Automation "Stamp the finish date" failed');
+    const reads = bridge.listAutomationFailures.mock.calls.length;
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId, claimId: "atc_failed", startOver: false,
+    });
+    // A repeated retry sends no failure event, so the notice reads again itself.
+    await waitFor(() => expect(bridge.listAutomationFailures.mock.calls.length).toBe(reads + 1));
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("automation-run-atc_failed", undefined, { timeout: 15_000 })).toBeTruthy();
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId,
+    });
+  });
+
+  it("moves an open panel to the next automation a notice opens", async () => {
+    const failure = (id: string, claimId: string) => ({
+      automationId: `collection:tasks#${id}`, claimId, chainStopped: false,
+      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+    });
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure("first", "atc_first"), failure("second", "atc_second")] });
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
+      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
+      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] }));
+    renderShell(bridge);
+
+    const open = async (id: string) => {
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(within(await screen.findByTestId(`notice-automation-failure-collection:tasks#${id}`))
+        .getByRole("button", { name: "Open automation" }));
+    };
+    await open("first");
+    expect(await screen.findByTestId("automation-run-atc_first", undefined, { timeout: 15_000 })).toBeTruthy();
+    // The page cleared the first ask; the second still reaches the open panel.
+    await open("second");
+    expect(await screen.findByTestId("automation-run-atc_second")).toBeTruthy();
+    expect(screen.queryByTestId("automation-run-atc_first")).toBeNull();
+  });
+
+  it("toasts a Collection automation failure that arrives while the window is open, but not the ones it opened with", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const old = {
+      automationId: "collection:tasks#old", claimId: "atc_old", chainStopped: false,
+      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1,
+    };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old] });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalled());
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-automation-failure-collection:tasks#old");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("automation-failure-toast")).toBeNull();
+
+    const fresh = { ...old, automationId: "collection:tasks#stamp", claimId: "atc_new", name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 9_000 };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old, fresh] });
+    act(() => bridge.emitAutomationFailuresChanged({ workspaceId: WORKSPACE.workspaceId }));
+    const toast = await screen.findByTestId("automation-failure-toast");
+    expect(toast.textContent).toContain('Automation "Stamp" failed.');
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith(expect.objectContaining({ claimId: "atc_new" }));
+    await waitFor(() => expect(screen.queryByTestId("automation-failure-toast")).toBeNull());
   });
 
   it("ignores a poke for another workspace", async () => {
@@ -9349,6 +9599,147 @@ describe("automation failure notices", () => {
       bridge.listAutomationFailures.mock.calls.length,
       "another workspace's failures repainting this one",
     ).toBe(reads);
+  });
+});
+
+describe("notices sent to you", () => {
+  function sentNotices(notices: NoticeRow[]): SentNotices {
+    return {
+      account: null,
+      notices,
+      settled: true,
+      listFailure: null,
+      relist: vi.fn(),
+      toast: null,
+      hideToast: vi.fn(),
+      read: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    };
+  }
+  const MENTION: NoticeRow = {
+    store: "account",
+    noticeId: "mention:1",
+    kind: "mention",
+    workspaceId: WORKSPACE.workspaceId,
+    recipientShareId: null,
+    senderKind: "person",
+    senderLabel: "Ana",
+    title: "Ana mentioned you in b.md",
+    body: "",
+    target: { path: "b.md" },
+    createdAtMs: 5_000,
+    readAtMs: null,
+  };
+
+  function renderWithNotices(
+    bridge: ReturnType<typeof makeBridge>,
+    extra: { sentNotices?: SentNotices; openPathOnReady?: string; onSwitchWorkspace?: (workspace: Workspace, openPath?: string) => void },
+    workspaces: Workspace[] = [WORKSPACE],
+  ) {
+    vi.stubGlobal("dohcDesktop", bridge);
+    return render(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={WORKSPACE}
+          workspaces={workspaces}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
+          {...(extra.sentNotices ? { sentNotices: extra.sentNotices } : {})}
+          {...(extra.openPathOnReady ? { openPathOnReady: extra.openPathOnReady } : {})}
+        />
+      </>,
+    );
+  }
+
+  it("opens a notice's file in this workspace and marks it read", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([MENTION]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    expect(toggle.getAttribute("aria-label")).toBe("Notices, 1 unread");
+    await user.click(toggle);
+    await user.click(within(await screen.findByTestId("sent-notice-mention:1")).getByRole("button", { name: "Open" }));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
+  });
+
+  it("switches to the workspace that holds a notice, with its file", async () => {
+    const user = userEvent.setup();
+    const trip: Workspace = { ...WORKSPACE, workspaceId: "ws-trip", rootPath: "/home/sam/dohc/trip" };
+    const onSwitchWorkspace = vi.fn();
+    renderWithNotices(
+      makeBridge(Promise.resolve(null)),
+      { sentNotices: sentNotices([{ ...MENTION, workspaceId: "ws-trip", target: { path: "Japan/day-1.md" } }]), onSwitchWorkspace },
+      [WORKSPACE, trip],
+    );
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("sent-notice-mention:1");
+    expect(row.textContent).toContain("Japan");
+    await user.click(within(row).getByRole("button", { name: "Open" }));
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+  });
+
+  it("opens the file a notice named once the workspace it switched to is ready", async () => {
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openPathOnReady: "b.md" });
+    await screen.findByTestId("tab-b.md");
+  });
+
+  describe("through a share this computer has not added", () => {
+    const THROUGH_SHARE: NoticeRow = {
+      ...MENTION,
+      kind: "automation-notify",
+      senderKind: "automation",
+      workspaceId: null,
+      recipientShareId: "share-1",
+      title: "Weekday report is ready",
+      target: { path: "Trips/Japan/report.md" },
+    };
+    const VIEW: Workspace = { ...WORKSPACE, workspaceId: "ws-owner-view", rootPath: "/home/sam/dohc/owner" };
+    function shareBridge(access: "view" | "edit") {
+      return Object.assign(makeBridge(Promise.resolve(null)), {
+        mountShare: vi.fn(async () => ({
+          workspace: WORKSPACE,
+          mount: { shareId: "share-1", label: "owner", status: "updated" as const, changedPaths: 1 },
+        })),
+        openSharedView: vi.fn(async () => ({ workspace: VIEW })),
+        getRelayReceivedShare: vi.fn(async () => ({
+          found: true as const,
+          share: {
+            shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantId: "g1",
+            generation: 1, createdAtMs: 1, shareCode: "code-1", selector: { paths: ["Trips"], versionId: null }, access,
+          },
+        })),
+        getDefaultShareRoot: vi.fn(async () => "/home/sam/dohc/owner"),
+      });
+    }
+
+    it("adds it to shared-with-me and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("view");
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]) });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("open-share-start"));
+      expect(bridge.mountShare).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, shareCode: "code-1" });
+      await screen.findByTestId("tab-shared-with-me/owner/Trips/Japan/report.md");
+    });
+
+    it("opens it as its own workspace and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("edit");
+      const onSwitchWorkspace = vi.fn();
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]), onSwitchWorkspace });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      const start = await screen.findByTestId("open-share-start");
+      await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+      await user.click(start);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+    });
   });
 });
 
@@ -15880,6 +16271,12 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 // distinction between recovery (dot, no save promise) and savable-dirty
 // (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
+  // Most tests capture a draft before the shell mounts, and the draft store
+  // reads the platform from the bridge. `renderShell` replaces this stub.
+  beforeEach(() => {
+    vi.stubGlobal("dohcDesktop", { platform: "linux" });
+  });
+
   it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(
@@ -16015,7 +16412,7 @@ describe("set-aside draft recovery", () => {
       ),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await user.type(screen.getByTestId("page-title"), " changed");
     await screen.findByTestId("tab-dirty");
@@ -16644,7 +17041,6 @@ describe("workbench render cost", () => {
       await waitFor(
         () =>
           expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1),
-        { timeout: 10_000 },
       );
       expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
         workspaceId: WORKSPACE.workspaceId,
@@ -16667,7 +17063,6 @@ describe("workbench render cost", () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
         expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
       },
-      { timeout: 10_000 },
     );
 
     vi.useFakeTimers();
@@ -16896,5 +17291,173 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("apps pinned to the sidebar", () => {
+  it("opens a view hidden from the rail from a command, and moves off it only when the rail changes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const withSidebar = (hidden: typeof VIEW_IDS[number][], zoomLevel = 0) => ({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
+        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden },
+      },
+      source: "stored" as const,
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shellWith = (userSettings: ReturnType<typeof withSidebar>) => (
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={userSettings}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shellWith(withSidebar(["history"])));
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-history")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("View: History"));
+    const panel = await screen.findByTestId("side-panel");
+    expect(within(panel).getByText("History")).toBeTruthy();
+
+    // Another settings change, or hiding another view, leaves it open.
+    view.rerender(shellWith(withSidebar(["history"], 1)));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+    view.rerender(shellWith(withSidebar(["history", "explorer"])));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+
+    // Hiding the selected view is what moves the selection, to the first
+    // view on the rail.
+    await user.click(screen.getByTestId("activity-search"));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
+    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
+  });
+
+  it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: [...VIEW_IDS] },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.queryByTestId("file-tree")).toBeNull();
+  });
+
+  it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
+    const user = userEvent.setup();
+    const site: SitePackageInfo = {
+      root: "apps/trip",
+      title: "Trip planner",
+      kind: "static",
+      confidence: "high",
+      entryPath: "apps/trip/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredPreviewMode: null,
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: ["apps/trip/index.html"],
+      shareManifest: { ok: true, manifest: { entryPath: "apps/trip/index.html", assets: [] } },
+      diagnostics: [],
+      authority: { kind: "workspace" },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      getSitePackage: vi.fn(async () => site),
+      startSitePreview: vi.fn(async () => ({
+        siteRoot: "apps/trip",
+        mode: "static" as const,
+        url: "http://127.0.0.1:49152/",
+        logs: [],
+        exited: false,
+        generation: 1,
+      })),
+      stopSitePreview: vi.fn(async () => undefined),
+      onSitePreviewReplaced: vi.fn(() => () => undefined),
+      getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
+      setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
+    });
+    bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: {
+        ...DEFAULT_USER_SETTINGS.sidebar,
+        hidden: ["graph" as const],
+        pinnedApps: { [WORKSPACE.workspaceId]: ["apps/trip"] },
+      },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-graph")).toBeNull();
+    // The pin carries its app's title once dohc has read the app.
+    const pinned = await screen.findByRole("button", { name: "Trip planner" });
+    await user.click(pinned);
+
+    const panel = screen.getByTestId("side-panel");
+    const frame = await within(panel).findByTestId("site-preview-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
+    expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(bridge.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      siteRoot: "apps/trip",
+      mode: "static",
+      holderId: expect.any(String),
+      restart: false,
+    });
+
+    fireEvent.contextMenu(pinned);
+    await waitFor(() =>
+      expect(bridge.setAppPinned).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        appRoot: "apps/trip",
+        pinned: false,
+      }),
+    );
+    expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      context: "pinned-app",
+      path: "apps/trip",
+    });
   });
 });

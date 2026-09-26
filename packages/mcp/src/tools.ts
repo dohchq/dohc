@@ -104,8 +104,8 @@ async function safeResolve(
   // the entry itself rather than following it — see realRelativeInRoot.
   const validated =
     access === "read"
-      ? validateUserReadPath(relativePath)
-      : validateUserMaterializePath(relativePath);
+      ? validateUserReadPath(relativePath, { platform: process.platform })
+      : validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
@@ -169,12 +169,20 @@ function unresolvedPathRefusal(
   }
 }
 
-const LIVE_DOCUMENT_WRITE_REFUSAL =
-  "This file is a live document. Edit it in dohc; raw MCP file writes cannot update its document state.";
-
-function isLiveDocumentPath(resolved: { normalized: string; realRelative: string }): boolean {
-  return liveDocumentKindForPath(resolved.normalized) !== null ||
-    liveDocumentKindForPath(resolved.realRelative) !== null;
+// A raw write cannot update a live document's state, so each kind names the
+// way that can.
+function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: string }): string | null {
+  const kinds = [
+    liveDocumentKindForPath(resolved.normalized),
+    liveDocumentKindForPath(resolved.realRelative),
+  ];
+  if (kinds.includes("scene")) {
+    return "This file is a live document. Edit it in dohc; a raw file write cannot update its document state.";
+  }
+  if (kinds.includes("richdoc")) {
+    return "This file is a live document. Read it with dohc_read_document and change it with dohc_edit_document; a raw file write cannot update its document state.";
+  }
+  return null;
 }
 
 async function safeResolveForMutation(
@@ -185,7 +193,8 @@ async function safeResolveForMutation(
   if (!resolved.ok) {
     throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
   }
-  if (isLiveDocumentPath(resolved)) throw new Error(LIVE_DOCUMENT_WRITE_REFUSAL);
+  const refusal = liveDocumentWriteRefusal(resolved);
+  if (refusal) throw new Error(refusal);
   return resolved;
 }
 
@@ -612,7 +621,7 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
   // sees it (secret), where the write-side classifier would say "ignored"
   // and wave it through the floor.
-  return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
+  return classifyEngineFilePathForRead(normalizedPath, process.platform).kind === "secret";
 }
 
 // The secret floor decided on both spellings of a resolved path. The name the
@@ -916,12 +925,8 @@ export async function writeWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isLiveDocumentPath(resolved)) {
-    return {
-      ok: false as const,
-      reason: LIVE_DOCUMENT_WRITE_REFUSAL,
-    };
-  }
+  const refusal = liveDocumentWriteRefusal(resolved);
+  if (refusal) return { ok: false as const, reason: refusal };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -1682,6 +1687,7 @@ async function detectSiteAt(
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
+  const hasPublishManifest = files.has("app.publish.json");
   // Whether any script exists is a materially looser test than whether
   // one actually names a web dependency or a recognizable web-tool token —
   // the shared hasWebScript predicate is the same one desktop's own
@@ -1780,6 +1786,7 @@ async function detectSiteAt(
   if (
     explicitNonSite &&
     !hasIndex &&
+    !hasPublishManifest &&
     !hasPackageSignal &&
     !frameworkConfig &&
     detectedBuildOutputs.length === 0
@@ -1795,7 +1802,7 @@ async function detectSiteAt(
     });
   }
 
-  if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
+  if (!configPath && !hasIndex && !hasPublishManifest && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
     return null;
   }
 
@@ -1805,7 +1812,7 @@ async function detectSiteAt(
   // either one is a high-confidence signal on its own, same as an actual
   // index.html file — the desktop Apps view and MCP's detect_sites must
   // describe the same project the same way.
-  const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
+  const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
   // counts toward high confidence when it explicitly declares type: "site"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
@@ -1820,7 +1827,7 @@ async function detectSiteAt(
   const confidence: SiteConfidence =
     validType === "site"
       ? "high"
-      : hasIndex || frameworkConfig
+      : hasIndex || hasPublishManifest || frameworkConfig
         ? "high"
         : hasPackageSignal || uniqueBuildOutputs.length > 0
           ? "medium"
@@ -2368,15 +2375,15 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
   return requestCli(ctx, "chat", args);
 }
 
-// --- channels (PR 12/15 slice, WS-E) ----------------------------------------
+// --- groups (PR 12/15 slice, WS-E) ----------------------------------------
 
-// Channel discovery for agents: names, slugs, kinds, and each channel's
+// Group discovery for agents: names, slugs, kinds, and each group's
 // threads (id + display title) so a follow-up reply/read has real ids to
 // target. Writable MCP profiles ensure the workspace's default "general"
-// channel on first use — the same rule the desktop applies. Read-only shared
-// views list only existing channels so discovery never creates durable state.
-export async function listChannels(ctx: ToolContext) {
-  return requestCli(ctx, "channelsFull", {});
+// group on first use — the same rule the desktop applies. Read-only shared
+// views list only existing groups so discovery never creates durable state.
+export async function listGroups(ctx: ToolContext) {
+  return requestCli(ctx, "groupsFull", {});
 }
 
 // Canonical chat verbs return CLI handles. MCP reads use engine ids, so
@@ -2387,7 +2394,7 @@ function engineId(id: string, handlePrefix: string, enginePrefix: string): strin
     : id;
 }
 
-const engineChannelId = (id: string) => engineId(id, "ch_", "channel-");
+const engineGroupId = (id: string) => engineId(id, "ch_", "channel-");
 const engineThreadId = (id: string) => engineId(id, "th_", "thread-");
 const engineMessageId = (id: string) => engineId(id, "msg_", "message-");
 
@@ -2412,25 +2419,25 @@ function chatWriteArgs(input: ChatWriteInput) {
   };
 }
 
-// Start a chat in a channel AS THE AGENT. `channel` accepts a channel id or
+// Start a chat in a group AS THE AGENT. `group` accepts a group id or
 // a name/slug ("general", "#general", "Client ACME"). No title is required:
 // untitled chats display their first-message snippet.
-export async function startChannelChat(
+export async function startGroupChat(
   ctx: ToolContext,
-  args: ChatWriteInput & { channel: string; title?: string },
+  args: ChatWriteInput & { group: string; title?: string },
 ) {
   const result = await requestCli(ctx, "post", {
-    channel: args.channel,
+    group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...chatWriteArgs(args),
   });
   if ("ok" in result) return result;
   return {
     ok: true as const,
-    channel: {
-      id: engineChannelId(result.channel.id),
-      slug: result.channel.slug,
-      kind: result.channel.kind,
+    group: {
+      id: engineGroupId(result.group.id),
+      slug: result.group.slug,
+      kind: result.group.kind,
     },
     threadId: engineThreadId(result.threadId),
     messageId: engineMessageId(result.messageId),
@@ -2599,6 +2606,30 @@ export async function createRecord(
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,
+  });
+}
+
+// Live documents change through the desktop, which applies an edit to the
+// session an open editor holds. The path is checked here and again there.
+export async function readDocument(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentRead", { path: resolved.normalized });
+}
+
+export async function editDocument(
+  ctx: ToolContext,
+  args: { path: string; find?: string; replacement: string; requestId?: string },
+  agent: string | undefined,
+) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentEdit", {
+    path: resolved.normalized,
+    ...(args.find === undefined ? {} : { find: args.find }),
+    replacement: args.replacement,
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    ...(agent === undefined ? {} : { agent }),
   });
 }
 

@@ -11,12 +11,13 @@ import type {
   EngineDaemonLifecycle,
   EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
-import type {
-  CliRegistryWorkspace,
-  CliRunMessageLink,
-  CliServerHandle,
-  CliWorkspaceContext,
-  startCliServer as startCliServerImplementation,
+import {
+  CLI_REQUEST_DEADLINE_MS,
+  type CliRegistryWorkspace,
+  type CliRunMessageLink,
+  type CliServerHandle,
+  type CliWorkspaceContext,
+  type startCliServer as startCliServerImplementation,
 } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -31,6 +32,16 @@ import {
 } from "../workspaces/collectionRecordEdits";
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
+import { readWorkspaceText } from "../workspaces/workspaceAssets";
+import type { DocumentProjection } from "../workspaces/documentProjection";
+
+// With no editor open, the file holds the document's settled text.
+async function settledMarkdown(rootPath: string, path: string): Promise<string> {
+  const read = await readWorkspaceText(rootPath, path);
+  if (read.truncated) throw new Error(`${path} is too large to open as a live document.`);
+  return read.text;
+}
 
 interface DesktopCliServerDependencies<State> {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -56,11 +67,14 @@ interface DesktopCliServerDependencies<State> {
   ): Promise<Result>;
   collectionEditContextFor(
     operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+    signal: AbortSignal,
   ): Promise<CollectionRecordEditContext>;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
   ): Promise<Result | null>;
+  liveDocuments: LiveDocumentSessions;
+  documentProjection: DocumentProjection;
   chatWrites: ChatWrites;
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
@@ -89,6 +103,8 @@ export function createDesktopCliServer<State>(
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
     withEngineAdapter,
+    liveDocuments,
+    documentProjection,
     chatWrites,
     startCliServer,
     stateDir,
@@ -122,12 +138,20 @@ export function createDesktopCliServer<State>(
     // The CLI's collection writes ride the same seam plugin SDK edits take,
     // resolved per write under the physical workspace's authority, so a
     // retired-and-reattached workspace refuses instead of falling through to
-    // its successor.
+    // its successor. A write ends with the CLI request that asked for it.
     const cliCollectionEdit = <T>(
       work: (context: CollectionRecordEditContext) => Promise<T>,
     ): Promise<T> =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
-        await work(await collectionEditContextFor(operation)),
+        await work(
+          await collectionEditContextFor(
+            operation,
+            AbortSignal.any([
+              operation.signal,
+              AbortSignal.timeout(CLI_REQUEST_DEADLINE_MS),
+            ]),
+          ),
+        ),
       );
     const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
@@ -223,6 +247,29 @@ export function createDesktopCliServer<State>(
           if (!result) throw new Error("The workspace engine is not running.");
           return result;
         },
+      },
+      // Document reads and edits go through the desktop's live document
+      // sessions, the ones its editor holds, so an agent's edit merges into
+      // an open editor instead of racing it on disk.
+      documents: {
+        read: async (path) => {
+          const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          const markdown = live.state
+            ? await documentProjection.run({ kind: "read", state: live.state })
+            : await documentProjection.run({
+                kind: "read-settled",
+                markdown: await settledMarkdown(workspace.rootPath, live.path),
+              });
+          return { path: live.path, markdown };
+        },
+        edit: ({ path, edit, origin }) =>
+          liveDocuments.editDocument({
+            workspaceId: workspace.workspaceId,
+            path,
+            origin,
+            change: (state, { keepBlocks }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
+          }),
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit }) => {

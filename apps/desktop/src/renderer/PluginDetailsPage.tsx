@@ -1057,17 +1057,8 @@ function PluginUninstallDialog(props: {
   // states which one is true instead of calling a never-installed copy
   // "uninstalled".
   const installed = isInstalled(confirmation.plugin);
-  // A directoryName matching a built-in only means Add can offer this slot
-  // again — it says nothing about what's actually IN the folder right now.
-  // A user or an agent can put anything at plugins/agent-chat; Add always
-  // restores dohc's own packaged source, never whatever this specific copy
-  // held. Anything else has no such path at all, and dohc's own delete here
-  // is permanent either way (PluginPipeline.uninstall removes the source
-  // directly, no trash) — the copy below says exactly that, never more.
-  // The preflight this confirmation came from already read the packaged
-  // manifest itself (never this copy's, which can be hand-edited or too
-  // broken to read) — a non-null name here IS the built-in-offer fact.
-  const packagedDisplayName = confirmation.preflight.packagedDisplayName;
+  // dohc's own delete here is permanent (PluginPipeline.uninstall removes
+  // the source directly, no trash), so the Remove copy says exactly that.
 
   return (
     <Overlay
@@ -1094,9 +1085,7 @@ function PluginUninstallDialog(props: {
           <p className="m-0 mt-2 text-xs text-muted">
             {installed
               ? "This removes the plugin source and build files from this workspace."
-              : packagedDisplayName !== null
-                ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${packagedDisplayName} plugin, not this copy.`
-                : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
+              : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>
           {warning ? (
             <div
@@ -1160,7 +1149,7 @@ function PluginUninstallDialog(props: {
             data-testid="plugin-uninstall-confirm"
             disabled={uninstalling}
             onClick={catalog.confirmUninstall}
-            className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-bg disabled:opacity-50"
           >
             {installed
               ? actionLabel("uninstall", uninstalling)
