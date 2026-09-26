@@ -4,6 +4,7 @@ import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-a
 import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { datasetFindOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automationReach";
 
 // How a dataset Collection's automation maps onto the dataset's approved
 // operations. A dataset changes only through them, so each step names one:
@@ -224,6 +225,40 @@ export function datasetStepsOf(automation: Automation, definition: DatasetDefini
 }
 
 /**
+ * The reach check's view of a dataset automation. First each operation it
+ * can call, once each: the trigger record's read, each step's operation, and
+ * each read that checks a record again after someone changed it. Then each
+ * field of the tables it uses, which its formulas see only while every editor
+ * can read it; a field that becomes readable because an editor left waits
+ * for a current editor's confirmation, like a step. An automation whose
+ * operations do not resolve runs nothing, so it has no steps to check.
+ */
+export function datasetReachSteps(
+  automation: Automation,
+  collection: ReachCollection,
+  definition: DatasetDefinition,
+  grants: ReachDatasetGrants,
+): ReachStep[] {
+  const resolved = resolve(automation, definition, false);
+  if ("problem" in resolved) return [];
+  const { table, triggerRead, steps, rereads } = resolved.steps;
+  const operations = new Map<string, DatasetOperation>();
+  for (const operation of [triggerRead, ...[...steps.values()].map((step) => step.operation), ...rereads.values()]) {
+    if (operation !== null) operations.set(operation.operationId, operation);
+  }
+  const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, access: operation.access });
+  const tables = new Map([[table.tableId, table], ...[...steps.values()].map((step) => [step.table.tableId, step.table] as const)]);
+  const reads = definition.operations.filter((operation) => operation.kind === "read");
+  return [
+    ...[...operations.values()].map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
+    ...[...tables.values()].flatMap((own) => own.fields.map((field): ReachStep => ({
+      kind: "dataset-field", collection, grants, field: { fieldId: field.fieldId, name: field.name },
+      reads: reads.filter((read) => read.fieldIds.includes(field.fieldId)).map(reach),
+    }))),
+  ];
+}
+
+/**
  * The automation with each step pinned to the operation the panel prefers,
  * where the step names none or one that no longer fits. A step no operation
  * fits keeps what it names, and the automation says why it cannot run.
@@ -248,7 +283,7 @@ export function pinDatasetOperations(automation: Automation, definition: Dataset
  * A dataset claim as planning reads a change: fields named as the approved
  * rules name them, each side wrapped as the engine wraps a fact.
  */
-export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable): RunClaim {
+export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable, readable: ReadonlySet<string>): RunClaim {
   const fact = claim.fact;
   if (fact === null) throw new Error(claim.error ?? "This change cannot be read.");
   const side = (present: boolean, value: JsonValue, truncated: boolean) =>
@@ -256,7 +291,8 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
   const fields: RunClaim["change"]["fields"][number][] = [];
   for (const change of fact.fields) {
     const field = table.fields.find((candidate) => candidate.fieldId === change.fieldId);
-    if (field === undefined) continue;
+    // A claim carries each watched field; formulas see only the readable ones.
+    if (field === undefined || !readable.has(field.fieldId)) continue;
     const truncated = change.truncated === true;
     fields.push({
       field: field.name,

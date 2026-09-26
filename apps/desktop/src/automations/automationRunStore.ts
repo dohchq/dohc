@@ -140,6 +140,7 @@ const StoredRunSchema = z.object({
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   created: z.array(z.object({ ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() })),
   replans: z.array(ReplanSchema),
+  readableFields: z.array(z.string()).nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   settled: z.boolean(),
@@ -190,6 +191,11 @@ export interface StoredRun {
   created: Array<{ ordinal: number; recordId: string; path: string }>;
   /** Dataset edits sent again after their record changed, saved before each is sent. */
   replans: DatasetReplan[];
+  /**
+   * The dataset fields the plan's formulas could see, or null for a document
+   * Collection. A run resumes only while every one of them is still readable.
+   */
+  readableFields: string[] | null;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
   /**
@@ -225,7 +231,7 @@ const ReachVerdictsSchema = z.object({
   verdicts: z.array(z.object({
     automationId: z.string().min(1),
     definitionHash: z.string().min(1),
-    step: z.number().int().nonnegative(),
+    step: z.string().min(1).max(512),
     verdict: z.enum(["allowed", "stopped", "held"]),
     stoppedFor: z.string().nullable(),
     narrowed: z.literal(true).optional(),

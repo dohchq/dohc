@@ -39,7 +39,7 @@ const ana: ListedGrant = {
   selector: { paths: ["Trip"], versionId: null }, access: "edit",
 };
 const anaOnRoster = {
-  recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
+  grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
   files: { paths: ["Trip"], versionId: null, access: "edit" }, channel: null,
 };
 
@@ -90,11 +90,11 @@ describe("roster from the relay's listings", () => {
     expect(reachRosterFor({ entry, localUserId: null, latest: listing, next: "" })).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [
         { ...anaOnRoster, files: null, channel: { wireId: "wire-family", canPost: true } },
-        { ...anaOnRoster, files: { paths: ["Trip"], versionId: null, access: "view" }, channel: { wireId: "wire-trip", canPost: false } },
-        { ...anaOnRoster, channel: { wireId: "wire-trip", canPost: true } },
-        { recipientUserId: null, recipientEmail: "cai@dohc.test", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: null },
-        anaOnRoster,
-        { ...anaOnRoster, files: { paths: [], versionId: "v-1", access: "edit" } },
+        { ...anaOnRoster, grantId: "g-2", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: { wireId: "wire-trip", canPost: false } },
+        { ...anaOnRoster, grantId: "g-3", channel: { wireId: "wire-trip", canPost: true } },
+        { grantId: "g-4", recipientUserId: null, recipientEmail: "cai@dohc.test", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: null },
+        { ...anaOnRoster, grantId: "g-5" },
+        { ...anaOnRoster, grantId: "g-6", files: { paths: [], versionId: "v-1", access: "edit" } },
       ],
     });
   });

@@ -481,6 +481,21 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           }
           return { definitions, failures };
         },
+        /** The dataset's current data grants: each principal and the operations it may use. */
+        dataGrants(datasetId: string): { workspaceId: string; grants: Array<{ principalKey: string; operationIds: string[] }> } {
+          assertCurrent();
+          const grants: Array<{ principalKey: string; operationIds: string[] }> = [];
+          for (let after: string | undefined; ;) {
+            const page = host.permissions(owner, { workspaceId, datasetId, after, limit: 100 });
+            for (const permission of page.permissions) {
+              const operationIds = (permission.metadata as { operationIds?: unknown }).operationIds;
+              if (permission.kind !== "data" || !permission.current || !Array.isArray(operationIds)) continue;
+              grants.push({ principalKey: permission.principal, operationIds: operationIds.filter((value): value is string => typeof value === "string") });
+            }
+            if (page.nextCursor === null) return { workspaceId, grants };
+            after = page.nextCursor;
+          }
+        },
         /** A dataset's approved revision now. */
         revision(datasetId: string): DatasetRevision { assertCurrent(); return host.approvedRevision(owner, { workspaceId, datasetId }); },
         /** Whether dohc generated the dataset's operations, the only ones automations can use at launch. */

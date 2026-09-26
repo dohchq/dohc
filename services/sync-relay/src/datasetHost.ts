@@ -9,6 +9,7 @@ import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-atte
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
+import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
@@ -23,7 +24,6 @@ import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const principalKey = (workspaceId: string, grantId: string, userId: string) => hash(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId]));
 const ownerPrincipalKey = (workspaceId: string) => hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
 export interface RelayDatasetHostOptions {
   storage: StorageContext;
@@ -106,7 +106,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const result = authorizeShareGrantAction({storage, grantId, principal: {kind: "user", userId}, action: "read"});
     if (!result.ok || result.share.workspaceId !== workspaceId || !["view", "comment", "edit"].includes(result.grant.access)) throw notFound();
     return {caller: {kind: "named", userId, grantId, access: result.grant.access as "view" | "comment" | "edit", helper: false},
-      principalKey: principalKey(workspaceId, grantId, userId),
+      principalKey: datasetPrincipalKey(workspaceId, grantId, userId),
       authorityToken: hash(JSON.stringify([result.grant.generation, result.share.selectorJson]))};
   }
   function namedPublication(auth: Extract<AppBackendAuth, {kind: "named"}>, publicationId: string) {
@@ -152,7 +152,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       candidate = published.candidate;
       authority = {caller: {kind: "link", grantId: published.result.grantId,
         principalId: `dataset_${hash(JSON.stringify([workspaceId, datasetId, published.result.grantId, auth.profileTokenHash]))}`},
-        principalKey: principalKey(workspaceId, published.result.grantId, auth.profileTokenHash),
+        principalKey: datasetPrincipalKey(workspaceId, published.result.grantId, auth.profileTokenHash),
         authorityToken: hash(JSON.stringify([published.result.generation, published.result.descriptor.authorityRevision]))};
     } else {
       if (auth.workspaceId !== workspaceId) throw notFound();
@@ -421,7 +421,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         owner(auth, input.workspaceId);
         const target = storage.getShareGrant(input.grantId);
         if (!target || target.principalKind !== "user" || !target.principalUserId) throw notFound();
-        const key = input.grant === null ? principalKey(input.workspaceId, input.grantId, target.principalUserId)
+        const key = input.grant === null ? datasetPrincipalKey(input.workspaceId, input.grantId, target.principalUserId)
           : named(input.workspaceId, input.grantId, target.principalUserId).principalKey;
         host.setDataGrant(auth, {...input, principalKey: key});
       },

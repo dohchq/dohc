@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   checkAutomationReach,
   shareImpactOf,
   type ReachAutomation,
   type ReachCollection,
+  type ReachDatasetOperation,
   type ReachRoster,
   type ReachStep,
   type RosterGrant,
@@ -19,6 +21,7 @@ function grant(
   channel: { wireId: string; canPost: boolean } | null = null,
 ): RosterGrant {
   return {
+    grantId: `g-${recipient.userId ?? recipient.email}-${files?.paths.join(",") ?? channel?.wireId}`,
     recipientUserId: recipient.userId ?? null,
     recipientEmail: recipient.email ?? null,
     files: files && { paths: files.paths, versionId: files.versionId ?? null, access: files.access },
@@ -249,6 +252,59 @@ describe("reach check", () => {
     for (const step of [change(budget), find(budget), post("wire-family"), notify(OWNER), personal(OWNER)]) {
       expect(check({ kind: "shared-view" }, step)).toEqual(stopped("In a shared view, automations can use only Trip."));
     }
+  });
+});
+
+describe("reach on a dataset Collection", () => {
+  // Budget keeps its records in a dataset. Its automations use its operations.
+  const edit = { operationId: "op-edit", name: "invoices.edit", access: "helper" as const };
+  const ownerOnly = { operationId: "op-delete", name: "invoices.delete", access: "owner" as const };
+  const read = { operationId: "op-read", fieldIds: ["f-status", "f-amount"] };
+  const narrow = { operationId: "op-narrow", fieldIds: ["f-status"] };
+  const anaGrant = grant(ana, { paths: ["Budget"], access: "edit" });
+  const anaKey = datasetPrincipalKey("workspace", anaGrant.grantId, ana.userId);
+  const grants = (operationIds: string[]) => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds }] });
+  const asOperation = (read: { operationId: string }): ReachDatasetOperation => ({ operationId: read.operationId, name: read.operationId, access: "helper" });
+  const field = (fieldId: string, reads: Array<{ operationId: string }>, held = grants([])): ReachStep =>
+    ({ kind: "dataset-field", collection: budget, field: { fieldId, name: fieldId === "f-amount" ? "Amount" : "Status" }, reads: reads.map(asOperation), grants: held });
+  const step = (operation: ReachDatasetOperation, operationIds: string[] = []): ReachStep =>
+    ({ kind: "dataset-operation", collection: budget, operation, grants: grants(operationIds) });
+
+  it("allows any operation when the owner is the only editor", () => {
+    expect(check(owner(), step(ownerOnly), budget)).toEqual(allowed);
+    expect(check(owner(), field("f-amount", [read]), budget)).toEqual(allowed);
+  });
+
+  it("allows an operation only when every other editor holds a current data grant that lists it", () => {
+    expect(check(owner(anaGrant), step(edit, ["op-edit"]), budget)).toEqual(allowed);
+    expect(check(owner(anaGrant), step(edit, ["op-read"]), budget)).toEqual(stopped("ana@dohc.test has no grant to use invoices.edit in Budget."));
+    // File Edit alone is not record access.
+    expect(check(owner(anaGrant), step(edit), budget)).toEqual(stopped("ana@dohc.test has no grant to use invoices.edit in Budget."));
+    // A grant for someone else's share, or a pending invite with no account, is not Ana's.
+    expect(check(owner(grant({ email: "cai@dohc.test" }, { paths: ["Budget"], access: "edit" })), step(edit, ["op-edit"]), budget))
+      .toEqual(stopped("cai@dohc.test has no grant to use invoices.edit in Budget."));
+  });
+
+  it("stops an owner-only operation whenever someone else edits the automations", () => {
+    expect(check(owner(anaGrant), step(ownerOnly, ["op-delete"]), budget))
+      .toEqual(stopped("Only you can use invoices.delete in Budget, and ana@dohc.test can also edit these automations."));
+  });
+
+  it("stops every dataset step on a collaborator's computer", () => {
+    expect(check({ kind: "shared-view" }, step(edit, ["op-edit"]), budget)).toEqual(stopped("In a shared view, automations cannot use Budget's records."));
+  });
+
+  it("lets formulas see only the fields every other editor can read through a granted read", () => {
+    const ben = grant({ userId: "u-ben", email: "ben@dohc.test" }, { paths: ["Budget"], access: "edit" });
+    const both = { workspaceId: "workspace", grants: [
+      { principalKey: anaKey, operationIds: ["op-read"] },
+      { principalKey: datasetPrincipalKey("workspace", ben.grantId, "u-ben"), operationIds: ["op-narrow"] },
+    ] };
+    const amount = field("f-amount", [read], both), status = field("f-status", [read, narrow], both);
+    expect(check(owner(anaGrant), amount, budget)).toEqual(allowed);
+    expect(check(owner(anaGrant, ben), status, budget)).toEqual(allowed);
+    expect(check(owner(anaGrant, ben), amount, budget)).toEqual(stopped("ben@dohc.test cannot read Amount in Budget, so formulas do not see it."));
+    expect(check(owner(anaGrant), field("f-amount", [read]), budget)).toEqual(stopped("ana@dohc.test cannot read Amount in Budget, so formulas do not see it."));
   });
 });
 

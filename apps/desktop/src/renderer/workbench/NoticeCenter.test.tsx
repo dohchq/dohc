@@ -219,7 +219,7 @@ describe("automation failure notices", () => {
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
       automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: 0, seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+      step: "0", seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
     };
     const onAllowAutomationHold = vi.fn();
     renderNotices({ automationHolds: [hold], onAllowAutomationHold });
@@ -236,7 +236,7 @@ describe("automation failure notices", () => {
   it("names every automation a share stopped in one notice, and dismisses them together", async () => {
     const stop = (automation: string, name: string, target: string, action: "change" | "find") => ({
       automationId: `collection:Projects/Trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
-      step: 0, seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
+      step: "0", seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
     });
     const onDismissAutomationStops = vi.fn();
     const spend = stop("spend", "Spend", "Budget", "change");

@@ -331,7 +331,7 @@ describe("the ⚡ panel", () => {
   it("says an automation waits to check who can edit, and lets a person allow a held step", async () => {
     const held = summary(nudge, {
       automationId: "collection:Tasks#nudge",
-      reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "bob@dohc.test", seq: 7, target: "Budget", action: "change" }] },
+      reach: { kind: "checked", steps: [{ verdict: "held", step: "operation:invoices.edit", stoppedFor: "bob@dohc.test", seq: 7, target: "Budget", action: "change" }] },
     });
     const { bridge } = makeBridge(read([
       summary(stamp, { reach: { kind: "waiting", reason: "dohc could not check who can edit Tasks. Try again later." } }),
@@ -343,7 +343,7 @@ describe("the ⚡ panel", () => {
     expect(row.textContent).toContain("A step can now change Budget. It stopped before because bob@dohc.test could not.");
     await userEvent.click(within(row).getByRole("button", { name: "Allow" }));
     expect(bridge.confirmCollectionAutomationStep).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: 0, seq: 7,
+      workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7,
     });
   });
 });

@@ -3,7 +3,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
-import type { DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
@@ -17,10 +17,10 @@ import {
   type RunInputs,
   type RunRecord,
 } from "./automationPlan";
-import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep } from "./automationReach";
+import { checkAutomationReach, type ReachCollection, type ReachDatasetGrants, type ReachRoster } from "./automationReach";
 import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type DatasetEffect, type DatasetReplan, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 import { DEADLINE_ERROR, newRun, savedRunOf, type CollectionAutomationRunOutcome } from "./collectionAutomationRun";
-import { datasetEffectKey, datasetRecordKey, datasetRunClaim, datasetStepsOf, type DatasetRecordId, type DatasetSteps } from "./datasetAutomationPlan";
+import { datasetEffectKey, datasetReachSteps, datasetRecordKey, datasetRunClaim, datasetStepsOf, type DatasetRecordId, type DatasetSteps } from "./datasetAutomationPlan";
 
 // One run of one dataset claim, as runCollectionAutomation runs an engine
 // claim: check reach, read through the dataset's approved reads, evaluate
@@ -36,6 +36,7 @@ import { datasetEffectKey, datasetRecordKey, datasetRunClaim, datasetStepsOf, ty
 // field someone changed to anything else keeps their change.
 
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
+export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
 // A record that keeps changing under the run stops it rather than loop.
 const MAX_REPLANS = 5;
 // Reads keep no receipt, so they share one key.
@@ -48,6 +49,7 @@ export interface DatasetRunHost {
   revision(datasetId: string): DatasetRevision;
   generated(datasetId: string): boolean;
   resolves(reference: { datasetId: string; revision: number; revisionSha256: string }): boolean;
+  dataGrants(datasetId: string): ReachDatasetGrants;
 }
 
 export interface DatasetAutomationRunDependencies {
@@ -100,9 +102,12 @@ function rowsOf(result: DatasetInvocationResult): Row[] {
  * A row as planning reads it: values by field name, the id as text for
  * formulas, and the record's whole identity where a document has its path.
  */
-function runRecordOf(row: Row, datasetId: string, table: DatasetTable): RunRecord {
+function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable: ReadonlySet<string>): RunRecord {
   const values: JsonObject = {};
-  for (const field of table.fields) if (Object.hasOwn(row.values, field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
+  for (const field of table.fields) {
+    // Formulas see only what every editor can read.
+    if (Object.hasOwn(row.values, field.fieldId) && readable.has(field.fieldId)) values[field.name] = row.values[field.fieldId] ?? null;
+  }
   return { id: String(row.id), path: datasetRecordKey(datasetId, table.tableId, row.id), values };
 }
 
@@ -153,22 +158,45 @@ export async function runDatasetAutomation(
   const saved = await savedRunOf(dependencies.store, claim, automation);
   if ("outcome" in saved) return saved.outcome;
 
-  for (const verdict of checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps: datasetReachSteps(automation, collection) })) {
-    if (!verdict.allowed) return failed(verdict.reason);
+  // Reach (ADR 0012) against the rules and data grants now, before anything
+  // is read: each operation the automation can call stops the run when an
+  // editor lacks it, and each field its formulas may see is hidden when an
+  // editor cannot read it. The run plans and reads again under the rules
+  // this checked, so an approval landing meanwhile cannot bring in a read
+  // reach never saw.
+  const checked = await dependencies.withHost((host) => {
+    const approved = host.revision(claim.datasetId);
+    return { approved, steps: datasetReachSteps(automation, collection, approved.definition, host.dataGrants(claim.datasetId)) };
+  });
+  if (checked === null) return { kind: "wait", reason: "engine" };
+  const { approved, steps } = checked;
+  const readable = new Set<string>();
+  const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps });
+  for (const [index, verdict] of verdicts.entries()) {
+    const step = steps[index]!;
+    if (step.kind === "dataset-field") {
+      if (verdict.allowed) readable.add(step.field.fieldId);
+    } else if (!verdict.allowed) {
+      return failed(verdict.reason);
+    }
   }
 
   let run = saved.current?.plan ? saved.current : null;
+  // A plan's formulas saw only the fields readable when it was made. Once an
+  // editor can no longer read one of them, its effects not yet sent stop;
+  // what already landed stays.
+  if (run !== null && (run.readableFields ?? []).some((fieldId) => !readable.has(fieldId))) return failed(ACCESS_NARROWED_ERROR);
   const keySeed = `${definitionHash(automation)}-${claim.run}`;
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
-      planned = await plan(dependencies, input, keySeed);
+      planned = await plan(dependencies, input, keySeed, readable, approved);
     } catch (error) {
       return input.stopped.aborted ? stopped : failed(errorText(error));
     }
     if (input.stopped.aborted) return stopped;
     if (planned.kind === "stop") return planned.outcome;
-    run = newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs());
+    run = { ...newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs()), readableFields: [...readable].sort() };
     // Every effect's record, with every field planned, must fit what the
     // store reads back.
     if (Buffer.byteLength(JSON.stringify(run)) * 2 > RUN_PLAN_BUDGET_BYTES) {
@@ -176,7 +204,7 @@ export async function runDatasetAutomation(
     }
     await dependencies.store.save(run);
   }
-  const outcome = await applyPlan(dependencies, input, run);
+  const outcome = await applyPlan(dependencies, input, run, approved.definition);
   if (outcome.kind === "wait") return outcome;
   if (outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.error, run: claim.run };
@@ -189,32 +217,16 @@ export async function runDatasetAutomation(
   return outcome;
 }
 
-/** The reach check's view of a dataset automation: every record step uses the owner's access to this dataset. */
-export function datasetReachSteps(automation: Automation, collection: ReachCollection): ReachStep[] {
-  const steps: ReachStep[] = [];
-  const visit = (list: Automation["do"]) => {
-    for (const step of list) {
-      if (step.kind === "if") {
-        visit(step.do);
-        visit(step.otherwise);
-      } else if (step.kind === "set" || step.kind === "add-record" || step.kind === "find") {
-        steps.push({ kind: "dataset-records", collection });
-      }
-    }
-  };
-  visit(automation.do);
-  return steps;
-}
-
 async function plan(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
   keySeed: string,
+  readable: ReadonlySet<string>,
+  approved: DatasetRevision,
 ): Promise<{ kind: "plan"; steps: StoredStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation, collection, signal } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
   const read = await dependencies.withHost(async (host) => {
-    const approved = host.revision(claim.datasetId);
     if (!host.generated(claim.datasetId)) {
       throw new Error(`${approved.definition.name}'s operations were written or changed outside dohc, so automations cannot use them yet.`);
     }
@@ -225,7 +237,7 @@ async function plan(
     const versions = new Map<string, { id: DatasetRecordId; version: number }>();
     const remember = (row: Row, table: DatasetTable) => {
       versions.set(datasetRecordKey(rules.datasetId, table.tableId, row.id), { id: row.id, version: row.version });
-      return runRecordOf(row, rules.datasetId, table);
+      return runRecordOf(row, rules.datasetId, table, readable);
     };
     let record: RunRecord | null = null;
     if (steps.triggerRead !== null && claim.fact !== null && claim.fact.kind !== "removed") {
@@ -260,7 +272,7 @@ async function plan(
   });
   if (read === null) return stop({ kind: "wait", reason: "engine" });
   if (read.removed) return stop({ kind: "skipped" });
-  const inputs: RunInputs = { automation, claim: datasetRunClaim(claim, collection.path, read.steps.table), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
+  const inputs: RunInputs = { automation, claim: datasetRunClaim(claim, collection.path, read.steps.table, readable), record: read.record, found: read.found, truncatedFinds: read.truncatedFinds };
   if (!triggerMatches(inputs)) return stop({ kind: "skipped" });
   const request = evaluationRequest(inputs, claim.createdAtMs);
   const results = request.formulas.length === 0 ? [] : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
@@ -311,6 +323,7 @@ async function applyPlan(
   dependencies: DatasetAutomationRunDependencies,
   input: DatasetAutomationRunInput,
   run: StoredRun,
+  definition: DatasetDefinition,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, signal, automation } = input;
   const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
@@ -324,7 +337,7 @@ async function applyPlan(
       if (effect.kind !== "dataset-edit" && effect.kind !== "dataset-create") return failed("This run's saved plan is not a dataset plan.");
       let writes: RunWrite[];
       try {
-        writes = await applyEffect({ dependencies, host, context, run, index, ordinal, signal }, effect, automation);
+        writes = await applyEffect({ dependencies, host, context, run, index, ordinal, signal, definition }, effect, automation);
       } catch (error) {
         if (input.stopped.aborted) return stopped;
         return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
@@ -365,6 +378,8 @@ async function applyEffect(
     index: number;
     ordinal: number;
     signal: AbortSignal;
+    /** The rules reach checked for this run. */
+    definition: DatasetDefinition;
   },
   effect: DatasetEffect,
   automation: Automation,
@@ -410,7 +425,7 @@ async function applyEffect(
     }
     if (result.refused.code !== "stale_record") throw new Error(result.refused.message);
     // Someone changed the record since the plan read it. Read it again.
-    const steps = datasetStepsOf(automation, host.revision(effect.rules.datasetId).definition);
+    const steps = datasetStepsOf(automation, context.definition);
     const reader = steps.rereads.get(ordinal);
     const table = steps.steps.get(ordinal)!.table;
     if (reader === undefined) throw new Error(`${table.name} changed, and dohc has no approved read of it to check the record again.`);
