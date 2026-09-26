@@ -70,6 +70,7 @@ import {
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
+import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useAutomationRetry } from "./collections/useAutomationRetry";
@@ -4108,6 +4109,10 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
+  const crashReportNotice = useCrashReport({
+    reportError: reportShellError,
+    showSuccess: showSuccessNotice,
+  });
 
   // Resolves true when the view is current: refreshed, or not a shared
   // view at all. A failed, superseded, or ended refresh resolves false.
@@ -5056,6 +5061,7 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              {...crashReportNotice}
               onRetryAutomationFailure={automationFailureRetry.retry}
               onOpenAutomation={openAutomation}
               automationFailureToast={automationFailureToast}

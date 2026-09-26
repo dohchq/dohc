@@ -59,6 +59,7 @@ import {
   PluginSettingsResult,
   PluginSizesResult,
   PluginUninstallPreflightResult,
+  CrashReportChangedEvent,
   NoticesChangedEvent,
   SearchResultsEvent,
   ShareHandoffStatus,
@@ -70,6 +71,7 @@ import {
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
   WorkspaceSummary,
+  crashReportOperations,
   noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
@@ -513,6 +515,9 @@ const bridge: DohcDesktopBridge = {
     return () =>
       ipcRenderer.removeListener(CHANNELS.automationFailuresChanged, handler);
   },
+  ...operationBridge(crashReportOperations, invoke),
+  onCrashReportChanged: (listener) =>
+    onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {

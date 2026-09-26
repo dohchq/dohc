@@ -1,6 +1,10 @@
 import { useCallback, useMemo } from "react";
 import { bridge } from "../bridge";
-import { NoticeCenter, type WorkspaceErrorNotice } from "../workbench/NoticeCenter";
+import {
+  NoticeCenter,
+  type CrashReportNotice,
+  type WorkspaceErrorNotice,
+} from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
 import { useShellError } from "./useShellError";
 
@@ -41,6 +45,7 @@ export function useConnectionNotices() {
   const {
     shellErrors,
     reportShellError,
+    showSuccessNotice,
     retryShellError,
     hideShellError,
     dismissShellError,
@@ -62,6 +67,7 @@ export function useConnectionNotices() {
   const notices = useMemo<WorkspaceErrorNotice[]>(
     () =>
       shellErrors.map((error) => ({
+        ...(error.tone ? { tone: error.tone } : {}),
         id: error.id,
         message: error.message,
         details: errorDetails([
@@ -78,6 +84,8 @@ export function useConnectionNotices() {
 
   return {
     reporter,
+    reportError: reportShellError,
+    showSuccess: showSuccessNotice,
     notices,
     retryNotice: retryShellError,
     hideNotice: hideShellError,
@@ -97,8 +105,11 @@ export function ConnectionNotices(props: {
   onRetry: (id: string) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
+  crashReport?: CrashReportNotice | null;
+  onSendCrashReport?: () => void;
+  onDismissCrashReport?: () => void;
 }) {
-  if (props.notices.length === 0) return null;
+  if (props.notices.length === 0 && !props.crashReport) return null;
   return (
     <div
       data-testid="connection-notices"
@@ -119,6 +130,9 @@ export function ConnectionNotices(props: {
         onRetryWorkspaceError={props.onRetry}
         onHideWorkspaceError={props.onHide}
         onDismissWorkspaceError={props.onDismiss}
+        crashReport={props.crashReport ?? null}
+        {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
+        {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
       />
     </div>
   );

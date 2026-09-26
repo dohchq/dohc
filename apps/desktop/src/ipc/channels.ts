@@ -276,6 +276,8 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  // The crash report changed; the renderer reads it again.
+  crashReportChanged: "desktop:crash-report-changed",
   noticesChanged: "desktop:notices-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",

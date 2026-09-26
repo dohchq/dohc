@@ -91,6 +91,7 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir } from "node:fs/promises";
+import { release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
   PluginPanelSdkEvent,
@@ -104,6 +105,7 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  crashReportOperations,
   noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
@@ -398,6 +400,11 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+import { installCrashCapture } from "./crashReports/crashCapture";
+import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
+import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
+import { createCrashReportPreview } from "./crashReports/crashReportPreview";
+import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
   registerShareHandoffProtocol,
@@ -410,6 +417,45 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+// Crashes are recorded on this computer before anything else can crash. A
+// report leaves only when the person confirms in main's own dialog, and
+// only to the report server this build names.
+const crashReports = createCrashReportStore({
+  path: join(stateDir(), "crash-report.json"),
+  endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL, app.isPackaged),
+  facts: () => ({
+    atMs: Date.now(),
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+    packaged: app.isPackaged,
+    system: `${osType()} ${osRelease()}`,
+    arch: process.arch,
+    electron: process.versions.electron ?? "unknown",
+    uptimeSeconds: Math.round(process.uptime()),
+  }),
+  codeFrame: createCodeFrames(
+    [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
+    process.platform,
+  ),
+  onChanged: () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
+    }
+  },
+});
+// A preview left by a dohc that ended while its dialog was open goes now.
+const crashReportPreview = createCrashReportPreview({
+  path: join(stateDir(), "crash-report-to-send.txt"),
+  openPath: (path) => shell.openPath(path),
+});
+void crashReportPreview.remove();
+installCrashCapture({
+  process,
+  app,
+  isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
+  record: (event) => crashReports.record(event),
+});
 
 const shareHandoffIntentSlot = createShareHandoffIntentSlot();
 registerShareHandoffProtocol(app, process);
@@ -3522,6 +3568,7 @@ const desktopEngine = createDesktopEngine({
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
+  recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
@@ -4969,6 +5016,31 @@ function registerIpcHandlers(): void {
   windowIpc.registerWindowControls();
 
   settingsIpc.registerWorkspaceUiStateIpcHandlers();
+
+  registerOperations(operationBoundary, crashReportOperations, {
+    readCrashReport: () => crashReports.read(),
+    dismissCrashReport: async ({ through }) => {
+      crashReports.dismiss(through);
+      await crashReportPreview.remove();
+    },
+    // The renderer only opens the dialog. The answer comes from the person.
+    sendCrashReport: async (_input, { event }) => ({
+      sent: await crashReports.send(async (request) => {
+        try {
+          return await confirmCrashReportSend({
+            showMessageBox: async (options) => {
+              const window = BrowserWindow.fromWebContents(event.sender);
+              return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+            },
+            openText: async (text) => await crashReportPreview.show(text),
+          }, request);
+        } finally {
+          // The preview goes when the dialog ends, whatever the answer.
+          await crashReportPreview.remove();
+        }
+      }),
+    }),
+  });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,

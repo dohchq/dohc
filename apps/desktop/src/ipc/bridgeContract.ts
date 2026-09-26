@@ -6152,6 +6152,54 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Crash reports. Main keeps each crash on this computer as plain text and
+// sends nothing on its own. A report leaves only after the person confirms
+// in main's own dialog, which names where it goes and can show the exact
+// text. One report holds the problems recorded since the last send or
+// dismiss.
+export const CrashReportSource = z.enum(["main", "window", "gpu", "utility", "engine"]);
+export type CrashReportSource = z.infer<typeof CrashReportSource>;
+// Five problems of at most 6,000 characters each, with the header.
+export const CRASH_REPORT_MAX_CHARS = 32_768;
+export const CrashReportView = z.object({
+  // Changes whenever the text does.
+  revision: z.number().int().positive(),
+  // The last problem in this text. Dismiss removes up to it, so a newer
+  // problem stays.
+  through: z.number().int().positive(),
+  // Where the newest problem happened. The notice names it.
+  source: CrashReportSource,
+  problems: z.number().int().positive(),
+  atMs: z.number().int().nonnegative(),
+  text: z.string().min(1).max(CRASH_REPORT_MAX_CHARS),
+});
+export type CrashReportView = z.infer<typeof CrashReportView>;
+export const ReadCrashReportResult = z.object({
+  report: CrashReportView.nullable(),
+  // The host a sent report goes to. Null when this build has no report
+  // server, so the notice offers only Copy report.
+  sendTo: z.string().min(1).max(255).nullable(),
+});
+export type ReadCrashReportResult = z.infer<typeof ReadCrashReportResult>;
+export const CrashReportChangedEvent = z.undefined();
+
+export const crashReportOperations = {
+  readCrashReport: {
+    channel: "desktop:read-crash-report",
+    payload: z.object({}), result: ReadCrashReportResult, guard: "trusted-sender",
+  },
+  dismissCrashReport: {
+    channel: "desktop:dismiss-crash-report",
+    payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
+  },
+  // Opens main's dialog. Sent is true only when the person confirmed there
+  // and the server took the report.
+  sendCrashReport: {
+    channel: "desktop:send-crash-report",
+    payload: z.object({}), result: z.object({ sent: z.boolean() }), guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
@@ -6466,6 +6514,7 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof noticeOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
@@ -6943,6 +6992,9 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the crash report changed. A poke, not the report; the
+  // subscriber reads it again. Returns an unsubscribe function.
+  onCrashReportChanged(listener: () => void): () => void;
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
