@@ -10,7 +10,7 @@ import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from 
 import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
-import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
+import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentResult, PersistentWorkerMessage } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
@@ -210,8 +210,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
   return {path:command.path,cursor:{...cursor}};
 }
 
-const parentPort=(process as unknown as {parentPort?:{on(event:"message",callback:(event:{data:{id:number;command:PersistentCommand}})=>void):void;postMessage(message:PersistentReply):void}}).parentPort;
-const send=(reply:PersistentReply)=>parentPort ? parentPort.postMessage(reply) : process.send!(reply);
+const parentPort=(process as unknown as {parentPort?:{on(event:"message",callback:(event:{data:{id:number;command:PersistentCommand}})=>void):void;postMessage(message:PersistentWorkerMessage):void}}).parentPort;
+const send=(reply:PersistentWorkerMessage)=>parentPort ? parentPort.postMessage(reply) : process.send!(reply);
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }
   busy=true;
@@ -229,3 +229,4 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
 else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }
+send({ready:true});

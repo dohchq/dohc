@@ -156,7 +156,7 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
-                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind IN ('versioned', 'merge')",
+                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind IN ('versioned', 'merge', 'authored-create')",
                 params![prep.moment.moment_order],
             )
             .map_err(DomainError::sql_persist)?;

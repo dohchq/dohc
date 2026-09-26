@@ -7,6 +7,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
+import { ipcWireError } from "./ipc/errorWords";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -76,6 +77,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   protocol,
   safeStorage,
   session,
@@ -90,6 +92,7 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir } from "node:fs/promises";
+import { release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
   PluginPanelSdkEvent,
@@ -103,6 +106,7 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  crashReportOperations,
   noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
@@ -397,6 +401,11 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+import { installCrashCapture } from "./crashReports/crashCapture";
+import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
+import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
+import { createCrashReportPreview } from "./crashReports/crashReportPreview";
+import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
   registerShareHandoffProtocol,
@@ -409,6 +418,45 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+// Crashes are recorded on this computer before anything else can crash. A
+// report leaves only when the person confirms in main's own dialog, and
+// only to the report server this build names.
+const crashReports = createCrashReportStore({
+  path: join(stateDir(), "crash-report.json"),
+  endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL, app.isPackaged),
+  facts: () => ({
+    atMs: Date.now(),
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+    packaged: app.isPackaged,
+    system: `${osType()} ${osRelease()}`,
+    arch: process.arch,
+    electron: process.versions.electron ?? "unknown",
+    uptimeSeconds: Math.round(process.uptime()),
+  }),
+  codeFrame: createCodeFrames(
+    [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
+    process.platform,
+  ),
+  onChanged: () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
+    }
+  },
+});
+// A preview left by a dohc that ended while its dialog was open goes now.
+const crashReportPreview = createCrashReportPreview({
+  path: join(stateDir(), "crash-report-to-send.txt"),
+  openPath: (path) => shell.openPath(path),
+});
+void crashReportPreview.remove();
+installCrashCapture({
+  process,
+  app,
+  isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
+  record: (event) => crashReports.record(event),
+});
 
 const shareHandoffIntentSlot = createShareHandoffIntentSlot();
 registerShareHandoffProtocol(app, process);
@@ -2067,6 +2115,31 @@ const activity = {
       workspaceActivity.queueCloudSync(lease.state.activity),
     );
   },
+  // Starts the pass under the lease and waits for it outside, so a pass that
+  // waits on an unreachable server holds no workspace authority.
+  retryCloudSync: (
+    workspaceId: string,
+    reason: "person" | "reconnect",
+  ): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.retryCloudSync(lease.state.activity, reason),
+    ),
+  retryFailingCloudSyncs: (): void => {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      // Started inside the promise, so a workspace closing under the loop
+      // fails its own retry and not the others.
+      void Promise.resolve()
+        .then(() => {
+          const failing = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+            workspaceActivity.getStatus(workspace, lease.state.activity).syncFailure,
+          );
+          return failing ? activity.retryCloudSync(workspaceId, "reconnect") : undefined;
+        })
+        .catch((error: unknown) => {
+          console.error(`[desktop] sync retry after wake failed for ${workspaceId}:`, error);
+        });
+    }
+  },
   queueCloudPull: (workspaceId: string): void => {
     if (!findWorkspace(workspaceId)) return;
     withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3496,6 +3569,7 @@ const desktopEngine = createDesktopEngine({
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
+  recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
@@ -3966,6 +4040,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     registerHandlers: () => {
       nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
+      // A backoff can outlast a sleep. On wake, try each failing sync now.
+      powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       registerIpcHandlers();
       // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
       // Registered before the window so the first load can already fetch.
@@ -4117,6 +4193,18 @@ function isTrustedFrame(frameUrl: string): boolean {
   return decideNavigation(frameUrl, policy()).action === "allow";
 }
 
+// Every invoke handler registers here. Electron sends a rejected handler's
+// error to the renderer as one string, so this keeps its code in that string.
+function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await listener(event, ...args);
+    } catch (error) {
+      throw ipcWireError(error);
+    }
+  });
+}
+
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const frameUrl = event.senderFrame?.url ?? "";
   if (!isTrustedFrame(frameUrl)) {
@@ -4128,7 +4216,7 @@ const operationBoundary: OperationBoundary<
   IpcMainInvokeEvent,
   DesktopRendererWorkspaceOperation
 > = {
-  handle: (channel, listener) => ipcMain.handle(channel, listener),
+  handle: handleIpc,
   assertTrustedSender,
   withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
     withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
@@ -4216,7 +4304,7 @@ const quitGuard = createQuitGuard({
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-  registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+  registerHandler: handleIpc,
   assertTrustedSender, stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
@@ -4228,7 +4316,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
 
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
     rememberChromeTheme, titleBarOverlayOptions,
@@ -4239,7 +4327,7 @@ function registerIpcHandlers(): void {
 
   const { usableRoot } = workspaceRootApproval;
   registerWorkspaceRegistryIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
@@ -4264,7 +4352,7 @@ function registerIpcHandlers(): void {
 
   registerDevToolsIpcHandlers<IpcMainInvokeEvent>({
     enabled: devToolsGranted,
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     listWorkspaces,
     forgetWorkspace,
@@ -4278,7 +4366,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
@@ -4305,11 +4393,12 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceAuthorityState,
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
+    retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
@@ -4324,7 +4413,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     exactRendererWorkspaceReferences,
@@ -4344,7 +4433,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     workspaceFileListings,
@@ -4359,13 +4448,13 @@ function registerIpcHandlers(): void {
   windowIpc.registerExternalUrl();
 
   registerShareHandoffIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     shareHandoffRedemption,
   });
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
@@ -4388,7 +4477,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     remoteForWorkspace,
@@ -4404,7 +4493,7 @@ function registerIpcHandlers(): void {
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     flushCapture: async workspace => {
@@ -4595,7 +4684,7 @@ function registerIpcHandlers(): void {
     },
     withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
   });
-  ipcMain.handle(CHANNELS.dataset, async (event, raw: unknown) => {
+  handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
     assertTrustedSender(event);
     return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
   });
@@ -4650,7 +4739,7 @@ function registerIpcHandlers(): void {
   });
   ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
   const ownerResponseDependencies={
-    registerHandler:(channel,handler)=>ipcMain.handle(channel,handler),assertTrustedSender,withRendererWorkspaceOperation,
+    registerHandler:handleIpc,assertTrustedSender,withRendererWorkspaceOperation,
     remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
     undoAcceptedResponse:async(workspace,input)=>{
       await openWorkspaceActivity(workspace);
@@ -4672,7 +4761,7 @@ function registerIpcHandlers(): void {
     WebContents, IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     requireEngineCapture,
@@ -4706,7 +4795,7 @@ function registerIpcHandlers(): void {
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
     detectAgentTools,
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
     acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
     automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
@@ -4719,7 +4808,7 @@ function registerIpcHandlers(): void {
   });
   agentRunsIpc.registerAutomationFailures();
   registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
     readText: readWorkspaceTextIfPresent,
     createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
@@ -4729,7 +4818,7 @@ function registerIpcHandlers(): void {
   });
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
     withWorkspaceAuthority: (workspaceId, work) =>
       workspaceAuthorities.withAuthority(workspaceId, (lease) => work({
@@ -4746,7 +4835,7 @@ function registerIpcHandlers(): void {
   });
 
   registerSharedViewsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation, DesktopWorkspaceAuthorityLease>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     engineDaemonStartup: () => desktopEngine.startup,
@@ -4766,7 +4855,7 @@ function registerIpcHandlers(): void {
   // host's history or its synced copy.
 
   registerShareMountIpcHandlers({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withWorkspaceOperation: (event, workspaceId, work) =>
       withRendererWorkspaceOperation(
@@ -4784,7 +4873,7 @@ function registerIpcHandlers(): void {
     IpcMainInvokeEvent,
     DesktopWorkspaceOperation["workspace"]
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, assertWritableWorkspace,
     shareViewFiles, workerDatabaseReader, editWorkspaceDatabaseInWorker,
   });
@@ -4793,11 +4882,11 @@ function registerIpcHandlers(): void {
     authority: senderWorkspaceAuthority,
     catalog: ownedSiteCatalog,
   });
-  ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
-  ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
+  handleIpc(CHANNELS.listSites, siteIpcHandlers.listSites);
+  handleIpc(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
   registerAppPreviewIpcHandlers<WebContents, IpcMainInvokeEvent, CreatedWorkspace, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, senderWorkspaceAuthority, withRendererWorkspaceOperation,
     appCatalog: ownedSiteCatalog, appPreviews: sitePreviews,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
@@ -4811,9 +4900,7 @@ function registerIpcHandlers(): void {
     WebContentsView
   >({
     registrar: {
-      handle: (channel, handler) => {
-        ipcMain.handle(channel, handler);
-      },
+      handle: handleIpc,
     },
     assertTrustedSender,
     workspaces: {
@@ -4851,7 +4938,7 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceOperation["workspace"],
     DesktopWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
@@ -4898,7 +4985,7 @@ function registerIpcHandlers(): void {
   workspaceEngineIpc.registerHistory();
 
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
@@ -4913,7 +5000,7 @@ function registerIpcHandlers(): void {
   agentRunsIpc.registerChatRunRecords();
 
   registerDirectMessagesIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     assertWritableWorkspace, linkedChatStoreFor, warmCredentialCache,
     currentCredentials: () => cachedCredentials,
@@ -4925,7 +5012,7 @@ function registerIpcHandlers(): void {
   });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, rendererWorkspaceSessions,
   });
 
@@ -4940,6 +5027,31 @@ function registerIpcHandlers(): void {
   windowIpc.registerWindowControls();
 
   settingsIpc.registerWorkspaceUiStateIpcHandlers();
+
+  registerOperations(operationBoundary, crashReportOperations, {
+    readCrashReport: () => crashReports.read(),
+    dismissCrashReport: async ({ through }) => {
+      crashReports.dismiss(through);
+      await crashReportPreview.remove();
+    },
+    // The renderer only opens the dialog. The answer comes from the person.
+    sendCrashReport: async (_input, { event }) => ({
+      sent: await crashReports.send(async (request) => {
+        try {
+          return await confirmCrashReportSend({
+            showMessageBox: async (options) => {
+              const window = BrowserWindow.fromWebContents(event.sender);
+              return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+            },
+            openText: async (text) => await crashReportPreview.show(text),
+          }, request);
+        } finally {
+          // The preview goes when the dialog ends, whatever the answer.
+          await crashReportPreview.remove();
+        }
+      }),
+    }),
+  });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
@@ -4981,7 +5093,7 @@ function registerIpcHandlers(): void {
   workspaceEngineIpc.registerYDoc();
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return autoUpdateController; },
   });

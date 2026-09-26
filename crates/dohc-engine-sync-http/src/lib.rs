@@ -1047,14 +1047,16 @@ fn validate_outbound_payloads<'a>(
 
 fn map_transport_error(error: ureq::Error) -> RelayError {
     match error {
+        // No connection reached the server. ureq reports a failed name lookup
+        // as `Io`, and a lookup that found no address as `HostNotFound`.
         ureq::Error::Io(_)
         | ureq::Error::Timeout(_)
         | ureq::Error::ConnectionFailed
+        | ureq::Error::HostNotFound
         | ureq::Error::Other(_) => RelayError::Partitioned,
         ureq::Error::StatusCode(status) => RelayError::HttpStatus(status),
         ureq::Error::BadUri(_)
         | ureq::Error::Http(_)
-        | ureq::Error::HostNotFound
         | ureq::Error::RedirectFailed
         | ureq::Error::InvalidProxyUrl
         | ureq::Error::TooManyRedirects
@@ -1982,11 +1984,24 @@ mod tests {
         assert_eq!(transport.agent.config().max_redirects(), 0);
     }
 
+    // The desktop names a partition "Server unreachable". A lookup that found
+    // no address read as a bad request, so it reached a person as an
+    // unknown failure.
+    #[test]
+    fn failures_that_never_reach_the_server_are_partitions() {
+        for error in [
+            ureq::Error::ConnectionFailed,
+            ureq::Error::HostNotFound,
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        ] {
+            assert_eq!(map_transport_error(error), RelayError::Partitioned);
+        }
+    }
+
     #[test]
     fn permanent_transport_failures_are_not_classified_as_partitions() {
         for error in [
             ureq::Error::BadUri("bad".to_owned()),
-            ureq::Error::HostNotFound,
             ureq::Error::InvalidProxyUrl,
             ureq::Error::Tls("certificate"),
             ureq::Error::ConnectProxyFailed("proxy".to_owned()),

@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { isDeepStrictEqual } from "node:util";
 import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
-import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
+import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
 export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
@@ -88,23 +89,25 @@ const typeName = (value: unknown) => {
  * A value JSON cannot hold, such as a bigint, a date, or an instance of an Array subclass, is a problem for the
  * caller to fix.
  */
-function measureScope(scope: AutomationScope): "fits" | "too_large" | "too_deep" | { problem: string } {
+function measureScope(scope: AutomationScope, comparisons: readonly JsonValue[] = []): "fits" | "too_large" | "too_deep" | { problem: string } {
   const limit = AUTOMATION_LIMITS.scopeBytes;
   let size = 0;
-  const pending: Array<[value: unknown, depth: number]> = [[scope, 1]];
+  // Comparisons stay in the host. Charge their values without adding wrapper depth to them or to the scope.
+  const pending: Array<[value: unknown, depth: number, maxDepth: number]> = [[scope, 1, SCOPE_DEPTH]];
+  for (const value of comparisons) pending.push([value, 1, AUTOMATION_LIMITS.resultDepth]);
   while (pending.length > 0) {
-    const [value, depth] = pending.pop()!;
+    const [value, depth, maxDepth] = pending.pop()!;
     if (typeof value === "string") size += jsonStringBytes(value, limit - size);
     else if (typeof value === "number") size += Number.isFinite(value) ? String(value).length : 4;
     else if (typeof value === "boolean") size += value ? 4 : 5;
     // JSON.stringify writes null, and `undefined` in a list, as null. It leaves out an undefined property.
     else if (value === null || value === undefined) size += 4;
     else if (Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype) {
-      if (depth > SCOPE_DEPTH) return "too_deep";
+      if (depth > maxDepth) return "too_deep";
       size += Math.max(2, value.length + 1);
-      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1]);
+      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1, maxDepth]);
     } else if (typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
-      if (depth > SCOPE_DEPTH) return "too_deep";
+      if (depth > maxDepth) return "too_deep";
       let keys = 0;
       for (const key in value) {
         const item = (value as Record<string, unknown>)[key];
@@ -113,7 +116,7 @@ function measureScope(scope: AutomationScope): "fits" | "too_large" | "too_deep"
         // The key, its colon, and the comma after its value.
         size += jsonStringBytes(key, limit - size) + 2;
         if (size > limit) break;
-        pending.push([item, depth + 1]);
+        pending.push([item, depth + 1, maxDepth]);
       }
       size += keys === 0 ? 2 : 1;
     } else return { problem: `${NOT_JSON} It holds a value of type ${typeName(value)}.` };
@@ -146,6 +149,8 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   let queue: Promise<unknown> = Promise.resolve();
   let queued = 0;
   let closed = false;
+  let nextRunId = 0;
+  type Run = { id: number; scope: AutomationScope; preparedOn?: Worker };
 
   const stop = async (thread: Promise<Worker>) => {
     if (worker === thread) worker = undefined;
@@ -166,7 +171,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
    * Sends items to the worker and reports each result. It adds the time each item took to `spent`, and resolves
    * early when the worker is replaced.
    */
-  async function dispatch(scope: AutomationScope, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
+  async function dispatch(run: Run, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
     if (closed) throw new Error("The automation evaluator is closed.");
     clearTimeout(idle);
     const thread = worker ??= start();
@@ -238,7 +243,11 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       };
       active.on("message", onMessage).on("messageerror", onMessageError).on("error", onFailure).on("exit", onFailure);
       arm();
-      try { active.postMessage({ scope, items, spent: { ...spent } }); } catch (error) { rest(); reject(error); }
+      try {
+        active.postMessage({ kind: "evaluate", runId: run.id, items, spent: { ...spent },
+          ...(run.preparedOn === active ? {} : { scope: run.scope }) } satisfies AutomationWorkerRequest);
+        run.preparedOn = active;
+      } catch (error) { rest(); reject(error); }
     });
   }
 
@@ -256,24 +265,52 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
-    const measured = measureScope(scope);
+    // Dependents share condition objects. Guard references are bounded at admission; charge each value only once.
+    const guards = new Set(items.flatMap(item => "when" in item ? item.when ?? [] : []));
+    const comparisons = [...guards].flatMap(guard => "equals" in guard ? [guard.equals] : []);
+    const measured = measureScope(scope, comparisons);
     if (typeof measured === "object") throw new Error(measured.problem);
-    const results = measured === "too_large" ? items.map(scopeTooLarge) : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(tooLarge);
+    const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
+      : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);
     if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
+    const context: Run = { id: ++nextRunId, scope: structuredClone(scope) };
     queued++;
     const done = queue.then(async () => {
       const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
       for (;;) {
-        const waiting = results.flatMap((result, index) => result ? [] : [index]);
-        if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
-        // After a replaced worker, items past the request's time budgets do not start another worker.
-        if (notReached(items[waiting[0]!]!, spent)) {
-          for (const index of waiting) results[index] = notReached(items[index]!, spent)!;
-          continue;
+        const waiting: number[] = [];
+        for (const [index, item] of items.entries()) {
+          if (results[index] !== undefined) continue;
+          const guards = "when" in item ? item.when ?? [] : [];
+          // Dispatch the preceding formulas before deciding a dependent branch.
+          if (guards.some(guard => results[guard.index] === undefined)) break;
+          if (guards.some(guard => {
+            const result = results[guard.index]!;
+            return !result.ok || ("truthy" in guard ? Boolean(result.value) !== guard.truthy : !isDeepStrictEqual(result.value, guard.equals));
+          })) {
+            results[index] = { ok: true, value: null };
+            continue;
+          }
+          // A skipped formula costs no source check, scope preparation, or runtime.
+          const refused = tooLarge(item) ?? notReached(item, spent);
+          if (refused) results[index] = refused;
+          else waiting.push(index);
         }
-        await dispatch(scope, waiting.map(index => items[index]!), (offset, result) => { results[waiting[offset]!] = result; }, spent);
+        if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
+        const runnable = waiting.map(index => {
+          const item = items[index]!;
+          if (!("when" in item)) return item;
+          const { when: _when, ...formula } = item;
+          return formula;
+        });
+        await dispatch(context, runnable, (offset, result) => { results[waiting[offset]!] = result; }, spent);
       }
-    }).finally(() => { queued--; });
+    }).finally(() => {
+      queued--;
+      // Messages to one worker are ordered. End this run before the queue admits the next one.
+      try { context.preparedOn?.postMessage({ kind: "end", runId: context.id } satisfies AutomationWorkerRequest); }
+      catch { /* A replaced or closed worker already released its run. */ }
+    });
     queue = done.catch(() => undefined);
     return done;
   }
@@ -284,6 +321,12 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       if (full) return full;
       if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
       if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
+      if (!formulas.every((formula, index) => formula.when === undefined || (Array.isArray(formula.when)
+        && formula.when.length <= index && formula.when.every(guard => guard !== null && typeof guard === "object"
+          && Number.isSafeInteger(guard.index) && guard.index >= 0 && guard.index < index
+          && ("truthy" in guard ? typeof guard.truthy === "boolean" && !("equals" in guard) : "equals" in guard && guard.equals !== undefined))))) {
+        throw new Error("A formula guard must refer to an earlier formula and require truthiness or a JSON value.");
+      }
       return formulas.length === 0 ? [] : run(scope, [...formulas]);
     },
     async runCode(scope, source) {

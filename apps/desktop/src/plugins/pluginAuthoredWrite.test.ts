@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import {
   createPluginAuthoredTextWriter,
   type PluginAuthoredWriteCapture,
@@ -13,7 +13,7 @@ import {
 import { canonicalPluginSourceHash } from "./pluginSourceSnapshot";
 import { writePluginBaselineManifest } from "./pluginUninstallPreflight";
 
-const author: MomentAuthor = {
+const author: MomentWriteAuthor = {
   kind: "agent",
   agentId: "plugin:example-plugin",
   onBehalfOf: "local",

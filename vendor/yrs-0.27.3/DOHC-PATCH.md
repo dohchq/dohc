@@ -20,6 +20,12 @@ projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.
 Both run in the canonical workspace Rust gate. This dependency is excluded
 from workspace membership and selected through the root Cargo patch.
 
+`src/types/map.rs` adds `Map::entry_id`. It returns the ID of the item that
+holds a key's live value, which Yjs exposes as `map._map.get(key).id`. The
+engine keeps a person's frontmatter text only for entries still held by the
+items that text was written for; tests live in
+`crates/dohc-engine-collab/src/ydoc.rs`.
+
 `src/any.rs` uses the existing signed-varint reader and writer for Any integers.
 This preserves negative zero across Yjs import, snapshot encoding, and reopen.
 Ordinary integer values keep their existing bytes. Regression tests cover

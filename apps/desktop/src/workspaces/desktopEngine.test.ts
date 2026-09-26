@@ -127,6 +127,7 @@ function fixture() {
     }),
     defaultEngineBinaryPath: vi.fn(() => resolve("test-engine")),
     isQuitting: () => quitting,
+    recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
     pluginWorkspaceRuntimes: {
       current: (id) => {
@@ -409,6 +410,7 @@ describe("desktop engine construction", () => {
       expect(f.dependencies.createRustEngineDaemon).not.toHaveBeenCalled();
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Rust engine failed to start",
         "binary path failed\n\nThe desktop cannot start without the Rust engine.");
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledWith(error, "startup");
       expect(f.dependencies.app.quit).toHaveBeenCalledOnce();
       expect(engine.daemon).toBeNull(); expect(engine.sessions).toBeNull(); expect(engine.relayClient).toBeNull();
     } finally { await f.close(); }
@@ -565,6 +567,26 @@ describe("desktop engine restart coordination", () => {
     } finally { held.resolve(); await started; await waiting; await f.close(error); }
   });
 
+  it("records one crash problem per engine crash, then the final verdict", async () => {
+    const f = fixture();
+    const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await f.engine.start();
+      const record = vi.mocked(f.dependencies.recordEngineProblem);
+      f.options().onFailure!(exit, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(verdict, true);
+      expect(record.mock.calls).toEqual([[exit, "restarting"], [verdict, "stopped"]]);
+      // A launch ends the crash, so the next failure is a new problem.
+      f.options().onLaunch!();
+      f.options().onFailure!(exit, false);
+      expect(record).toHaveBeenCalledTimes(3);
+      expect(record).toHaveBeenLastCalledWith(exit, "restarting");
+    } finally { await f.close(); }
+  });
+
   it("reads quitting state on terminal failure and fails only the prepared restart set", async () => {
     const f = fixture();
     const workspace = await f.addWorkspace("workspace");
@@ -577,6 +599,7 @@ describe("desktop engine restart coordination", () => {
       const failed = vi.spyOn(runtimes, "failEngineRestart");
       f.options().onFailure!(error, true);
       expect(failed).not.toHaveBeenCalled();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledWith(error, "stopped");
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("The workspace engine stopped",
         "dohc stopped restarting the workspace engine.\n\nRestart dohc. If this happens again, review the desktop logs. If it continues, reinstall dohc.");
       vi.mocked(f.dependencies.dialog.showErrorBox).mockClear();
@@ -584,8 +607,11 @@ describe("desktop engine restart coordination", () => {
       waiting = runtimes.ensure(workspace).catch((failure: unknown) => failure);
       f.options().onFailure!(error, false);
       expect(failed).not.toHaveBeenCalled();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenLastCalledWith(error, "restarting");
       f.setQuitting(true);
       f.options().onFailure!(error, true);
+      // A failure while dohc quits is the quit, not a crash.
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledTimes(2);
       expect(await waiting).toBe(error);
       expect(failed).toHaveBeenCalledWith(error);
       expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
