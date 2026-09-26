@@ -19,7 +19,11 @@ const globals = await (async () => {
   } finally { vm.dispose(); }
 })();
 
-const reply = (message: AutomationWorkerReply) => port.postMessage(message);
+let prepared: { runId: number; scopeJson: string; quickjs: QuickJSWASMModule } | undefined;
+const reply = (message: AutomationWorkerReply) => {
+  if (message.kind === "restart" || (message.kind === "result" && message.restart)) prepared = undefined;
+  port.postMessage(message);
+};
 // Requests run one at a time: the next message waits until this one has replied for every item.
 let requests = Promise.resolve();
 // An unexpected failure asks for a new worker, so the request's remaining items still get results. It can only come
@@ -28,19 +32,30 @@ port.on("message", (request: AutomationWorkerRequest) => {
   requests = requests.then(() => answer(request)).catch(() => reply({ kind: "restart" }));
 });
 
-async function answer({ scope, items, spent }: AutomationWorkerRequest): Promise<void> {
-  const taken = Object.keys(scope.bindings ?? {}).find(name => globals.has(name));
-  if (taken !== undefined) {
-    return reply({ kind: "refused", message: `The step result name ${JSON.stringify(taken)} belongs to a JavaScript built-in. Bind it with another name.` });
+async function answer(request: AutomationWorkerRequest): Promise<void> {
+  if (request.kind === "end") {
+    if (prepared?.runId === request.runId) prepared = undefined;
+    return;
   }
-  let scopeJson: string;
-  try { scopeJson = JSON.stringify(scope); } catch { return reply({ kind: "refused", message: NOT_JSON }); }
-  const scopeFailure = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes ? scopeTooLarge()
-    : jsonDepth(scopeJson) > SCOPE_DEPTH ? scopeTooDeep() : undefined;
-  if (scopeFailure) return answerItems(items, spent, () => ({ result: scopeFailure, prepareMs: 0, runMs: 0 }), reply);
-  // Each request gets its own QuickJS instance and memory, so no request reads memory another used.
-  let quickjs: QuickJSWASMModule;
-  try { quickjs = await newQuickJS(); } catch { return reply({ kind: "restart" }); }
+  const { scope, items, spent, runId } = request;
+  if (scope !== undefined) {
+    prepared = undefined;
+    const taken = Object.keys(scope.bindings ?? {}).find(name => globals.has(name));
+    if (taken !== undefined) {
+      return reply({ kind: "refused", message: `The step result name ${JSON.stringify(taken)} belongs to a JavaScript built-in. Bind it with another name.` });
+    }
+    let scopeJson: string;
+    try { scopeJson = JSON.stringify(scope); } catch { return reply({ kind: "refused", message: NOT_JSON }); }
+    const scopeFailure = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes ? scopeTooLarge()
+      : jsonDepth(scopeJson) > SCOPE_DEPTH ? scopeTooDeep() : undefined;
+    if (scopeFailure) return answerItems(items, spent, () => ({ result: scopeFailure, prepareMs: 0, runMs: 0 }), reply);
+    // Only phases of this run share the instance. Each formula still gets a fresh runtime and context.
+    let quickjs: QuickJSWASMModule;
+    try { quickjs = await newQuickJS(); } catch { return reply({ kind: "restart" }); }
+    prepared = { runId, scopeJson, quickjs };
+  }
+  if (prepared?.runId !== runId) return reply({ kind: "refused", message: "The automation run is no longer prepared." });
+  const { quickjs, scopeJson } = prepared;
   answerItems(items, spent, item => evaluateItem(quickjs, scopeJson, item), reply);
 }
 reply({ kind: "ready" });

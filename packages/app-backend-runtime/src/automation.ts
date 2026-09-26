@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { isDeepStrictEqual } from "node:util";
 import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
-import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
+import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
 export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
@@ -149,6 +149,8 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   let queue: Promise<unknown> = Promise.resolve();
   let queued = 0;
   let closed = false;
+  let nextRunId = 0;
+  type Run = { id: number; scope: AutomationScope; preparedOn?: Worker };
 
   const stop = async (thread: Promise<Worker>) => {
     if (worker === thread) worker = undefined;
@@ -169,7 +171,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
    * Sends items to the worker and reports each result. It adds the time each item took to `spent`, and resolves
    * early when the worker is replaced.
    */
-  async function dispatch(scope: AutomationScope, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
+  async function dispatch(run: Run, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
     if (closed) throw new Error("The automation evaluator is closed.");
     clearTimeout(idle);
     const thread = worker ??= start();
@@ -241,7 +243,11 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       };
       active.on("message", onMessage).on("messageerror", onMessageError).on("error", onFailure).on("exit", onFailure);
       arm();
-      try { active.postMessage({ scope, items, spent: { ...spent } }); } catch (error) { rest(); reject(error); }
+      try {
+        active.postMessage({ kind: "evaluate", runId: run.id, items, spent: { ...spent },
+          ...(run.preparedOn === active ? {} : { scope: run.scope }) } satisfies AutomationWorkerRequest);
+        run.preparedOn = active;
+      } catch (error) { rest(); reject(error); }
     });
   }
 
@@ -267,6 +273,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
       : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);
     if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
+    const context: Run = { id: ++nextRunId, scope: structuredClone(scope) };
     queued++;
     const done = queue.then(async () => {
       const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
@@ -296,9 +303,14 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           const { when: _when, ...formula } = item;
           return formula;
         });
-        await dispatch(scope, runnable, (offset, result) => { results[waiting[offset]!] = result; }, spent);
+        await dispatch(context, runnable, (offset, result) => { results[waiting[offset]!] = result; }, spent);
       }
-    }).finally(() => { queued--; });
+    }).finally(() => {
+      queued--;
+      // Messages to one worker are ordered. End this run before the queue admits the next one.
+      try { context.preparedOn?.postMessage({ kind: "end", runId: context.id } satisfies AutomationWorkerRequest); }
+      catch { /* A replaced or closed worker already released its run. */ }
+    });
     queue = done.catch(() => undefined);
     return done;
   }
