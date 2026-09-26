@@ -354,7 +354,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     }
     standing(input);lane.lifecycle.signal.throwIfAborted();
     if(performance.now()>=lane.admission!.deadline)throw new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again.");
-    if(!head(input).active)throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+    if(!head(input).active)throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
   }
   async function openWorker(lane: Lane, input: DatasetAccess, reopen: { admitted: boolean }): Promise<Worker> {
     const wait=reopenWaits.get(JSON.stringify(lane.scope));
@@ -382,7 +382,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         }
       }
       standing(input);lane.lifecycle.signal.throwIfAborted();
-      if(!head(input).active)throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+      if(!head(input).active)throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
       // Reserve before asynchronous opening so different datasets cannot exceed the pool.
       workerCount++;reopen.admitted=true;
     } finally {
@@ -393,7 +393,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const signal=input.signal ? AbortSignal.any([input.signal,lane.lifecycle.signal]) : lane.lifecycle.signal;
     try {
       const current = head(input);
-      if (!current.active) throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+      if (!current.active) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
       const canonical = options.journal.captureExport({ scope: input.scope, authorize: () => standing(input), capture: () => null }).checkpoint;
       if (!sameAuthority(canonical.cursor, current.cursor)) throw new Error("This Collection's saved records are damaged.");
       const cache = options.journal.materialization({scope: input.scope, authorize: () => standing(input)});
@@ -449,7 +449,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function recover(lane: Lane, input: DatasetAccess): Promise<Worker> {
     const current = head(input);
-    if (!current.active) throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+    if (!current.active) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
     // Waiting for a worker slot is admission, not reopening, so it earns no wait.
     const reopen = { admitted: Boolean(lane.worker) };
@@ -496,7 +496,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function execute(lane: Lane, input: DatasetInvocation): Promise<DatasetInvocationResult> {
     const captured = head(input);
-    if (!captured.active) throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+    if (!captured.active) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
     let worker: Worker | undefined;
     const abort = () => { void worker?.runtime.abort("The Collection action stopped before it finished.").catch(() => {}); };
     const currentAuthority = () => {

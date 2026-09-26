@@ -525,7 +525,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         const current = parseDatasetRevision(JSON.parse(String(existing.revision_json)));
         if (current.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "This Collection's rules are already approved. Review a Collection change to change them.");
         const currentHead = journal.head(key, authorize);
-        if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file.");
+        if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
         authorize(); return current;
       }
       const compiledSource = await compile(source, approved.definition.operationsPath);

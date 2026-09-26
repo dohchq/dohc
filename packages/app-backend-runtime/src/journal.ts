@@ -249,7 +249,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return head;
     } catch { return corrupt("This Collection's saved state is damaged."); }
   }
-  function active(head: StoredHead) { if(!head.active)throw new JournalError("inactive","This host stopped accepting changes to this Collection. Publish its app again to finish moving it, or finish restoring it from its recovery file."); }
+  function active(head: StoredHead) { if(!head.active)throw new JournalError("inactive","This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file."); }
   function readEvent(key: DatasetScope, revision: number): JournalEvent {
     const size=db.prepare(`SELECT storage_bytes,length(changeset)+length(CAST(result_json AS BLOB))+length(CAST(attached_file_ids AS BLOB))+
       length(CAST(caller_key AS BLOB))+length(CAST(proposal_id AS BLOB))+length(CAST(operation AS BLOB))+length(CAST(idempotency_key AS BLOB)) AS actual_bytes
