@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
@@ -313,6 +314,9 @@ export interface RegistryEntry extends CreatedWorkspace {
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
   shareRoster?: ShareRoster;
+  // The computer that runs this synced workspace's schedules, as the relay
+  // last said; null when it recorded none. See automations/automationHost.ts.
+  automationHost?: RelayAutomationHost | null;
 }
 
 /**
@@ -614,6 +618,11 @@ export function createRegistryStore(registryFile: string) {
           },
         };
       });
+    },
+
+    /** Keep the relay's latest answer for which computer runs the schedules. */
+    setAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, automationHost: host }));
     },
 
     /**

@@ -636,12 +636,12 @@ describe("Collection automations", () => {
     expect(await w.executor.scheduleMarks()).toEqual([
       { automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due },
     ]);
-    // A synced workspace does not run schedules yet, and says so.
+    // A workspace that must sync before its schedules run says so.
     const synced = w.makeExecutor({ runsSchedules: async () => false });
     await synced.open();
     const syncedList = await synced.automationsIn("Tasks");
     expect(syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].cannotRun : null)
-      .toBe("Schedules run only in a workspace that has never synced, for now.");
+      .toBe("Turn on sync to run this workspace's schedules.");
     await synced.dispose();
     // This computer's parser refuses a zone it does not know, so that
     // schedule is off here with its diagnostic.

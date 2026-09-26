@@ -84,8 +84,8 @@ function fakeSource(initialSchedules: ScheduledAutomation[], initial: Automation
 }
 
 const idle = (scheduler: AutomationScheduler) => scheduler.idle();
-const here: ScheduleHost = { runsHere: async () => true, stillRuns: () => true };
-const elsewhere: ScheduleHost = { runsHere: async () => false, stillRuns: () => false };
+const here: ScheduleHost = { runsHere: async () => true, stillRuns: () => true, asksAgain: () => false };
+const elsewhere: ScheduleHost = { runsHere: async () => false, stillRuns: () => false, asksAgain: () => false };
 
 describe("planScheduleStep", () => {
   it("starts a new or changed schedule's mark at now, running nothing", () => {
@@ -298,6 +298,7 @@ describe("AutomationScheduler", () => {
         return true;
       },
       stillRuns: () => true,
+      asksAgain: () => false,
     };
     scheduler.add("ws", work.source, host);
     await idle(scheduler);
@@ -310,16 +311,21 @@ describe("AutomationScheduler", () => {
     const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 10 * MINUTE)]);
     let answer: (runs: boolean) => void = () => undefined;
+    let asked: () => void = () => undefined;
+    const firstAsked = new Promise<void>((resolve) => { asked = resolve; });
     let first = true;
     const host: ScheduleHost = {
       runsHere: () => {
         if (!first) return Promise.resolve(true);
         first = false;
+        asked();
         return new Promise<boolean>((resolve) => { answer = resolve; });
       },
       stillRuns: () => true,
+      asksAgain: () => false,
     };
     scheduler.add("ws", work.source, host);
+    await firstAsked;
     // Asleep from 8:59 to 9:03 while the first answer is out.
     scheduler.suspended();
     time.advance(4 * MINUTE);
@@ -341,7 +347,7 @@ describe("AutomationScheduler", () => {
       local = false;
       return await marks();
     };
-    scheduler.add("ws", work.source, { runsHere: async () => local, stillRuns: () => local });
+    scheduler.add("ws", work.source, { runsHere: async () => local, stillRuns: () => local, asksAgain: () => false });
     await idle(scheduler);
     expect(work.steps).toEqual([]);
     expect(time.timerAt(), "no timer for a workspace it does not run").toBeNull();
@@ -415,6 +421,117 @@ describe("AutomationScheduler", () => {
     scheduler.remove("ws");
     await idle(scheduler);
     expect(time.timerAt(), "no schedules, no timer").toBeNull();
+    scheduler.dispose();
+  });
+});
+
+describe("AutomationScheduler with an automation host", () => {
+  function movableHost() {
+    const host = { runs: false, runsHere: async () => host.runs, stillRuns: () => host.runs, asksAgain: () => true };
+    return host;
+  }
+
+  it("asks again within the cap, and after a release runs what came after it", async () => {
+    const time = fakeClock(NINE + 30 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    const work = fakeSource([hourly, daily], [markOf(hourly, NINE - 5 * HOUR)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    expect(work.steps).toEqual([]);
+    expect(time.timerAt(), "another computer may hand the schedules over").toBe(NINE + 30 * MINUTE + MAX_TIMER_MS);
+
+    // The last host released through 9:10. This computer opened at 9:30,
+    // so it runs ten o'clock, and a schedule it has no mark for starts
+    // where its own coverage does.
+    time.advance(50 * MINUTE);
+    host.runs = true;
+    scheduler.startedHere("ws", NINE + 10 * MINUTE);
+    await idle(scheduler);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE + HOUR], throughMs: NINE + 80 * MINUTE },
+      { automationId: daily.automationId, run: [], throughMs: NINE + 25 * MINUTE },
+    ]);
+    scheduler.dispose();
+  });
+
+  it("starts at now when it became the host without a release", async () => {
+    const time = fakeClock(NINE + 30 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    const work = fakeSource([hourly], [markOf(hourly, NINE - 5 * HOUR)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    time.advance(50 * MINUTE);
+    host.runs = true;
+    scheduler.startedHere("ws", null);
+    await idle(scheduler);
+    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 80 * MINUTE }]);
+    scheduler.dispose();
+  });
+
+  it("hands over with every schedule stepped through one cutoff, past the engine's bound", async () => {
+    const time = fakeClock(NINE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    host.runs = true;
+    const work = fakeSource([hourly, daily], [markOf(hourly, NINE), markOf(daily, NINE)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    // Open through 150 hourly due times with no step between.
+    time.advance(150 * HOUR);
+    host.runs = false;
+    expect(await scheduler.finishHere("ws")).toBe(NINE + 150 * HOUR);
+    const hourlySteps = work.steps.filter((step) => step.automationId === hourly.automationId);
+    expect(hourlySteps.map((step) => [step.run.length, step.throughMs])).toEqual([
+      [MAX_RUNS_PER_STEP, NINE + MAX_RUNS_PER_STEP * HOUR],
+      [50, NINE + 150 * HOUR],
+    ]);
+    expect(work.marks.get(daily.automationId)?.throughMs).toBe(NINE + 150 * HOUR);
+    scheduler.dispose();
+  });
+
+  it("waits for its own clock to pass a release from a computer whose clock is ahead", async () => {
+    const time = fakeClock(NINE + 59 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    const work = fakeSource([hourly], [markOf(hourly, NINE)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    // The last host ran ten o'clock and released at its own 10:00:30.
+    host.runs = true;
+    scheduler.startedHere("ws", NINE + HOUR + 30_000);
+    await idle(scheduler);
+    time.advance(2 * MINUTE);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run), "ten o'clock ran there").toEqual([]);
+    time.advance(HOUR);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(work.steps.flatMap((step) => step.run)).toEqual([NINE + 2 * HOUR]);
+    scheduler.dispose();
+  });
+
+  it("steps the schedules one last time when it hands over, and says how far", async () => {
+    const time = fakeClock(NINE + 3 * MINUTE);
+    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const host = movableHost();
+    host.runs = true;
+    const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
+    scheduler.add("ws", work.source, host);
+    await idle(scheduler);
+    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+
+    host.runs = false;
+    time.advance(67 * MINUTE);
+    expect(await scheduler.finishHere("ws")).toBe(NINE + 70 * MINUTE);
+    expect(work.steps.at(-1)).toEqual({ automationId: hourly.automationId, run: [NINE + HOUR], throughMs: NINE + 70 * MINUTE });
+
+    time.advance(HOUR);
+    work.setAnswering(false);
+    expect(await scheduler.finishHere("ws"), "the engine did not answer").toBeNull();
+    expect(await scheduler.finishHere("other"), "not open here").toBeNull();
     scheduler.dispose();
   });
 });
