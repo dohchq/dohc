@@ -220,7 +220,7 @@ export function CloudLogin(props: {
         applyStatus(status);
         if (announceSession && status.connected) props.onConnected?.();
       })
-      .catch(() => {
+      .catch((cause: unknown) => {
         if (!sessionRef.isCurrent(session)) return;
         // Nothing on screen can recover this one, so the notice carries the
         // only way back: run the check again.
@@ -229,6 +229,7 @@ export function CloudLogin(props: {
           // Main rejects a status check with an engine or IPC failure, not
           // with a sentence for the user. Say what dohc could not do.
           message: "dohc could not check this connection.",
+          cause,
           serverUrl: null,
           retry: retryFor(session, recheckStatus),
         });
@@ -279,6 +280,7 @@ export function CloudLogin(props: {
         // operational failure uses.
         reportConnectionError({
           message: ipcErrorMessage(cause, "dohc could not enable sync for this workspace."),
+          cause,
           serverUrl: null,
           retry: retryFor(session, () => void enableSync()),
         });
@@ -318,7 +320,7 @@ export function CloudLogin(props: {
                 applyStatus(status, result.email ?? status.email ?? "");
                 if (status.connected) props.onConnected?.();
               })
-              .catch(() => {
+              .catch((cause: unknown) => {
                 if (!sessionRef.isCurrent(session)) return;
                 // The approval happened, but nothing here can say what the
                 // session is now. Do not announce a connection main has not
@@ -326,6 +328,7 @@ export function CloudLogin(props: {
                 setPhase({ kind: "unknown" });
                 reportConnectionError({
                   message: "dohc could not check this connection after sign-in.",
+                  cause,
                   serverUrl: origin,
                   retry: retryFor(session, recheckStatus),
                 });
@@ -347,6 +350,7 @@ export function CloudLogin(props: {
           setPhase({ kind: "disconnected" });
           reportConnectionError({
             message: ipcErrorMessage(cause, "dohc could not reach the server."),
+            cause,
             serverUrl: origin,
             retry: retryFor(session, () => void connect(origin)),
           });
@@ -390,6 +394,7 @@ export function CloudLogin(props: {
           cause,
           "dohc could not reach this server. Check the address, then choose Try again.",
         ),
+        cause,
         serverUrl: origin,
         retry: retryFor(session, () => void connect(origin)),
       });
@@ -454,6 +459,7 @@ export function CloudLogin(props: {
       clearPollTimer();
       reportConnectionError({
         message: ipcErrorMessage(cause, "dohc could not finish disconnecting."),
+        cause,
         serverUrl: null,
         retry: retryFor(session, () => void disconnect()),
       });

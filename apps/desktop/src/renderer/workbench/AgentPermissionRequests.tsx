@@ -5,6 +5,7 @@ import type { AgentPermissionDecision } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { useGuestBlockingUiWhile } from "../guestBlockingUi";
 import type { AgentPermissionRequest } from "./useAgentNotifications";
+import { ipcErrorMessage } from "../ipcError";
 
 // Floating permission cards (update-toast position, bottom-right): the place
 // a blocked agent run asks the user for consent. Requests arrive through the
@@ -83,7 +84,7 @@ export function AgentPermissionRequests(props: {
         next.delete(key);
         return next;
       });
-      setError(cause instanceof Error ? cause.message : "Could not answer the request.");
+      setError(ipcErrorMessage(cause, "Could not answer the request."));
     }
   }
 

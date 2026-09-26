@@ -6,7 +6,7 @@ import { ipcErrorMessage } from "../ipcError";
 export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
   workspaceId: string;
   liveToken: Readonly<{ current: number }>;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
 }) {
   const [personalFeed, setPersonalFeed] = useState<ChatFeedItemRecord[]>([]);
   const [personalFeedLoading, setPersonalFeedLoading] = useState(false);
@@ -82,7 +82,7 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
         }
       } catch (error) {
         if (requestIsCurrent()) {
-          onError(ipcErrorMessage(error, "Could not load your Feed."));
+          onError(ipcErrorMessage(error, "Could not load your Feed."), error);
         }
       } finally {
         if (requestIsCurrent()) setPersonalFeedLoading(false);

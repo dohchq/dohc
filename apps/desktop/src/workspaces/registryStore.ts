@@ -412,7 +412,7 @@ export function createRegistryStore(registryFile: string) {
     if (obj.version !== 1) {
       // A future-version registry must be preserved, never silently wiped.
       throw new Error(
-        `Workspace registry version ${String(obj.version)} is newer than supported; refusing to overwrite it.`,
+        `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`,
       );
     }
     if (!Array.isArray(obj.workspaces)) {

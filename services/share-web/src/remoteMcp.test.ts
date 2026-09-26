@@ -7,7 +7,7 @@ const secret = "A".repeat(43);
 const clients: Client[] = [];
 let servedLog: unknown;
 afterEach(async () => {servedLog = logPage; await Promise.all(clients.splice(0).map(client => client.close()));});
-const [first, second] = ["a".repeat(64), "b".repeat(64)];
+const [first, second, withdrawn] = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
 const moment = (relaySeq: number, payload: Record<string, unknown>) =>
   ({relaySeq, originSeq: relaySeq, opKind: "moment.append", recordedAtMs: relaySeq * 1000, payload: {versionId: "main", metadata: {origin: "sync"}, payloadBeforeBlobSha256: null, ...payload}});
 const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops: [
@@ -39,6 +39,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
+      if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
       if (path.startsWith("/sync/link/blobs/")) return new Response("hello", {headers: {"content-type": "text/plain"}});
       if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
@@ -183,8 +184,9 @@ it("lists the link log as changes through the browser's log route", async () => 
   expect(log).toEqual(["?since=7&limit=50"]);
   expect(await client.callTool({name: "dohc_list_changes", arguments: {limit: 501}})).toMatchObject({isError: true});
   expect(f.calls.filter(call => new URL(call.url).pathname === "/sync/link/log")).toHaveLength(1);
-  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: second}})).toMatchObject({isError: true});
-  expect(f.calls.some(call => new URL(call.url).pathname.startsWith("/sync/link/blobs/"))).toBe(false);
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: second}})).toMatchObject({structuredContent: {ok: true, encoding: "utf8", content: "hello"}});
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}})).toMatchObject({isError: true, content: [{text: expect.stringContaining("withdraws its history")}]});
+  expect(f.calls.filter(call => new URL(call.url).pathname.startsWith("/sync/link/blobs/")).map(call => new URL(call.url).pathname)).toEqual([`/sync/link/blobs/${second}`, `/sync/link/blobs/${withdrawn}`]);
 });
 
 it("shows a pinned version's fork snapshot as one version change", async () => {

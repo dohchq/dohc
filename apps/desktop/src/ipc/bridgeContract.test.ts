@@ -74,6 +74,8 @@ import {
   StartDmPayload,
   SyncDmsResult,
   SyncStatusResult,
+  engineStoreRefusalCopy,
+  engineStoreRefusalRecovery,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
@@ -3739,6 +3741,28 @@ describe("sync status IPC contract", () => {
       SyncStatusResult.safeParse({ ...status, engineStoreRefused: undefined })
         .success,
     ).toBe(false);
+  });
+
+  // The engine refuses a store a newer build migrated and leaves it intact.
+  // Rebuild would move that store aside, so the only recovery is an update.
+  it("asks for an update when a newer build migrated the store", () => {
+    const refused = SyncStatusResult.parse({
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      liveSessionsGeneration: 0,
+      historyCaptureFailed: true,
+      engineStoreRefused: "migrated-by-newer-build",
+      engineStoreRefusedDetail:
+        "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
+    });
+    expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
+    expect(engineStoreRefusalRecovery("migrated-by-newer-build")).toBe("update");
+    expect(engineStoreRefusalCopy("migrated-by-newer-build")).toBe(
+      "A newer version of dohc updated this workspace's data store. Update dohc to continue. Your files are unchanged.",
+    );
   });
 });
 

@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { createDesktopCliServer } from "./desktopCliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -49,7 +50,12 @@ function fixture(rootPath = resolve("cli-workspace")) {
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredTextFile: vi.fn<Capture["writeAuthoredTextFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
+      try {
+        await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        throw new VersionedTextStoreError("target-path-exists", "File already exists");
+      }
       return { resolvedAbsolutePath: absolutePath };
     }),
   };

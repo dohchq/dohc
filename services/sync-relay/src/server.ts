@@ -318,6 +318,7 @@ export function createSyncRelayHandler({
     filteredLogPage,
     newestFilteredOpFreshness,
     historicalSharedBlob,
+    linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
   // A granter's name on the notice a share sends: their display name, or
@@ -651,6 +652,7 @@ export function createSyncRelayHandler({
     linkJsonResponse,
     filteredLogPage,
     newestFilteredOpFreshness,
+    linkRevisionByteLength,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     linkLogReadRateLimiter,

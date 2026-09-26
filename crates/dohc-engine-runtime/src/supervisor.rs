@@ -13,7 +13,7 @@
 //! opening. Concurrent opens of the *same* identity serialize on a reservation
 //! and share the resulting actor.
 
-use crate::actor::{ActorHandle, LifecycleState, WorkspaceActor};
+use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
@@ -201,7 +201,7 @@ impl WorkspaceSupervisor {
             loop {
                 let action = match guard.get(&identity) {
                     Some(Slot::Active(actor)) => {
-                        if actor.lifecycle() == LifecycleState::Closed {
+                        if actor.lifecycle().needs_reopen() {
                             Action::Evict
                         } else {
                             Action::Return

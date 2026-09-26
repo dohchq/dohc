@@ -522,7 +522,7 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
-    onBehalfOf: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
   }).strict(),
   z.object({
@@ -533,7 +533,7 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1),
-    onBehalfOf: z.string().min(1),
+    onBehalfOf: z.string().min(1).optional(),
     depth: z.number().int().nonnegative(),
   }).strict(),
 ]);

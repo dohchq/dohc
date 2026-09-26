@@ -79,7 +79,7 @@ test('compiles captured app bytes in the job and snapshots before caller mutatio
   const request={entryPath:'main.js',inputs:[{path:'main.js',bytes,sha256:createHash('sha256').update(bytes).digest('hex')}],bounds:{maxInputFiles:8,maxInputBytes:4096,maxOutputBytes:4096}};
   const pending=compileClosedAppInProcess({nodeExecutable:process.execPath,workerPath:fileURLToPath(new URL('../src/workspaces/closedAppCompilerWorker.ts',import.meta.url))},request,{...bounds,maxInputBytes:8192,maxOutputBytes:8192});
   bytes.fill(0);request.entryPath='changed.js';
-  const result=await pending;assert.equal(result.compiler.recipe,'dohc-closed-app-v2');assert.equal(result.files[0].path,'bundle.js');assert.match(Buffer.from(result.files[0].bytes).toString(),/before/);
+  const result=await pending;assert.equal(result.compiler.recipe,'dohc-closed-app-v3');assert.equal(result.files[0].path,'bundle.js');assert.match(Buffer.from(result.files[0].bytes).toString(),/before/);
 });
 test('abrupt caller death closes its job and descendants',windows,async t=>{
   const {directory,runtime}=await fixture(t,`import{spawn}from'node:child_process';import{writeFileSync}from'node:fs';const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>writeFileSync(process.argv[2],JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())})));setInterval(()=>{},1000);`);

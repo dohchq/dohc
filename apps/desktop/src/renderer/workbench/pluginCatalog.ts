@@ -6,6 +6,7 @@ import type {
   PluginUninstallPreflightRecord,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { readError } from "../../ipc/errorWords";
 
 // The plugin data layer, shared by the two surfaces that show a plugin: the
 // side-panel list (PluginsView) and the details tab (PluginDetailsPage). The
@@ -417,7 +418,7 @@ export function usePluginCatalog(
       ) {
         return;
       }
-      const reason = error instanceof Error ? error.message : "Try again.";
+      const reason = readError(error).words ?? "Try again.";
       setLoad({
         status: "error",
         message: `Plugins could not load. ${reason}`,
@@ -617,7 +618,7 @@ export function usePluginCatalog(
       });
     } catch (error) {
       if (epoch !== workspaceEpoch.current) return;
-      const reason = error instanceof Error ? error.message : "Try again.";
+      const reason = readError(error).words ?? "Try again.";
       setErrors((current) => ({
         ...current,
         [pluginKey(plugin)]: `dohc could not open the app from ${plugin.id}. ${reason}`,

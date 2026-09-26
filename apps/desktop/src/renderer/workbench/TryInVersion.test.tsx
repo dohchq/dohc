@@ -442,7 +442,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       attempts += 1;
       if (attempts <= 7) {
         throw new Error(
-          "Error invoking remote method 'desktop:list-workspace-versions': Error: Workspace is still updating. Try again.",
+          "Error invoking remote method 'desktop:list-workspace-versions': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
         );
       }
       return {

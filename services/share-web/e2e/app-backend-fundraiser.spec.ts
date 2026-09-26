@@ -143,7 +143,7 @@ $cert.Dispose();$rsa.Dispose()`;
     const table=await f.ownerRead("tableRegistrations",{limit:50,search:"Venue"});
     expect(table.result.rows).toHaveLength(1);
     expect(table.result.rows[0]).toMatchObject({values:{[f.field("registrations","full_name")]:"Venue Friend",[f.field("registrations","status")]:"pay_at_venue",[f.field("registrations","total_php")]:300}});
-    expect(f.compiler.recipe).toBe("dohc-closed-app-v2");expect(failures).toEqual([]);
+    expect(f.compiler.recipe).toBe("dohc-closed-app-v3");expect(failures).toEqual([]);
     await info.attach("real-backend-operations",{body:JSON.stringify(f.calls,null,2),contentType:"application/json"});
   }finally{await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await f.close();}
 });

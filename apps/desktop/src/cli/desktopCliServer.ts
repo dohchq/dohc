@@ -36,11 +36,11 @@ import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
-import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 // The History author of a document an agent creates: the agent under the
 // name it gave, on behalf of the local owner, or no author without a name.
-function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentAuthor | null {
+function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentWriteAuthor | null {
   return origin.actorOriginId === undefined
     ? null
     : { kind: "agent", agentId: origin.actorOriginId, onBehalfOf: "local" };
@@ -298,7 +298,7 @@ export function createDesktopCliServer<State>(
             try {
               await current.writeAuthoredTextFile(absolute, "", momentAuthorFor(origin), { createOnly: true });
             } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+              if (error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
                 throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
               }
               throw error;

@@ -143,6 +143,7 @@ describe('documentCreateUpdate', () => {
     '---\ntitle: Trip\n---\n\nBody.',
     '---\n{}\n---\n\nBody.',
     '---\n\n---\n',
+    '---\n---\n',
   ])('refuses frontmatter, which would land as body blocks: %j', (markdown) => {
     expect(startsWithFrontmatter(markdown)).toBe(true)
     expect(() => documentCreateUpdate(state(new Y.Doc()), markdown, open)).toThrow(FRONTMATTER_REFUSAL)
@@ -150,7 +151,6 @@ describe('documentCreateUpdate', () => {
 
   test.each([
     'Intro.\n\n---\n\nMore.',
-    '---\n---\n',
     '---\nA line between two rules.\n---\n\nMore.',
   ])('takes rules the reader does not read as frontmatter as body text: %j', (markdown) => {
     expect(startsWithFrontmatter(markdown)).toBe(false)
