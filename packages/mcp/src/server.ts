@@ -31,9 +31,9 @@ import {
   replyToChat,
   startGroupChat,
   startFileChat,
-  createSite,
+  createApp,
   deleteWorkspacePath,
-  detectSites,
+  detectApps,
   editDocument,
   importData,
   listWorkspaceFiles,
@@ -45,7 +45,7 @@ import {
   readDocument,
   readWorkspaceFile,
   searchWorkspaceFiles,
-  testSite,
+  testApp,
   writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
@@ -92,7 +92,7 @@ function text(structuredContent: Record<string, unknown>) {
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: "dohc", version: "0.2.0" });
+  const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
   // A share view's write surface is its access level. The write tools
   // come in two tiers, and a tier the level does not grant is never registered
@@ -313,42 +313,42 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_detect_sites",
+    "dohc_detect_apps",
     {
       description:
-        "Detect normal browser-viewable website folders in the workspace using index.html, package.json, dohc.json, and common web configs.",
+        "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       inputSchema: {
         path: z.string().max(4096).optional(),
         maxDepth: z.number().int().nonnegative().max(12).optional(),
       },
     },
-    async (args) => text(await detectSites(ctx, args)),
+    async (args) => text(await detectApps(ctx, args)),
   );
 
   registerWrite(
-    "dohc_create_site",
+    "dohc_create_app",
     {
       description:
-        "Scaffold a normal website folder with index.html, package.json, pinned serve devDependency, and optional dohc.json. Records history; does not create hidden app folders.",
+        "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Records history; does not create hidden app folders.",
       inputSchema: {
-        path: z.string().min(1).max(4096),
+        appRoot: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),
         withDohcJson: z.boolean().optional(),
       },
     },
-    async (args) => text(await createSite(ctx, args)),
+    async (args) => text(await createApp(ctx, args)),
   );
 
   server.registerTool(
-    "dohc_test_site",
+    "dohc_test_app",
     {
       description:
-        "Run bounded static validation for a normal website folder: detector diagnostics and entry presence.",
+        "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
       inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
+        appRoot: z.string().min(1).max(4096),
       },
     },
-    async (args) => text(await testSite(ctx, args)),
+    async (args) => text(await testApp(ctx, args)),
   );
 
   registerWrite(

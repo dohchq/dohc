@@ -78,7 +78,7 @@ export interface PluginChildProcessExit {
  * A working directory in the workspace.
  *
  * `{ workspaceRoot: true }` is the workspace root itself. Adding `path` names
- * one directory inside it — the site a preview builds, the package a tool
+ * one directory inside it — the app a preview builds, the package a tool
  * runs on. dohc resolves the path and refuses one that leaves the workspace,
  * so a child always runs in the workspace or in the plugin's own built root,
  * and nowhere else.
@@ -484,7 +484,7 @@ export interface PluginWebAppStart {
   url: string;
   /**
    * What to call this instance's tab. Every instance of one web app shares
-   * the manifest title, so a plugin that opens a tab per site names each one
+   * the manifest title, so a plugin that opens a tab per app names each one
    * here. Omit it to use the manifest title. Titles longer than 120
    * characters are refused.
    */

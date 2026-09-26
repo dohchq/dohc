@@ -16,7 +16,7 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_create_directory",
   "dohc_move_path",
   "dohc_delete_path",
-  "dohc_create_site",
+  "dohc_create_app",
   "dohc_import_data",
   // Collection writes change the granter's records, so they sit in the
   // document tier: a shared view never sees them.
@@ -173,7 +173,7 @@ describe("parseArgs", () => {
 describe("MCP tool results", () => {
   it("omits tools that cannot perform the advertised action", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
-    for (const name of ["build_site", "preview_site", "publish_site", "share", "open_in_dohc", "resolve_conflict"]) {
+    for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {
       expect(names).not.toContain(`dohc_${name}`);
     }
   });

@@ -346,7 +346,7 @@ describe("@dohc/sdk", () => {
 
     await expect(transport.request("capabilities")).rejects.toMatchObject({
       code: "DOHC_HOST_MISSING_ORIGIN",
-      message: "No dohc host origin is available for this site.",
+      message: "No dohc host origin is available for this panel.",
     });
     expect(harness.messages).toEqual([]);
     expect(harness.listeners.size).toBe(0);
