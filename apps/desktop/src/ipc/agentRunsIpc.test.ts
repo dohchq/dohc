@@ -122,7 +122,6 @@ async function harness(shared = false) {
   const runnable = vi.fn((_id: string) => { events.push("runnable"); });
   const idle = vi.fn((_id: string) => { events.push("idle"); });
   const start = vi.fn(async (value: RegistryEntry) => { events.push("start-with-activity"); return integration.startAgentRun(value.workspaceId); });
-  const warm = vi.fn(async (_value: RegistryEntry) => { events.push("warm"); });
   const writable = vi.fn((_value: RegistryEntry) => { events.push("writable"); });
   const activity = vi.fn(async (_value: RegistryEntry) => { events.push("activity"); });
   const dispatch = {
@@ -152,8 +151,7 @@ async function harness(shared = false) {
     startAgentRunWithWorkspaceActivity: start,
     get cachedAgentSessions() { return cached; }, agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
-    sharedViewOf: (id) => registry.find(id)?.shareView,
-    pluginWorkspaceRuntimes: { ensure: warm }, agentSessionManager: lazyManager,
+    agentSessionManager: lazyManager,
     senderWorkspaceAuthority: {
       withActiveWorkspace: (value, id, subject, work) => withRendererWorkspaceOperation(
         value, id, `The ${subject} does not target the active workspace. Open the workspace and try again.`, async () => work(),
@@ -175,7 +173,7 @@ async function harness(shared = false) {
   return {
     workspace, registry, physical, sender, authority, renderers, events, integration, manager, lazyManager, inputs,
     provider, driver, ended, setAgentRun, failure, datasetFailures, adapter, acknowledge, notify, requireWorkspace, requireCapture,
-    ensureOpen, records, runnable, idle, start, warm, writable, activity, dispatch, shareAccess, config,
+    ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
     detection, handlers, groupSizes, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
     durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
     switchWorkspace: async () => {
@@ -398,28 +396,8 @@ describe("agent run IPC registrations", () => {
     expect(await h.durableRuns()).toEqual([expect.objectContaining({ id: "run-1", status: "complete" }), expect.objectContaining({ id: "run-2", status: "running" })]);
   });
 
-  it("waits for plugin warmup before probing the real manager", async () => {
-    const h = await harness();
-    const reached = deferred<void>();
-    const release = deferred<void>();
-    h.warm.mockImplementation(async () => { reached.resolve(); await release.promise; });
-    const pending = h.invoke(CHANNELS.probeAgentDrivers);
-    try {
-      await reached.promise;
-      expect(h.lazyManager).not.toHaveBeenCalled();
-      expect(h.driver.probe).not.toHaveBeenCalled();
-    } finally {
-      release.resolve();
-      await Promise.allSettled([pending]);
-    }
-    await expect(pending).resolves.toMatchObject({ drivers: [{ id: "fake-driver", installed: true }], session: null });
-    expect(h.driver.probe).toHaveBeenCalledTimes(1);
-  });
-
-  it("skips plugin warmup for a shared view and forwards main-owned MCP configuration", async () => {
+  it("forwards main-owned MCP configuration for a shared view", async () => {
     const h = await harness(true);
-    await h.invoke(CHANNELS.probeAgentDrivers);
-    expect(h.warm).not.toHaveBeenCalled();
     await expect(h.invoke(CHANNELS.getMcpConfig)).resolves.toEqual({
       command: "dohc-mcp", args: ["--workspace", h.workspace.rootPath], workspacePath: h.workspace.rootPath, home: h.workspace.rootPath,
     });

@@ -193,7 +193,7 @@ async function writeWorkspaceBytes(
   if (!validated.ok) {
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }
-  // "entry" for the same reason writeContainedFile uses it: `link()` refuses
+  // "entry" because `link()` refuses
   // an existing entry rather than writing through it, so this never follows
   // the leaf. A link squatting the path then reports "already exists", which
   // is what it is, instead of a symlink refusal from a rule that does not

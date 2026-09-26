@@ -30,8 +30,8 @@ beforeAll(async () => {
   ]);
 });
 
-// The file reader and the plugin README share one markdown component map, so
-// a document reads the same wherever dohc shows it. The map itself is pinned
+// The file reader renders through the shared markdown component map, so a
+// document reads the same wherever dohc shows it. The map itself is pinned
 // beside it (markdownComponents.test.tsx); this pins that the reader still
 // hands it over — nothing else renders a table through FileInspector, so the
 // reader could quietly fall back to react-markdown's bare defaults and every

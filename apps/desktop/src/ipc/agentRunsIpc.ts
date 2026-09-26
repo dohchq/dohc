@@ -51,8 +51,6 @@ export function createAgentRunsIpc<
   agentIntegration: Pick<AgentIntegration, "endAgentRun" | "getAgentRunStatus">;
   mcpShareAccessOf(shareView: unknown): ShareAccess | null;
   mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): McpConfigResult;
-  sharedViewOf(workspaceId: string): unknown;
-  pluginWorkspaceRuntimes: { ensure(workspace: Workspace): Promise<unknown> };
   agentSessionManager(): Promise<Pick<AgentSessionManager, "probeDrivers" | "panelSnapshot" | "answerPermission">>;
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
@@ -67,7 +65,7 @@ export function createAgentRunsIpc<
     withEngineAdapter, acknowledgeWorkspaceAutomationFailure, datasetAutomationFailures, notifyAutomationFailuresChanged,
     requireEngineCapture, linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace,
     assertAgentRunnableWorkspace, assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
-    agentIntegration, mcpShareAccessOf, mcpConfigFor, sharedViewOf, pluginWorkspaceRuntimes,
+    agentIntegration, mcpShareAccessOf, mcpConfigFor,
     agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   } = dependencies;
@@ -253,13 +251,7 @@ export function createAgentRunsIpc<
     registerHandler(CHANNELS.probeAgentDrivers, async (event, payload) => {
       assertTrustedSender(event);
       const input = AgentRunPayload.parse(payload);
-      const workspace = requireWorkspace(input.workspaceId);
-      // Every driver is plugin-contributed, and workspace open only warms the
-      // plugin runtime in the background. A probe that ran ahead of it would
-      // answer "no drivers" and the caller would cache that for its lifetime.
-      if (!sharedViewOf(workspace.workspaceId)) {
-        await pluginWorkspaceRuntimes.ensure(workspace);
-      }
+      requireWorkspace(input.workspaceId);
       const sessions = await agentSessionManager();
       await sessions.probeDrivers(input.workspaceId);
       return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));

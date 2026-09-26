@@ -8,10 +8,10 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/stage-plugin-tools.mjs && node scripts/stage-app-compiler.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
+    "build": "node scripts/ensure-electron-installed.mjs && node scripts/stage-app-compiler.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
     "build:cli": "node scripts/build-cli-bin.mjs",
     "build:engine": "node scripts/build-workspace-engine.mjs",
-    "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-plugin-tools.mjs && node scripts/stage-app-compiler.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
+    "package": "node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-app-compiler.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:app-backend": "node scripts/smoke-app-backend-runtime.mjs",
     "smoke:settings": "node ../../scripts/verification/verify.mjs e2e --grep @settings-smoke",
@@ -22,7 +22,7 @@
     "test:apps:e2e": "node ../../scripts/verification/verify.mjs e2e --grep @apps",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json && tsc --noEmit -p tsconfig.stock-orders.json",
     "test:unit": "vitest run",
-    "test:scripts": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/stage-plugin-tools.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/stage-app-backend-runtime.test.mjs"
+    "test:scripts": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/stage-app-backend-runtime.test.mjs"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -82,7 +82,6 @@
     "@dohc/cli": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
-    "@dohc/sdk": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",

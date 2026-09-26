@@ -6,7 +6,7 @@ import type { CSSProperties, ReactNode } from "react";
 // routes it through the audited external or workspace path.
 //
 // Shared by every surface that shows read-only markdown, so the document
-// voice cannot drift file by file: the file reader and the plugin README.
+// voice cannot drift file by file.
 export const MARKDOWN_COMPONENTS = {
   h1: (p: { children?: ReactNode }) => (
     <h1 className="mb-3 mt-1 text-2xl font-semibold tracking-tight text-ink">{p.children}</h1>

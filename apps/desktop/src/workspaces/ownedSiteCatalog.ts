@@ -4,7 +4,7 @@ import {
   listSitePackages,
   type SitePackageInfo,
 } from "./sitePackage";
-import type { OwnedWorkspaceSdkReadPort } from "./ownedWorkspaceSdkReadPort";
+import type { OwnedWorkspaceReadPort } from "./ownedWorkspaceReadPort";
 
 export interface OwnedSiteCatalog<Workspace> {
   list(workspace: Workspace): Promise<SitePackageInfo[]>;
@@ -19,7 +19,7 @@ export function createOwnedSiteCatalog<Workspace extends { rootPath: string }>(
   input: {
     reads(
       workspace: Workspace,
-    ): Pick<OwnedWorkspaceSdkReadPort, "prepareSearch" | "listFiles">;
+    ): OwnedWorkspaceReadPort;
   },
 ): OwnedSiteCatalog<Workspace> {
   const listOwnedPackages = async (workspace: Workspace) => {

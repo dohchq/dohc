@@ -162,7 +162,6 @@ describe("automation failure notices", () => {
     const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
     expect(stopped.textContent).toContain('"nudge" did not run.');
     expect(within(stopped).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(document.body.textContent).not.toContain("plugin's source");
     expect(document.body.textContent).not.toContain("automations.yaml");
 
     await userEvent.click(within(row).getByRole("button", { name: "Try again" }));

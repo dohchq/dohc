@@ -279,9 +279,6 @@ function sitePath(root: string, child: string): string {
 
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
-  if (stripWindowsAliasSuffix(segments[0] ?? "") === "plugins") {
-    return true;
-  }
   return segments.some((segment, index) => {
     const stripped = stripWindowsAliasSuffix(segment);
     const nextStripped =

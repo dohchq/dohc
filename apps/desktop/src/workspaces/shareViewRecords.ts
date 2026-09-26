@@ -5,10 +5,10 @@ import {
 } from "@dohc/security-contract/share-selector";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
+  formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "./workspaceEngineCaptureLimits";
-import { formatSize } from "../plugins/pluginFormat";
 
 export interface UnjournalablePath {
   path: string;

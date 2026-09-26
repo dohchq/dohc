@@ -1,5 +1,4 @@
 import {
-  Blocks,
   Cloud,
   Files,
   Globe2,
@@ -9,9 +8,7 @@ import {
   Workflow,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import type { PluginActivityView } from "./pluginActivityViews";
 import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
-import { PluginIcon } from "./PluginIcon";
 import { appViewId, type ActivityViewId, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
@@ -26,7 +23,6 @@ const ICONS: Record<ViewId, typeof Files> = {
   graph: Workflow,
   sites: Globe2,
   history: History,
-  plugins: Blocks,
 };
 
 const LABELS: Record<ViewId, string> = {
@@ -35,7 +31,6 @@ const LABELS: Record<ViewId, string> = {
   graph: "Graph",
   sites: "Apps",
   history: "History",
-  plugins: "Plugins",
 };
 
 export function activityViewLabel(view: ViewId): string {
@@ -57,8 +52,8 @@ function RailButton(props: {
   count?: number;
   onClick?: () => void;
   onContextMenu?: () => void;
-  // A node, not a component: dohc's views draw a lucide glyph and a plugin's
-  // view draws its own icon file.
+  // A node, not a component: dohc's views draw a lucide glyph and a pinned
+  // app draws its initial.
   icon: ReactNode;
 }) {
   const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
@@ -133,7 +128,6 @@ function RailButton(props: {
 }
 
 export function ActivityBar(props: {
-  workspaceId: string;
   // dohc's own views the person keeps in the sidebar, in their order.
   views: readonly ViewId[];
   activeView: ActivityViewId;
@@ -141,10 +135,7 @@ export function ActivityBar(props: {
   hasConflict: boolean;
   // Content-search results count; undefined = no badge.
   searchResultCount?: number;
-  // The views plugins contribute, after dohc's own. A plugin that is gone or
-  // turned off contributes none, so its button leaves the rail with it.
-  pluginViews: readonly PluginActivityView[];
-  // Apps pinned in this workspace, after the plugin views.
+  // Apps pinned in this workspace, after dohc's own views.
   pinnedApps?: readonly PinnedApp[];
   onPinnedAppMenu?: (appRoot: string) => void;
   onSelectView: (view: ActivityViewId) => void;
@@ -159,7 +150,7 @@ export function ActivityBar(props: {
       data-testid="activity-bar"
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel pb-2 pt-1"
     >
-      {/* The view list scrolls, so enough contributed views never push the
+      {/* The view list scrolls, so enough pinned apps never push the
           Cloud and Settings buttons off the rail. It spans the rail and pads
           its ends, so the clip keeps the active bar, a tile's count, and the
           focus ring, and never scrolls sideways. */}
@@ -175,24 +166,6 @@ export function ActivityBar(props: {
             count={view === "search" ? props.searchResultCount : undefined}
             onClick={() => props.onSelectView(view)}
             icon={<RailGlyph Icon={ICONS[view]} />}
-          />
-        ))}
-        {props.pluginViews.map((view) => (
-          <RailButton
-            key={view.viewId}
-            testId={`activity-${view.viewId}`}
-            label={view.title}
-            active={props.sidebarVisible && props.activeView === view.viewId}
-            onClick={() => props.onSelectView(view.viewId)}
-            icon={
-              <PluginIcon
-                workspaceId={props.workspaceId}
-                plugin={view.plugin}
-                icon={view.icon}
-                glyphSize={18}
-                className="grid size-[18px] place-items-center"
-              />
-            }
           />
         ))}
         {(props.pinnedApps ?? []).map((app) => {

@@ -1,7 +1,7 @@
 import type { SearchResult } from "@dohc/workspace-engine-client";
 import { SearchResultsEvent, type WorkspaceSearchPayload } from "../ipc/bridgeContract";
 import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "../ipc/channels";
-import type { OwnedWorkspaceSearchView } from "./ownedWorkspaceSdkReadPort";
+import type { OwnedWorkspaceSearchView } from "./ownedWorkspaceReadPort";
 import { usableShareMountRecord } from "./shareMounts";
 import { storedShareMounts } from "./shareViewFilesTarget";
 import {

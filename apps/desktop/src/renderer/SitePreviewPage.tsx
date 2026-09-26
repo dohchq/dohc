@@ -23,7 +23,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
-import { isLoopbackOrigin } from "./sdkFrame";
+import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppPublication } from "./OwnerAppPublication";
 import { ipcErrorMessage } from "./ipcError";

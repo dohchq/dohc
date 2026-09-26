@@ -43,7 +43,7 @@ type AutomationStep = Automation["do"][number];
 type IfStep = Extract<AutomationStep, { kind: "if" }>;
 type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number]["value"];
 
-/** The claim prefix this executor drains, beside the plugin executor's "plugin:". */
+/** The claim prefix this executor drains. */
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
 const MAX_FINDS = 5;
 export const MAX_FOUND_RECORDS = 50;

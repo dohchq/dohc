@@ -74,7 +74,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     budgetMs: number;
     beginEngineShutdown(): void;
     stopSearch(): Promise<void>;
-    stopPlugins(): Promise<void>;
+    stopSitePreviews(): Promise<void>;
     stopAgentSessions(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
@@ -100,7 +100,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // writes keep retrying until settlement or the overall shutdown budget.
     shutdown.beginEngineShutdown();
     const searchStop = shutdown.stopSearch().catch(() => undefined);
-    const pluginStop = shutdown.stopPlugins();
+    const sitePreviewStop = shutdown.stopSitePreviews();
     const agentSessionStop = shutdown.stopAgentSessions().catch(() => undefined);
     const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
     const cliServerStop = chatDispatchStop.then(() =>
@@ -120,7 +120,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       cliServerStop,
       searchStop,
       agentIntegrationStop,
-      pluginStop,
+      sitePreviewStop,
     ])
       .then(() => shutdown.closeWorkspaces())
       .catch(() => undefined);

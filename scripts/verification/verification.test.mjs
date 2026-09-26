@@ -448,12 +448,6 @@ test("verification selects packages and proofs and prepares the engine after Rus
             assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
             return {stdout:'compiled runtime'};
           }
-          if(command==='pnpm' && args[1]==='@dohc/sdk') {
-            assert.deepEqual(args,['--filter','@dohc/sdk','build']);
-            mkdirSync(join(repoRoot,'packages/sdk/dist'),{recursive:true});
-            writeFileSync(join(repoRoot,'packages/sdk/dist/built.txt'),'SDK');
-            return {stdout:''};
-          }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
@@ -484,8 +478,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
           }
           if(command==='pnpm' && args[0]==='run') {
             assert.ok(['typecheck','test:repo'].includes(args[1]));
-            assert.ok(existsSync(join(repoRoot,'packages/sdk/dist/built.txt')),'SDK must build before global typecheck and repository tests');
-            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
           if(command==='pnpm' && args.includes('list')) {
@@ -498,7 +491,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
             assert.deepEqual(args,['--filter',args[1],'run','test','--maxWorkers=4']);
             assert.ok(${JSON.stringify(selected)}.includes(args[1]),'Unselected package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});
-            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
@@ -604,7 +597,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
           ...(mode === "pr" ? ["install"] : []),
           "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
-          ...(js && !desktop ? ["sdk-build"] : []), ...(js ? ["typecheck", "tests"] : []),
+          ...(js ? ["typecheck", "tests"] : []),
           ...(nativeProof ? ["self-host-native"] : []), ...(browser ? ["browser-install"] : []),
           ...(accounts ? ["accounts"] : []), ...(desktop ? ["desktop"] : []),
         ]);
@@ -987,7 +980,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
+      "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       copyFileSync(join(repoRoot, file), join(root, file));

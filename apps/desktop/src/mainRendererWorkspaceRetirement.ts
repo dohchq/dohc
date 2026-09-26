@@ -9,17 +9,6 @@ interface SenderRetirementPorts<Sender extends RendererWorkspaceSender> {
   engineYDoc: {
     retireSender(sender: Sender, generation: number): Promise<unknown>;
   };
-  pluginSurfaces: {
-    stop(
-      target:
-        | { kind: "sender"; senderId: number }
-        | {
-            kind: "workspace";
-            workspaceId: string;
-            attachmentId: symbol;
-          },
-    ): Promise<void>;
-  };
   workspaceSearch: {
     disposeSender(senderId: number): Promise<void>;
   };
@@ -31,19 +20,9 @@ interface SenderRetirementPorts<Sender extends RendererWorkspaceSender> {
   };
 }
 
-interface WorkspaceRetirementPorts {
-  pluginRuntimes: {
-    stop(
-      workspace: { workspaceId: string; attachmentId: symbol },
-      beforeDispose: () => Promise<void>,
-    ): Promise<void>;
-  };
-}
-
 interface DesktopRendererWorkspaceRetirementDependencies<
   Sender extends RendererWorkspaceSender,
-> extends SenderRetirementPorts<Sender>,
-    WorkspaceRetirementPorts {
+> extends SenderRetirementPorts<Sender> {
   sitePreviews: {
     cancelSender(senderId: number): void;
     stopWorkspace(workspace: {
@@ -123,14 +102,6 @@ export function createDesktopRendererWorkspaceRetirement<
             run: () => dependencies.sitePreviews.cancelSender(session.senderId),
           },
           {
-            owner: "plugin surfaces",
-            run: () =>
-              dependencies.pluginSurfaces.stop({
-                kind: "sender",
-                senderId: session.senderId,
-              }),
-          },
-          {
             owner: "workspace search",
             run: () =>
               dependencies.workspaceSearch.disposeSender(session.senderId),
@@ -160,17 +131,6 @@ export function createDesktopRendererWorkspaceRetirement<
           {
             owner: "site previews",
             run: () => dependencies.sitePreviews.stopWorkspace(identity),
-          },
-          {
-            owner: "plugin runtime",
-            run: () =>
-              dependencies.pluginRuntimes.stop(identity, () =>
-                dependencies.pluginSurfaces.stop({
-                  kind: "workspace",
-                  workspaceId: identity.workspaceId,
-                  attachmentId: identity.attachmentId,
-                }),
-              ),
           },
         ],
         scope,

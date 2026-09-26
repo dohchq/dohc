@@ -101,8 +101,6 @@ import { lstat, mkdir, readdir } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
-  PluginPanelSdkEvent,
-  PluginStatusChangedEvent,
   SitePreviewReplacedEvent,
   McpConfigResult,
   DesktopUserSettingsResult,
@@ -123,7 +121,6 @@ import {
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
-import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
@@ -134,7 +131,6 @@ import { registerOperations, type OperationBoundary } from "./ipc/operationTable
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
-import { createDesktopPluginSurfaces } from "./plugins/desktopPluginSurfaces";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
@@ -370,20 +366,6 @@ import {
 } from "./workspaces/siteRunner";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
-import { createPluginPanelPreviewStarter } from "./plugins/pluginPanelLifecycle";
-import { createDesktopPluginRuntime, type DesktopPluginRuntimeDependencies } from "./plugins/desktopPluginRuntime";
-import {
-  type PluginPipelineStatusEvent,
-} from "./plugins/PluginPipeline";
-import {
-  createPluginPanelSurfaceHostLease,
-  createPluginWebAppHostLease,
-} from "./plugins/pluginHostStart";
-import { createDesktopPluginSdk } from "./plugins/desktopPluginSdk";
-import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
-import {
-  type PluginSurfaces,
-} from "./plugins/pluginSurfaces";
 
 import {
   readWorkspaceText,
@@ -506,16 +488,12 @@ const {
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
   withPhysicalWorkspaceOperation,
-  withEngineAdapter,
   isRecordValue,
   get desktopEngine(): DesktopWorkspaceReadsDependencies["desktopEngine"] {
     return desktopEngine;
   },
   get shareViewFiles(): DesktopWorkspaceReadsDependencies["shareViewFiles"] {
     return shareViewFiles;
-  },
-  get receivedShareEngine(): DesktopWorkspaceReadsDependencies["receivedShareEngine"] {
-    return receivedShareEngine;
   },
   get ensureOwnedProjectionTargetCurrent(): DesktopWorkspaceReadsDependencies["ensureOwnedProjectionTargetCurrent"] {
     return ensureOwnedProjectionTargetCurrent;
@@ -592,10 +570,8 @@ let autoUpdateController: AutoUpdateController | null = null;
 // direct script path (as the e2e harness does, and as a plain built binary
 // is), it resolves to the launched script's own directory (dist/main) rather
 // than the package root, with no upward package.json search — it silently
-// pointed pnpm resolution at dist/main/resources and broke every plugin
-// install (the e2e caught this). import.meta.dirname is the currently
-// executing module's own directory (dist/main at runtime, exactly like
-// the plugin runtime factory's sibling plugin-host.js resolution below), so two
+// pointed resource resolution at dist/main/resources. import.meta.dirname is
+// the currently executing module's own directory (dist/main at runtime), so two
 // levels up reaches apps/desktop deterministically regardless of how
 // Electron was launched. Every dev-mode resolver walks from here, so this
 // one call site is the only place that encodes that layout.
@@ -603,36 +579,10 @@ function desktopPackageRootInDev(): string {
   return join(import.meta.dirname, "..", "..");
 }
 
-function pluginResourcesBasePath(): string {
+function resourcesBasePath(): string {
   return app.isPackaged
     ? process.resourcesPath
     : join(desktopPackageRootInDev(), "resources");
-}
-
-function notifyPluginStatusChanged(
-  workspaceId: string,
-  event: PluginPipelineStatusEvent,
-): void {
-  // Emitted from a queueMicrotask with no catch above it, so a payload that
-  // fails the IPC schema is dropped and logged — it must never become an
-  // uncaught main-process exception.
-  const payload = PluginStatusChangedEvent.safeParse({ workspaceId, ...event });
-  if (!payload.success) {
-    console.error(
-      `[desktop] dropped a plugin status event for ${workspaceId} that ` +
-        `failed the IPC schema: ${payload.error.message}`,
-    );
-    return;
-  }
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (
-      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
-      workspaceId
-    ) {
-      continue;
-    }
-    win.webContents.send(CHANNELS.pluginStatusChanged, payload.data);
-  }
 }
 
 // An automation claim failed (settled by this desktop's executor, or
@@ -715,26 +665,6 @@ function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDir
 // Main's queue of direct pushes, once the IPC handlers are registered.
 let shareDirectWrites: { shareViewEdited(workspaceId: string): void } | null = null;
 
-function notifyPluginPanelSdkEvent(event: unknown): void {
-  const payload = PluginPanelSdkEvent.safeParse(event);
-  if (!payload.success) {
-    console.error(
-      "[desktop] dropped a plugin panel SDK event that failed the IPC " +
-        `schema: ${payload.error.message}`,
-    );
-    return;
-  }
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (
-      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
-      payload.data.workspaceId
-    ) {
-      continue;
-    }
-    win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data);
-  }
-}
-
 const {
   withWorkspaceAttachment,
   withWorkspaceAttachmentAsync,
@@ -747,9 +677,6 @@ const {
   get workspaceAuthorities(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["workspaceAuthorities"] {
     return workspaceAuthorities;
   },
-  get pluginWorkspaceRuntimes(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["pluginWorkspaceRuntimes"] {
-    return pluginWorkspaceRuntimes;
-  },
   get chatDispatchService(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["chatDispatchService"] {
     return chatDispatchService;
   },
@@ -757,24 +684,6 @@ const {
 });
 
 let linuxStableCliBinDir: string | undefined;
-
-const createPluginWorkspaceRuntimeParts = createDesktopPluginRuntime({
-  utilityProcess, stateDir, pluginResourcesBasePath,
-  requireWorkspaceAuthority, withWorkspaceAttachment, withEngineAdapter,
-  findWorkspace, ownedWorkspaceReadsFor,
-  sharedViewOf, notifyAutomationFailuresChanged,
-  pluginHostEntry: join(import.meta.dirname, "plugin-host.js"),
-  pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
-  get workspaceAuthorities(): DesktopPluginRuntimeDependencies["workspaceAuthorities"] {
-    return workspaceAuthorities;
-  },
-  get workspaceActivity(): DesktopPluginRuntimeDependencies["workspaceActivity"] {
-    return workspaceActivity;
-  },
-  get invokeWorkspacePluginSdk(): DesktopPluginRuntimeDependencies["invokeWorkspacePluginSdk"] {
-    return invokeWorkspacePluginSdk;
-  },
-});
 
 const executeAppPreview = createAppPreviewExecution({
   get shareViewFiles() { return shareViewFiles; },
@@ -805,7 +714,7 @@ function cloudLogin(): CloudLogin {
 // Live file-watch → history pipeline. Pushes a renderer notification whenever
 // a settled batch is recorded so the file tree, timeline, and sync status
 // refresh without polling. A scoped push reaches only windows whose active
-// workspace matches — the pluginStatusChanged rule — so a window on
+// workspace matches, so a window on
 // workspace B never refetches its world for workspace A's activity. Only a
 // genuinely cross-workspace event (logout, registry change, daemon
 // relaunch) broadcasts scope-free.
@@ -864,7 +773,6 @@ const desktopWindows = createDesktopWindows({
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
-  get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
@@ -878,7 +786,6 @@ const {
   targetWindow,
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
-  bindGuestZoom,
   broadcastUserSettings,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
@@ -886,15 +793,6 @@ const {
   prepareAfterRendererCrash,
   showOrCreateMainWindow,
 } = desktopWindows;
-const { createPluginWebAppContainer, createPluginSurfaces } =
-  createDesktopPluginSurfaces<WebContents, WebContentsView>({
-    BrowserWindow, WebContentsView, webContents, session, bindGuestZoom,
-    allowLoopbackFrameOrigin, withWorkspaceAttachment,
-    get rendererWorkspaceSessions(): RendererWorkspaceSessionOwner<WebContents> {
-      return rendererWorkspaceSessions;
-    },
-  });
-
 // Synchronous mirror of the credential store for status derivation (the
 // status handler path is hot). Refreshed at ready, login, and logout.
 type CloudSessionCredentials = NonNullable<
@@ -1287,7 +1185,7 @@ const shareRosters = createShareRosters({
 // the package's own worker file.
 const automationEvaluator = createAutomationFormulaEvaluator(() =>
   createAutomationEvaluator({
-    entryPath: join(pluginResourcesBasePath(), "app-backend-runtime", "automation-worker.mjs"),
+    entryPath: join(resourcesBasePath(), "app-backend-runtime", "automation-worker.mjs"),
   }),
 );
 
@@ -1299,7 +1197,7 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
 // A Collection automation that wrote a moment, as History shows it: its
 // name from the workspace's automations.yaml as this computer read it, or
 // its id when the file no longer has it, and the Collection it belongs to.
-// Any other automation, such as a plugin's, keeps the moment's origin label.
+// Any other automation keeps the moment's origin label.
 function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
   const parsed = parseCollectionAutomationId(automationId);
   if (parsed === null) return null;
@@ -1332,8 +1230,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
   workspaceGraph: WorkspaceGraphIndex;
-  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
-  pluginSurfaces: PluginSurfaces<WebContentsView>;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
@@ -1370,25 +1266,6 @@ type DesktopWorkspaceOperation = WorkspaceAuthorityOperation<
 function createDesktopWorkspaceAuthorityState(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ): DesktopWorkspaceAuthorityState {
-  const pluginRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
-    assertWritable: assertWritableWorkspace,
-    isOpen: () =>
-      rendererWorkspaceSessions.isAttachmentOpen(binding.attachmentId),
-    create: createPluginWorkspaceRuntimeParts,
-    onPipelineStatus: (workspaceId, event) => {
-      withWorkspaceAttachment(
-        { workspaceId, attachmentId: binding.attachmentId },
-        () => notifyPluginStatusChanged(workspaceId, event),
-      );
-    },
-    onCleanupError: (workspaceId, error) => {
-      console.warn(
-        `[desktop] failed to clean up plugins for workspace "${workspaceId}"`,
-        error,
-      );
-    },
-  });
-  const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   const datasetHost: DatasetHostSlot = { pending: null };
   const collectionAutomations = createCollectionAutomationsFor(binding, datasetHost);
   automationScheduler.add(binding.workspaceId, collectionAutomations, {
@@ -1402,8 +1279,6 @@ function createDesktopWorkspaceAuthorityState(
     datasetHost,
     relayedPresses: createRelayedPressHostFor(binding.workspaceId),
     workspaceGraph: new WorkspaceGraphIndex(),
-    pluginRuntimes,
-    pluginSurfaces,
     sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
       notifyReplaced: (senderId, replacement) => {
@@ -1494,12 +1369,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       Promise.resolve().then(() =>
         agentIntegration.disposeState(state.agentIntegration),
       ),
-      state.pluginRuntimes.stop(binding.workspaceId, () =>
-        state.pluginSurfaces.stop({
-          kind: "workspace",
-          workspaceId: binding.workspaceId,
-        }),
-      ),
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
       ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
@@ -1571,146 +1440,6 @@ function invalidateWorkspaceGraphIndexes(event: {
     invalidate(workspaceId);
   }
 }
-
-type DesktopPluginWorkspaceRuntimes = Omit<
-  Pick<
-  PluginWorkspaceRuntimes<CreatedWorkspace>,
-  "current" | "ensure" | "stop"
-  >,
-  "stop"
-> & {
-  stop(
-    workspace: string | { workspaceId: string; attachmentId: symbol },
-    beforeDispose: () => Promise<void>,
-  ): Promise<void>;
-};
-
-const pluginWorkspaceRuntimes: DesktopPluginWorkspaceRuntimes = {
-  current(workspaceId) {
-    return withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.pluginRuntimes.current(workspaceId),
-    );
-  },
-  ensure(workspace) {
-    return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
-      if (
-        operation.workspace.rootPath !== workspace.rootPath ||
-        ("attachmentId" in workspace &&
-          workspace.attachmentId !== operation.workspace.attachmentId)
-      ) {
-        throw new Error("Plugin runtime request belongs to a retired workspace.");
-      }
-      return operation.state.pluginRuntimes.ensure(operation.workspace);
-    });
-  },
-  stop(workspace, beforeDispose) {
-    if (typeof workspace === "string") {
-      return workspaceAuthorities.withAuthority(workspace, (lease) =>
-        lease.state.pluginRuntimes.stop(workspace, beforeDispose),
-      );
-    }
-    return withCurrentWorkspaceAttachmentOperation(workspace, (operation) =>
-      operation.state.pluginRuntimes.stop(workspace.workspaceId, beforeDispose),
-    ).then(() => undefined);
-  },
-};
-
-type WorkspacePluginSurfaceTarget =
-  | Parameters<PluginSurfaces<WebContentsView>["stop"]>[0]
-  | { kind: "workspace"; workspaceId: string; attachmentId: symbol };
-
-type WorkspacePluginSurfaces = Omit<
-  Pick<
-    PluginSurfaces<WebContentsView>,
-  | "applyWebAppBounds"
-  | "authorizePanelSdk"
-  | "startPanel"
-  | "startWebApp"
-  | "stop"
-  >,
-  "stop"
-> & {
-  stop(target: WorkspacePluginSurfaceTarget): Promise<void>;
-  applyWebAppZoom(level: number): void;
-  close(): Promise<void>;
-  withPluginSdkGrantSuspensions<Result extends { readonly ok: boolean }>(
-    workspaceId: string,
-    run: (
-      suspend: (identity: { workspaceId: string; pluginId: string }) => void,
-    ) => Promise<Result>,
-  ): Promise<Result>;
-};
-
-const pluginSurfaces: WorkspacePluginSurfaces = {
-  startPanel(request, admission) {
-    return workspaceAuthorities.withAuthority(request.workspaceId, (lease) =>
-      lease.state.pluginSurfaces.startPanel(request, admission),
-    );
-  },
-  startWebApp(request, admission) {
-    return workspaceAuthorities.withAuthority(request.workspaceId, (lease) =>
-      lease.state.pluginSurfaces.startWebApp(request, admission),
-    );
-  },
-  authorizePanelSdk(request) {
-    const lease = requireWorkspaceAuthority(request.workspaceId);
-    try {
-      return lease.state.pluginSurfaces.authorizePanelSdk(request);
-    } finally {
-      lease.release();
-    }
-  },
-  applyWebAppBounds(request) {
-    return (
-      withWorkspaceAttachment({ workspaceId: request.workspaceId }, (lease) =>
-        lease.state.pluginSurfaces.applyWebAppBounds(request),
-      ) ?? false
-    );
-  },
-  applyWebAppZoom(level) {
-    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
-      withWorkspaceAttachment({ workspaceId }, (lease) =>
-        lease.state.pluginSurfaces.applyWebAppZoom(level),
-      );
-    }
-  },
-  stop(target) {
-    if (target.kind === "workspace" && "attachmentId" in target) {
-      return withCurrentWorkspaceAttachmentOperation(target, (operation) =>
-        operation.state.pluginSurfaces.stop({
-          kind: "workspace",
-          workspaceId: target.workspaceId,
-        }),
-      ).then(() => undefined);
-    }
-    if (target.kind !== "sender") {
-      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
-        lease.state.pluginSurfaces.stop(target),
-      );
-    }
-    return Promise.all(
-      workspaceAuthorities.workspaceIds().map((workspaceId) =>
-        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-          lease.state.pluginSurfaces.stop(target),
-        ),
-      ),
-    ).then(() => undefined);
-  },
-  withPluginSdkGrantSuspensions(workspaceId, run) {
-    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.pluginSurfaces.withPluginSdkGrantSuspensions(run),
-    );
-  },
-  close() {
-    return Promise.all(
-      workspaceAuthorities.workspaceIds().map((workspaceId) =>
-        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-          lease.state.pluginSurfaces.close(),
-        ),
-      ),
-    ).then(() => undefined);
-  },
-};
 
 type SitePreviewLifecycle = Omit<
   ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
@@ -2144,8 +1873,6 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       requireEngineSessions(),
       testCaptureSeams(),
     ),
-  // One settled batch, two readers: the approval pipeline, and the plugins
-  // that subscribed to a prefix of it. Neither changes the batch.
   onWatcherBatch,
 });
 
@@ -2530,8 +2257,7 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
     const { createAgentSessionManager } = await import("./agents/AgentSessionManager");
     cachedAgentSessions = createAgentSessionManager({
-      pluginDriversFor: (workspaceId) =>
-        pluginWorkspaceRuntimes.current(workspaceId)?.agentDrivers.list() ?? [],
+      pluginDriversFor: () => [],
       agentDefaultsFor: workspaceAgentDefaults,
       integration: {
         ...agentIntegration,
@@ -3402,7 +3128,7 @@ async function startAgentRunWithWorkspaceActivity(
   return run;
 }
 
-async function requirePluginEngineCaptureForOperation(
+async function requireEngineCaptureForOperation(
   operation: DesktopWorkspaceOperation,
 ) {
   await openWorkspaceActivityForOperation(
@@ -3414,7 +3140,7 @@ async function requirePluginEngineCaptureForOperation(
   const workspace = operation.workspace;
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
-    throw new Error(captureRefusal("Plugins"));
+    throw new Error(captureRefusal("Collections"));
   }
   return { workspace, capture };
 }
@@ -3429,7 +3155,7 @@ async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
   editSignal?: AbortSignal,
 ): Promise<CollectionRecordEditContext> {
-  const { capture } = await requirePluginEngineCaptureForOperation(operation);
+  const { capture } = await requireEngineCaptureForOperation(operation);
   return collectionEditContextWith(operation, capture, editSignal ?? operation.signal);
 }
 
@@ -3935,33 +3661,16 @@ function resumeAutomationSessionWaits(): void {
   for (const workspaceId of workspaceAuthorities.workspaceIds()) collectionAutomationsOf(workspaceId)?.sessionChanged();
 }
 
-const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
-  createDesktopPluginSdk<DesktopWorkspaceOperation>({
-    withPhysicalWorkspaceOperation, ownedWorkspaceReadsFor, workerDatabaseReader,
-    editWorkspaceDatabaseInWorker, openWorkspaceActivityForOperation,
-    ensureWorkspaceActivityOpen, activity, collectionEditContextFor,
-    requirePluginEngineCaptureForOperation, assertWritableWorkspace,
-    workspaceAuthorities, pluginWorkspaceRuntimes, sharedViewOf,
-    notifyPluginPanelSdkEvent,
-  });
-
-const startPluginPanelPreview = createPluginPanelPreviewStarter(stateDir);
-
-async function stopAllPluginWorkspaces(): Promise<void> {
+async function stopAllSitePreviews(): Promise<void> {
   // Runs once, from the will-quit teardown — the first moment a quit can no
   // longer be cancelled. Idempotent. The caller awaits it inside
   // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
   // hard-kill path.
   await Promise.allSettled(
     workspaceAuthorities.workspaceIds().map((workspaceId) =>
-      workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
-        await Promise.allSettled([
-          lease.state.sitePreviews.stopAll(),
-          lease.state.pluginRuntimes.close(() =>
-            lease.state.pluginSurfaces.close(),
-          ),
-        ]);
-      }),
+      workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+        lease.state.sitePreviews.stopAll(),
+      ),
     ),
   );
 }
@@ -3998,7 +3707,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
         persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
         compile: async (source, path, signal) => {
-          installedDatasetCompiler ??= createInstalledDatasetCompiler(pluginResourcesBasePath());
+          installedDatasetCompiler ??= createInstalledDatasetCompiler(resourcesBasePath());
           return (await installedDatasetCompiler)(source, path, signal);
         },
         onAutomationClaims: () => collectionAutomationsOf(workspace.workspaceId)?.notifyClaimed(),
@@ -4191,7 +3900,7 @@ const desktopEngine = createDesktopEngine({
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
   recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
-  workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
+  workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
 });
@@ -4506,8 +4215,6 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
     retirement: createDesktopRendererWorkspaceRetirement<WebContents>({
       engineYDoc: engineYDocSessionIpc,
       sitePreviews,
-      pluginSurfaces,
-      pluginRuntimes: pluginWorkspaceRuntimes,
       workspaceSearch: workspaceSearchOwner,
       presencePolls: {
         disposeSender: (senderId) => {
@@ -4743,7 +4450,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       desktopChatBookmarks.stop();
     },
     stopSearch: () => workspaceSearchOwner.dispose(),
-    stopPlugins: stopAllPluginWorkspaces,
+    stopSitePreviews: stopAllSitePreviews,
     stopAgentSessions: () => cachedAgentSessions?.stopAll() ?? Promise.resolve(),
     settleYDocs: closeAllEngineYDocSessions,
     stopAgentIntegration: () => agentIntegration.stopAll(),
@@ -5146,7 +4853,7 @@ function registerIpcHandlers(): void {
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
-      installedAppCompiler ??= createInstalledAppCompiler(pluginResourcesBasePath());
+      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath());
       const compile = await installedAppCompiler;
       signal.throwIfAborted();
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
@@ -5418,7 +5125,7 @@ function registerIpcHandlers(): void {
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     get cachedAgentSessions() { return cachedAgentSessions; },
-    agentIntegration, mcpShareAccessOf, mcpConfigFor, sharedViewOf, pluginWorkspaceRuntimes,
+    agentIntegration, mcpShareAccessOf, mcpConfigFor,
     agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   });
@@ -5590,45 +5297,6 @@ function registerIpcHandlers(): void {
     executeAppPreview,
   });
 
-  registerPluginIpcHandlers<
-    WebContents,
-    IpcMainInvokeEvent,
-    CreatedWorkspace,
-    WebContentsView
-  >({
-    registrar: {
-      handle: handleIpc,
-    },
-    assertTrustedSender,
-    workspaces: {
-      assertWritable: assertWritableWorkspace,
-      withActive: (sender, workspaceId, inactiveMessage, work) =>
-        withRendererWorkspaceOperation(
-          sender,
-          workspaceId,
-          inactiveMessage,
-          (operation) =>
-            work({
-              workspace: operation.workspace,
-              session: {
-                workspaceId: operation.session.workspaceId,
-                generation: operation.session.generation,
-                isCurrent: operation.isCurrent,
-              },
-            }),
-        ),
-    },
-    runtimes: pluginWorkspaceRuntimes,
-    surfaces: pluginSurfaces,
-    platform: {
-      createPanelHostLease: createPluginPanelSurfaceHostLease,
-      createWebAppContainer: createPluginWebAppContainer,
-      createWebAppHostLease: createPluginWebAppHostLease,
-      routePanelSdk: routePluginPanelSdk,
-      startPanelPreview: startPluginPanelPreview,
-    },
-  });
-
   registerOpenWorkspaceIpcHandler<
     WebContents,
     IpcMainInvokeEvent,
@@ -5646,7 +5314,6 @@ function registerIpcHandlers(): void {
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: (operation) =>
       openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),
-    sharedViewOf,
   });
 
   // Named versions. Every handler resolves the workspace through

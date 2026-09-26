@@ -371,8 +371,7 @@ async function waitForProcessExit(
  * process that reused the pid. A child forked inside the grace window whose
  * own parent also exits and gets reparented to init before the force round's
  * table read escapes both rounds' walks entirely — the same documented
- * full-trust limit as JsonRpcTransport's setsid caveat, recovered only by the
- * wrapper plugin's own next-launch orphan sweep.
+ * full-trust limit as JsonRpcTransport's setsid caveat.
  */
 export async function stopProcessTreePosix(
   pid: number,

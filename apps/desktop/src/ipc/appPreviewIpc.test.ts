@@ -61,8 +61,6 @@ async function harness() {
   const retirementErrors = vi.fn();
   const sessions = new RendererWorkspaceSessionOwner<Sender>({ retirement: createDesktopRendererWorkspaceRetirement({
     engineYDoc: { retireSender: async () => undefined },
-    pluginSurfaces: { stop: async () => undefined },
-    pluginRuntimes: { stop: async (_workspace, beforeDispose) => beforeDispose() },
     workspaceSearch: { disposeSender: async () => undefined },
     presencePolls: { disposeSender: () => undefined },
     presenceMutations: { retireSender: async () => undefined },

@@ -1453,7 +1453,7 @@ describe("SitePreviewPage", () => {
     });
   });
 
-  it("keeps a plain static site shareable when it carries vendored SDK files", () => {
+  it("keeps a plain static site shareable when it carries vendored library files", () => {
     expect(
       shareTargetForSite({
         ...site,
@@ -1462,18 +1462,18 @@ describe("SitePreviewPage", () => {
           "report/index.html",
           "report/app.js",
           "report/package.json",
-          "report/vendor/dohc-sdk/dist/index.js",
+          "report/vendor/chart-lib/dist/index.js",
         ],
         shareManifest: readyShare("report/index.html", [
           "report/app.js",
-          "report/vendor/dohc-sdk/dist/index.js",
+          "report/vendor/chart-lib/dist/index.js",
         ]),
       }),
     ).toEqual({
       paths: [
         "report/index.html",
         "report/app.js",
-        "report/vendor/dohc-sdk/dist/index.js",
+        "report/vendor/chart-lib/dist/index.js",
       ],
       label: "Report",
     });
@@ -1489,15 +1489,15 @@ describe("SitePreviewPage", () => {
           "index.html",
           "app.js",
           "assets/logo.png",
-          "vendor/dohc-sdk/dist/index.js",
-          "vendor/dohc-sdk/dist/index.d.ts",
+          "vendor/chart-lib/dist/index.js",
+          "vendor/chart-lib/dist/index.d.ts",
           "notes/private.md",
           "projects/other/index.html",
         ],
         shareManifest: readyShare("index.html", [
           "app.js",
           "assets/logo.png",
-          "vendor/dohc-sdk/dist/index.js",
+          "vendor/chart-lib/dist/index.js",
         ]),
       }),
     ).toEqual({
@@ -1505,7 +1505,7 @@ describe("SitePreviewPage", () => {
         "index.html",
         "app.js",
         "assets/logo.png",
-        "vendor/dohc-sdk/dist/index.js",
+        "vendor/chart-lib/dist/index.js",
       ],
       label: "Report",
     });

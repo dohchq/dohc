@@ -227,8 +227,7 @@ export async function verify(args) {
         database = await measure("postgres-start", () => postgres(output, run, measure));
         report.postgres = { id: database.id }; save();
       }
-      if (!needs.desktop) await step("sdk-build", ...pnpm(["--filter", "@dohc/sdk", "build"]));
-      const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1" };
+      const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1" };
       desktopEnvironment = env;
       await step("typecheck", ...pnpm(["run", "typecheck"]), env);
       report.jsTests = join(output, "js-tests", "result.json");

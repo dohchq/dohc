@@ -65,7 +65,7 @@ describe("automation ids", () => {
     const id = collectionAutomationId("Plans #1/Tasks", "stamp");
     expect(id).toBe("collection:Plans #1/Tasks#stamp");
     expect(parseCollectionAutomationId(id)).toEqual({ collectionPath: "Plans #1/Tasks", id: "stamp" });
-    expect(parseCollectionAutomationId("plugin:tools/stamp")).toBeNull();
+    expect(parseCollectionAutomationId("other:tools/stamp")).toBeNull();
   });
 
   it("hashes what an automation does, not its name or switch", () => {

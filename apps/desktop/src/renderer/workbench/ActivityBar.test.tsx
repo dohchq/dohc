@@ -2,144 +2,27 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityBar } from "./ActivityBar";
-import type { PluginActivityView } from "./pluginActivityViews";
-import { appViewId, pluginViewId, VIEW_IDS } from "./workbenchState";
+import { appViewId, VIEW_IDS } from "./workbenchState";
 
 afterEach(cleanup);
 
 describe("ActivityBar views", () => {
-  it("offers Plugins as a rail item that selects the plugins view", () => {
+  it("offers each view as a rail item that selects it and marks it current", () => {
     const onSelectView = vi.fn();
     render(
       <ActivityBar
-        workspaceId="workspace-a"
         views={VIEW_IDS}
-        pluginViews={[]}
-        activeView="explorer"
+        activeView="history"
         sidebarVisible
         hasConflict={false}
         onSelectView={onSelectView}
       />,
     );
 
-    const plugins = screen.getByRole("button", { name: "Plugins" });
-    expect(plugins.getAttribute("aria-current")).toBeNull();
-    fireEvent.click(plugins);
-    expect(onSelectView).toHaveBeenCalledWith("plugins");
-  });
-
-  it("marks the Plugins rail item current while its panel shows", () => {
-    render(
-      <ActivityBar
-        workspaceId="workspace-a"
-        views={VIEW_IDS}
-        pluginViews={[]}
-        activeView="plugins"
-        sidebarVisible
-        hasConflict={false}
-        onSelectView={() => undefined}
-      />,
-    );
-
-    expect(
-      screen.getByTestId("activity-plugins").getAttribute("aria-current"),
-    ).toBe("page");
-  });
-});
-
-describe("ActivityBar plugin views", () => {
-  const sitesView: PluginActivityView = {
-    viewId: pluginViewId("dohc-sites", "sites"),
-    pluginId: "dohc-sites",
-    panelId: "sites",
-    title: "Sites list",
-    icon: "icons/sites.svg",
-    plugin: {
-      id: "dohc-sites",
-      directoryName: "dohc-sites",
-      rootPath: "/workspace/plugins/dohc-sites",
-      valid: true,
-      status: "ready",
-      disabledReason: null,
-      runtimeStatus: "ready",
-      sourceHash: null,
-      approvedHash: null,
-      installedBaselineHash: null,
-      displayName: "Sites",
-      description: null,
-      publisher: null,
-      icon: null,
-      pluginVersion: null,
-      repository: null,
-      issues: null,
-      license: null,
-      settings: [],
-      commands: [],
-      panels: [],
-      webApps: [],
-      hasFailedReplacement: false,
-      diagnostics: [],
-      warnings: [],
-      error: null,
-    },
-  };
-
-  it("gives a contributed view its own rail button that selects it", () => {
-    const onSelectView = vi.fn();
-    render(
-      <ActivityBar
-        workspaceId="workspace-a"
-        views={VIEW_IDS}
-        pluginViews={[sitesView]}
-        activeView="explorer"
-        sidebarVisible
-        hasConflict={false}
-        onSelectView={onSelectView}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Sites list" }));
-    expect(onSelectView).toHaveBeenCalledWith(sitesView.viewId);
-  });
-
-  it("marks a selected plugin view current and draws the panel's own icon", () => {
-    render(
-      <ActivityBar
-        workspaceId="workspace-a"
-        views={VIEW_IDS}
-        pluginViews={[sitesView]}
-        activeView={sitesView.viewId}
-        sidebarVisible
-        hasConflict={false}
-        onSelectView={() => undefined}
-      />,
-    );
-
-    expect(
-      screen.getByTestId(`activity-${sitesView.viewId}`).getAttribute("aria-current"),
-    ).toBe("page");
-    // The panel's icon, served like any other workspace file — a plugin's
-    // rail button reuses the icon pipeline the plugin list already uses.
-    expect(screen.getByTestId("plugin-icon").getAttribute("src")).toContain(
-      "icons/sites.svg",
-    );
-  });
-
-  it("keeps dohc's own views when a plugin contributes none", () => {
-    render(
-      <ActivityBar
-        workspaceId="workspace-a"
-        views={VIEW_IDS}
-        pluginViews={[]}
-        activeView="explorer"
-        sidebarVisible
-        hasConflict={false}
-        onSelectView={() => undefined}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: "Explorer" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Sites list" })).toBeNull();
+    const history = screen.getByRole("button", { name: "History" });
+    expect(history.getAttribute("aria-current")).toBe("page");
+    fireEvent.click(screen.getByRole("button", { name: "Explorer" }));
+    expect(onSelectView).toHaveBeenCalledWith("explorer");
   });
 });
 
@@ -147,9 +30,7 @@ describe("ActivityBar optional utility actions", () => {
   it("renders Cloud and Settings as inert icons when the host omits actions", () => {
     render(
       <ActivityBar
-        workspaceId="workspace-a"
         views={VIEW_IDS}
-        pluginViews={[]}
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
@@ -168,9 +49,7 @@ describe("ActivityBar optional utility actions", () => {
     const onOpenSettings = vi.fn();
     render(
       <ActivityBar
-        workspaceId="workspace-a"
         views={VIEW_IDS}
-        pluginViews={[]}
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
@@ -191,9 +70,7 @@ describe("ActivityBar order and pinned apps", () => {
   it("shows only the views it is given, in their order", () => {
     render(
       <ActivityBar
-        workspaceId="workspace-a"
         views={["sites", "explorer"]}
-        pluginViews={[]}
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
@@ -214,9 +91,7 @@ describe("ActivityBar order and pinned apps", () => {
     const onPinnedAppMenu = vi.fn();
     render(
       <ActivityBar
-        workspaceId="workspace-a"
         views={VIEW_IDS}
-        pluginViews={[]}
         pinnedApps={[{ root: "apps/trip", label: "Trip planner", missing: false }]}
         onPinnedAppMenu={onPinnedAppMenu}
         activeView={appViewId("apps/trip")}
