@@ -5049,7 +5049,14 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
             );
         }
         client
-            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
+            .commit_pull_cursor(
+                &mut engine,
+                "ws",
+                &cursor,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                1_000,
+            )
             .unwrap();
         if joining {
             assert!(
@@ -5137,7 +5144,14 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
         "uncommitted disk report survives restart"
     );
     client
-        .commit_pull_cursor(&mut engine, "ws", &stale_cursor, &NoFaults, 1_002)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &stale_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_002,
+        )
         .unwrap();
     let pending: i64 = engine
         .read_with(|conn| {
@@ -5151,7 +5165,14 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
         "a stale report cannot remove the newer report's work"
     );
     client
-        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_002)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_002,
+        )
         .unwrap();
     let pending: i64 = engine
         .read_with(|conn| {
@@ -5405,7 +5426,14 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
             panic!("completed pass");
         };
         client
-            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000 + pass)
+            .commit_pull_cursor(
+                &mut engine,
+                "ws",
+                &cursor,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                1_000 + pass,
+            )
             .unwrap();
         assert_eq!(
             read_replication_acked_seq(&engine, "ws", "a-held").unwrap(),
