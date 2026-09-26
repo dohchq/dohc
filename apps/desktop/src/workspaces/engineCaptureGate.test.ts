@@ -19,6 +19,7 @@ const unusedSessions = new Proxy({} as EngineWorkspaceSessions, {
 
 const hooks: WorkspaceCaptureHooks = {
   onCaptureOutcome: () => undefined,
+  onAtomicPlacementUnavailable: () => undefined,
 };
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 

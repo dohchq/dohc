@@ -1185,6 +1185,8 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
     assert_eq!(status.result["terminal"], json!(false));
     assert_eq!(status.result["degraded"], json!(false));
     assert_eq!(status.result["phase"], json!("ready"));
+    // An ordinary filesystem has an atomic no-replace rename.
+    assert_eq!(status.result["noAtomicPlacement"], json!(false));
 
     // And a flush on the quiescent workspace settles: the baseline content
     // is already captured and acknowledged.
