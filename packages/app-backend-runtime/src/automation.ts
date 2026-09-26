@@ -89,23 +89,25 @@ const typeName = (value: unknown) => {
  * A value JSON cannot hold, such as a bigint, a date, or an instance of an Array subclass, is a problem for the
  * caller to fix.
  */
-function measureScope(scope: AutomationScope): "fits" | "too_large" | "too_deep" | { problem: string } {
+function measureScope(scope: AutomationScope, comparisons: readonly JsonValue[] = []): "fits" | "too_large" | "too_deep" | { problem: string } {
   const limit = AUTOMATION_LIMITS.scopeBytes;
   let size = 0;
-  const pending: Array<[value: unknown, depth: number]> = [[scope, 1]];
+  // Comparisons stay in the host. Charge their values without adding wrapper depth to them or to the scope.
+  const pending: Array<[value: unknown, depth: number, maxDepth: number]> = [[scope, 1, SCOPE_DEPTH]];
+  for (const value of comparisons) pending.push([value, 1, AUTOMATION_LIMITS.resultDepth]);
   while (pending.length > 0) {
-    const [value, depth] = pending.pop()!;
+    const [value, depth, maxDepth] = pending.pop()!;
     if (typeof value === "string") size += jsonStringBytes(value, limit - size);
     else if (typeof value === "number") size += Number.isFinite(value) ? String(value).length : 4;
     else if (typeof value === "boolean") size += value ? 4 : 5;
     // JSON.stringify writes null, and `undefined` in a list, as null. It leaves out an undefined property.
     else if (value === null || value === undefined) size += 4;
     else if (Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype) {
-      if (depth > SCOPE_DEPTH) return "too_deep";
+      if (depth > maxDepth) return "too_deep";
       size += Math.max(2, value.length + 1);
-      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1]);
+      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1, maxDepth]);
     } else if (typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
-      if (depth > SCOPE_DEPTH) return "too_deep";
+      if (depth > maxDepth) return "too_deep";
       let keys = 0;
       for (const key in value) {
         const item = (value as Record<string, unknown>)[key];
@@ -114,7 +116,7 @@ function measureScope(scope: AutomationScope): "fits" | "too_large" | "too_deep"
         // The key, its colon, and the comma after its value.
         size += jsonStringBytes(key, limit - size) + 2;
         if (size > limit) break;
-        pending.push([item, depth + 1]);
+        pending.push([item, depth + 1, maxDepth]);
       }
       size += keys === 0 ? 2 : 1;
     } else return { problem: `${NOT_JSON} It holds a value of type ${typeName(value)}.` };
@@ -257,8 +259,10 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
-    const guards = items.flatMap(item => "when" in item ? item.when ?? [] : []);
-    const measured = measureScope(guards.length ? { ...scope, ...{ formulaGuards: guards } } : scope);
+    // Dependents share condition objects. Guard references are bounded at admission; charge each value only once.
+    const guards = new Set(items.flatMap(item => "when" in item ? item.when ?? [] : []));
+    const comparisons = [...guards].flatMap(guard => "equals" in guard ? [guard.equals] : []);
+    const measured = measureScope(scope, comparisons);
     if (typeof measured === "object") throw new Error(measured.problem);
     const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
       : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);

@@ -76,7 +76,10 @@ export type AutomationFormula = (
   | { kind: "expression"; source: string }
   | { kind: "text"; parts: AutomationTextPart[] }
 ) & {
-  /** All guards must match earlier successful results. Otherwise this formula returns null without running. */
+  /**
+   * All guards must match earlier successful results. Otherwise this formula returns null without running.
+   * Dependent formulas can share a guard object; its comparison value counts once toward the request's size.
+   */
   when?: Array<{ index: number } & ({ truthy: boolean } | { equals: JsonValue })>;
 };
 

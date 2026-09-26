@@ -61,6 +61,16 @@ async function values(sources: string[]) {
 }
 
 describe("formula helpers", () => {
+  it.each([64, 65])("validates comparison depth from its value root: %i", async depth => {
+    const comparison = nested(depth);
+    const results = await evaluator.evaluate(scope, [expression(JSON.stringify(comparison)), {
+      ...expression("42"), when: [{ index: 0, equals: comparison }],
+    }]);
+    expect(results).toEqual(depth === 64
+      ? [{ ok: true, value: comparison }, { ok: true, value: 42 }]
+      : [{ ok: false, error: tooDeep }, { ok: false, error: tooDeep }]);
+  });
+
   it("compares guarded values deeply without rerunning their formula", async () => {
     expect(await evaluator.evaluate(scope, [
       expression('({b: [2, 3], a: 1})'),

@@ -166,6 +166,25 @@ describe("trigger facts", () => {
 describe("plans", () => {
   const key = { claimId: "atc_one", hash: "0123456789abcdef" };
 
+  it("plans many formulas after matching a large formula-to value", async () => {
+    const definition = automation([
+      "id: large", "name: Large", "when: {field-changed: Status, to: '=record.Status'}",
+      `do: [{set: {${Array.from({ length: 12 }, (_, index) => `F${index}: '= ${index}'`).join(", ")}}}]`,
+    ].join("\n"));
+    const value = "x".repeat(24 * 1024);
+    const run = inputs(definition, {
+      record: { ...task, values: { Status: value } },
+      claim: claim({ fields: [{ field: "Status", historyId: 7, previous: null, next: { truncated: true, bytes: value.length } }] }),
+    });
+    const request = evaluationRequest(run, 0);
+    const evaluator = createAutomationEvaluator();
+    try {
+      const results = await evaluator.evaluate(request.scope, request.formulas);
+      expect(results).toEqual([value, ...Array.from({ length: 12 }, (_, index) => index)].map(value => ({ ok: true, value })));
+      expect(planRun(run, request, results, key).kind).toBe("plan");
+    } finally { await evaluator.close(); }
+  });
+
   it.each([
     'when: {starts-matching: record.Status == "Done"}',
     `when: {field-changed: Status, to: '= "Done"'}`,
