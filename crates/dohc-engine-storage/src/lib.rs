@@ -15,6 +15,10 @@
 //! - **The v1-vs-v2 fence.** A database stamped with any schema version other
 //!   than `2` is rejected with [`StorageError::UnsupportedFingerprint`] — never
 //!   auto-migrated, never written over.
+//! - **The newer-build fence.** A store whose ledger holds a migration this
+//!   build does not define is rejected with
+//!   [`StorageError::MigratedByNewerBuild`], whatever `user_version` it
+//!   carries, also before any write.
 //! - **One transactional seam** ([`EngineStore::write_with`]) runs a domain
 //!   mutation in one transaction, consulting the named storage fault points
 //!   [`faults::FaultPoint::StorageBeforePersist`] and

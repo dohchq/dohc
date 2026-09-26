@@ -1,4 +1,5 @@
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
+import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
 import { CompilerProcessError, runOwnedCompilerProcess, type CompilerProcessBounds, type CompilerProcessRuntime } from "./compilerProcessSupervisor.ts";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -50,15 +51,15 @@ export async function compileClosedAppInProcess(
   const version = compilerRequire("esbuild/package.json").version;
   if (version !== "0.28.1") throw new Error("Unsupported app compiler installation.");
   const binary = compilerRequire.resolve(`@esbuild/${process.platform}-${process.arch}/${process.platform === "win32" ? "esbuild.exe" : "bin/esbuild"}`);
-  const compiler = { recipe: "dohc-closed-app-v2" as const, version, binarySha256: sha256(await readFile(binary)) };
+  const compiler = { recipe: "dohc-closed-app-v3" as const, version, binarySha256: sha256(await readFile(binary)) };
   const result = await runOwnedCompilerProcess(capturedRuntime, { input, bounds: processBounds, signal });
   const wire = JSON.parse(Buffer.from(result.stdout).toString("utf8"));
-  if (!wire || !Array.isArray(wire.files) || wire.files.length < 1 || wire.files.length > 2 || !Array.isArray(wire.dependencyLock) || wire.dependencyLock.length > inventory.length) throw new Error("Invalid compiler response.");
+  if (!wire || !Array.isArray(wire.files) || wire.files.length < 1 || wire.files.length > 3 || !Array.isArray(wire.dependencyLock) || wire.dependencyLock.length > inventory.length) throw new Error("Invalid compiler response.");
   const seen = new Set<string>();let outputBytes = 0;
   const files: ClosedAppBuild["files"] = wire.files.map((file: Record<string, unknown>) => {
-    if (file?.path !== "bundle.js" && file?.path !== "bundle.css") throw new Error("Invalid compiler output path.");
+    if (typeof file?.path !== "string" || !Object.hasOwn(APP_BUNDLE_CONTENT_TYPES, file.path)) throw new Error("Invalid compiler output path.");
     if (seen.has(file.path)) throw new Error("Duplicate compiler output.");seen.add(file.path);
-    const contentType = file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8";
+    const contentType = APP_BUNDLE_CONTENT_TYPES[file.path]!;
     if (file.contentType !== contentType) throw new Error("Invalid compiler output type.");
     if (typeof file.bytes !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.bytes)) throw new Error("Invalid compiler file bytes.");
     const bytes = Buffer.from(file.bytes, "base64");

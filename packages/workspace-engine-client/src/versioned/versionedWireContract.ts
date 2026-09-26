@@ -87,6 +87,7 @@ type VersionedTextWriteParams = MutationMetadata & {
   objectId?: string;
   path: string;
   text: string;
+  createOnly?: boolean;
   restoreBeforeMomentId?: string;
   momentId?: string;
 };
@@ -607,7 +608,7 @@ const BinaryWriteSnapshotWireSchema = mutableStruct({
 const AgentAuthorSchema = mutableStruct({
   kind: Schema.Literal("agent"),
   agentId: Schema.String,
-  onBehalfOf: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
   agentRunId: Schema.optionalKey(Schema.String),
 });
 const PublicAuthorSchema = mutableStruct({
@@ -624,7 +625,7 @@ const NamedAuthorSchema = mutableStruct({
 const AutomationAuthorSchema = mutableStruct({
   kind: Schema.Literal("automation"),
   automationId: Schema.String,
-  onBehalfOf: Schema.String,
+  onBehalfOf: Schema.optionalKey(Schema.String),
   depth: Schema.Int,
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });

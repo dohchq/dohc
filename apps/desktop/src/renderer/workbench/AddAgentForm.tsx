@@ -31,7 +31,7 @@ export function AddAgentForm(props: {
   // Saves the changed settings with the settings they came from, the way the
   // settings dialog does.
   onSave: (settings: DesktopUserSettings, base: DesktopUserSettings) => Promise<void>;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -83,7 +83,7 @@ export function AddAgentForm(props: {
       }, settings);
       return requests.isCurrent(token);
     } catch (cause) {
-      if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."));
+      if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
       return false;
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
@@ -101,7 +101,7 @@ export function AddAgentForm(props: {
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
-      props.onError(ipcErrorMessage(cause, "The check could not start."));
+      props.onError(ipcErrorMessage(cause, "The check could not start."), cause);
       setCheck({
         status: "failed",
         detail: ipcErrorMessage(cause, "The check could not start."),

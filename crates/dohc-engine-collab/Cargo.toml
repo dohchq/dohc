@@ -23,11 +23,6 @@ description = "Durable Y.Doc layer for the workspace engine: update log, snapsho
 # Production builds must not enable this feature.
 # Poison tests require debug assertions.
 test-support = []
-# Passthrough of the storage crate's crash-injection seam so the durable
-# append / settle-commit crash-recovery tests can arm the shared storage fault
-# points under `-p dohc-engine-collab --features fault-injection`. Under
-# `cargo test --workspace` the testkit enables it via feature unification.
-fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 # The durable store (single writer, migration ledger with the R11a ydoc tables,

@@ -31,9 +31,8 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build --workspace=PASS test --workspace=PASS doctests=PASS " +
-  "test collab crash tier=PASS " +
-  "cargo-deny=PASS cargo-audit=PASS";
+  "test --workspace=PASS doctests=PASS build daemon=PASS " +
+  "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => check(passVerdict));
@@ -73,15 +72,6 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       check(passVerdict.replace("native target=PASS ", "")),
     /native target/,
   );
-  // The crash tier is compiled out of the plain workspace test run, so an
-  // evidence line missing this row means the exactly-once tests never ran.
-  assert.throws(
-    () =>
-      check(
-        passVerdict.replace(" test collab crash tier=PASS", ""),
-      ),
-    /test collab crash tier/,
-  );
   // The advisory scan is the one that had been silently skipping: CI never
   // installed cargo-audit, so the gate probed, reported SKIP, and the verdict
   // check did not mind. Both halves are now required -- the tool is installed
@@ -93,6 +83,15 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-audit/,
   );
+});
+
+test("a PASS verdict requires scratch cleanup to have passed", () => {
+  for (const replacement of ["", " scratch leak=SKIP", " scratch leak=FAIL"]) {
+    assert.throws(
+      () => check(passVerdict.replace(" scratch leak=PASS", replacement)),
+      /scratch leak/,
+    );
+  }
 });
 
 test("a required step is matched by its whole name, not as a substring", () => {
@@ -217,7 +216,7 @@ test("the gate name is required in its own field, not anywhere in the line", () 
   const impostor =
     "- 2026-07-27T00:00:00.000Z | not-the-gate | run-rust-checks | PASS | " +
     "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-    "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+    "test --workspace=PASS doctests=PASS build daemon=PASS " +
     "cargo-deny=PASS cargo-audit=PASS";
   assert.throws(
     () => check(impostor),
@@ -349,23 +348,17 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 // contract. `scripts/rust-gate-artifact.test.mjs` now runs the real producer
 // and feeds its evidence line to this checker, which cannot rot.
 
-test("PR workflow validates the canonical verdict and installed cargo-deny version", () => {
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/run-rust-checks\.mjs 2>&1 \| tee pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/require-ci-pass-verdict\.mjs pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_DENY_VERSION[\s\S]*"cargo-deny \$CARGO_DENY_VERSION"/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"\$CARGO_AUDIT_VERSION"/,
-  );
+test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
+  const document = load(workflow);
+  for (const [job, invocation] of [
+    ["javascript", "xvfb-run -a pnpm verify:pr --base HEAD --job js"],
+    ["rust", "pnpm verify:pr --base HEAD --job rust"],
+  ]) {
+    assert.equal(document.jobs[job].steps.filter(step => step.run?.trim() === invocation).length, 1);
+  }
+  const install = document.jobs.rust.steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
+  assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
+    `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
 });
 
 test("both gate filters select on ignore rules and vendored engine dependencies", () => {
@@ -459,12 +452,12 @@ test("a tree that changed and changed back is caught by the reading between", ()
   const restored = classifyTreeProvenance([
     { step: "start", state: A },
     { step: "native target", state: A },
-    { step: "build --workspace", state: B },
+    { step: "build daemon", state: B },
     { step: "test --workspace", state: A },
   ]);
   assert.equal(restored.status, "FAIL");
   // The step is named, because that is what a reader has to re-run.
-  assert.match(restored.reason, /HEAD moved during `build --workspace`/);
+  assert.match(restored.reason, /HEAD moved during `build daemon`/);
   assert.equal(restored.stamp, "UNATTRIBUTABLE");
 
   // The same for an edit that is reverted: A, dirty, A.
@@ -819,7 +812,7 @@ test("a HEAD that moved and came back inside one step is refused", () => {
   // commit cannot show.
   const returned = classifyTreeProvenance([
     { step: "start", state: A },
-    { step: "build --workspace", state: A },
+    { step: "build daemon", state: A },
     { step: "test --workspace", state: logged(2) },
   ]);
   assert.equal(returned.status, "FAIL");

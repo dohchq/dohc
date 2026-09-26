@@ -969,6 +969,7 @@ impl CaptureDriver {
             let mut env = RealEnv {
                 root,
                 actor,
+                lease_releases_seen: leases.release_generation(&workspace_id),
                 workspace_id,
                 leases,
                 status: Arc::clone(&drive_status),
@@ -1488,9 +1489,12 @@ const MAX_FLUSH_CYCLES: u32 = 32;
 /// What one `capture.flush` could actually promise.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FlushOutcome {
-    /// The reconcile loop reached converged: every change visible on disk at
-    /// entry has been captured and acknowledged. False means the cycle bound
-    /// was hit, the layer is down, or teardown raced the flush.
+    /// Capture is quiet: the reconcile loop reached converged, and every change
+    /// visible on disk at entry has been captured, acknowledged, or deferred
+    /// to a live document session. It does not mean every edit is on disk: a
+    /// live Y.Doc's edits can still be on their way, and the session's settle
+    /// or close writes them. False means the cycle bound was hit, the layer is
+    /// down, or teardown raced the flush.
     pub(crate) settled: bool,
     /// The files layer was up when the flush was answered.
     pub(crate) running: bool,
@@ -1834,6 +1838,9 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     leases: LeaseRegistry,
+    /// The lease release count at the last check. A capture deferred to a
+    /// live session is offered again once this moves.
+    lease_releases_seen: u64,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
@@ -2100,8 +2107,15 @@ impl DriverEnv for RealEnv {
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
-        let run =
-            reconcile_if_dirty_bound(&self.root, &layer.files.handle(), cancel.child_token()).await;
+        let files = layer.files.handle();
+        offer_deferred_after_release(
+            &self.leases,
+            &self.workspace_id,
+            &mut self.lease_releases_seen,
+            &files,
+        )
+        .await;
+        let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
             Ok(RootBoundRun {
@@ -2254,14 +2268,20 @@ pub(crate) async fn reconcile_full_for_switch(
                 events,
                 apply_probe: None,
             };
-            if apply_bound_run_with_handle(
+            let applied = apply_bound_run_with_handle(
                 context,
                 &handle,
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await
-            {
+            .await;
+            // A new file an editor still holds is not recorded yet, so the
+            // switch would leave it behind.
+            let deferred = match handle.stats().await {
+                Ok(stats) => stats.deferred > 0,
+                Err(_) => true,
+            };
+            if applied && !deferred {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2863,6 +2883,28 @@ async fn materialize_ydoc_recoveries(
         .collect())
 }
 
+/// A path deferred to a live document session is not in the manifest yet, so
+/// the next full scan offers it again. That scan must happen once the session
+/// lets go, even when nothing on disk changes: a new file closed without an
+/// edit is otherwise never captured. Asks for it when a lease on this
+/// workspace was released since the last check and the last run deferred
+/// something.
+async fn offer_deferred_after_release(
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    releases_seen: &mut u64,
+    files: &FilesHandle,
+) {
+    let releases = leases.release_generation(workspace_id);
+    if releases == *releases_seen {
+        return;
+    }
+    *releases_seen = releases;
+    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0) {
+        files.request_rescan();
+    }
+}
+
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op
 /// marked failed, clearing the controller's `outstanding` latch while keeping
 /// the paths dirty for the next cycle's retry.
@@ -2873,6 +2915,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         captured: Vec::new(),
         not_owned_paths: Vec::new(),
         failed_applies: failed,
+        deferred_paths: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,
     };
@@ -2886,6 +2929,9 @@ mod root_bound_run_tests;
 
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests;
+
+#[cfg(test)]
+mod live_session_deferral_tests;
 
 #[cfg(test)]
 mod selected_recovery_replay_tests;
