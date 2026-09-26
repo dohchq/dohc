@@ -937,6 +937,7 @@ fn materialize_secret_one_with_remover(
     let current = read_current_no_follow(&target)?;
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == desired_sha
+        && target_has_requested_name(&target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1118,6 +1119,7 @@ fn materialize_secret_write(
     }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
+        && target_has_requested_name(target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1250,6 +1252,7 @@ fn materialize_ordinary_write(
     // Step 1 (idempotent replay): the target already equals the desired content.
     if let CurrentTarget::Present(bytes) = read_current_no_follow(target)?
         && hex_sha256(&bytes) == job.content_sha256
+        && target_has_requested_name(target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -2321,6 +2324,20 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     }
     // `remove_dir` refuses a directory that is not empty.
     Ok(std::fs::remove_dir(&target).is_ok())
+}
+
+/// Content equality does not complete a Windows case-only file rename.
+/// Call after validating the target and its ancestors against links.
+pub fn target_has_requested_name(target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::fs::canonicalize(target).is_ok_and(|actual| actual.file_name() == target.file_name())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        true
+    }
 }
 
 /// Resolve every displacement a crash left unresolved under `root`,

@@ -22,6 +22,7 @@ use crate::{
     ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
     ShareDisposition, SyncError, blob_ceiling,
 };
+pub use direct_write::collision_key as path_component_collision_key;
 pub use direct_write::{
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, ShareCollectionWriteRequest,
     ShareCollectionWriteResponse,

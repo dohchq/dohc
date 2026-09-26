@@ -253,3 +253,99 @@ async fn one_page_turns_a_directory_into_a_file() {
         "file d"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_replacement_retries_after_the_delete_batch() {
+    let scratch = materialize_page(
+        |domain| {
+            domain
+                .write_text(&write_at("d/a.md", "o-a", "a", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .delete_text_file(&delete_at("d/a.md", "m2", 2), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d", "o-d", "file d", "m3", 3), &NoFaults)
+                .unwrap();
+        },
+        |root| {
+            std::fs::create_dir(root.join("d")).unwrap();
+            std::fs::write(root.join("d/a.md"), "a").unwrap();
+        },
+        // Stop at the crash boundary: the delete batch has committed, but
+        // the next batch has not removed the directory or written its file.
+        vec![change("d/a.md", "delete")],
+    )
+    .await;
+    assert!(scratch.path().join("d").is_dir());
+    assert!(!scratch.path().join("d/a.md").exists());
+
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 12).unwrap().actor;
+    actor
+        .materialize_relay_page(
+            "workspace".into(),
+            scratch.path().to_path_buf(),
+            vec![change("d", "write"), change("d/a.md", "delete")],
+            Arc::new(()),
+            13,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retry finishes the directory replacement");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("d")).unwrap(),
+        "file d"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_replacement_keeps_the_file_and_changes_its_spelling() {
+    check_case_replacement("file.md", "FILE.md").await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collision_key_match_does_not_skip_deleting_a_distinct_windows_file() {
+    check_case_replacement("\u{1e9e}.md", "ss.md").await;
+}
+
+#[cfg(windows)]
+async fn check_case_replacement(old_path: &str, new_path: &str) {
+    for new_text in ["old", "new"] {
+        for delete_first in [false, true] {
+            let mut page = vec![change(new_path, "write"), change(old_path, "delete")];
+            if delete_first {
+                page.reverse();
+            }
+            let scratch = materialize_page(
+                |domain| {
+                    domain
+                        .write_text(&write_at(old_path, "o-a", "old", "m1", 1), &NoFaults)
+                        .unwrap();
+                    domain
+                        .delete_text_file(&delete_at(old_path, "m2", 2), &NoFaults)
+                        .unwrap();
+                    domain
+                        .write_text(&write_at(new_path, "o-b", new_text, "m3", 3), &NoFaults)
+                        .unwrap();
+                },
+                |root| std::fs::write(root.join(old_path), "old").unwrap(),
+                page,
+            )
+            .await;
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join(new_path)).unwrap(),
+                new_text
+            );
+            let names: Vec<_> = std::fs::read_dir(scratch.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert!(names.iter().any(|name| name == new_path));
+            assert!(!names.iter().any(|name| name == old_path));
+        }
+    }
+}

@@ -14,14 +14,14 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
-    remove_empty_directory_target,
+    remove_empty_directory_target, target_has_requested_name,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -359,6 +359,32 @@ fn is_inside(path: &str, ancestor: &str) -> bool {
     path.len() > ancestor.len()
         && path.starts_with(ancestor)
         && path.as_bytes()[ancestor.len()] == b'/'
+}
+
+fn relay_case_replacement_paths(
+    changes: &[dohc_engine_sync::MomentMaterializationChange],
+    case_insensitive: bool,
+) -> HashMap<String, String> {
+    use dohc_engine_sync::path_component_collision_key;
+    changes
+        .iter()
+        .filter(|change| case_insensitive && change.operation == "delete")
+        .filter_map(|change| {
+            changes
+                .iter()
+                .find(|other| {
+                    other.operation == "write"
+                        && other.version_id == change.version_id
+                        && other.path != change.path
+                        && other
+                            .path
+                            .split('/')
+                            .map(path_component_collision_key)
+                            .eq(change.path.split('/').map(path_component_collision_key))
+                })
+                .map(|other| (change.path.clone(), other.path.clone()))
+        })
+        .collect()
 }
 
 /// Enqueue one batch of a sync page in one transaction and materialize it in
@@ -949,6 +975,8 @@ impl ActorHandle {
             // effects of the batches before it. Each batch shares one synced
             // displacement commit.
             let mut changes = changes;
+            changes.retain(|change| change.version_id == active);
+            let case_replacements = relay_case_replacement_paths(&changes, cfg!(windows));
             let inside_another = |path: &str, all: &[dohc_engine_sync::MomentMaterializationChange]| {
                 all.iter().any(|other| is_inside(path, &other.path))
             };
@@ -974,8 +1002,6 @@ impl ActorHandle {
                 if deleted.iter().any(|path| is_inside(path, &change.path)) {
                     remove_empty_directory_target(&root_dir, &change.path)?;
                 }
-                // A retry from a former active version cannot repaint the current version.
-                if change.version_id != active { continue; }
                 let secret = change.content_kind == "secret";
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
                     return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
@@ -1004,9 +1030,19 @@ impl ActorHandle {
                             (head.blob_sha256, Some(head.text.into_bytes()), equal) })
                 } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
                 let (operation, sha, inline) = match (change.operation, desired) {
-                    ("write" | "delete", Some((_, _, true))) => continue,
-                    ("write" | "delete", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
-                    ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => continue,
+                    ("write" | "delete", Some((_, _, true))) if target_has_requested_name(&root_dir.join(&change.path)) => continue,
+                    ("write" | "delete", Some((sha, inline, _))) => (MaterializationOperation::Write, sha, inline),
+                    ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => {
+                        deleted.push(change.path);
+                        continue;
+                    }
+                    ("delete", None) if case_replacements.get(&change.path).is_some_and(|destination| {
+                        // Collision keys also group names that Windows can store separately.
+                        matches!(
+                            (std::fs::canonicalize(root_dir.join(&change.path)), std::fs::canonicalize(root_dir.join(destination))),
+                            (Ok(source), Ok(target)) if source == target
+                        )
+                    }) => continue,
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
@@ -1018,5 +1054,41 @@ impl ActorHandle {
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relay_case_replacement_paths;
+    use dohc_engine_sync::MomentMaterializationChange;
+
+    #[test]
+    fn case_replacement_planning_uses_collision_keys_and_keeps_other_deletes() {
+        let change = |version: &str, path: &str, operation| MomentMaterializationChange {
+            version_id: version.into(),
+            path: path.into(),
+            operation,
+            content_kind: "text",
+        };
+        let changes = vec![
+            change("main", "dir/File.md", "delete"),
+            change("main", "dir/FILE.md", "write"),
+            change("main", "\u{1e9e}.md", "delete"),
+            change("main", "ss.md", "write"),
+            change("main", "same.md", "delete"),
+            change("main", "same.md", "write"),
+            change("main", "other.md", "delete"),
+            change("main", "version.md", "delete"),
+            change("inactive", "VERSION.md", "write"),
+        ];
+        assert_eq!(
+            relay_case_replacement_paths(&changes, true),
+            [
+                ("dir/File.md".into(), "dir/FILE.md".into()),
+                ("\u{1e9e}.md".into(), "ss.md".into()),
+            ]
+            .into()
+        );
+        assert!(relay_case_replacement_paths(&changes, false).is_empty());
     }
 }
