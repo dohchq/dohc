@@ -29,8 +29,11 @@
 //! - An `open` row in `materialization_displacements` names the job's
 //!   `.dohc-write-*.displaced` sibling before anything moves. That one commit
 //!   syncs the WAL, so no rename into a displaced name outlives its row, even
-//!   after an operating-system crash. Later commits keep the engine's
-//!   `synchronous = NORMAL`; recovery handles losing them.
+//!   after an operating-system crash. A batch of jobs (a replay, a sync page)
+//!   writes all its rows `prepared` in one such commit before its first
+//!   rename, one fsync for the batch, and discards the ones it did not use.
+//!   Later commits keep the engine's `synchronous = NORMAL`; recovery handles
+//!   losing them.
 //! - One rename moves whatever is at the target name to that sibling. A file
 //!   another program renamed over the target after the check moves with it, and
 //!   bytes written in place move with the file they were written to.
@@ -796,18 +799,29 @@ pub fn run_pending_jobs(
 ) -> Result<Vec<JobResult>, MaterializeError> {
     recover_displacements(store, root, None, options)?;
     let jobs = store.list_pending_materialization_jobs()?;
+    if jobs.len() > 1 {
+        prepare_displacements(store, root, &jobs, options.now_ms)?;
+    }
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
-        let outcome = materialize_one(store, root, &job, options)?;
+        let outcome = match materialize_one(store, root, &job, options) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                finish_prepared_displacements(store, root)?;
+                return Err(err);
+            }
+        };
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
             job_id: job.job_id,
             outcome,
         });
         if crashed {
-            break;
+            // A crashed process cleans nothing up; replay does.
+            return Ok(results);
         }
     }
+    finish_prepared_displacements(store, root)?;
     Ok(results)
 }
 
@@ -1521,7 +1535,40 @@ fn displace_target(
     content: Option<&str>,
     options: &MaterializeOptions<'_>,
 ) -> Result<Displace, MaterializeError> {
-    let displaced_name = unused_displaced_name(target, &job.job_id)?;
+    // A batch synced a row for this job before any of its renames. Use it
+    // when it expects these bytes and names a free file; otherwise sync one
+    // now.
+    let prepared = match store.prepared_displacement(&job.job_id)? {
+        Some(row)
+            if row.target_path == job.target_path
+                && row.expected_sha256 == expected
+                && row.content_sha256.as_deref() == content
+                && !entry_exists(&sibling_with_name(target, &row.displaced_name))? =>
+        {
+            Some(row)
+        }
+        Some(stale) => {
+            store.discard_displacements(&[stale.displacement_id])?;
+            None
+        }
+        None => None,
+    };
+    let (displacement_id, displaced_name) = match prepared {
+        Some(row) => (row.displacement_id, row.displaced_name),
+        None => {
+            let displaced_name = unused_displaced_name(target, &job.job_id)?;
+            let id = store.open_displacement(&DisplacementSpec {
+                job_id: job.job_id.clone(),
+                workspace_id: job.workspace_id.clone(),
+                target_path: job.target_path.clone(),
+                displaced_name: displaced_name.clone(),
+                expected_sha256: expected.to_owned(),
+                content_sha256: content.map(str::to_owned),
+                now_ms: options.now_ms,
+            })?;
+            (id, displaced_name)
+        }
+    };
     let spec = DisplacementSpec {
         job_id: job.job_id.clone(),
         workspace_id: job.workspace_id.clone(),
@@ -1531,7 +1578,6 @@ fn displace_target(
         content_sha256: content.map(str::to_owned),
         now_ms: options.now_ms,
     };
-    let displacement_id = store.open_displacement(&spec)?;
     let moved = Moved {
         displacement_id,
         path: sibling_with_name(target, &spec.displaced_name),
@@ -1979,8 +2025,10 @@ fn settle_in_place(
 }
 
 /// Delete a displaced file whose bytes the store holds, then end its row and
-/// give `job` its status in one transaction. The row is marked placed first,
-/// so a failed delete never leaves an open row that replay would move back.
+/// give `job` its status in one transaction. A write's row is marked placed
+/// first, so a failed delete never leaves an open row that replay would move
+/// back. A delete's row has nothing to move back, so it is marked only when
+/// the file stays, and a delete ends in one commit.
 fn delete_displaced(
     store: &EngineStore,
     moved: &Moved,
@@ -1988,7 +2036,8 @@ fn delete_displaced(
     job: Option<(&str, JobStatus)>,
     now_ms: i64,
 ) -> Result<(), MaterializeError> {
-    if !placed {
+    let is_delete = moved.content_sha256.is_none();
+    if !placed && !is_delete {
         store.mark_displacement_placed(moved.displacement_id)?;
     }
     match std::fs::remove_file(&moved.path) {
@@ -1996,6 +2045,9 @@ fn delete_displaced(
         Err(err) if err.kind() == ErrorKind::NotFound => {}
         // The placed row stays for the next replay to delete the file.
         Err(_) => {
+            if !placed && is_delete {
+                store.mark_displacement_placed(moved.displacement_id)?;
+            }
             if let Some((job_id, status)) = job {
                 match status {
                     JobStatus::Conflict => store.mark_materialization_conflict(job_id, now_ms)?,
@@ -2164,6 +2216,76 @@ fn is_displaced_name(name: &str) -> bool {
         && !name.contains(['/', '\\', ':'])
 }
 
+/// Write one synced displacement row for every job in `jobs` that can move
+/// its target aside (an ordinary overwrite or delete of a file it expects),
+/// so the batch pays one fsync instead of one per job. Run it after
+/// [`recover_displacements`] and before the jobs, and
+/// [`finish_prepared_displacements`] after them.
+pub fn prepare_displacements(
+    store: &EngineStore,
+    root: &Path,
+    jobs: &[MaterializationJob],
+    now_ms: i64,
+) -> Result<(), MaterializeError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let mut specs = Vec::new();
+    for job in jobs {
+        let Preimage::Present(expected) = &job.preimage else {
+            continue;
+        };
+        if job.job_id.starts_with("secret-mat_")
+            || job.job_id.starts_with("version-switch-secret-mat_")
+        {
+            continue;
+        }
+        let Ok(target) = resolve_target(&canonical_root, &job.target_path) else {
+            continue;
+        };
+        let Ok(displaced_name) = unused_displaced_name(&target, &job.job_id) else {
+            continue;
+        };
+        specs.push(DisplacementSpec {
+            job_id: job.job_id.clone(),
+            workspace_id: job.workspace_id.clone(),
+            target_path: job.target_path.clone(),
+            displaced_name,
+            expected_sha256: expected.clone(),
+            content_sha256: (job.operation == MaterializationOperation::Write)
+                .then(|| job.content_sha256.clone()),
+            now_ms,
+        });
+    }
+    store.prepare_displacements(&specs)?;
+    Ok(())
+}
+
+/// Discard, in one transaction, the prepared rows whose job never moved its
+/// target: it was already materialized, superseded, blocked or in conflict.
+pub fn finish_prepared_displacements(
+    store: &EngineStore,
+    root: &Path,
+) -> Result<(), MaterializeError> {
+    let prepared = store.list_prepared_displacements()?;
+    if prepared.is_empty() {
+        return Ok(());
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let mut unused = Vec::new();
+    for row in prepared {
+        let unmoved = match resolve_target(&canonical_root, &row.target_path) {
+            Ok(target) => !entry_exists(&sibling_with_name(&target, &row.displaced_name))?,
+            Err(_) => true,
+        };
+        if unmoved {
+            unused.push(row.displacement_id);
+        }
+    }
+    store.discard_displacements(&unused)?;
+    Ok(())
+}
+
 /// Resolve every displacement a crash left unresolved under `root`,
 /// including rows whose job will not run again, and inspect kept files whose
 /// bytes could not be read before. A file that stays displaced makes its
@@ -2295,6 +2417,13 @@ fn recover_job_displacements(
     let mut kept = false;
     for row in rows {
         let unsettled = row.state != DisplacementState::Kept || row.displaced_sha256.is_none();
+        // A prepared row whose file has not moved belongs to the batch this
+        // job runs in: it is this job's row to use, not one to recover.
+        let unused_prepared = row.state == DisplacementState::Prepared
+            && !entry_exists(&sibling_with_name(target, &row.displaced_name))?;
+        if unused_prepared {
+            continue;
+        }
         if unsettled {
             kept |= recover_displacement(store, root, &row, options)?;
         }
@@ -2330,8 +2459,10 @@ fn recover_displacement(
         return Ok(false);
     }
     let target_exists = entry_exists(&target)?;
-    let unplaced_write =
-        displacement.state == DisplacementState::Open && moved.content_sha256.is_some();
+    let unplaced_write = matches!(
+        displacement.state,
+        DisplacementState::Open | DisplacementState::Prepared
+    ) && moved.content_sha256.is_some();
     // Undo an interrupted write; the job reruns against the file.
     if unplaced_write && !target_exists && return_displaced(&target, &moved, options)? {
         store.resolve_displacement(

@@ -2547,3 +2547,116 @@ fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit()
     assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS), "it took effect");
     assert!(workspace_lacks_atomic_placement(sc.workspace()));
 }
+
+/// Stage `n` overwrites of `f{i}.md`, each file on disk holding its preimage.
+fn stage_overwrites(sc: &Scratch, store: &mut EngineStore, n: usize) {
+    for i in 0..n {
+        let before = format!("preimage {i}");
+        let after = format!("content {i}");
+        std::fs::write(sc.target(&format!("f{i}.md")), &before).expect("preimage on disk");
+        store
+            .put_binary_blob(before.as_bytes())
+            .expect("preimage blob");
+        let job = spec(
+            &format!("j{i}"),
+            &format!("f{i}.md"),
+            &hex_sha256(after.as_bytes()),
+            Preimage::Present(hex_sha256(before.as_bytes())),
+            1,
+            10 + i as i64,
+        );
+        stage_job(store, after.as_bytes(), &job);
+    }
+}
+
+/// Counts, at the first rename of a batch, the rows its one synced commit
+/// wrote.
+struct CountPreparedAtFirstRename {
+    db: PathBuf,
+    prepared_then: Mutex<Option<i64>>,
+}
+
+impl AtomicReplacer for CountPreparedAtFirstRename {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        let mut seen = self.prepared_then.lock().unwrap();
+        if seen.is_none() {
+            let conn = rusqlite::Connection::open_with_flags(
+                &self.db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("read the store");
+            *seen = Some(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_displacements WHERE state = 'prepared'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count prepared rows"),
+            );
+        }
+        drop(seen);
+        StdReplacer.displace(target, displaced)
+    }
+}
+
+/// A batch writes every job's displacement row in one synced commit before
+/// its first rename, uses them, and leaves none behind.
+#[test]
+fn a_batch_writes_every_displacement_row_before_its_first_rename() {
+    let sc = Scratch::new("batch-prepared");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrites(&sc, &mut store, 3);
+    let replacer = CountPreparedAtFirstRename {
+        db: sc.db(),
+        prepared_then: Mutex::new(None),
+    };
+
+    assert_eq!(
+        drain(&store, &sc, &replacer, &NoFaults),
+        vec![JobOutcome::Completed; 3]
+    );
+    assert_eq!(*replacer.prepared_then.lock().unwrap(), Some(3));
+    for i in 0..3 {
+        assert_eq!(
+            read(&sc, &format!("f{i}.md")).as_deref(),
+            Some(format!("content {i}").as_bytes())
+        );
+    }
+    assert_nothing_displaced(&sc, &store);
+}
+
+/// A crash mid-batch leaves the prepared rows of jobs that never ran. Replay
+/// discards them, puts the interrupted job's file back, and runs every job.
+#[test]
+fn a_crash_mid_batch_recovers_every_job() {
+    let sc = Scratch::new("batch-crash");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrites(&sc, &mut store, 3);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert_eq!(
+            store
+                .list_unsettled_displacements()
+                .expect("unsettled")
+                .len(),
+            3,
+            "one moved file and two unused prepared rows"
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed; 3]
+    );
+    for i in 0..3 {
+        assert_eq!(
+            read(&sc, &format!("f{i}.md")).as_deref(),
+            Some(format!("content {i}").as_bytes())
+        );
+    }
+    assert_nothing_displaced(&sc, &store);
+}

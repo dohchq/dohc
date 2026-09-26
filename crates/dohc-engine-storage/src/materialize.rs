@@ -441,6 +441,11 @@ pub(crate) fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, 
 /// Where a displaced file stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplacementState {
+    /// Written, in one synced commit for a whole batch of jobs, before any of
+    /// them moves a target aside. Until its job moves the target it names no
+    /// file; after, it means what `Open` means. A batch discards the prepared
+    /// rows it did not use.
+    Prepared,
     /// Written before the materializer moves the target aside. The job's own
     /// content is not at the target yet, so a crash that leaves the target
     /// name empty is undone by moving the displaced file back.
@@ -457,6 +462,7 @@ pub enum DisplacementState {
 impl DisplacementState {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
+            "prepared" => Some(DisplacementState::Prepared),
             "open" => Some(DisplacementState::Open),
             "placed" => Some(DisplacementState::Placed),
             "kept" => Some(DisplacementState::Kept),
@@ -621,6 +627,99 @@ pub(crate) fn open_displacement(
     Ok(displacement_id)
 }
 
+/// Record, in one transaction synced like [`open_displacement`], that each of
+/// these jobs may move its target aside: one fsync for a batch, before any of
+/// its renames.
+pub(crate) fn prepare_displacements(
+    conn: &Connection,
+    specs: &[DisplacementSpec],
+) -> Result<(), StorageError> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+    const SYNCHRONOUS_FULL: i64 = 2;
+    let session: i64 = conn
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(StorageError::corrupt)?;
+    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
+        .map_err(StorageError::persist)?;
+    let inserted = (|| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(StorageError::persist)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO materialization_displacements \
+                     (job_id, workspace_id, target_path, displaced_name, expected_sha256, \
+                      content_sha256, state, displaced_sha256, created_at_ms, resolved_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'prepared', NULL, ?7, NULL)",
+                )
+                .map_err(StorageError::persist)?;
+            for spec in specs {
+                insert
+                    .execute(rusqlite::params![
+                        spec.job_id,
+                        spec.workspace_id,
+                        spec.target_path,
+                        spec.displaced_name,
+                        spec.expected_sha256,
+                        spec.content_sha256,
+                        spec.now_ms,
+                    ])
+                    .map_err(StorageError::persist)?;
+            }
+        }
+        tx.commit().map_err(StorageError::persist)
+    })();
+    let restored = conn
+        .pragma_update(None, "synchronous", session)
+        .map_err(StorageError::persist);
+    inserted?;
+    restored
+}
+
+/// Delete these rows in one transaction.
+pub(crate) fn discard_displacements(conn: &Connection, ids: &[i64]) -> Result<(), StorageError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::persist)?;
+    {
+        let mut delete = tx
+            .prepare("DELETE FROM materialization_displacements WHERE displacement_id = ?1")
+            .map_err(StorageError::persist)?;
+        for id in ids {
+            delete.execute([id]).map_err(StorageError::persist)?;
+        }
+    }
+    tx.commit().map_err(StorageError::persist)
+}
+
+/// The prepared row of one job, if its batch wrote one.
+pub(crate) fn prepared_displacement(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<Option<Displacement>, StorageError> {
+    Ok(query_displacements(
+        conn,
+        "state = 'prepared' AND job_id = ?1",
+        Order::NewestFirst,
+        [job_id],
+    )?
+    .into_iter()
+    .next())
+}
+
+/// Every prepared row, newest first.
+pub(crate) fn list_prepared_displacements(
+    conn: &Connection,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(conn, "state = 'prepared'", Order::NewestFirst, [])
+}
+
 /// Record that the job's content is at the target, before the displaced
 /// file is deleted.
 pub(crate) fn mark_displacement_placed(
@@ -629,7 +728,7 @@ pub(crate) fn mark_displacement_placed(
 ) -> Result<(), StorageError> {
     conn.execute(
         "UPDATE materialization_displacements SET state = 'placed' \
-         WHERE displacement_id = ?1 AND state = 'open'",
+         WHERE displacement_id = ?1 AND state IN ('prepared', 'open')",
         [displacement_id],
     )
     .map_err(StorageError::persist)?;
@@ -673,7 +772,7 @@ pub(crate) fn list_unsettled_displacements(
 ) -> Result<Vec<Displacement>, StorageError> {
     query_displacements(
         conn,
-        "state IN ('open', 'placed') OR (state = 'kept' AND displaced_sha256 IS NULL)",
+        "state IN ('prepared', 'open', 'placed') OR (state = 'kept' AND displaced_sha256 IS NULL)",
         Order::NewestFirst,
         [],
     )
@@ -688,7 +787,7 @@ pub(crate) fn list_unsettled_displacements_for_path(
 ) -> Result<Vec<Displacement>, StorageError> {
     query_displacements(
         conn,
-        "state IN ('open', 'placed') AND target_path = ?2 \
+        "state IN ('prepared', 'open', 'placed') AND target_path = ?2 \
          AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
         Order::NewestFirst,
         [workspace_id, path],
@@ -727,7 +826,7 @@ pub(crate) fn path_is_displaced(
 ) -> Result<bool, StorageError> {
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM materialization_displacements \
-         WHERE state = 'open' AND target_path = ?2 \
+         WHERE state IN ('prepared', 'open') AND target_path = ?2 \
            AND (?1 = '' OR workspace_id = ?1 OR workspace_id = ''))",
         [workspace_id, path],
         |row| row.get(0),

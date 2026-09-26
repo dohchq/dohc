@@ -872,6 +872,10 @@ impl ActorHandle {
                 return Err(DomainError::StateCorrupt { reason: "ordinary materialization policy unavailable" }.into());
             }
             let mut secret_key = None;
+            // The page's paths are distinct. Plan every change first, enqueue
+            // them in one transaction, then materialize them in one replay, so
+            // the page shares one synced displacement commit.
+            let mut projections = Vec::new();
             for change in changes {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                 // A retry from a former active version cannot repaint the current version.
@@ -910,26 +914,30 @@ impl ActorHandle {
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
-                let projection = planned_projection(&workspace_id, &active, change.path, operation, sha,
-                    preimage, now_ms, now_ms, secret, inline);
-                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                projections.push(planned_projection(&workspace_id, &active, change.path, operation, sha,
+                    preimage, now_ms, now_ms, secret, inline));
+            }
+            if projections.is_empty() { return Ok(()); }
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                for projection in &projections {
                     if let Some(bytes) = projection.inline_content.as_deref() {
                         if put_binary_blob(tx, bytes)? != projection.spec.content_sha256 {
                             return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
                         }
                     }
                     upsert_projection_job(tx, &projection.spec, projection.operation)?;
-                    Ok::<_, StorageError>(())
-                })?;
-                if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
-                let selected = HashSet::from([projection.spec.job_id]);
-                let replay = replay_pending_materializations(store, &root_dir,
-                    MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None},
-                    now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
-                let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
-                if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }
-            }
+                }
+                Ok::<_, StorageError>(())
+            })?;
+            if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
+            let selected: HashSet<String> =
+                projections.into_iter().map(|projection| projection.spec.job_id).collect();
+            let replay = replay_pending_materializations(store, &root_dir,
+                MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None},
+                now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
+            let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+            if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await
