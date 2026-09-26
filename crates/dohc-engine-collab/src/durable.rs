@@ -548,9 +548,7 @@ where
                 .map_err(map_sql)?;
             if let Some((payload_hash, result_seq)) = recorded {
                 if payload_hash != hash {
-                    return Err(CollabError::Corrupt {
-                        reason: "idempotency key reused with different content".to_owned(),
-                    });
+                    return Err(CollabError::IdempotencyKeyReused);
                 }
                 // Negative namespace: -seq (see the insert below).
                 return Ok(AppendOutcome {

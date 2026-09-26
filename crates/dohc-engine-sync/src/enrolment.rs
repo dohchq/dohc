@@ -1499,12 +1499,10 @@ mod tests {
             |_, _, _update_sha| Ok(()),
         )
         .expect_err("the same request id cannot name a different path");
-        match error {
-            dohc_engine_collab::CollabError::Corrupt { reason } => {
-                assert_eq!(reason, "idempotency key reused with different content")
-            }
-            other => panic!("unexpected request-id reuse error: {other:?}"),
-        }
+        assert!(
+            matches!(error, dohc_engine_collab::CollabError::IdempotencyKeyReused),
+            "unexpected request-id reuse error: {error:?}"
+        );
         assert_eq!(
             ydoc_path(&store, "legacy-request"),
             None,

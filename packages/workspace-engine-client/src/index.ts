@@ -11,6 +11,7 @@ export {
   isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,

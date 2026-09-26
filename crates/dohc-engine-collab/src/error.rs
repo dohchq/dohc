@@ -176,6 +176,11 @@ pub enum CollabError {
     #[error("cannot seed onto an existing Y.Doc lineage")]
     SeedOntoExistingLineage,
 
+    /// A write reused an idempotency key that already recorded different
+    /// content. Nothing of this write was recorded.
+    #[error("idempotency key was reused with different content")]
+    IdempotencyKeyReused,
+
     /// A local-only close would prune CRDT state whose edits no durable settle
     /// covers (the current head is not reflected in the materialized artifact).
     /// Settle first. The workspace file must contain the artifact before the
@@ -232,6 +237,7 @@ impl CollabError {
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",
             CollabError::ObjectAliasCollision => "object-alias-collision",
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
+            CollabError::IdempotencyKeyReused => "idempotency-key-reuse-mismatch",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::OwnerOutboxFrozen => "owner-outbox-frozen",
             CollabError::RestoreFenced => "restore-fenced",

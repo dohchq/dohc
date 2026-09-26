@@ -90,7 +90,7 @@ function fakeSession(options: {
       const bytes = Buffer.from(update).toString("base64");
       if (key !== undefined && journaledKeys.has(key)) {
         if (journaledKeys.get(key) !== bytes) {
-          throw new Error("idempotency key reused with different content");
+          throw new Error("idempotency-key-reuse-mismatch");
         }
         return;
       }

@@ -193,6 +193,18 @@ function seedNotFirstUpdateRefusal(): Error {
   });
 }
 
+// A journal write whose idempotency key already recorded other content
+// (`CollabError::IdempotencyKeyReused`).
+function idempotencyKeyReuseRefusal(): Error {
+  return Object.assign(new Error("idempotency-key-reuse-mismatch"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "idempotency-key-reuse-mismatch",
+      retry: "no",
+    },
+  });
+}
+
 function optionalBoolean(object: JsonObject, key: string): boolean | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
@@ -290,6 +302,12 @@ export class YdocLoopbackEngine implements EngineTransport {
   private nextMomentId = 1;
   private nextHeadMomentId = 1;
   private nextRecaptureOrder = 2;
+  // The daemon's request ledger for journal writes: a key answers its first
+  // result again, and refuses content it was not first used with.
+  private readonly recordRequests = new Map<
+    string,
+    { payload: string; result: JsonValue }
+  >();
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
@@ -618,6 +636,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
       throw seedNotFirstUpdateRefusal();
     }
+    const payload = `${this.lineageKeyFor(session)}\0${sha256(update)}`;
+    const recorded = this.recordRequests.get(request.idempotencyKey);
+    if (recorded !== undefined) {
+      if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
+      return recorded.result;
+    }
     const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
@@ -626,7 +650,9 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (seed) entry.seedSourceSha = session.openHeadSha;
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
-    return { seq: session.updateSeq, lineageClaimId: null };
+    const result = { seq: session.updateSeq, lineageClaimId: null };
+    this.recordRequests.set(request.idempotencyKey, { payload, result });
+    return result;
   }
 
   private settleSession(session: LoopbackSession): {
