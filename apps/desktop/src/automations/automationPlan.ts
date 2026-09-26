@@ -19,6 +19,7 @@ import {
   automationMessageId,
   automationNoticeId,
   automationThreadId,
+  automationWakeThreadId,
   cutText,
   type AutomationNotice,
   type ChatDirectory,
@@ -302,7 +303,6 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
   for (const { step } of everyStep(steps)) {
     switch (step.kind) {
       case "wake-agent":
-        return "dohc cannot wake agents from automations yet.";
       case "post":
         formulas += 1;
         break;
@@ -471,6 +471,9 @@ export function reachStepsOf(
       for (const person of step.to) {
         if (!isFormula(person) && typeof person.value === "string") reach.push(directMessageReach(chat, person.value));
       }
+    } else if (step.kind === "wake-agent") {
+      // A personal step: it acts as its person, so it reaches only what they do alone.
+      reach.push({ kind: "personal", person: { userId: step.person, name: chat?.person(step.person) ?? "that person" } });
     } else if (step.kind === "notify") {
       for (const person of step.to) {
         if (isFormula(person) || typeof person.value !== "string") continue;
@@ -704,10 +707,10 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
         addSteps(entry.otherwise, [...when, { index, truthy: false }]);
         continue;
       }
-      if (step.kind === "post" || step.kind === "direct-message" || step.kind === "notify") {
+      if (step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent") {
         slots.push({ kind: "text", ordinal });
         formulas.push({ kind: "text", parts: automationTextParts(step.text) ?? [{ kind: "text", text: step.text }], ...guarded(when) });
-        if (step.kind !== "post") {
+        if (step.kind === "direct-message" || step.kind === "notify") {
           step.to.forEach((person, index) => {
             if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression, when);
           });
@@ -781,6 +784,16 @@ export type PlannedEffect =
       body: string;
       /** A formula named the person, so their reach is checked once the plan names them. */
       byFormula?: boolean;
+    }
+  | {
+      kind: "wake";
+      /** Also the idempotency key, so a retry posts the message once and queues it once. */
+      effectId: string;
+      messageId: string;
+      threadId: string;
+      /** The person whose agent it wakes. */
+      person: string;
+      body: string;
     }
   | {
       kind: "notice";
@@ -878,6 +891,19 @@ export function formulaPeople(request: EvaluationRequest, results: readonly Auto
   return [...people];
 }
 
+export const AGENT_WAKES_AGENT =
+  "Only a person's change can wake an agent for now. An agent or another automation made this change, so this automation did not wake an agent. That keeps agents and automations from starting each other forever.";
+
+/**
+ * Whether a person started this claim: a change that declared no actor, as a
+ * person's write does, or one a person made. An agent's writes do not carry
+ * their chain depth yet, so an agent's change, or an automation's change
+ * that an agent's started, could wake the agent again without end.
+ */
+function startedByPerson(claim: RunClaim): boolean {
+  return "actorKind" in claim.change && (claim.change.actorKind === null || claim.change.actorKind === "human");
+}
+
 /** The seed of every id and idempotency key a step's effects use. */
 export function stepKey(claimId: string, hash: string, ordinal: number): string {
   return `${claimId}/${hash}/${ordinal}`;
@@ -970,6 +996,23 @@ export function planRun(
       if ("then" in entry) {
         const problem = walk(answers.get(`if:${ordinal}`) ? entry.then : entry.otherwise);
         if (problem !== null) return problem;
+        continue;
+      }
+      if (step.kind === "wake-agent") {
+        // Only a person's change wakes an agent until agents' writes carry
+        // their chain depth (see startedByPerson).
+        if (!startedByPerson(claim)) return AGENT_WAKES_AGENT;
+        const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
+        if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
+        const effectId = `${stepKey(key.claimId, key.hash, ordinal)}/wake`;
+        planned.push({ ordinal, effects: [{
+          kind: "wake",
+          effectId,
+          messageId: automationMessageId(effectId),
+          threadId: automationWakeThreadId(claim.automationId),
+          person: step.person,
+          body,
+        }] });
         continue;
       }
       if (step.kind === "notify") {

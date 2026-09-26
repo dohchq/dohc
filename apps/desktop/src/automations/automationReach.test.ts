@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   checkAutomationReach,
+  PERSONAL_NEEDS_ACCOUNT,
   shareImpactOf,
   type ReachAutomation,
   type ReachCollection,
@@ -210,9 +211,9 @@ describe("reach check", () => {
     expect(check(owner(), personal("u-cai", "Cai"))).toEqual(stopped("This step acts as Cai, and you can also edit Trip."));
   });
 
-  it("allows a personal step in a workspace that does not sync with no account signed in", () => {
+  it("stops a personal step when no account says who this computer's person is", () => {
     const local: ReachRoster = { kind: "owner", ownerUserId: null, grants: [] };
-    expect(check(local, personal("u-anyone"))).toEqual(allowed);
+    expect(check(local, personal("u-anyone"))).toEqual(stopped(PERSONAL_NEEDS_ACCOUNT));
     expect(check(local, change(budget))).toEqual(allowed);
   });
 

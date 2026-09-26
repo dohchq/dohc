@@ -257,7 +257,7 @@ export interface CollectionAutomationHold {
   collection: string;
   /** A Collection, a Group, or a direct message. */
   target: string;
-  action: "change" | "find" | "post" | "notify";
+  action: "change" | "find" | "post" | "notify" | "wake";
   /** A person a formula named: the hold is theirs, not the step's. */
   recipient?: string;
   /** The editor whose reach stopped the step. */
@@ -351,6 +351,13 @@ function errorText(error: unknown): string {
 function startDeadline(abort: () => void): () => void {
   const timer = setTimeout(abort, AUTOMATION_RUN_DEADLINE_MS);
   return () => clearTimeout(timer);
+}
+
+/** Whether any step wakes its person's agent. */
+function wakesAgent(automation: Automation): boolean {
+  const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
+    step.kind === "wake-agent" || (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
+  return walk(automation.do);
 }
 
 function collectionNamed(path: string): ReachCollection {
@@ -1759,7 +1766,19 @@ export class CollectionAutomations {
     // with Edit on the file alone is an editor who cannot edit its records.
     const roster = await this.options.roster();
     if (stop.aborted) return release;
-    if (roster.kind === "unknown") return { kind: "release", waitsFor: "roster" };
+    if (roster.kind === "unknown") {
+      // A step that acts as you needs to know who you are now; waiting could
+      // mean waiting for a sign-in, so it fails with the reason instead.
+      if (wakesAgent(automation)) {
+        const collection = collectionNamed(id.collectionPath);
+        const steps = this.reachSteps(id.collectionPath, automation);
+        const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })
+          .find((reach) => !reach.allowed);
+        const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
+        return { kind: "settle", input: { state: "failed", error }, settled: () => this.pruneRuns(claim.automationId) };
+      }
+      return { kind: "release", waitsFor: "roster" };
+    }
     const stepHeld = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
     // A step that reach allows only because an editor left waits for a
     // current editor to confirm it.
@@ -2008,6 +2027,8 @@ function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "tar
     ? { target: reach.group.name, action: "post" as const }
     : reach.kind === "notify"
       ? { target: reach.person.name, action: "notify" }
+    : reach.kind === "personal"
+      ? { target: "your agent", action: "wake" }
     : "collection" in reach
       ? { target: reach.collection.name, action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" as const : "change" as const }
       : null;

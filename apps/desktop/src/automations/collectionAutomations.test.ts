@@ -11,8 +11,8 @@ import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
-import type { ReachRoster, RosterGrant } from "./automationReach";
+import { AGENT_WAKES_AGENT, definitionHash, localIsoTime, stepKey } from "./automationPlan";
+import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
 import {
   CollectionAutomations,
@@ -21,7 +21,17 @@ import {
   type CollectionAutomationEngine,
 } from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
-import { AutomationChatSessionWait, automationMessageId, automationNoticeId, chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel, type ChatNeeds } from "./automationChat";
+import {
+  AutomationChatSessionWait,
+  automationMessageId,
+  automationNoticeId,
+  automationWakeThreadId,
+  chatDirectoryOf,
+  type AutomationChatMessage,
+  type AutomationNotice,
+  type ChatDirectoryChannel,
+  type ChatNeeds,
+} from "./automationChat";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 import { NoticeNotSentError } from "../notices/noticeStore";
@@ -46,7 +56,7 @@ interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc 
 // automation off, so each test Collection defines them all.
 const FIELDS = [
   "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
-  "Project", "Finished on", "A", "B", "C", "D", "E", "Details",
+  "Project", "Finished on", "A", "B", "C", "D", "E", "Details", "Stamped",
 ];
 const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
 
@@ -1508,10 +1518,10 @@ describe("Collection automations", () => {
 
   it("records no reach for an automation dohc cannot run yet", async () => {
     const unsupported = [
-      "  - id: wake",
-      "    name: Wake",
+      "  - id: code",
+      "    name: Code",
       "    when: {field-changed: Status}",
-      "    do: [{set: {X: 1}}, {wake-agent: Hi, person: user-1}]",
+      "    do: [{set: {X: 1}}, {run: 'return 1'}]",
     ].join("\n");
     const w = await world({ automations: { Tasks: unsupported } });
     await w.executor.open();
@@ -2402,5 +2412,127 @@ describe("Collection automations that notify", () => {
     await w.until(() => claim.state === "done");
     expect(posted).toEqual(["user-owner", "user-ana@dohc.test", "user-ana@dohc.test"]);
     expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["user-owner", "user-ana@dohc.test"]);
+  });
+});
+
+describe("Collection automations that wake your agent", () => {
+  const ask = [
+    "  - id: ask",
+    "    name: Ask my agent",
+    "    when: {field-changed: Status}",
+    "    do: [{wake-agent: 'Plan {record.Status}', person: user-owner}]",
+  ].join("\n");
+
+  it("includes agent wakes in share warnings and held summaries", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    expect(await w.executor.shareImpact({ paths: ["Tasks"], versionId: null, access: "edit", recipientEmail: "bob@dohc.test" })).toMatchObject([{ target: "your agent", action: "wake" }]);
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    await w.executor.automationsIn("Tasks");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", target: "your agent", action: "wake" }] } }] });
+  });
+
+  it("sends the automation's message to the person's agent when they alone edit the Collection", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+
+    expect(claim.state).toBe("done");
+    expect(w.messages).toEqual([expect.objectContaining({
+      target: { kind: "agent" },
+      threadId: automationWakeThreadId("collection:Tasks#ask"),
+      automation: { automationId: "collection:Tasks#ask", name: "Ask my agent", depth: 1 },
+      body: "Plan Done",
+    })]);
+    const [run] = await w.executor.runs("collection:Tasks#ask");
+    expect(run!.writes).toEqual([{ kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" }]);
+  });
+
+  it("does not wake an agent for a change an agent made", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }), { actorKind: "agent" });
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("breaks the agent, automation, automation, agent cycle at the wake", async () => {
+    // The agent changes a task; automation A stamps it; automation B, seeing
+    // A's change, would wake the agent, whose writes start again at depth 0.
+    const w = await world({ automations: { Tasks: [
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Stamped: true}}]",
+      ask.replace("{field-changed: Status}", "{field-changed: Stamped}"),
+    ].join("\n") } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const fromAgent = w.claim("collection:Tasks#stamp", task, { actorKind: "agent", authorOriginId: "dohc-chat-runner" });
+    await w.executor.open();
+    await w.settledClaim(fromAgent);
+    expect(fromAgent.state).toBe("done");
+    expect(w.fieldsOf(task).Stamped).toBe(true);
+
+    const fromStamp = w.claim("collection:Tasks#ask", task, {
+      actorKind: "automation", authorOriginId: "collection:Tasks#stamp",
+      fields: [{ field: "Stamped", historyId: 99, previous: null, next: { value: true } }],
+    });
+    w.executor.notifyClaimed();
+    await w.settledClaim(fromStamp);
+    expect(fromStamp).toMatchObject({ state: "failed", error: AGENT_WAKES_AGENT });
+    expect(w.messages).toEqual([]);
+
+    // A person's own change still wakes the agent.
+    const fromPerson = w.claim("collection:Tasks#ask", task, {
+      actorKind: "human", fields: [{ field: "Stamped", historyId: 100, previous: { value: true }, next: { value: false } }],
+    });
+    w.executor.notifyClaimed();
+    await w.settledClaim(fromPerson);
+    expect(fromPerson.state).toBe("done");
+    expect(w.messages).toHaveLength(1);
+  });
+
+  it("fails a wake with the reason when dohc cannot check who can edit, instead of waiting for a sign-in", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Sign in, then try again." } });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: "dohc could not check who can edit Tasks. Sign in, then try again." });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("does not wake an agent when no account says who this computer's person is", async () => {
+    const w = await world({ automations: { Tasks: ask } });
+    w.setRoster({ kind: "owner", ownerUserId: null, grants: [] });
+    const claim = w.claim("collection:Tasks#ask", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "failed", error: PERSONAL_NEEDS_ACCOUNT });
+  });
+
+  it("stops when someone else can also edit the Collection, or the step names another person", async () => {
+    const w = await world({ automations: { Tasks: [
+      ask,
+      "  - id: other",
+      "    name: Ask Ana's agent",
+      "    when: {field-changed: Status}",
+      "    do: [{wake-agent: Plan, person: user-ana@dohc.test}]",
+    ].join("\n") } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Tasks"])] });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const mine = w.claim("collection:Tasks#ask", task);
+    const others = w.claim("collection:Tasks#other", task);
+    await w.executor.open();
+    await w.settledClaim(mine);
+    await w.settledClaim(others);
+
+    expect(mine).toMatchObject({ state: "failed", error: "This step acts as you, and bob@dohc.test can also edit Tasks." });
+    expect(others).toMatchObject({ state: "failed", error: "This step acts as that person, and you can also edit Tasks." });
+    expect(w.messages).toEqual([]);
   });
 });
