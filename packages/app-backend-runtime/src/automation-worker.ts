@@ -54,7 +54,7 @@ async function answer(request: AutomationWorkerRequest): Promise<void> {
     try { quickjs = await newQuickJS(); } catch { return reply({ kind: "restart" }); }
     prepared = { runId, scopeJson, quickjs };
   }
-  if (prepared?.runId !== runId) return reply({ kind: "refused", message: "The automation run is no longer prepared." });
+  if (prepared?.runId !== runId) return reply({ kind: "refused", message: "The automation could not continue. Try again." });
   const { quickjs, scopeJson } = prepared;
   answerItems(items, spent, item => evaluateItem(quickjs, scopeJson, item), reply);
 }
