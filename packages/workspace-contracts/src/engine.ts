@@ -116,7 +116,7 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
-  onBehalfOf: string;
+  onBehalfOf?: string;
   agentRunId?: string;
 }
 
@@ -141,7 +141,7 @@ interface NamedMomentAuthor {
 interface AutomationMomentAuthor {
   kind: "automation";
   automationId: string;
-  onBehalfOf: string;
+  onBehalfOf?: string;
   depth: number;
 }
 

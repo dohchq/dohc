@@ -635,6 +635,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
         name: &'static str,
         record_id: &'static str,
         creator: Option<u32>,
+        principal: Option<&'static str>,
         editor: Option<Option<u32>>,
         compact: bool,
         claimers: &'static [&'static str],
@@ -645,6 +646,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "beta",
             record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
             creator: Some(1),
+            principal: Some("user:ice"),
             editor: Some(None),
             compact: true,
             claimers: &["collection:tasks#other"],
@@ -654,6 +656,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "gamma",
             record_id: "rec_cccccccccccccccccccccccccc",
             creator: Some(cap),
+            principal: Some("user:ice"),
             editor: None,
             compact: false,
             claimers: &["collection:tasks#other"],
@@ -663,10 +666,21 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             name: "delta",
             record_id: "rec_dddddddddddddddddddddddddd",
             creator: None,
+            principal: None,
             editor: Some(Some(1)),
             compact: false,
             claimers: &["collection:tasks#other", AUTOMATION],
             depth: 0,
+        },
+        Case {
+            name: "epsilon",
+            record_id: "rec_eeeeeeeeeeeeeeeeeeeeeeeeee",
+            creator: Some(cap),
+            principal: None,
+            editor: None,
+            compact: true,
+            claimers: &["collection:tasks#other"],
+            depth: cap,
         },
     ] {
         let path = format!("tasks/{}.md", case.name);
@@ -685,7 +699,11 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                 Regime::LocalOnly,
                 doc.encode_full_state(),
                 case.creator.map(|_| AUTOMATION.to_owned()),
-                case.creator.and_then(automation),
+                case.creator.map(|depth| ChangeAttribution {
+                    actor_kind: ChangeActorKind::Automation,
+                    on_behalf_of: case.principal.map(str::to_owned),
+                    depth,
+                }),
                 None,
                 true,
                 None,
@@ -787,6 +805,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
                 case.name
             );
             assert_eq!(claim.depth, case.depth, "{}", case.name);
+            assert_eq!(claim.change.on_behalf_of.as_deref(), case.principal);
             assert_eq!(claim.chain_stopped(), case.depth == cap);
         }
     }

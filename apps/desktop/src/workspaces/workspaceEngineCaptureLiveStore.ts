@@ -253,14 +253,14 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
     return {
       kind: "automation",
       automationId: author.automationId,
-      onBehalfOf: author.onBehalfOf,
+      ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
       depth: author.depth,
     };
   }
   return {
     kind: "agent",
     agentId: author.agentId,
-    onBehalfOf: author.onBehalfOf,
+    ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
       : {}),
@@ -546,6 +546,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 // relay replication, never from this computer.
 function adapterAuthor(author: MomentAuthor): WriteAuthor {
   if (author.kind === "automation") {
+    if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
     return { kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth };
   }
   return captureAuthor(author);
@@ -554,6 +555,7 @@ function adapterAuthor(author: MomentAuthor): WriteAuthor {
 // The author capture stamps on this computer's own edits: an agent run only.
 function captureAuthor(author: MomentAuthor): AgentAuthor {
   if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Only an agent run can author captured edits.");
+  if (author.onBehalfOf === undefined) throw new VersionedTextStoreError("invalid-input", "The write does not name the person it acts for.");
   return {
     kind: "agent",
     agentId: author.agentId,
