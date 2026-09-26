@@ -59,6 +59,7 @@ pub enum RelayOperation {
     },
     Claim {
         workspace_id: String,
+        account_id: Option<String>,
         new_origin_id: String,
         new_replication_epoch: String,
         new_stream_identity: String,
@@ -1132,12 +1133,18 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
-    pub async fn reset_claim_refusal(&self, workspace_id: String) -> Result<(), RuntimeError> {
+    pub async fn reset_claim_refusal(
+        &self,
+        workspace_id: String,
+        account_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
         self.run(move |store, _cache| {
             match store.write_with(&NoFaults, |tx| {
                 tx.execute(
-                    "UPDATE sync_identity SET claim_state='pending' WHERE workspace_id=?1 AND claim_state <> 'pending'",
-                    [workspace_id],
+                    "UPDATE sync_identity SET claim_state='pending', claim_account_id=NULL \
+                     WHERE workspace_id=?1 AND claim_state <> 'pending' \
+                     AND (?2 IS NULL OR claim_account_id IS NOT ?2)",
+                    rusqlite::params![workspace_id, account_id],
                 ).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })? {
@@ -1498,6 +1505,7 @@ fn run_relay_operation(
         }
         RelayOperation::Claim {
             workspace_id,
+            account_id,
             new_origin_id,
             new_replication_epoch,
             new_stream_identity,
@@ -1531,6 +1539,7 @@ fn run_relay_operation(
                     replication_epoch: identity.replication_epoch,
                     stream_identity: identity.stream_identity,
                 },
+                account_id.as_deref(),
                 &NoFaults,
             )?;
             Ok(RelayOperationOutcome::Claimed)
@@ -1723,6 +1732,7 @@ mod share_view_identity_tests {
             let mut store = EngineStore::open(&path, 1_000).unwrap();
             let operation = RelayOperation::Claim {
                 workspace_id: "ws".to_owned(),
+                account_id: Some("account-a".to_owned()),
                 new_origin_id: "origin".to_owned(),
                 new_replication_epoch: "epoch".to_owned(),
                 new_stream_identity: "stream".to_owned(),

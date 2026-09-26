@@ -249,6 +249,55 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("claims after reopening a refused workspace under another account", async () => {
+    let refusalAccount: string | null = null;
+    let pending = true;
+    const daemon = new MockDaemon((request) => {
+      const params = request.params;
+      const accountId = params !== null && typeof params === "object" && !Array.isArray(params)
+        ? params.accountId : undefined;
+      if (request.method === "sync.resetClaimRefusal") {
+        if (accountId !== refusalAccount) refusalAccount = null;
+      }
+      if (request.method === "sync.push" && refusalAccount !== null) {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" }, new Error("refused"),
+        );
+      }
+      if (request.method === "sync.push" && pending) {
+        throw new DaemonRefusalError(
+          { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" }, new Error("pending"),
+        );
+      }
+      if (request.method === "sync.claim") {
+        if (accountId === "account-b") pending = false;
+        else {
+          refusalAccount = "account-a";
+          throw new DaemonRefusalError(
+            { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" }, new Error("refused"),
+          );
+        }
+      }
+      return undefined;
+    });
+    const h = await harness(daemon);
+    const binding = { workspaceId: "workspace-a", rootPath: h.rootPath, relay: h.relay, accountId: "account-a" };
+    const first = h.live.bind(binding);
+    await expect(first.claim()).rejects.toBeInstanceOf(RelayClaimRefusedError);
+    await h.live.closeWorkspace("workspace-a");
+    const sameAccount = h.live.bind({ ...binding, relay: { ...h.relay, token: "refreshed-token" } });
+    await expect(sameAccount.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
+    await h.live.closeWorkspace("workspace-a");
+    await h.live.closeAll({ accountChanged: true });
+    expect(refusalAccount).toBe("account-a");
+    const next = h.live.bind({ ...binding, accountId: "account-b", relay: { ...h.relay, token: "account-b-token" } });
+    await expect(next.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
+    await next.claim();
+    await expect(next.push()).resolves.toBeDefined();
+    expect(daemon.requests.filter(request => request.method === "sync.claim")).toHaveLength(2);
+    await h.live.closeAll();
+  });
+
   it("clears a persisted refusal on sign-out even after failed enrollment", async () => {
     let refused = true;
     let pending = false;

@@ -371,6 +371,7 @@ fn first_push_exports_native_history_after_actual_contact() {
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
             },
+            None,
             &NoFaults,
         )
         .unwrap();
@@ -520,6 +521,7 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
             },
+            None,
             &NoFaults,
         )
         .unwrap();

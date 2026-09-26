@@ -691,6 +691,7 @@ export class EngineRelayClient {
   bind(input: {
     workspaceId: string;
     rootPath: string;
+    accountId?: string;
     attachmentId?: symbol;
     shareMount?: true;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
@@ -715,6 +716,7 @@ export class EngineRelayClient {
     const workspaceKey = this.workspaceKey(workspace);
     this.boundWorkspaces.set(workspaceKey, workspace);
     const connectionKey = `${input.rootPath}\u0000${input.relay.token}`;
+    let accountChecked = false;
     const requestFor = async (
       targetWorkspace: EngineWorkspace,
       method: string,
@@ -731,6 +733,13 @@ export class EngineRelayClient {
             async ({ client, workspace: handle }) => {
               this.retainBoundWorkspace(workspaceKey, workspace);
               const requester = new WorkspaceDaemonRequester(client);
+              if (!accountChecked && input.accountId !== undefined) {
+                await requester.request("sync.resetClaimRefusal", {
+                  workspaceId: workspace.workspaceId,
+                  accountId: input.accountId,
+                }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
+                accountChecked = true;
+              }
               return await requester.request(method, params, {
                 workspace: handle,
                 deadlineMs: this.requestDeadlineMs,
@@ -789,7 +798,10 @@ export class EngineRelayClient {
       requester: typeof request,
     ): Promise<void> => {
       const result = resultRecord(
-        await requester("sync.claim", { workspaceId: workspace.workspaceId }),
+        await requester("sync.claim", {
+          workspaceId: workspace.workspaceId,
+          ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
+        }),
         "sync.claim",
       );
       if (!booleanField(result, "claimed", "sync.claim")) {

@@ -1741,6 +1741,7 @@ function testCaptureSeams(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  accountId: string;
   attachmentId?: symbol;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
@@ -1772,6 +1773,7 @@ function engineForWorkspace(
   const daemonRelay = relayClientForWorkspace({
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
+    accountId: credentials.userId,
     attachmentId: workspace.attachmentId,
     relay,
   });

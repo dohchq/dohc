@@ -68,6 +68,13 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClaimParams {
+    workspace_id: String,
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AdoptJoinIdentityParams {
     workspace_id: String,
     replication_epoch: String,
@@ -1012,7 +1019,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: RelayWorkspaceParams = parse(params)?;
+        let params: ClaimParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
@@ -1021,6 +1028,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::Claim {
                     workspace_id: open.workspace_id.clone(),
+                    account_id: params.account_id,
                     new_origin_id: sync_identifier("origin")?,
                     new_replication_epoch: sync_identifier("epoch")?,
                     new_stream_identity: sync_identifier("stream")?,
@@ -1038,14 +1046,14 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: RelayWorkspaceParams = parse(params)?;
+        let params: ClaimParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
         Self::read_under_ctx(
             &cancellation,
             "sync.resetClaimRefusal",
-            open.actor.reset_claim_refusal(open.workspace_id.clone()),
+            open.actor.reset_claim_refusal(open.workspace_id.clone(), params.account_id),
         )
         .await?;
         Ok(json!({ "reset": true }))

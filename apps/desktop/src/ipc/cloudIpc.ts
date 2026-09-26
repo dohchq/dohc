@@ -69,6 +69,7 @@ export function registerCloudIpcHandlers<
   assertWritableWorkspace(workspace: RegistryEntry): void;
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
+    accountId: string;
     relay: { baseUrl: string; token: string };
   }): EngineRelayWorkspaceClient;
   enrollWorkspaceKeyEnvelope: typeof enrollWorkspaceKeyEnvelope;
@@ -225,6 +226,7 @@ export function registerCloudIpcHandlers<
         };
         const daemonRelay = relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
+          accountId: credentials.userId,
           rootPath: workspace.rootPath,
           attachmentId: workspace.attachmentId,
           relay,
@@ -348,6 +350,7 @@ export function registerCloudIpcHandlers<
         // activity session opens.
         const daemonRelay = relayClientForWorkspace({
           workspaceId: parsed.workspaceId,
+          accountId: credentials.userId,
           rootPath: created.rootPath,
           relay,
         });

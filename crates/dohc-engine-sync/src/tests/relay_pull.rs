@@ -109,12 +109,16 @@ fn relay_claim_refusal_survives_restart_until_successful_retry() {
         let client = RelaySyncClient::new(ClaimRelay::default());
         *client.transport().refusal.lock().unwrap() = Some(refusal.clone());
         assert_eq!(
-            client.claim_workspace(&mut engine, request.clone(), &NoFaults),
+            client.claim_workspace(&mut engine, request.clone(), Some("account-a"), &NoFaults),
             Err(refusal.clone())
         );
         drop(engine);
 
         let mut reopened = EngineStore::open(&path, 2_000).unwrap();
+        assert_eq!(reopened.read_with(|conn| conn.query_row(
+            "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+            [], |row| row.get::<_, String>(0),
+        )).unwrap(), "account-a");
         let restarted = RelaySyncClient::new(ClaimRelay::default());
         assert_eq!(
             restarted.push_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 2_001, 0),
@@ -132,7 +136,7 @@ fn relay_claim_refusal_survives_restart_until_successful_retry() {
         assert!(restarted.transport().claims.lock().unwrap().is_empty());
         *restarted.transport().refusal.lock().unwrap() = Some(RelayError::Partitioned);
         assert_eq!(
-            restarted.claim_workspace(&mut reopened, request.clone(), &NoFaults),
+            restarted.claim_workspace(&mut reopened, request.clone(), Some("account-a"), &NoFaults),
             Err(RelayError::Partitioned)
         );
         drop(reopened);
@@ -143,9 +147,13 @@ fn relay_claim_refusal_survives_restart_until_successful_retry() {
         );
         *restarted.transport().refusal.lock().unwrap() = None;
         restarted
-            .claim_workspace(&mut reopened, request.clone(), &NoFaults)
+            .claim_workspace(&mut reopened, request.clone(), Some("account-a"), &NoFaults)
             .unwrap();
         assert_eq!(read_sync_identity(&reopened, "ws").unwrap(), Some(identity));
+        assert_eq!(reopened.read_with(|conn| conn.query_row(
+            "SELECT claim_account_id FROM sync_identity WHERE workspace_id='ws'",
+            [], |row| row.get::<_, Option<String>>(0),
+        )).unwrap(), None);
         drop(reopened);
         let mut reopened = EngineStore::open(&path, 2_004).unwrap();
         restarted
@@ -173,6 +181,7 @@ fn relay_interrupted_claim_survives_restart_as_identity_required() {
                 replication_epoch: identity.replication_epoch,
                 stream_identity: identity.stream_identity,
             },
+            Some("account-a"),
             &NoFaults
         ),
         Err(RelayError::Partitioned)
@@ -232,6 +241,7 @@ fn locally_journaled_identity_requires_claim_before_push() {
                 replication_epoch: "epoch-1".to_owned(),
                 stream_identity: "stream-1".to_owned(),
             },
+            Some("account-a"),
             &NoFaults,
         )
         .unwrap();

@@ -2237,16 +2237,31 @@ async fn account_change_resets_only_refused_claims_without_contacting_relay() {
     }
     assert!(relay.state.lock().unwrap().requests.is_empty());
     db.execute(
-        "UPDATE sync_identity SET claim_state='workspace-unavailable' WHERE workspace_id=?1",
+        "UPDATE sync_identity SET claim_state='workspace-unavailable', claim_account_id='account-a' WHERE workspace_id=?1",
         [workspace_id],
     )
     .unwrap();
+    close(&transport, &handle, &mut id).await;
+    id += 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
     call(
         &transport,
         &handle,
         &mut id,
         "sync.resetClaimRefusal",
-        json!({ "workspaceId": workspace_id }),
+        json!({ "workspaceId": workspace_id, "accountId": "account-a" }),
+    )
+    .await;
+    assert_eq!(db.query_row(
+        "SELECT claim_state FROM sync_identity WHERE workspace_id=?1", [workspace_id],
+        |row| row.get::<_, String>(0),
+    ).unwrap(), "workspace-unavailable");
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.resetClaimRefusal",
+        json!({ "workspaceId": workspace_id, "accountId": "account-b" }),
     )
     .await;
     id += 1;

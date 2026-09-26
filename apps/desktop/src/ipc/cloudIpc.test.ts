@@ -277,6 +277,7 @@ describe("registered cloud handlers", () => {
     await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "phrase" })).resolves.toEqual(status);
     expect(h.bindRelay).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "existing", rootPath: h.workspace.rootPath, attachmentId: expect.any(Symbol),
+      accountId: credentials.userId,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }));
     expect(h.enroll).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }));
@@ -354,6 +355,7 @@ describe("registered cloud handlers", () => {
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
     expect(h.registry.has("joined")).toBe(false);
+    h.cache.set({ ...credentials, userId: "account-b", token: "account-b-token" });
     held.resolve({ hasContent: true, identity: null });
     await expect(result).resolves.toEqual({ workspace: {
       workspaceId: "joined", rootPath: h.joinPayload.rootPath, kind: "personal", mode: "local-first",
@@ -362,6 +364,10 @@ describe("registered cloud handlers", () => {
     expect(h.enable).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "joined" }), { joinBootstrap: true });
     expect(h.registry.get("joined")?.joinBootstrapPending).toBeUndefined();
     expect(h.bindRelay.mock.calls[0]?.[0]).not.toHaveProperty("attachmentId");
+    expect(h.bindRelay).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: credentials.userId,
+      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+    }));
   });
 
   it("keeps a failed-cleanup registration and directs recovery through Forget before rejoining", async () => {

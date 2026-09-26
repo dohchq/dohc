@@ -448,7 +448,7 @@ fn create_sync_identity(
         if let Some((_, epoch, stream)) = current {
             if epoch == replication_epoch && stream == stream_identity {
                 if claim_state.is_none() {
-                    tx.execute("UPDATE sync_identity SET claim_state=NULL WHERE workspace_id=?1", [workspace_id])
+                    tx.execute("UPDATE sync_identity SET claim_state=NULL, claim_account_id=NULL WHERE workspace_id=?1", [workspace_id])
                         .map_err(SyncError::persist)?;
                 }
                 return Ok(AdoptJoinIdentityOutcome::AlreadyMatched);

@@ -65,6 +65,7 @@ export function registerSharedChannelsIpcHandlers<
   setWorkspaceSharedChannels(workspaceId: string, channels: JoinedSharedChannel[]): unknown;
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
+    accountId: string;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
   }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel"> & { push(): Promise<unknown> };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
@@ -164,6 +165,7 @@ export function registerSharedChannelsIpcHandlers<
         if (channel.folderPath && credentials.relayUrl) {
           await relayClientForWorkspace({
             workspaceId: workspace.workspaceId,
+            accountId: credentials.userId,
             rootPath: workspace.rootPath,
             attachmentId: operation.workspace.attachmentId,
             relay: { baseUrl: credentials.relayUrl, token: credentials.token },
@@ -330,6 +332,7 @@ export function registerSharedChannelsIpcHandlers<
         }
         const result = await relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
+          accountId: input.recipientUserId,
           rootPath: workspace.rootPath,
           attachmentId: workspace.attachmentId,
           relay,

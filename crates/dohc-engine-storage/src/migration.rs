@@ -2657,7 +2657,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 19,
         id: "v2-sync-identity-claim-state",
-        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch'));",
+        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch')); ALTER TABLE sync_identity ADD COLUMN claim_account_id TEXT;",
         sets_user_version: None,
     },
 ];
@@ -2991,7 +2991,7 @@ mod tests {
             ),
             (
                 "v2-sync-identity-claim-state",
-                "06698ed6c3ca2c0cf698540d7eeb872cd4962b22203b865196df8c8e4e493f60",
+                "3cf872e265017c043dd394e9a67c6a3108cec735d06c7cab6f89d00b164feaee",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3038,9 +3038,9 @@ mod tests {
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
-        let identity: (String, String, String, Option<String>) = conn.query_row(
-            "SELECT origin_id,replication_epoch,stream_identity,claim_state FROM sync_identity WHERE workspace_id='ws'", [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let identity: (String, String, String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT origin_id,replication_epoch,stream_identity,claim_state,claim_account_id FROM sync_identity WHERE workspace_id='ws'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).unwrap();
         assert_eq!(
             identity,
@@ -3048,6 +3048,7 @@ mod tests {
                 "origin".to_owned(),
                 "epoch".to_owned(),
                 "stream".to_owned(),
+                None,
                 None
             )
         );
