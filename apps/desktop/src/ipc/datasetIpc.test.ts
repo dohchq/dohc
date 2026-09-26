@@ -7,7 +7,8 @@ import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
-function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">) {
+function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
+  automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -31,7 +32,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
-    withAdapter, createSources,
+    withAdapter, createSources, ...(automationName ? { automationName } : {}),
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetId, revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
@@ -81,6 +82,20 @@ it("routes history to shared authority and rejects stale history replies", async
   expect(remote.history).toHaveBeenCalledWith({ workspaceId: "workspace", datasetId, action: "history", limit: 10 });
   vi.mocked(remote.history).mockImplementation(async () => { f.stale(); return page; });
   await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "history" })).rejects.toThrow("stale workspace");
+});
+it("names each automation in History once, as its Collection's automations.yaml names it now", async () => {
+  const entry = (revision: number, automationId?: string) => ({ revision, operation: "edit", callerReference: "a".repeat(64), recordedAtMs: 1000,
+    approvedRevisionHash: "b".repeat(64), changesetBytes: 80, attachmentCount: 0, ...(automationId ? { automation: { automationId, depth: 1 } } : {}) });
+  const page = { datasetId, headRevision: 3, nextBeforeRevision: null,
+    entries: [entry(3, "collection:Budget#close-paid"), entry(2, "collection:Budget#gone"), entry(1, "collection:Budget#close-paid")] };
+  const names = vi.fn(async (_workspace: { workspaceId: string }, automationId: string) => automationId.endsWith("close-paid") ? "Close paid invoices" : null);
+  const f = fixture({ history: vi.fn(async () => page) } as unknown as OwnerDatasetData, undefined, names);
+  expect(await f.handler("window", { workspaceId: "workspace", datasetId, action: "history" })).toEqual({ kind: "history", ...page, entries: [
+    { ...page.entries[0], automation: { automationId: "collection:Budget#close-paid", depth: 1, name: "Close paid invoices" } },
+    page.entries[1],
+    { ...page.entries[2], automation: { automationId: "collection:Budget#close-paid", depth: 1, name: "Close paid invoices" } },
+  ] });
+  expect(names).toHaveBeenCalledTimes(2);
 });
 it("allows named Collection data actions without opening a local owner store or source controls", async () => {
   const named = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), describe: vi.fn(), invoke: vi.fn(), upload: vi.fn(), file: vi.fn() };

@@ -1265,6 +1265,8 @@ function automationAuthor(workspaceId: string, automationId: string): { name: st
 interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionState {
   activity: WorkspaceActivityState;
   collectionAutomations: CollectionAutomations;
+  /** This attachment's local dataset host, opened on first use and closed after the executor at disposal. */
+  datasetHost: DatasetHostSlot;
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
@@ -1321,9 +1323,11 @@ function createDesktopWorkspaceAuthorityState(
     },
   });
   const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
+  const datasetHost: DatasetHostSlot = { pending: null };
   return {
     activity: new WorkspaceActivityState(),
-    collectionAutomations: createCollectionAutomationsFor(binding),
+    collectionAutomations: createCollectionAutomationsFor(binding, datasetHost),
+    datasetHost,
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
@@ -1405,7 +1409,8 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
-      state.collectionAutomations.dispose(),
+      // The executor hands its held dataset claims back before the host closes.
+      state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
       Promise.resolve().then(() =>
@@ -3382,6 +3387,7 @@ async function readWorkspaceTextIfPresent(rootPath: string, relativePath: string
 // already opened, and end at the run's own signal or the operation's.
 function createCollectionAutomationsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
+  datasetHost: DatasetHostSlot,
 ): CollectionAutomations {
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
@@ -3409,6 +3415,19 @@ function createCollectionAutomationsFor(
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+    withDatasetLedger: async (work) => {
+      // An open host serves the executor until disposal closes it, so a
+      // closing executor can still hand its claims back.
+      const opened = datasetHost.pending;
+      if (opened) return await work((await opened).automations);
+      return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        // A workspace that never approved a dataset has no dataset store to open.
+        if (!(await lstat(join(rootPath, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false))) return null;
+        const host = await localDatasetHostFor(operation.workspace, operation.signal);
+        return await work(host.automations);
+      });
+    },
   });
 }
 
@@ -3445,6 +3464,51 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 
 let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
+// Each workspace attachment's local dataset host, opened on first use and
+// closed when the attachment's state is disposed, after its automation
+// executor. Dataset IPC and the automation executor share it.
+type DatasetHostSlot = { pending: Promise<LocalDatasetHost> | null };
+async function closeLocalDatasetHost(slot: DatasetHostSlot): Promise<void> {
+  const pending = slot.pending;
+  slot.pending = null;
+  if (!pending) return;
+  try {
+    await (await pending).close();
+  } catch (error) {
+    console.error("Collection shutdown failed", error);
+  } finally {
+    activeDatasetHosts.delete(pending);
+  }
+}
+let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
+const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
+const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
+  workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+    signal.throwIfAborted(); operation.assertCurrent();
+    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+    const slot = operation.state.datasetHost;
+    let pending = slot.pending;
+    if (!pending) {
+      const runtimePath = datasetRuntimePath();
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
+        runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
+        persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(runtimePath, "persistent-child.mjs") },
+        compile: async (source, path, signal) => {
+          installedDatasetCompiler ??= createInstalledDatasetCompiler(pluginResourcesBasePath());
+          return (await installedDatasetCompiler)(source, path, signal);
+        },
+        onAutomationClaims: () => collectionAutomationsOf(workspace.workspaceId)?.notifyClaimed(),
+        onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
+      });
+      slot.pending = pending;
+      activeDatasetHosts.add(pending);
+      const ownedPending = pending;
+      void pending.catch(() => { if (slot.pending === ownedPending) slot.pending = null; activeDatasetHosts.delete(ownedPending); });
+    }
+    const host = await pending;
+    signal.throwIfAborted(); operation.assertCurrent();
+    return host;
+  });
 const chatWrites = createChatWrites({
   findWorkspace,
   warmCredentials: warmCredentialCache,
@@ -4569,39 +4633,11 @@ function registerIpcHandlers(): void {
       if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
-  const localDatasetHosts = new WeakMap<AbortSignal, Promise<LocalDatasetHost>>();
-  let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
-  const datasetRuntimePath = join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
-  const datasetForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
-    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-      signal.throwIfAborted(); operation.assertCurrent();
-      if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
-      let pending = localDatasetHosts.get(operation.signal);
-      if (!pending) {
-        const lifetime = operation.signal;
-        pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
-          assertCurrent: () => { lifetime.throwIfAborted(); },
-          runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(datasetRuntimePath, "child.mjs") },
-          persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
-          compile: async (source, path, signal) => {
-            installedDatasetCompiler ??= createInstalledDatasetCompiler(pluginResourcesBasePath());
-            return (await installedDatasetCompiler)(source, path, signal);
-          },
-        });
-        localDatasetHosts.set(lifetime, pending);
-        activeDatasetHosts.add(pending);
-        const ownedPending = pending;
-        void pending.then(host => {
-          const close = () => { void host.close().catch(error => console.error("Collection shutdown failed", error)).finally(() => activeDatasetHosts.delete(ownedPending)); };
-          if (lifetime.aborted) close(); else lifetime.addEventListener("abort", close, { once: true });
-        }, () => { localDatasetHosts.delete(lifetime); activeDatasetHosts.delete(ownedPending); });
-      }
-      const host = await pending;
-      signal.throwIfAborted(); operation.assertCurrent();
-      return host;
-    });
+  const datasetForWorkspace = localDatasetHostFor;
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    automationName: async (workspace: DesktopRendererWorkspaceOperation["workspace"], automationId: string) =>
+      await collectionAutomationsOf(workspace.workspaceId)?.nameForHistory(automationId) ?? null,
     currentCredentialGeneration: () => credentialCacheGeneration,
     namedDataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await warmCredentialCache();
@@ -4641,7 +4677,7 @@ function registerIpcHandlers(): void {
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
               },
-              runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
+              runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath(), "persistent-child.mjs") },
             });
           });
           const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,

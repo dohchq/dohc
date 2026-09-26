@@ -209,7 +209,8 @@ async function syncFolder(folder: string): Promise<void> {
 async function realFolder(path: string): Promise<string> {
   let stats = await lstat(path).catch(() => null);
   if (stats === null) {
-    await mkdir(path);
+    // Two readers can both find it missing; the second finds the first's folder.
+    await mkdir(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await syncFolder(dirname(path));
     stats = await lstat(path);
   }
