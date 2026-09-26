@@ -4,7 +4,6 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayUnreachableError,
-  RelayIdentityMissingError,
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
   type MaterializeRelayPullPage,
@@ -15,6 +14,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { pushWithIdentity } from "./pushWithIdentity";
 
 export interface RelaySyncOperations {
   claim(): Promise<void>;
@@ -406,11 +406,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         retryClaim = false;
         await claim();
       }
-      const result = await operations.push().catch(async (error: unknown) => {
-        if (!(error instanceof RelayIdentityMissingError)) throw error;
-        await claim();
-        return operations.push();
-      });
+      const result = await pushWithIdentity({ push: () => operations.push(), claim });
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
     };
