@@ -378,7 +378,6 @@ export async function runDrill({
     const cleanup = [];
     if (app && !result.app) cleanup.push(() => removeApp(app));
     if (scratch && !result.scratch) cleanup.push(() => remove(scratch));
-    if (result.passed && !keep) cleanup.push(() => remove(evidence));
     const failures = [];
     for (const step of cleanup) {
       try {
@@ -387,6 +386,8 @@ export async function runDrill({
         failures.push(error);
       }
     }
+    // Keep result.json when cleanup failed, so the failure has its evidence.
+    if (result.passed && !keep && failures.length === 0) remove(evidence);
     // A drill that already failed keeps its own error; cleanup failures are only printed.
     for (const error of failures) console.error(`release drill cleanup: ${error instanceof Error ? error.message : String(error)}`);
     if (failures.length > 0 && !result.error) throw failures[0];
