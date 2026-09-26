@@ -72,9 +72,13 @@ export interface AutomationScope {
 export type AutomationTextPart = { kind: "text"; text: string } | { kind: "expression"; expression: string };
 
 /** `expression` is JavaScript such as `record.Status == "Done"`. `text` is message text, already split into parts. */
-export type AutomationFormula =
+export type AutomationFormula = (
   | { kind: "expression"; source: string }
-  | { kind: "text"; parts: AutomationTextPart[] };
+  | { kind: "text"; parts: AutomationTextPart[] }
+) & {
+  /** All guards must match earlier successful results. Otherwise this formula returns null without running. */
+  when?: Array<{ index: number; truthy: boolean }>;
+};
 
 export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result" | "busy";
 export interface AutomationError { code: AutomationErrorCode; message: string }

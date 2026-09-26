@@ -258,19 +258,32 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     if (problem) throw new Error(problem);
     const measured = measureScope(scope);
     if (typeof measured === "object") throw new Error(measured.problem);
-    const results = measured === "too_large" ? items.map(scopeTooLarge) : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(tooLarge);
+    const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
+      : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);
     if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
     queued++;
     const done = queue.then(async () => {
       const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
       for (;;) {
-        const waiting = results.flatMap((result, index) => result ? [] : [index]);
-        if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
-        // After a replaced worker, items past the request's time budgets do not start another worker.
-        if (notReached(items[waiting[0]!]!, spent)) {
-          for (const index of waiting) results[index] = notReached(items[index]!, spent)!;
-          continue;
+        const waiting: number[] = [];
+        for (const [index, item] of items.entries()) {
+          if (results[index] !== undefined) continue;
+          const guards = "when" in item ? item.when ?? [] : [];
+          // Dispatch the preceding formulas before deciding a dependent branch.
+          if (guards.some(guard => results[guard.index] === undefined)) break;
+          if (guards.some(guard => {
+            const result = results[guard.index]!;
+            return !result.ok || Boolean(result.value) !== guard.truthy;
+          })) {
+            results[index] = { ok: true, value: null };
+            continue;
+          }
+          // A skipped formula costs no source check, scope preparation, or runtime.
+          const refused = tooLarge(item) ?? notReached(item, spent);
+          if (refused) results[index] = refused;
+          else waiting.push(index);
         }
+        if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
         await dispatch(scope, waiting.map(index => items[index]!), (offset, result) => { results[waiting[offset]!] = result; }, spent);
       }
     }).finally(() => { queued--; });
@@ -284,6 +297,11 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       if (full) return full;
       if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
       if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
+      if (!formulas.every((formula, index) => formula.when === undefined || (Array.isArray(formula.when)
+        && formula.when.length <= index && formula.when.every(guard => guard !== null && typeof guard === "object"
+          && Number.isSafeInteger(guard.index) && guard.index >= 0 && guard.index < index && typeof guard.truthy === "boolean")))) {
+        throw new Error("A formula guard must refer to an earlier formula and say whether its result must be truthy.");
+      }
       return formulas.length === 0 ? [] : run(scope, [...formulas]);
     },
     async runCode(scope, source) {

@@ -61,6 +61,79 @@ async function values(sources: string[]) {
 }
 
 describe("formula helpers", () => {
+  it("skips guarded runtime errors, loops, and oversized sources without evaluating them", async () => {
+    const when = [{ index: 0, truthy: true }];
+    expect(await evaluator.evaluate(scope, [
+      expression("false"),
+      { ...expression("record.Missing.name"), when },
+      { ...expression("(() => { for (;;) {} })()"), when },
+      { ...expression("x".repeat(AUTOMATION_LIMITS.sourceBytes + 1)), when },
+      { ...expression("42"), when: [{ index: 0, truthy: false }] },
+    ])).toEqual([false, null, null, null, 42].map(value => ({ ok: true, value })));
+  });
+
+  it.each([
+    { prepareMs: 0, runMs: 8000, error: runSpent },
+    { prepareMs: 8000, runMs: 0, error: readSpent },
+  ])("carries a predicate's budget into its selected branch: $error.message", async ({ prepareMs, runMs, error }) => {
+    await using standIn = await standInWorker(`
+      for (const item of items) reply({ kind: "result", result: { ok: true, value: true }, prepareMs: ${prepareMs}, runMs: ${runMs} });
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [
+        expression("predicate"),
+        { ...expression("dead"), when: [{ index: 0, truthy: false }] },
+        { ...expression("selected"), when: [{ index: 0, truthy: true }] },
+      ])).toEqual([{ ok: true, value: true }, { ok: true, value: null }, { ok: false, error }]);
+    } finally { await fresh.close(); }
+  });
+
+  it("keeps guards resolved across worker replacement without repeating predicates", async () => {
+    await using standIn = await standInWorker(`
+      for (const item of items) {
+        const result = item.source === "break" ? { ok: false, error: { code: "memory", message: "Stopped" } }
+          : { ok: true, value: item.source };
+        reply({ kind: "result", result, prepareMs: 0, runMs: 1, ...(item.source === "break" ? { restart: true } : {}) });
+        if (item.source === "break") break;
+      }
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [
+        expression("predicate"),
+        { ...expression("break"), when: [{ index: 0, truthy: true }] },
+        { ...expression("dead"), when: [{ index: 1, truthy: false }] },
+        { ...expression("next"), when: [{ index: 0, truthy: true }] },
+      ])).toEqual([
+        { ok: true, value: "predicate" }, { ok: false, error: { code: "memory", message: "Stopped" } },
+        { ok: true, value: null }, { ok: true, value: "next" },
+      ]);
+    } finally { await fresh.close(); }
+  });
+
+  it("retains selected errors and skips dependencies of a failed predicate", async () => {
+    const results = await evaluator.evaluate(scope, [
+      expression("true"),
+      { ...expression("record.Missing.name"), when: [{ index: 0, truthy: true }] },
+      { ...expression("42"), when: [{ index: 1, truthy: false }] },
+      expression("7"),
+    ]);
+    expect(results).toEqual([
+      { ok: true, value: true }, { ok: false, error: expect.objectContaining({ code: "runtime" }) },
+      { ok: true, value: null }, { ok: true, value: 7 },
+    ]);
+  });
+
+  it.each([
+    [{ index: 1, truthy: true }], [{ index: -1, truthy: true }], [{ index: 0.5, truthy: true }],
+    [{ index: 0, truthy: "yes" }], [{ index: 0, truthy: true }, { index: 0, truthy: true }], [null],
+  ].map(guards => ({ guards })))("rejects invalid or forward formula guards: $guards", async ({ guards }) => {
+    await expect(evaluator.evaluate(scope, [expression("true"), {
+      ...expression("1"), when: guards as NonNullable<AutomationFormula["when"]>,
+    }])).rejects.toThrow("A formula guard must refer to an earlier formula");
+  });
+
   it("reads the run's date and time on the clock of now", async () => {
     expect(await values(["today()", "now()"])).toEqual(["2026-09-24", "2026-09-24T09:30:00.000+08:00"]);
     // 23:30 in New York is already the next day in UTC; today() stays on the automation's clock.

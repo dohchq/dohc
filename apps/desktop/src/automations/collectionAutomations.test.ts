@@ -39,7 +39,7 @@ interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc 
 // automation off, so each test Collection defines them all.
 const FIELDS = [
   "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
-  "Project", "Finished on", "A", "B", "C", "D", "E",
+  "Project", "Finished on", "A", "B", "C", "D", "E", "Details",
 ];
 const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
 
@@ -379,6 +379,42 @@ const BUMP = [
 ].join("\n");
 
 describe("Collection automations", () => {
+  it.each([false, true])("uses otherwise when a guarded formula has no Details (Only if: %s)", async (onlyIf) => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: guarded", "    name: Guarded", "    when: {field-changed: Status}",
+      ...(onlyIf ? ['    if: record.Status == "Waiting"'] : []),
+      "    do:",
+      "      - if: record.Details != null",
+      "        do: [{set: {Note: '=record.Details.name'}}]",
+      "        otherwise: [{set: {Note: fallback}}]",
+    ].join("\n") } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Details: null });
+    const claim = w.claim("collection:Tasks#guarded", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Details: null, ...(onlyIf ? {} : { Note: "fallback" }) });
+    expect(w.journaled).toHaveLength(onlyIf ? 0 : 1);
+  });
+
+  it("fails a selected formula before writing any earlier planned step", async () => {
+    const w = await world({ automations: { Tasks: [
+      "  - id: guarded", "    name: Guarded", "    when: {field-changed: Status}",
+      "    do:", "      - set: {Seen: true}",
+      "      - if: record.Details == null",
+      "        do: [{set: {Note: '=record.Details.name'}}]",
+      "        otherwise: [{set: {Note: fallback}}]",
+    ].join("\n") } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Details: null });
+    const claim = w.claim("collection:Tasks#guarded", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    expect(claim.error).toContain('The formula for "Note" in step 3 failed.');
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Details: null });
+    expect(w.journaled).toEqual([]);
+  });
+
   it("subscribes each automation it can run, then sets fields on the trigger record as the automation", async () => {
     const w = await world({ automations: { Tasks: [
       "  - id: stamp",

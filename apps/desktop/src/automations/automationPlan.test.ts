@@ -165,6 +165,27 @@ describe("trigger facts", () => {
 describe("plans", () => {
   const key = { claimId: "atc_one", hash: "0123456789abcdef" };
 
+  it("guards nested conditions and both branches without changing step ordinals", () => {
+    const definition = automation([
+      "id: guarded", "name: Guarded", "when: record-added", "if: record.Count > 0", "do:",
+      "  - if: record.Details != null", "    do:",
+      "      - if: record.Details.ready", "        do: [{set: {Note: '=record.Details.name'}}]",
+      "        otherwise: [{set: {Note: '=record.Details.fallback'}}]",
+      "    otherwise: [{set: {Note: '=\"missing\"'}}]",
+      "  - set: {Seen: '=true'}",
+    ].join("\n"));
+    const request = evaluationRequest(inputs(definition), 0);
+    const yes = (index: number) => ({ index, truthy: true });
+    const no = (index: number) => ({ index, truthy: false });
+    expect(request.formulas.map(formula => formula.when ?? [])).toEqual([
+      [], [yes(0)], [yes(0), yes(1)], [yes(0), yes(1), yes(2)],
+      [yes(0), yes(1), no(2)], [yes(0), no(1)], [yes(0)],
+    ]);
+    const plan = planRun(inputs(definition), request,
+      [true, false, null, null, null, "missing", true].map(value => ({ ok: true as const, value })), key);
+    expect(plan.kind === "plan" && plan.steps.map(step => step.ordinal)).toEqual([4, 5]);
+  });
+
   it("asks for every formula in one request, reading now as the time of the change", () => {
     const definition = automation([
       "id: stamp", "name: Stamp", "when: {field-changed: Status}", "if: record.Count > 1",
@@ -173,7 +194,7 @@ describe("plans", () => {
     const request = evaluationRequest(inputs(definition), Date.UTC(2026, 8, 25, 1, 30));
     expect(request.formulas).toEqual([
       { kind: "expression", source: "record.Count > 1" },
-      { kind: "expression", source: "today()" },
+      { kind: "expression", source: "today()", when: [{ index: 0, truthy: true }] },
     ]);
     expect(request.scope).toMatchObject({
       record: { Status: "Done", Count: 2, id: "rec_task" },

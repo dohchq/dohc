@@ -509,11 +509,14 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const { automation, claim, record, found } = inputs;
   const formulas: AutomationFormula[] = [];
   const slots: Slot[] = [];
-  const add = (slot: Slot, source: string) => {
+  const add = (slot: Slot, source: string, when: NonNullable<AutomationFormula["when"]> = []) => {
+    const index = formulas.length;
     slots.push(slot);
-    formulas.push({ kind: "expression", source });
+    formulas.push({ kind: "expression", source, ...(when.length ? { when } : {}) });
+    return index;
   };
-  if (automation.if !== null) add({ kind: "only-if" }, automation.if);
+  const conditions: NonNullable<AutomationFormula["when"]> = [];
+  if (automation.if !== null) conditions.push({ index: add({ kind: "only-if" }, automation.if), truthy: true });
   const trigger = automation.when;
   if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") add({ kind: "to" }, trigger.to.expression);
   if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
@@ -524,18 +527,27 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   }
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
-  for (const { ordinal, step } of everyStep(steps)) {
-    if (step.kind === "if") add({ kind: "if", ordinal }, step.if);
-    if (step.kind !== "set" && step.kind !== "add-record") continue;
-    const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
-      ? step.records
-      : null;
-    for (const { field, value } of step.values) {
-      if (!isFormula(value)) continue;
-      if (records === null) add({ kind: "value", ordinal, field }, value.expression);
-      else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`);
+  const addSteps = (entries: readonly OrderedStep[], when: NonNullable<AutomationFormula["when"]>) => {
+    for (const entry of entries) {
+      const { ordinal, step } = entry;
+      if ("then" in entry) {
+        const index = add({ kind: "if", ordinal }, entry.step.if, when);
+        addSteps(entry.then, [...when, { index, truthy: true }]);
+        addSteps(entry.otherwise, [...when, { index, truthy: false }]);
+        continue;
+      }
+      if (step.kind !== "set" && step.kind !== "add-record") continue;
+      const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
+        ? step.records
+        : null;
+      for (const { field, value } of step.values) {
+        if (!isFormula(value)) continue;
+        if (records === null) add({ kind: "value", ordinal, field }, value.expression, when);
+        else add({ kind: "values", ordinal, field }, `(${records}).map((record) => (${value.expression}\n))`, when);
+      }
     }
-  }
+  };
+  addSteps(steps, conditions);
   const bound: JsonObject = {};
   for (const [name, binding] of bindings) {
     bound[name] = binding.kind === "find" ? (found.get(binding.ordinal) ?? []).map(recordScope) : null;
