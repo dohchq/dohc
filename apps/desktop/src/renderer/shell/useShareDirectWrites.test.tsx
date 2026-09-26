@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge, PushShareDirectWritesResult, ShareDirectWritesPushedEvent } from "../../ipc/bridgeContract";
-import { useShareDirectWrites, type DirectWriteNotice } from "./useShareDirectWrites";
+import { useShareDirectWrites, type DirectWriteNotice, type ShareViewRefresh } from "./useShareDirectWrites";
 
 let pushed: ((event: ShareDirectWritesPushedEvent) => void) | null = null;
 const pushShareDirectWrites = vi.fn<(payload: { workspaceId: string }) => Promise<PushShareDirectWritesResult>>();
@@ -26,11 +26,11 @@ afterEach(() => {
   delete window.dohcDesktop;
 });
 
-async function setup(options: { enabled?: boolean; workspaceId?: string; opened?: PushShareDirectWritesResult } = {}) {
+async function setup(options: { enabled?: boolean; workspaceId?: string; opened?: PushShareDirectWritesResult; ended?: boolean } = {}) {
   const workspaceId = options.workspaceId ?? "share-view";
   if (options.opened) pushShareDirectWrites.mockResolvedValueOnce(options.opened);
   const notices: DirectWriteNotice[] = [];
-  const refreshShareView = vi.fn(async () => undefined);
+  const refreshShareView = vi.fn(async (): Promise<ShareViewRefresh> => (options.ended ? "ended" : "current"));
   const sendShareChanges = vi.fn(async () => undefined);
   const hook = renderHook(() =>
     useShareDirectWrites({
@@ -173,19 +173,30 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
   ]);
 });
 
-it("says once per session that the server takes no direct changes, and offers Send changes", async () => {
-  const { notices, sendShareChanges, hook } = await setup({ workspaceId: "lane-off-view", opened: { status: "unavailable" } });
-  answer({ status: "unavailable" }, "lane-off-view");
-  hook.unmount();
-  const again = await setup({ workspaceId: "lane-off-view", opened: { status: "unavailable" } });
-  expect(again.notices).toEqual([]);
-  expect(notices).toEqual([expect.objectContaining({
+it("says the person's access ended once the view's refresh finds the share ended", async () => {
+  const { notices, refreshShareView } = await setup({ opened: { status: "unavailable" }, ended: true });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices).toEqual([{
     kind: "direct-write-unavailable",
-    message: "ana@example.com's server doesn't take Collection changes directly. Send your changes for ana@example.com to review.",
-    send: expect.objectContaining({ label: "Send changes" }),
-  })]);
-  notices[0]!.send?.run();
-  expect(sendShareChanges).toHaveBeenCalledTimes(1);
+    message: "Your access to this share ended, so your Collection changes didn't reach ana@example.com. Ask ana@example.com to share it again.",
+    retry: null,
+    send: null,
+  }]);
+  expect(refreshShareView).toHaveBeenCalledTimes(1);
+});
+
+it("says the changes did not go, with Try again, when the refresh finds the share still open", async () => {
+  const { notices, refreshShareView } = await setup({ opened: { status: "unavailable" }, ended: false });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(refreshShareView).toHaveBeenCalledTimes(1);
+  expect(notices[0]).toMatchObject({
+    kind: "direct-write-failed",
+    message: "dohc could not send your Collection changes to ana@example.com.",
+    send: null,
+  });
+  const pushes = pushShareDirectWrites.mock.calls.length;
+  await act(async () => { notices[0]!.retry?.(); });
+  expect(pushShareDirectWrites).toHaveBeenCalledTimes(pushes + 1);
 });
 
 it("ignores an answer that arrives after the view closed", async () => {

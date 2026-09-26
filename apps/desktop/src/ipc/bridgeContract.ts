@@ -4996,8 +4996,8 @@ const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
 
 // What one push did. A failure is an ordinary result, for the reason a failed
 // submit is one: Electron does not carry custom Error properties across IPC.
-// `unavailable`: the relay does not take direct writes, so every change
-// waits for Send changes. `failed` keeps the writes answered before it;
+// `unavailable`: the relay knows no Edit grant of this person's on the share,
+// because the owner ended the share or stopped them. `failed` keeps the writes answered before it;
 // `lasting` says trying again will not help, as when the grant is not Edit.
 export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),

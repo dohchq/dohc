@@ -145,9 +145,7 @@ export interface CreateSyncRelayHandlerOptions {
   relayExchangeKey?: string;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
-  // Direct writes to a Collection's own files under Edit. Off unless the
-  // deployment opts in.
-  collectionWritesEnabled?: boolean;
+  // Rate limit for direct writes to a Collection's own files under Edit.
   collectionWriteRateLimiter?: TokenBucketLimiter;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
@@ -230,7 +228,6 @@ export function createSyncRelayHandler({
   relayExchangeKey,
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
-  collectionWritesEnabled = false,
   collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
@@ -464,7 +461,6 @@ export function createSyncRelayHandler({
 
   const respondToCollectionWrites = createCollectionWriteRoutes({
     storage,
-    enabled: collectionWritesEnabled,
     rateLimiter: collectionWriteRateLimiter,
     nowMs,
     newId,
@@ -935,12 +931,16 @@ export function createSyncRelayHandler({
   });
 }
 
-/** Only recovery imports have an authenticated, bounded streaming body reader. */
-export function isDatasetRecoveryUpload(url: URL, method: string): boolean {
-  if (method !== "POST") return false;
+/**
+ * The routes whose handlers authenticate before they read the body, and bound
+ * its size and receipt time: recovery imports and direct writes. Classified by
+ * the same parse as dispatch, so every spelling of the path streams.
+ */
+export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
-    return route.route === "dataset" && route.action === "import";
+    return (route.route === "dataset" && route.action === "import" && method === "POST") ||
+      route.route === "share-collection-writes";
   } catch { return false; }
 }
 

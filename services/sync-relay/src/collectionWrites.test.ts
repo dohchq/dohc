@@ -1,10 +1,12 @@
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import { MAX_COLLECTION_WRITE_BODY_BYTES, readCollectionWritesConfig } from "./collectionWriteRoutes";
+import { MAX_COLLECTION_WRITE_BODY_BYTES } from "./collectionWriteRoutes";
 import { pathCollisionKey } from "./pathCollisionKey";
-import type { SyncRelayHandler } from "./server";
+import { streamsRequestBody, type SyncRelayHandler } from "./server";
 import {
   filterCollectionWriteForShare,
   MAX_COLLECTION_WRITE_BYTES,
@@ -63,7 +65,7 @@ async function relay(
   options: { overrides?: HandlerOverrides; paths?: string[]; access?: "view" | "comment" | "edit" } = {},
 ): Promise<Relay> {
   const storage = await testStorage();
-  const h = testHandler(storage, { nowMs: () => CLOCK, collectionWritesEnabled: true, ...options.overrides });
+  const h = testHandler(storage, { nowMs: () => CLOCK, ...options.overrides });
   await claimWorkspace(h, OWNER, WORKSPACE);
   const owner = new Owner(h);
   await owner.write("object-schema", `${PACKING}/collection.yaml`, SCHEMA);
@@ -203,18 +205,6 @@ describe("the fixtures", () => {
 });
 
 describe("direct writes to a Collection's own files", () => {
-  it("are off unless the deployment opts in", async () => {
-    const r = await relay({ overrides: { collectionWritesEnabled: undefined } });
-    await upload(r, SCHEMA_TWO);
-    await expectCode(await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]), 404, "not_found");
-    expect(await r.owner.directMoments()).toEqual([]);
-
-    expect(readCollectionWritesConfig(undefined)).toBe(false);
-    expect(readCollectionWritesConfig("0")).toBe(false);
-    expect(readCollectionWritesConfig("1")).toBe(true);
-    expect(() => readCollectionWritesConfig("yes")).toThrow("DOHC_RELAY_COLLECTION_WRITES must be 0 or 1.");
-  });
-
   it("mints the owner's moment for a schema edit, naming the recipient", async () => {
     const r = await relay();
     await upload(r, SCHEMA_TWO);
@@ -616,7 +606,7 @@ describe("round 1 of review", () => {
     db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = 'current-file-collision-keys-v1'").run();
     db.close();
     const reopened = reopenTestStorage(path);
-    const h = testHandler(reopened, { nowMs: () => CLOCK, collectionWritesEnabled: true });
+    const h = testHandler(reopened, { nowMs: () => CLOCK });
     const again: Relay = { ...r, h, storage: reopened };
     await upload(again, SCHEMA);
     await expectCode(await write(again, [create("trip/ideas/collection.yaml", SCHEMA)]), 409, "stale");
@@ -633,6 +623,117 @@ describe("round 1 of review", () => {
     await upload(r, removed);
     await expectCode(await write(r, [edit(`${PACKING}/automations.yaml`, withHidden, removed)]), 403, "share_op_rejected");
     expect(await r.owner.directMoments()).toEqual([]);
+  });
+});
+
+// The relay's own HTTP adapter, as main.ts configures it. The refused uploads
+// below never end, so an answer shows the relay did not wait for the whole
+// body. Each sends no more than the relay reads before it answers: the adapter
+// closes the connection after a refusal, and unread bytes would reset it.
+describe("over the HTTP adapter", () => {
+  async function serve(r: Relay): Promise<{ port: number; close(): Promise<void> }> {
+    const server = serveFetchHandler({
+      handler: r.h,
+      maxBodyBytes: () => 21 * 1024 * 1024,
+      streamBody: streamsRequestBody,
+      oversized: () => new Response(null, { status: 413 }),
+      failure: () => new Response(null, { status: 500 }),
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return {
+      port: (server.address() as AddressInfo).port,
+      close: async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+  }
+
+  function post(
+    port: number,
+    path: string,
+    options: { as: string | null; body: Uint8Array; end: boolean; method?: string; length?: number },
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (options.as !== null) headers.authorization = `Bearer user:${options.as}`;
+      if (options.length !== undefined) headers["content-length"] = String(options.length);
+      const sent = httpRequest({ host: "127.0.0.1", port, path, method: options.method ?? "POST", headers });
+      sent.on("response", (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => { text += chunk; });
+        response.on("end", () => {
+          sent.destroy();
+          resolve({ status: response.statusCode ?? 0, body: text });
+        });
+      });
+      sent.on("error", reject);
+      sent.write(options.body);
+      if (options.end) sent.end();
+    });
+  }
+
+  it("refuses a caller without credentials before reading the body, whatever the method", async () => {
+    const r = await relay();
+    const server = await serve(r);
+    try {
+      for (const method of ["POST", "PUT", "GET", "HEAD"]) {
+        const answer = await post(server.port, `/sync/shares/${r.shareId}/collection-writes`, {
+          as: null,
+          body: new Uint8Array(1024),
+          end: false,
+          method,
+          // Node sends a GET's body only under a stated length.
+          length: 4096,
+        });
+        expect({ method, status: answer.status }).toEqual({ method, status: 401 });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bounds the body at 1 MiB under every spelling of the path", async () => {
+    const r = await relay();
+    const server = await serve(r);
+    try {
+      for (const path of [
+        `/sync/shares/${r.shareId}/collection-writes`,
+        `/sync/shares/${r.shareId}/collection-writes/`,
+        `/sync/shares/${r.shareId}/collection%2Dwrites`,
+      ]) {
+        const answer = await post(server.port, path, {
+          as: RECIPIENT,
+          body: new Uint8Array(MAX_COLLECTION_WRITE_BODY_BYTES + 1).fill(0x20),
+          end: false,
+        });
+        expect({ path, status: answer.status, code: JSON.parse(answer.body).code })
+          .toEqual({ path, status: 413, code: "payload_too_large" });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("writes a streamed body", async () => {
+    const r = await relay();
+    await upload(r, SCHEMA_TWO);
+    const server = await serve(r);
+    try {
+      const answer = await post(server.port, `/sync/shares/${r.shareId}/collection-writes`, {
+        as: RECIPIENT,
+        body: new TextEncoder().encode(JSON.stringify({
+          submitId: "streamed",
+          changes: [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)],
+        })),
+        end: true,
+      });
+      expect(answer.status, answer.body).toBe(200);
+      expect((await r.owner.directMoments()).length).toBe(1);
+    } finally {
+      await server.close();
+    }
   });
 });
 
