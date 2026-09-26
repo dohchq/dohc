@@ -13,7 +13,7 @@ export function shareLinkSummary(
       : access === "edit"
         ? "This link grants read, comment, and edit access. " +
           (selector?.versionId === null && liveEditingAvailable
-            ? "You can edit live Markdown files while a document host is online."
+            ? "You can edit Markdown files here. Editing pauses while the workspace is offline, and you can still read then."
             : "Editing is unavailable on this link.")
         : "The link's permissions are unavailable.";
   const paths = selector?.paths;

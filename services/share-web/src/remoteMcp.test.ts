@@ -239,7 +239,7 @@ it.each([
   if (versionId !== null) {
     expect(summary).toContain("pinned version");
     expect(summary).toContain("Editing is unavailable on this link.");
-  } else if (access === "edit") expect(summary).toContain("while a document host is online");
+  } else if (access === "edit") expect(summary).toContain("Editing pauses while the workspace is offline");
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
   expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
 });
