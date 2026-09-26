@@ -111,10 +111,42 @@ test("doctor requires a disk measurement only when a build budget is configured"
         assert.equal(result.checks.find(check=>check.name==='disk').state,expected,JSON.stringify({floor,free}));
         assert.ok(result.checks.filter(check=>check.name!=='disk').every(check=>check.state==='PASS'));
       }
+      cp.execFileSync=command=>{assert.equal(command,'pwsh.exe','unrelated native tool probe');return '7.6.5';};
+      syncBuiltinESMExports();
+      measurement=1;
+      fs.rmSync('node_modules/electron',{recursive:true,force:true});
+      fs.rmSync('node_modules/playwright',{recursive:true,force:true});
+      const selective=doctor({engine:false,desktop:false,browser:false});
+      assert.ok(selective.checks.every(check=>check.state!=='FAIL'));
+      assert.ok(!selective.checks.some(check=>['rustc','cargo','electron','playwright','engine build','desktop build'].includes(check.name)));
     `], { cwd: root, encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("engine-only readiness validates the native artifact without requiring a desktop build", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-engine-only-ready-"));
+  try {
+    createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import cp from 'node:child_process';
+      import {writeFileSync} from 'node:fs';
+      import {syncBuiltinESMExports} from 'node:module';
+      const exec=cp.execFileSync;
+      cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+      syncBuiltinESMExports();
+      const {prepare,assertPrepared,enginePath}=await import('./scripts/verification/build.mjs');
+      await prepare({engineOnly:true});
+      assert.ok(assertPrepared({engineOnly:true}).engine.artifact);
+      assert.throws(()=>assertPrepared(),/does not match/);
+      writeFileSync(enginePath,'changed artifact');
+      assert.throws(()=>assertPrepared({engineOnly:true}),/does not match/);
+    `], {cwd:root,encoding:"utf8",timeout:20_000});
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });
 
 for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
@@ -330,13 +362,14 @@ test("verification prepares the engine after Rust without changing gate scope", 
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
-      put("apps/desktop/package.json", "{}");
-      put("packages/fixture/package.json", '{"scripts":{"test":"vitest run"}}');
+      put("apps/desktop/package.json", '{"name":"@dohc/desktop"}');
+      put("packages/fixture/package.json", '{"name":"@dohc/fixture","scripts":{"test":"vitest run"}}');
+      put("pnpm-workspace.yaml", 'packages: ["apps/*", "packages/*"]\n');
       for (const name of ["dohc", "dohc-mcp"]) {
         put(`apps/desktop/resources/cli-bin/${name}`, "fixture launcher");
         chmodSync(join(root, "apps/desktop/resources/cli-bin", name), 0o755);
@@ -390,7 +423,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
             return {stdout:''};
           }
           if(command==='pnpm' && args.includes('list')) {
-            return {stdout:JSON.stringify([{name:'@dohc/fixture',path:join(repoRoot,'packages/fixture')}])};
+            return {stdout:JSON.stringify([{name:'@dohc/fixture',path:join(repoRoot,'packages/fixture')},{name:'@dohc/desktop',path:join(repoRoot,'apps/desktop')}])};
           }
           if(command==='pnpm' && args[1]==='@dohc/fixture') {
             assert.deepEqual(args,['--filter','@dohc/fixture','run','test','--maxWorkers=4']);
@@ -854,7 +887,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
     ]) {
