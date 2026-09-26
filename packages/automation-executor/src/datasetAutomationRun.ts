@@ -6,7 +6,6 @@ import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervis
 import type { DatasetDefinition, DatasetOperation, DatasetRevision, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import { isNoticeLine, NOTICE_TARGET_FIELD_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
 import {
   definitionDigest,
   definitionHash,
@@ -73,10 +72,24 @@ const MAX_REPLANS = 5;
 // Reads keep no receipt, so they share one key.
 const READ_KEY = "automation-read";
 
+/** The caller a dataset host gives one run: every invocation the run makes carries it. */
+export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
+
+/** One invocation of an approved operation, as a run or an Undo sends it. */
+export interface DatasetInvocation {
+  datasetId: string;
+  revision: number;
+  revisionSha256: string;
+  operationId: string;
+  input: JsonValue;
+  idempotencyKey: string;
+  signal?: AbortSignal;
+}
+
 /** The dataset host as a run uses it. LocalDatasetHost's `automations` satisfies it. */
 export interface DatasetRunHost {
-  context(input: { automationId: string; claimId: string; depth: number }): LocalDatasetAutomationContext;
-  invoke(context: LocalDatasetAutomationContext, input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
+  context(input: { automationId: string; claimId: string; depth: number }): DatasetAutomationContext;
+  invoke(context: DatasetAutomationContext, input: DatasetInvocation): Promise<DatasetInvocationResult>;
   revision(datasetId: string): DatasetRevision;
   generated(datasetId: string): boolean;
   resolves(reference: { datasetId: string; revision: number; revisionSha256: string }): boolean;
@@ -153,7 +166,7 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
 /** One invocation as this run's automation, with the owner caller. */
 async function invoke(
   host: DatasetRunHost,
-  context: LocalDatasetAutomationContext,
+  context: DatasetAutomationContext,
   rules: Rules,
   operationId: string,
   input: JsonValue,
@@ -173,7 +186,7 @@ async function invoke(
  */
 function readRecord(
   host: DatasetRunHost,
-  context: LocalDatasetAutomationContext,
+  context: DatasetAutomationContext,
   rules: Rules,
   read: DatasetOperation,
   table: DatasetTable,
@@ -204,7 +217,7 @@ export async function readDatasetRecord(
  * owner through the read its runs find their record with.
  */
 export async function datasetRecordExists(
-  host: Pick<DatasetRunHost, "revision"> & { invokeAsOwner(input: LocalDatasetInvocation): Promise<DatasetInvocationResult> },
+  host: Pick<DatasetRunHost, "revision"> & { invokeAsOwner(input: DatasetInvocation): Promise<DatasetInvocationResult> },
   datasetId: string,
   automation: Automation,
   recordId: DatasetRecordId,
@@ -491,7 +504,7 @@ async function applyEffect(
   context: {
     dependencies: DatasetAutomationRunDependencies;
     host: DatasetRunHost;
-    context: LocalDatasetAutomationContext;
+    context: DatasetAutomationContext;
     run: StoredRun;
     index: number;
     ordinal: number;

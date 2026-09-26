@@ -26,7 +26,7 @@ import type {
   CollectionAutomationUndo,
   PressSettled,
   PressWaitReason,
-} from "../automations/collectionAutomations";
+} from "@dohc/automation-executor/collection-automations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
   NOTICE_BODY_MAX_CHARS,

@@ -13,7 +13,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "./recordIds";
 import type { ReachCollection, ReachStep } from "./automationReach";
 import {
   automationMessageId,

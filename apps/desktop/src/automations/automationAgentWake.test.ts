@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AUTOMATION_NO_RUNNER, wakeAgent, type AgentWakeDependencies } from "./automationAgentWake";
-import type { AutomationChatMessage } from "./automationChat";
+import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 
 const message: AutomationChatMessage = {
   target: { kind: "agent" },

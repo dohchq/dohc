@@ -19,7 +19,7 @@ import type {
   QueryCollectionRecordsResult,
   WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
-import type { AutomationButtonState } from "../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import {

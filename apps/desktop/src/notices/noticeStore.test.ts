@@ -22,9 +22,9 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { ListNoticesResult } from "../ipc/bridgeContract";
 import { createTestScratch } from "../workspaces/testTemp";
+import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   createNoticeStore,
-  NoticeNotSentError,
   type NoticeAccount,
   type NoticeStore,
   type PostNoticeInput,

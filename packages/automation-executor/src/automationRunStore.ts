@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import type { PlannedEffect } from "./automationPlan";
 import type { StoredReachVerdict } from "./reachVerdicts";
 
@@ -468,7 +467,23 @@ function progressText(run: StoredRun): string {
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
 
-export function createAutomationRunStore(rootPath: string): AutomationRunStore {
+/**
+ * Where a host keeps a workspace's metadata, the desktop's `<root>/.dohc`:
+ * made if missing, and refused when it is not a real folder the host allows.
+ * With `create: false` it makes nothing and answers null when the folder does
+ * not exist, for reads that change nothing.
+ */
+export interface MetadataDirResolver {
+  (rootPath: string): Promise<string>;
+  (rootPath: string, options: { create: false }): Promise<string | null>;
+}
+
+/**
+ * The run store of the workspace at `rootPath`, under `automations` in the
+ * folder `resolveMetadataDir` answers. Reads that change nothing make no
+ * folders.
+ */
+export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver): AutomationRunStore {
   // The file count at which each automation's folder is pruned next.
   const pruneAt = new Map<string, number>();
   // Writes queue behind each other, so two saves never race one rename.
@@ -478,7 +493,7 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     queue = next.catch(() => undefined);
     return next;
   };
-  const base = async () => realFolder(join(await resolveWorkspaceMetadataDir(rootPath), "automations"));
+  const base = async () => realFolder(join(await resolveMetadataDir(rootPath), "automations"));
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
@@ -560,8 +575,14 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
 
   return {
     async runsOf(automationId, claimId) {
-      let folder = rootPath;
-      for (const segment of [".dohc", "automations", "runs", hashName(automationId)]) {
+      let folder: string | null;
+      try {
+        folder = await resolveMetadataDir(rootPath, { create: false });
+      } catch {
+        return { runs: [], unreadable: true };
+      }
+      if (folder === null) return { runs: [], unreadable: false };
+      for (const segment of ["automations", "runs", hashName(automationId)]) {
         const found = await existingFolder(join(folder, segment));
         if (found === null) return { runs: [], unreadable: false };
         if (found === "unusable") return { runs: [], unreadable: true };

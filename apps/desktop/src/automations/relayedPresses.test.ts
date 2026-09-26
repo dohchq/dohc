@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RelayAutomationPress } from "@dohc/workspace-contracts/relay";
-import type { CollectionAutomationPress } from "./collectionAutomations";
+import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
 import {
   createRelayedPressHost,
   type HeldClaim,

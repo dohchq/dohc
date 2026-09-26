@@ -1,4 +1,5 @@
 import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import { runningThread } from "@dohc/automation-executor/automation-chat";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // WS-MU-C3 — desktop DM orchestration, kept out of main.ts so it is unit
@@ -64,23 +65,6 @@ export async function requireShareableChatChannel(input: {
     throw new Error("Only groups can be shared.");
   }
   return channel;
-}
-
-// The single running conversation (the anti-forum rule): the oldest thread in
-// the DM channel, deterministically (createdAtMs, then thread id) — every
-// participant picks the same one even if a race ever minted a duplicate.
-// Exported so startDm reuses the same canonical-thread rule as listDmRecords
-// (the two must never drift).
-export function runningThread<
-  T extends { thread: { id: string; createdAtMs: number } },
->(threads: T[]): T | undefined {
-  return threads
-    .slice()
-    .sort(
-      (a, b) =>
-        a.thread.createdAtMs - b.thread.createdAtMs ||
-        (a.thread.id < b.thread.id ? -1 : 1),
-    )[0];
 }
 
 // The local DM list (no network): every dm-kind channel with its running

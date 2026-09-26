@@ -15,7 +15,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { expressionProblem } from "../../automations/automationPlan";
+import { expressionProblem } from "@dohc/automation-executor/automation-plan";
 import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";

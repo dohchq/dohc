@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "./recordIds";
 import {
   collectionAutomationId,
   definitionHash,

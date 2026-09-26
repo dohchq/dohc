@@ -5,9 +5,7 @@ import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervis
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { AutomationScope } from "@dohc/app-backend-runtime/automation";
-import { NoticeNotSentError } from "../notices/noticeStore";
-import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, testMetadataDir } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   AutomationChatSessionWait,
@@ -16,6 +14,7 @@ import {
   automationThreadId,
   automationWakeThreadId,
   chatDirectoryOf,
+  NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
   type ChatDirectoryChannel,
@@ -24,7 +23,14 @@ import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
 import { datasetEffectKey } from "./datasetAutomationPlan";
-import { ACCESS_NARROWED_ERROR, RULES_CHANGED_ERROR, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import {
+  ACCESS_NARROWED_ERROR,
+  RULES_CHANGED_ERROR,
+  runDatasetAutomation,
+  type DatasetAutomationContext,
+  type DatasetInvocation,
+  type DatasetRunHost,
+} from "./datasetAutomationRun";
 
 // A dataset run against a scripted host: what it sends, under which key,
 // and what it does when the approved rules change under a saved plan.
@@ -71,10 +77,10 @@ const sendsNothing = {
   recipientVerdicts: async () => { throw new Error("This automation names nobody by formula."); },
 };
 
-function host(script: { resolves: () => boolean; edit: (input: LocalDatasetInvocation) => Promise<JsonValue> }) {
-  const sent: LocalDatasetInvocation[] = [];
+function host(script: { resolves: () => boolean; edit: (input: DatasetInvocation) => Promise<JsonValue> }) {
+  const sent: DatasetInvocation[] = [];
   const surface: DatasetRunHost = {
-    context: (input) => Object.freeze({ ...input }) satisfies LocalDatasetAutomationContext,
+    context: (input) => Object.freeze({ ...input }) satisfies DatasetAutomationContext,
     revision: () => revision,
     generated: () => true,
     dataGrants: () => ({ workspaceId: "workspace", grants: [] }),
@@ -114,7 +120,7 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
 
 describe("a dataset automation run", () => {
   it("resends a stopped effect under the same key with the same content, and fails once the saved rules no longer resolve", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     const input = (stopped: AbortSignal) => ({
       claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped,
@@ -163,7 +169,7 @@ describe("the rules a dataset run uses", () => {
     const script = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
     let reads = 0;
     const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
@@ -189,7 +195,7 @@ automations:
         operation: invoices.edit
 `);
     if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const sent: LocalDatasetInvocation[] = [];
+    const sent: DatasetInvocation[] = [];
     const surface: DatasetRunHost = {
       ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
       invoke: async (_context, input): Promise<DatasetInvocationResult> => {
@@ -201,7 +207,7 @@ automations:
         return { result: { rows, nextCursor: { id: "r49", value: "r49" } }, revision: 7, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     expect(await runDatasetAutomation({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
@@ -248,7 +254,7 @@ automations:
         operation: items.edit
 `);
     if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const sent: LocalDatasetInvocation[] = [];
+    const sent: DatasetInvocation[] = [];
     const surface: DatasetRunHost = {
       context: (input) => Object.freeze({ ...input }),
       revision: () => ({ ...revision, definition: two }),
@@ -264,7 +270,7 @@ automations:
         return { result: { id: body.id, version: body.expectedVersion + 1, priorValues: prior }, revision: 8, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     const added: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ship",
       fact: { kind: "added", datasetId: definition.datasetId, tableId: A, recordId: "1", version: 5, fields: [{ fieldId: A_STATUS, previous: null, next: "New" }] } };
     expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
@@ -320,7 +326,7 @@ automations:
     const outcome = await runDatasetAutomation({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "x" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
     }, {
       claim: { ...claim, fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: stamp, collection: { path: "Budget", name: "Budget" },
@@ -343,7 +349,7 @@ automations:
   });
 
   it("stops a resumed plan once an editor can no longer read a field it was planned with, and keeps what landed", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"), testMetadataDir);
     const stop = new AbortController();
     const host = (edit: () => Promise<JsonValue>): DatasetRunHost => ({
       context: (input) => Object.freeze({ ...input }),
@@ -395,7 +401,7 @@ automations:
     expect(await runDatasetAutomation({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "Added" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
     }, {
       claim: { ...claim, automationId: "collection:Budget#tell", fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: post, collection: { path: "Budget", name: "Budget" },
@@ -447,7 +453,7 @@ describe("chat steps in a dataset run", () => {
   it("posts, sends a direct message, and notifies as the automation, one chain step deeper, each keyed by its claim, definition, and step", async () => {
     const script = edits();
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
     expect(await runDatasetAutomation({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       claim: { ...told, depth: 2 }, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -471,7 +477,7 @@ describe("chat steps in a dataset run", () => {
 
   it("sends a message that may have landed again under the same ids, and Try again sends only what did not go", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
     const attempt = async (spy: ReturnType<typeof chatSpy>, run: number, stopped: AbortSignal) => await runDatasetAutomation(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { claim: { ...told, run }, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped });
@@ -498,7 +504,7 @@ describe("chat steps in a dataset run", () => {
 
   it("waits for a session to post in a synced workspace, then posts under the same id", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
     const attempt = async (spy: ReturnType<typeof chatSpy>) => await runDatasetAutomation(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { claim: told, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal });
@@ -522,7 +528,7 @@ describe("chat steps in a dataset run", () => {
       ({ result: { rows: [{ id: "a ", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }) };
     const spy = chatSpy();
     expect(await runDatasetAutomation({
-      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-chat-")),
+      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir),
       nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
     }, {
       claim: { ...claim, automationId: "collection:Budget#notify", fact: { ...added, recordId: "a " } }, automation: notify, collection: BUDGET,
@@ -534,7 +540,7 @@ describe("chat steps in a dataset run", () => {
   it("stops before it reads anything when an editor cannot post in the Group", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("A stopped run writes nothing."); } });
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
     expect(await runDatasetAutomation({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       claim: told, automation: tell, collection: BUDGET, roster: owner([...ANA, BOB]), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "failed", error: "bob@dohc.test cannot post in Team.", timedOut: false });
@@ -562,7 +568,7 @@ describe("chat steps in a dataset run", () => {
     const run = async (grants: RosterGrant[]) => {
       const spy = chatSpy();
       const outcome = await runDatasetAutomation({
-        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-wake-")),
+        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir),
         nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
       }, { claim: pressed, automation: ask, collection: BUDGET, roster: owner(grants), signal: new AbortController().signal, stopped: new AbortController().signal });
       return { outcome, messages: spy.messages };
@@ -578,7 +584,7 @@ describe("chat steps in a dataset run", () => {
   });
 
   it("does not resume a saved wake once the automation no longer resolves under the rules", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir);
     let rules = withButton;
     const surface: DatasetRunHost = { ...host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } }).surface,
       revision: () => ({ ...revision, definition: rules }) };
