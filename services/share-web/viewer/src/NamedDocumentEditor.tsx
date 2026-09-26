@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from "react";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
 import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {PropertiesAsWritten, useFrontmatterAsWritten} from "./PropertiesAsWritten";
 import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>["select"]>;
@@ -15,6 +16,7 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
 export function NamedDocumentEditor({session, path, onState, link = false}: {session: NamedDocumentSession; path: string; link?: boolean;
   onState(state: NamedLiveBrowserState): void}) {
   const element = useRef<HTMLDivElement>(null), [state, setState] = useState(session.state());
+  const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
     if (!element.current) return;
     const editor = mountLiveBodyEditor(element.current, {body: session.body, label: "Shared file editor",
@@ -28,6 +30,7 @@ export function NamedDocumentEditor({session, path, onState, link = false}: {ses
     <h1>{path}</h1>
     <p className="named-document-status" role="status">{statusText(state, link)}</p>
     {state.status === "disconnected" && <button className="handoff-button secondary" onClick={() => void session.reconnect()}>Retry connection</button>}
+    <PropertiesAsWritten block={frontmatter}/>
     <div className="named-body-editor" ref={element} />
   </section>;
 }

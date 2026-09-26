@@ -67,7 +67,7 @@ function PublicationControl(props: PublicationProps) {
     {props.triggerLabel ? <PrimaryButton ref={trigger} onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
     </IconButton>}
-    {open ? <PublicationDialog {...props} onClose={close} /> : null}
+    {open ? <PublicationDialog {...props} onClose={close} onReopen={() => setOpen(true)} /> : null}
   </>;
 }
 
@@ -77,7 +77,7 @@ function linkLabel(link: ActiveLink) {
   return `${paths}${version} · ${link.access} · ${link.grantId.slice(0, 8)}`;
 }
 
-function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
+function PublicationDialog(props: PublicationProps & { onClose: () => void; onReopen: () => void }) {
   const [links, setLinks] = useState<ActiveLink[]>([]);
   const [selected, setSelected] = useState("");
   const [loading, setLoading] = useState(true);
@@ -217,7 +217,11 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
       setReactivating(false);
       setPreparedLink(link);
     } catch (error) {
-      if (alive.current && mine === request.current) { cancel(candidate.current); candidate.current = null; setError(ipcErrorMessage(error, "dohc could not prepare this app. Try again.")); }
+      if (alive.current && mine === request.current) {
+        cancel(candidate.current); candidate.current = null;
+        // After the dialog closes, Try again reopens it so the owner can prepare the app again.
+        reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(error, "")), () => { if (alive.current) void prepareWith(input, link); else props.onReopen(); });
+      }
     } finally { if (alive.current && mine === request.current) { setBusy(null); setLocalPreparing(false); } }
   };
   const prepare = () => selectedLink ? prepareWith({ action: "prepare", workspaceId: props.workspaceId, appRoot: props.appRoot, shareId: selectedLink.shareId, grantId: selectedLink.grantId }, linkLabel(selectedLink)) : undefined;

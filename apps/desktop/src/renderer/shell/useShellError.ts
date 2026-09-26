@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
@@ -8,6 +9,7 @@ export type ShellErrorKind =
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
+  | "cloud-sync"
   | "import-files"
   | "share-refresh"
   | DirectWriteNoticeKind
@@ -25,8 +27,8 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
-  // Facts for a report, one "label: value" line each, such as a technical
-  // cause. They go into Copy details, not the text a person reads.
+  // Facts for a report, one "label: value" line each, such as the error as
+  // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
   retry: (() => void) | null;
   // A step offered beside Try again: one that fixes the cause, such as
@@ -47,27 +49,38 @@ export function useShellError(workspaceId: string) {
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
+  // `seen` files the row without a toast; "keep" gives it the seen state of
+  // the row of its kind it replaces, so an open toast stays open.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" = false) => {
       nextId.current += 1;
-      const next: ShellError = {
-        ...error,
-        message:
-          error.message.length > SHELL_ERROR_MAX_CHARS
-            ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
-            : error.message,
-        id: `shell-error-${nextId.current}`,
-        atMs: Date.now(),
-        seen: false,
-      };
-      setShellErrors((current) => [
-        ...current.filter(
-          (existing) =>
-            existing.message !== next.message &&
-            (next.kind === undefined || existing.kind !== next.kind),
-        ),
-        next,
-      ]);
+      const id = `shell-error-${nextId.current}`;
+      const atMs = Date.now();
+      const message =
+        error.message.length > SHELL_ERROR_MAX_CHARS
+          ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
+          : error.message;
+      setShellErrors((current) => {
+        const replaced =
+          error.kind === undefined
+            ? undefined
+            : current.find((existing) => existing.kind === error.kind);
+        const next: ShellError = {
+          ...error,
+          message,
+          id,
+          atMs,
+          seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
+        };
+        return [
+          ...current.filter(
+            (existing) =>
+              existing.message !== next.message &&
+              (next.kind === undefined || existing.kind !== next.kind),
+          ),
+          next,
+        ];
+      });
     },
     [],
   );
@@ -117,12 +130,10 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
     ) => {
-      const detail = error instanceof Error ? error.message.trim() : "";
+      const { cause } = readError(error);
       push({
-        message:
-          detail && detail !== fallback && !detail.startsWith(`${fallback} `)
-            ? `${fallback} ${detail}`
-            : detail || fallback,
+        message: withErrorWords(fallback, error),
+        ...(cause ? { details: [["Cause", cause]] } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
@@ -130,21 +141,31 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   // A failure already worded for the person. Report facts, such as a raw
-  // cause, go into Copy details only. A kind makes a newer message replace
-  // the row of an older one, such as one import's result replacing the last.
+  // cause, go into Copy details only; so does `cause`, the error that caused
+  // the words. Text that arrives raw is read into words the same way. A kind
+  // makes a newer message replace the row of an older one, such as one
+  // import's result replacing the last.
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
+      cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
       kind?: ShellErrorKind;
-    }) =>
+    }) => {
+      const shown = readError(failure.message);
+      const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      const details: ReadonlyArray<ErrorDetailField> = [
+        ...(failure.details ?? []),
+        ...(cause ? [["Cause", cause] as const] : []),
+      ];
       push({
-        message: failure.message,
+        message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
-        ...(failure.details?.length ? { details: failure.details } : {}),
+        ...(details.length ? { details } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
-      }),
+      });
+    },
     [push],
   );
   // Content search lives in the shell so its results survive panel switches.
@@ -161,6 +182,20 @@ export function useShellError(workspaceId: string) {
     [reportShellError],
   );
   const clearSearchError = useCallback(() => clearKind("workspace-search"), [clearKind]);
+  // One sync failure at a time: a new report replaces the last one. A toast
+  // interrupts; otherwise the row keeps whatever toast its predecessor had.
+  const reportSyncFailure = useCallback(
+    (
+      notice: { message: string; detail: string; toast: boolean },
+      retry: () => void,
+    ) =>
+      push(
+        { message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
+        notice.toast ? false : "keep",
+      ),
+    [push],
+  );
+  const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -170,8 +205,8 @@ export function useShellError(workspaceId: string) {
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
-      const cause = error instanceof Error ? error.message : null;
-      push({ message: cause ? `${lane} ${cause}` : lane, retry });
+      const { cause } = readError(error);
+      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry });
     },
     [push],
   );
@@ -267,6 +302,8 @@ export function useShellError(workspaceId: string) {
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,

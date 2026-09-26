@@ -11,6 +11,7 @@ import {
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { ipcErrorMessage } from "../ipcError";
 
 type WorkspaceGraphNode = WorkspaceGraphResult["nodes"][number];
 
@@ -826,7 +827,7 @@ export function GraphView(props: {
             current.chatMentionsEnabled === chatMentionsEnabled
               ? current.graph
               : null,
-          error: error instanceof Error ? error.message : "Graph failed to load",
+          error: ipcErrorMessage(error, "Graph failed to load"),
         }));
       },
     },

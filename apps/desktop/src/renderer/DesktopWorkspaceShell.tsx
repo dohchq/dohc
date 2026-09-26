@@ -42,6 +42,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
+import { readError } from "../ipc/errorWords";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -70,6 +71,7 @@ import {
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
+import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useAutomationRetry } from "./collections/useAutomationRetry";
@@ -80,6 +82,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -760,6 +763,8 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // The error as it arrived, for Copy details.
+    cause?: string;
     // Admission stopped on pending writes or retained failures from another
     // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
@@ -812,6 +817,8 @@ export function DesktopWorkspaceShell(props: {
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -823,11 +830,12 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
-  // For surfaces that report a failure as one sentence. One stable identity:
-  // ChatsView keys its polls and subscriptions off onError, so a fresh arrow
-  // per shell render tore them down and re-armed them every render.
+  // For surfaces that report a failure as one sentence, with the error that
+  // caused it when they have one. One stable identity: ChatsView keys its
+  // polls and subscriptions off onError, so a fresh arrow per shell render
+  // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string) => reportShellFailure({ message }),
+    (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -843,13 +851,17 @@ export function DesktopWorkspaceShell(props: {
   // the address that failed when the panel it came from has closed.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
-      reportShellError(error.message, new Error(error.message), () => {
-        if (error.retry?.()) return;
-        setCloudRetryServerUrl(error.serverUrl ?? "");
-        setCloudOpen(true);
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (error.retry?.()) return;
+          setCloudRetryServerUrl(error.serverUrl ?? "");
+          setCloudOpen(true);
+        },
       });
     },
-    [reportShellError],
+    [reportShellFailure],
   );
 
   // The live-document dialog's own reads and actions, straight through to
@@ -3557,11 +3569,12 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
-          const detail = error instanceof Error ? error.message.trim() : "";
+          const { words, cause } = readError(error);
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
-            message: detail || "dohc could not open this workspace.",
+            message: words ?? "dohc could not open this workspace.",
+            ...(cause ? { cause } : {}),
           });
         }
         return;
@@ -4105,6 +4118,10 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
+  const crashReportNotice = useCrashReport({
+    reportError: reportShellError,
+    showSuccess: showSuccessNotice,
+  });
 
   // Resolves true when the view is current: refreshed, or not a shared
   // view at all. A failed, superseded, or ended refresh resolves false.
@@ -4770,6 +4787,28 @@ export function DesktopWorkspaceShell(props: {
       });
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
+  const retryCloudSyncCommand = useCallback(
+    (askedFor: string, reason: "person" | "reconnect") =>
+      bridge().retryCloudSync({ workspaceId: askedFor, reason }),
+    [],
+  );
+  const syncFailureNotice = useSyncFailureNotice({
+    workspaceId,
+    failure: syncStatus === null ? undefined : (syncStatus.syncFailure ?? null),
+    retryCloudSync: retryCloudSyncCommand,
+    report: reportSyncFailure,
+    clear: clearSyncFailure,
+  });
+  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const dismissWorkspaceError = useCallback(
+    (id: string) => {
+      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
+        syncFailureNotice.noteDismissed();
+      }
+      dismissShellError(id);
+    },
+    [dismissShellError, shellErrors, syncFailureNotice],
+  );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
@@ -5035,7 +5074,7 @@ export function DesktopWorkspaceShell(props: {
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
-              onDismissWorkspaceError={dismissShellError}
+              onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView
                 ? {}
@@ -5046,6 +5085,7 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              {...crashReportNotice}
               onRetryAutomationFailure={automationFailureRetry.retry}
               onOpenAutomation={openAutomation}
               automationFailureToast={automationFailureToast}
@@ -5952,6 +5992,7 @@ export function DesktopWorkspaceShell(props: {
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
+                  ["Cause", workspaceOpenFailure.cause],
                   ...reportFacts(),
                 ])
               }

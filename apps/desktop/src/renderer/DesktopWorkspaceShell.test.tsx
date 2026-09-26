@@ -39,6 +39,7 @@ import type {
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   RetryCollectionAutomationResult,
@@ -153,6 +154,7 @@ import {
   resetCollectionFieldWritesForTests,
 } from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
@@ -355,6 +357,7 @@ function makeBaseBridge(
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
+  const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -426,6 +429,9 @@ function makeBaseBridge(
     ),
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
+    retryCloudSync: vi.fn(
+      async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
@@ -750,6 +756,21 @@ function makeBaseBridge(
         return () => automationFailuresCallbacks.delete(listener);
       },
     ),
+    readCrashReport: vi.fn(
+      async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
+        report: null,
+        sendTo: null,
+      }),
+    ),
+    dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
+    sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    emitCrashReportChanged: () => {
+      for (const callback of [...crashReportCallbacks]) callback();
+    },
+    onCrashReportChanged: vi.fn((listener: () => void) => {
+      crashReportCallbacks.add(listener);
+      return () => crashReportCallbacks.delete(listener);
+    }),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -1286,6 +1307,9 @@ afterEach(async () => {
   // The collection write queue is module state on purpose too — a pending
   // head left by one test must not open sessions inside the next.
   resetCollectionFieldWritesForTests();
+  // What a sync failure already showed is module state too, so it holds
+  // across the shell's remounts.
+  forgetSyncFailureNoticesForTests();
 });
 
 describe("plugin panel tabs", () => {
@@ -7721,18 +7745,27 @@ describe("engine store recovery", () => {
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => {
-      throw new Error("EACCES: permission denied");
+      throw new Error(
+        "Error invoking remote method 'desktop:rebuild-engine-store': Error [EACCES]: EACCES: permission denied",
+      );
     });
     const { user, dialog } = await openRebuildDialog(bridge);
 
     await user.click(
       within(dialog).getByRole("button", { name: "Move and rebuild" }),
     );
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-    ).toContain(
-      "dohc could not move this workspace's data store. EACCES: permission denied",
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
     );
+    expect(toast.textContent).not.toContain("EACCES");
+    // Copy keeps the error as it arrived, on its own line.
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied.split("\n").slice(0, 2)).toEqual([
+      "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
+      "Cause: Error [EACCES]: EACCES: permission denied",
+    ]);
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
@@ -7851,6 +7884,28 @@ describe("workspace shell errors", () => {
     );
     expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+  });
+
+  it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(
+      "dohc is still reading this workspace's files. Try again when it finishes.",
+    );
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|OVERLOADED|invoking remote method/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
+      "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ]);
   });
 
   it("retries a failed initial listing without reopening the workspace", async () => {
@@ -9653,6 +9708,96 @@ describe("automation failure notices", () => {
       bridge.listAutomationFailures.mock.calls.length,
       "another workspace's failures repainting this one",
     ).toBe(reads);
+  });
+});
+
+describe("crash report notice", () => {
+  const REPORT = {
+    revision: 3,
+    through: 3,
+    source: "engine" as const,
+    problems: 1,
+    atMs: 5_000,
+    text: "dohc crash report\n\nTime: 1970-01-01T00:00:05.000Z\nProcess: workspace engine",
+  };
+
+  it("offers Copy report and no Send report when this build has no report server", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("crash-report-toast");
+    expect(toast.textContent).toContain("The workspace engine failed");
+    expect(screen.queryByTestId("crash-report-toast-send")).toBeNull();
+    expect(screen.getByTestId("crash-report-toast-copy").getAttribute("aria-label")).toBe("Copy report");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).not.toContain("Send report");
+    expect(screen.getByTestId("notice-crash-report-copy").getAttribute("aria-label")).toBe("Copy report");
+    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
+  });
+
+  it("hands Send report to main, which asks, and says Report sent only when it went", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    // The person cancelled main's dialog.
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: false });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
+    // No dialog of the renderer's own: main asks.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("crash-report-toast-send")).toBeTruthy());
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: true });
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: "reports.example.test" });
+    await user.click(screen.getByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
+  });
+
+  it("keeps the report and offers Try again when the send fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    bridge.sendCrashReport.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'desktop:send-crash-report': Error: The connection to the report server failed."),
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not send the crash report. The connection to the report server failed.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledTimes(2));
+  });
+
+  it("dismisses up to the problem on screen and shows a newer report on the poke", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
+    await user.click(await screen.findByTestId("notice-crash-report-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("notice-crash-report")).toBeNull());
+    expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ through: 3 });
+
+    bridge.readCrashReport.mockResolvedValue({
+      report: { ...REPORT, revision: 5, through: 4, source: "window", problems: 2 },
+      sendTo: null,
+    });
+    act(() => bridge.emitCrashReportChanged());
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).toContain("A dohc window stopped unexpectedly");
+    expect(row.textContent).toContain("This report holds 2 problems.");
   });
 });
 
@@ -16286,6 +16431,151 @@ describe("owner live documents", () => {
       expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
       }),
+    );
+  });
+
+  // edges-05, share-09: a relay outage read "Saving…" for its whole length,
+  // and the row that came three failures later named no cause and offered
+  // nothing to do. Codex on #1233: the first failed pass toasts, and later
+  // passes of the same failure only update the row.
+  it("toasts a failed sync at once, only once per failure, and clears it on recovery", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing = (attempts: number): SyncStatusResult => ({
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: `RelayUnreachableError: attempt ${attempts}`,
+        sinceMs: 1000,
+        attempts,
+      },
+    });
+    let status = failing(1);
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    // The first Try again meets the same outage; the second gets through.
+    bridge.retryCloudSync = vi
+      .fn(async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => failing(3))
+      .mockImplementationOnce(async () => {
+        status = failing(3);
+        return status;
+      })
+      .mockImplementationOnce(async () => {
+        status = SYNC_STATUS;
+        return SYNC_STATUS;
+      });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    // One failed pass: the title bar, a toast with Try again and copy, and a
+    // Notices row.
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
+    );
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not reach the server.",
+    );
+    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("notice-center").textContent).toContain(
+        "dohc could not reach the server.",
+      ),
+    );
+    await user.click(screen.getByTestId("notice-center-toggle"));
+
+    // The automatic retry fails too: the same failure, so no second toast.
+    await user.click(await screen.findByRole("button", { name: "Dismiss workspace error" }));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const readsBefore = vi.mocked(bridge.getSyncStatus).mock.calls.length;
+    status = failing(2);
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(vi.mocked(bridge.getSyncStatus).mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => undefined);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).toContain(
+      "dohc could not reach the server.",
+    );
+
+    // Try again from the row, then close Notices so the toast can show.
+    await user.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),
+    );
+    if (screen.queryByTestId("notice-center")) {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+    }
+
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(1));
+    // Still failing: the person asked, so the answer interrupts again.
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("dohc could not reach the server.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(2));
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("synced"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
+    );
+  });
+
+  // The shell remounts on every workspace switch, with its status unknown
+  // until the workspace answers. Coming back to the same outage must not
+  // bring back a toast, or a row the person dismissed.
+  it("keeps a sync failure quiet across a remount once shown and dismissed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing: SyncStatusResult = {
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: down",
+        sinceMs: 1000,
+        attempts: 2,
+      },
+    };
+    // The status answers only when released, so the remount starts loading.
+    let answer: ((status: SyncStatusResult) => void) | null = null;
+    bridge.openWorkspace = vi.fn(async () => failing);
+    bridge.getSyncStatus = vi.fn(async () => failing);
+    const user = userEvent.setup();
+    const first = renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByText("dohc could not reach the server.");
+    const dismiss = row.closest("li")?.querySelector("[aria-label=\"Dismiss notice\"]");
+    if (!(dismiss instanceof HTMLElement)) throw new Error("no dismiss control on the row");
+    await user.click(dismiss);
+    first.unmount();
+
+    bridge.openWorkspace = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    bridge.getSyncStatus = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    renderShell(bridge);
+    await waitFor(() => expect(answer).not.toBeNull());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    act(() => answer?.(failing));
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
     );
   });
 
