@@ -1034,7 +1034,6 @@ type CaptureWorkRow =
   | "tracked-ordinary";
 
 type CaptureSnapshotIdentity = {
-  contentKind?: "text" | "binary";
   sha256?: string | null;
 };
 
@@ -1129,17 +1128,14 @@ function captureWorkRow(work: CaptureWorkItem): CaptureWorkRow {
   throw new Error(`Capture work has no source: ${work.path}`);
 }
 
+// Equal bytes are an unchanged file. A snapshot stored as binary before its
+// path was read as text still matches the same bytes on disk.
 function diskMatchesSnapshot(
   disk: DiskTextState,
   snapshot: CaptureSnapshotIdentity,
 ): boolean {
   if (disk.kind !== "text" && disk.kind !== "binary") return false;
-  const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
-  return (
-    disk.kind === contentKind &&
-    typeof snapshot.sha256 === "string" &&
-    disk.sha256 === snapshot.sha256
-  );
+  return typeof snapshot.sha256 === "string" && disk.sha256 === snapshot.sha256;
 }
 
 function unjournalableFromDisk(

@@ -57,6 +57,7 @@ jobs:
               - 'packages/security-contract/**'
               - 'packages/workspace-contracts/**'
               - 'packages/workspace-core/**'
+              - 'packages/workspace-fs/text-media-cases.json'
               - 'packages/workspace-engine-client/**'
               - 'packages/workspace-auth/**'
               - 'packages/service-http/**'
