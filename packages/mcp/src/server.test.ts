@@ -314,11 +314,16 @@ describe("MCP tool results", () => {
   });
 });
 
-it.each([null, "budget"] as const)("serves dispatch state through dohc_read_chat: %s", async (paused) => {
+it.each([
+  { paused: null, failureReason: "runner failed to start", exitCode: 7 },
+  { paused: "budget", failureReason: "runner failed to start", exitCode: 7 },
+  { paused: null, failureReason: "no-reply", exitCode: 0 },
+  { paused: "budget", failureReason: "no-reply", exitCode: 0 },
+] as const)("serves dispatch state through dohc_read_chat: $paused / $failureReason", async ({ paused, failureReason, exitCode }) => {
   const response = {
     ok: true, thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
     messages: [], projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
-    dispatch: { paused, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } },
+    dispatch: { paused, lastRun: { state: "failed", failureReason, exitCode } },
   };
   const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request: async () => response });
   const result = await client.callTool({ name: "dohc_read_chat", arguments: { threadId: "thread-1" } });

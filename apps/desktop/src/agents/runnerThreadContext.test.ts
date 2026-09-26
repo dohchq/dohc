@@ -131,7 +131,16 @@ describe("buildRunnerThreadContext", () => {
       workspaceId: WORKSPACE_ID,
       threadId: "th_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
+    await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1" });
+    const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected run");
+    await dispatchStore.store.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    await dispatchStore.store.markFailureNotePosted(claim.run.runId);
+    cliShowFixture.dispatch.lastRun = { state: "failed", failureReason: "no-reply", exitCode: 0 };
+    await expect(buildRunnerThreadContext({
+      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1",
+    })).resolves.toBe(renderShowMarkdown(cliShowFixture));
     await dispatchStore.store.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "th_1", paused: true, reason: "re-dispatch budget exceeded" });
-    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { paused: "budget", lastRun: null } }));
+    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
   });
 });

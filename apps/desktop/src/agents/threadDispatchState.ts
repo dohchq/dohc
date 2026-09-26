@@ -10,11 +10,16 @@ export async function readThreadDispatchState(
     store.getThreadDispatchPauseState(workspaceId, threadId),
     store.latestRunForThread(workspaceId, threadId),
   ]);
+  const failureReason = run?.failureReason ?? (
+    run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureNotePosted
+      ? "no-reply"
+      : null
+  );
   return {
     paused: pause?.paused ? "budget" : null,
     lastRun: run ? {
-      state: run.endedAtMs === undefined ? "running" : run.failureReason || run.exitCode !== 0 ? "failed" : "completed",
-      failureReason: run.failureReason ?? null,
+      state: run.endedAtMs === undefined ? "running" : failureReason || run.exitCode !== 0 ? "failed" : "completed",
+      failureReason,
       exitCode: run.exitCode ?? null,
     } : null,
   };

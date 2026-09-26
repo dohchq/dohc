@@ -2463,6 +2463,11 @@ describe("CLI socket server", () => {
     if (!next) throw new Error("Expected next run");
     await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
     expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
+    await dispatchStore.markFailureNotePosted(next.run.runId);
+    const noReply = { paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 } };
+    expect(await show()).toMatchObject({ dispatch: noReply, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: noReply });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, next.run.runId)).toEqual([]);
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {
@@ -3893,18 +3898,23 @@ describe("CLI socket server", () => {
     });
     expect(threadOnly).toEqual({ threadIds: [opened.threadId] });
 
+    const pauseRead = vi.spyOn(dispatchStore, "getThreadDispatchPauseState");
+    const runRead = vi.spyOn(dispatchStore, "latestRunForThread");
     const exported = await invoke("export", {
       cwd: workspaceRoot,
       actor: "human",
       scope: { kind: "thread", thread: opened.threadId },
       outDir: "exports",
     });
+    expect(pauseRead).not.toHaveBeenCalled();
+    expect(runRead).not.toHaveBeenCalled();
     expect(exported.files).toHaveLength(1);
     expect(exported.files[0]?.threadId).toBe(opened.threadId);
     const markdown = await readFile(exported.files[0]!.path, "utf8");
     expect(markdown).toContain(
       `<!-- exported from dohc chat thread ${opened.threadId} at 2026-07-10T04:05:06.000Z -->`,
     );
+    expect(markdown).not.toContain("dispatch:");
     expect(markdown).toContain("# Search and export");
     expect(markdown).toContain(`thread: ${opened.threadId} · #general`);
     expect(markdown).toContain("The stable blockId is our unique Needle");
