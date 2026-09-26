@@ -147,17 +147,11 @@ pub trait AtomicReplacer: Send + Sync {
         std::fs::rename(target, displaced)
     }
 
-    /// Check that the filesystem holding `dir` can rename atomically without
-    /// replacing. Fails with [`ErrorKind::Unsupported`] when it cannot; a
-    /// placement there is then a check-then-rename, and the workspace reports
-    /// the limit. Every placement asks first, through `place_attempt`.
-    fn check_no_replace(&self, dir: &Path) -> std::io::Result<()> {
-        check_no_replace_support(dir)
-    }
-
     /// Move `incoming` to `target` only while nothing exists at `target`.
-    /// Fails with [`ErrorKind::AlreadyExists`] otherwise.
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    /// Fails with [`ErrorKind::AlreadyExists`] otherwise. Reports which
+    /// rename it used, so a workspace whose drive falls back to a
+    /// check-then-rename can say so.
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         rename_no_replace(incoming, target)
     }
 
@@ -173,6 +167,17 @@ pub trait AtomicReplacer: Send + Sync {
     ) -> std::io::Result<()> {
         pinned_replace()
     }
+}
+
+/// Which rename placed a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// A rename that refuses, atomically, to replace an existing file.
+    Atomic,
+    /// A rename after an absence check, on a filesystem with neither an
+    /// exclusive rename nor hard links. A file another program creates
+    /// between the check and the rename is lost.
+    CheckThenRename,
 }
 
 /// The production replacer, using the trait's own steps.
@@ -193,27 +198,32 @@ impl AtomicReplacer for StdReplacer {}
 /// link and then remove the incoming name. A Unix filesystem that supports
 /// neither (FAT, exFAT, some SMB and FUSE mounts) falls back to a rename
 /// after an absence check, which a file another program creates in between
-/// can lose. The workspace then reports that it lacks atomic placement.
+/// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
-fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
+fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
     // Cleanup is disabled first, so dropping the path, including on the error
     // path, never deletes `incoming`.
     let mut path = tempfile::TempPath::try_from_path(incoming)?;
     path.disable_cleanup(true);
-    path.persist_noclobber(target).map_err(|err| err.error)
+    path.persist_noclobber(target).map_err(|err| err.error)?;
+    Ok(Placement::Atomic)
 }
 
 #[cfg(not(windows))]
-fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
+fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
     match rename_no_replace_atomic(incoming, target) {
+        Ok(()) => Ok(Placement::Atomic),
         Err(err) if err.kind() == ErrorKind::Unsupported => {
             match std::fs::symlink_metadata(target) {
                 Ok(_) => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
-                Err(err) if err.kind() == ErrorKind::NotFound => std::fs::rename(incoming, target),
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    std::fs::rename(incoming, target)?;
+                    Ok(Placement::CheckThenRename)
+                }
                 Err(err) => Err(err),
             }
         }
-        result => result,
+        Err(err) => Err(err),
     }
 }
 
@@ -258,55 +268,6 @@ fn hard_links_unsupported(err: &std::io::Error) -> bool {
             let errno = Errno::from_raw_os_error(code);
             errno == Errno::PERM || errno == Errno::NOTSUP || errno == Errno::OPNOTSUPP
         })
-}
-
-/// Windows' no-replace move is atomic on every filesystem.
-#[cfg(windows)]
-fn check_no_replace_support(_dir: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// Rename an empty scratch file of the probe's own in `dir` with the atomic
-/// no-replace rename, then delete it. The answer is kept per device for the
-/// life of the process, whether it passed or failed.
-#[cfg(not(windows))]
-fn check_no_replace_support(dir: &Path) -> std::io::Result<()> {
-    use std::collections::HashMap;
-    use std::os::unix::fs::MetadataExt;
-    use std::sync::{Mutex, OnceLock};
-    static PROBED: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
-    let probed = PROBED.get_or_init(|| Mutex::new(HashMap::new()));
-    let device = std::fs::symlink_metadata(dir)?.dev();
-    let known = probed
-        .lock()
-        .ok()
-        .and_then(|devices| devices.get(&device).copied());
-    let supported = match known {
-        Some(supported) => supported,
-        None => {
-            let from = dir.join(format!(".dohc-write-probe-{}", std::process::id()));
-            let to = dir.join(format!(".dohc-write-probe-{}.moved", std::process::id()));
-            let _ = std::fs::remove_file(&to);
-            std::fs::write(&from, b"")?;
-            let answer = rename_no_replace_atomic(&from, &to);
-            let _ = std::fs::remove_file(&from);
-            let _ = std::fs::remove_file(&to);
-            let supported = match answer {
-                Ok(()) => true,
-                Err(err) if err.kind() == ErrorKind::Unsupported => false,
-                Err(err) => return Err(err),
-            };
-            if let Ok(mut devices) = probed.lock() {
-                devices.insert(device, supported);
-            }
-            supported
-        }
-    };
-    if supported {
-        Ok(())
-    } else {
-        Err(std::io::Error::from(ErrorKind::Unsupported))
-    }
 }
 
 /// The delay schedule between bounded atomic-replace retries. Injectable so
@@ -1720,23 +1681,24 @@ fn place_after_displace(
 }
 
 /// One try of a no-replace placement. Every placement, by a write, a delete's
-/// return, or recovery after a restart, comes through here, so a directory
-/// whose filesystem falls back to a check-then-rename is always recorded
-/// first.
+/// return, or recovery after a restart, comes through here. A placement the
+/// rename reports as a check-then-rename records its directory, so the
+/// workspace reports the limit.
 fn place_attempt(
     replacer: &dyn AtomicReplacer,
     incoming: &Path,
     target: &Path,
 ) -> Result<Attempt<bool>, MaterializeError> {
-    if let Some(dir) = target.parent()
-        && let Err(err) = replacer.check_no_replace(dir)
-        && err.kind() == ErrorKind::Unsupported
-        && let Ok(mut dirs) = dirs_without_atomic_placement().lock()
-    {
-        dirs.insert(dir.to_path_buf());
-    }
     match replacer.place(incoming, target) {
-        Ok(()) => Ok(Attempt::Done(true)),
+        Ok(Placement::Atomic) => Ok(Attempt::Done(true)),
+        Ok(Placement::CheckThenRename) => {
+            if let Some(dir) = target.parent()
+                && let Ok(mut dirs) = dirs_without_atomic_placement().lock()
+            {
+                dirs.insert(dir.to_path_buf());
+            }
+            Ok(Attempt::Done(true))
+        }
         Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(Attempt::Done(false)),
         Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
         Err(err) => Err(MaterializeError::io(target, &err)),
@@ -3805,7 +3767,7 @@ mod tests {
             Err((self.error)())
         }
 
-        fn place(&self, _incoming: &Path, _target: &Path) -> std::io::Result<()> {
+        fn place(&self, _incoming: &Path, _target: &Path) -> std::io::Result<Placement> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             Err((self.error)())
         }
@@ -4150,7 +4112,7 @@ mod tests {
             std::fs::rename(target, displaced)
         }
 
-        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
             if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
                 return Err(std::io::Error::from(ErrorKind::PermissionDenied));
             }

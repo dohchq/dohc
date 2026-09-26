@@ -55,7 +55,7 @@ pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
 pub use materialize::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, MaterializeOptions,
-    NoBackoff, ProjectionTargetKind, ProjectionTargetState, ReplaceBackoff, StdBackoff,
+    NoBackoff, Placement, ProjectionTargetKind, ProjectionTargetState, ReplaceBackoff, StdBackoff,
     StdReplacer, backoff_delay, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, probe_projection_target, recover_displacements,
     recover_path_displacements, run_pending_jobs, workspace_lacks_atomic_placement,
