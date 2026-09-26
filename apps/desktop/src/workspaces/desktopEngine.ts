@@ -11,7 +11,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer } from "./captureActivityBridge";
+import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
 import { bridgeRecordEventsToPlugins } from "./recordEventsBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
@@ -80,6 +80,9 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed"> | undefined };
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   notifyAutomationFailuresChanged(workspaceId: string): void;
+  // The engine announced that a workspace's drive has no rename that refuses
+  // to replace a file.
+  noteNoAtomicPlacement(workspaceId: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
@@ -472,6 +475,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // signal that a moment landed, so bridge them onto the renderer's
       // workspace-activity ping or the history timeline goes permanently stale.
       bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
+      // The first placement that falls back on a drive without atomic
+      // renames announces it at once; the capture health poll is a backstop.
+      bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);
       // The daemon also records collection changes autonomously: its record
       // events are the only live signal behind a plugin's collections.watch
       // subscription, so route each one to the owning workspace's registry.

@@ -6,9 +6,10 @@
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, NoBackoff,
-    ReplaceBackoff, StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
-    run_pending_jobs, save_kept_displacement, workspace_lacks_atomic_placement,
+    AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, KeptCopySave,
+    MaterializeOptions, NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay,
+    materialize_secret_one, recover_displacements, recover_path_displacements, run_pending_jobs,
+    save_kept_displacement, workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -914,7 +915,7 @@ impl AtomicReplacer for FlakyReplacer {
         }
     }
 
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         match self.fail() {
             Some(err) => Err(err),
             None => StdReplacer.place(incoming, target),
@@ -1331,7 +1332,7 @@ impl AtomicReplacer for RaceBefore {
         StdReplacer.displace(target, displaced)
     }
 
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         self.arrive(RenameStep::Place);
         StdReplacer.place(incoming, target)
     }
@@ -2085,7 +2086,7 @@ fn a_file_truncated_mid_write_returns_and_conflicts() {
 struct ReturnsFail;
 
 impl AtomicReplacer for ReturnsFail {
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         if incoming.to_string_lossy().ends_with(".displaced") {
             return Err(std::io::Error::other("injected return failure"));
         }
@@ -2110,7 +2111,7 @@ fn a_failed_return_is_retried_and_the_file_comes_back() {
         fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
             self.0.displace(target, displaced)
         }
-        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
             self.1.place(incoming, target)
         }
     }
@@ -2187,7 +2188,7 @@ impl AtomicReplacer for RecordRenames {
         }
     }
 
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         self.record("place", incoming, target);
         StdReplacer.place(incoming, target)
     }
@@ -2448,7 +2449,7 @@ impl AtomicReplacer for TwoSaves {
         Ok(())
     }
 
-    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
         if self.lock_put_backs && incoming.to_string_lossy().ends_with(".displaced") {
             return Err(transient_lock_error());
         }
@@ -2575,12 +2576,14 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
 
 /// A filesystem with neither an exclusive rename nor hard links, as FAT or an
 /// SMB share can be on Linux and macOS. Its placement is the check-then-rename
-/// fallback, which here is the ordinary no-replace rename.
+/// fallback; here the ordinary no-replace rename stands in for it and reports
+/// the fallback.
 struct NoAtomicRename;
 
 impl AtomicReplacer for NoAtomicRename {
-    fn check_no_replace(&self, _incoming: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+        StdReplacer.place(incoming, target)?;
+        Ok(Placement::CheckThenRename)
     }
 }
 
@@ -2624,4 +2627,123 @@ fn a_filesystem_without_atomic_no_replace_writes_and_reports_the_limit() {
         vec![JobOutcome::Completed]
     );
     assert!(!workspace_lacks_atomic_placement(ordinary.workspace()));
+}
+
+/// A crash left a replace between its renames. After the restart, only the
+/// recovery sweep runs, and it puts the file back with a check-then-rename on
+/// this drive. The workspace reports the limit from recovery alone.
+#[test]
+fn recovery_after_a_restart_on_a_drive_without_atomic_renames_reports_the_limit() {
+    let sc = Scratch::new("no-atomic-recovery");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &NoAtomicRename, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(!sc.target("a.md").exists());
+        assert!(
+            !workspace_lacks_atomic_placement(sc.workspace()),
+            "nothing was placed before the crash"
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    recover_displacements(
+        &store,
+        sc.workspace(),
+        None,
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &NoAtomicRename,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
+    )
+    .expect("recover");
+    assert_eq!(
+        read(&sc, "a.md").as_deref(),
+        Some(PREIMAGE),
+        "the file is back"
+    );
+    assert!(workspace_lacks_atomic_placement(sc.workspace()));
+}
+
+/// A write creates, truncates and follows nothing but its own names. A file
+/// and a symlink at the names an earlier build's probe used, the symlink
+/// pointing outside the workspace, are left exactly as they were.
+#[test]
+fn a_write_leaves_files_and_symlinks_at_old_probe_names_untouched() {
+    let sc = Scratch::new("old-probe-names");
+    let outside = Scratch::new("old-probe-outside");
+    let outside_file = outside.target("precious.txt");
+    std::fs::write(&outside_file, b"outside the workspace").expect("outside file");
+    let pid = std::process::id();
+    let probe = sc.target(&format!(".dohc-write-probe-{pid}"));
+    std::fs::write(&probe, b"someone else's bytes").expect("file at the probe name");
+    let moved = sc.target(&format!(".dohc-write-probe-{pid}.moved"));
+    let linked = try_make_file_symlink(&outside_file, &moved).expect("symlink");
+
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+    assert_eq!(
+        std::fs::read(&probe).expect("probe file"),
+        b"someone else's bytes"
+    );
+    if linked {
+        assert!(
+            std::fs::symlink_metadata(&moved)
+                .expect("symlink kept")
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert_eq!(
+        std::fs::read(&outside_file).expect("outside file"),
+        b"outside the workspace"
+    );
+}
+
+/// A network filesystem can do a rename and then report it failed. A
+/// check-then-rename that errors after taking effect still records the limit.
+struct FallbackRenameFailsAfterMoving;
+
+impl AtomicReplacer for FallbackRenameFailsAfterMoving {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+        StdReplacer.place(incoming, target)?;
+        Err(CheckThenRenameFailed::wrap(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )))
+    }
+}
+
+#[test]
+fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit() {
+    let sc = Scratch::new("fallback-fails-after-moving");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let job = spec("j1", "a.md", &hex_sha256(OURS), Preimage::Absent, 1, 10);
+    stage_job(&mut store, OURS, &job);
+
+    let result = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &FallbackRenameFailsAfterMoving,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
+    );
+    assert!(result.is_err(), "the rename reported failure");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS), "it took effect");
+    assert!(workspace_lacks_atomic_placement(sc.workspace()));
 }

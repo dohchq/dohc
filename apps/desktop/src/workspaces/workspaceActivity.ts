@@ -229,6 +229,19 @@ export function createWorkspaceActivity(
     notify({ workspaceId: entry.workspace.workspaceId });
   }
 
+  // Sticky: the drive does not change while the workspace is open. The
+  // engine's event and the health poll both land here; only the first
+  // notifies.
+  function markAtomicPlacementUnavailable(entry: WatchedWorkspace): void {
+    if (entry.atomicPlacementUnavailable) return;
+    entry.atomicPlacementUnavailable = true;
+    notify({ workspaceId: entry.workspace.workspaceId });
+  }
+
+  function recordAtomicPlacementUnavailable(state: WorkspaceActivityState): void {
+    if (state.entry) markAtomicPlacementUnavailable(state.entry);
+  }
+
   // A shared view has no recorder, so its refresh is what reaches the store.
   // It reports the store's refusal here, or null once the store answered, so
   // the same status stops the workspace.
@@ -278,11 +291,7 @@ export function createWorkspaceActivity(
             await options.captureFor(workspace, {
               onCaptureOutcome: (failure, detail = null) =>
                 recordCaptureOutcome(entry, failure, detail),
-              onAtomicPlacementUnavailable: () => {
-                if (entry.atomicPlacementUnavailable) return;
-                entry.atomicPlacementUnavailable = true;
-                notify({ workspaceId: entry.workspace.workspaceId });
-              },
+              onAtomicPlacementUnavailable: () => markAtomicPlacementUnavailable(entry),
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
@@ -639,6 +648,7 @@ export function createWorkspaceActivity(
     stopEngine,
     getStatus,
     recordShareViewStoreRefusal,
+    recordAtomicPlacementUnavailable,
     isOpen,
     queueCloudSync,
     retryCloudSync,

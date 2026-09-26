@@ -137,7 +137,7 @@ function fixture() {
       },
     },
     collectionAutomations: { current: (id) => states.get(id)?.collectionAutomations },
-    notifyRenderer: vi.fn(), notifyAutomationFailuresChanged: vi.fn(),
+    notifyRenderer: vi.fn(), notifyAutomationFailuresChanged: vi.fn(), noteNoAtomicPlacement: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
@@ -702,6 +702,8 @@ describe("desktop engine composed sessions and events", () => {
       expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
       expect(f.states.get("workspace")!.collectionAutomations.notifyClaimed).toHaveBeenCalledOnce();
       expect(f.dependencies.notifyAutomationFailuresChanged).toHaveBeenCalledWith("workspace");
+      f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
+      expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
       f.client.emit("record.updated", payload);
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });

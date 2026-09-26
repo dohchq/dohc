@@ -84,6 +84,7 @@ import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useShellError } from "./shell/useShellError";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -820,6 +821,7 @@ export function DesktopWorkspaceShell(props: {
     clearSearchError,
     reportSyncFailure,
     clearSyncFailure,
+    reportDriveLimit,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4817,15 +4819,21 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
-  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const driveLimitNotice = useDriveLimitNotice({
+    workspaceId,
+    unavailable: syncStatus?.atomicPlacementUnavailable === true,
+    report: reportDriveLimit,
+  });
+  // A dismissed sync failure stays dismissed until it ends, and a dismissed
+  // drive limit for the session, across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
-      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
-        syncFailureNotice.noteDismissed();
-      }
+      const kind = shellErrors.find((error) => error.id === id)?.kind;
+      if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
+      if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       dismissShellError(id);
     },
-    [dismissShellError, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, shellErrors, syncFailureNotice],
   );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
