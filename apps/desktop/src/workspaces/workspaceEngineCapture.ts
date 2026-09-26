@@ -16,6 +16,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  VersionedTextStoreError,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentMetadata,
@@ -3134,15 +3135,22 @@ export function createWorkspaceEngineCapture(
           summary: `Updated ${pathBasename(path)}`,
           correlationId: `authored-write-${createId()}`,
         };
-        await engine.writeTextFile({
-          workspaceId,
-          versionId,
-          path,
-          text,
-          ...(writeOptions.createOnly ? { createOnly: true } : {}),
-          metadata,
-          author,
-        });
+        try {
+          await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path,
+            text,
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
+            metadata,
+            author,
+          });
+        } catch (error) {
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
+          }
+          throw error;
+        }
         if (!writeOptions.createOnly) {
           await materialize([{ kind: "write", path, text }], policy);
         }

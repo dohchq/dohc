@@ -5,7 +5,9 @@ use crate::{EngineDbIdentity, RuntimeError};
 use dohc_engine_domain::{
     DomainError, VersionedTextStore, WriteResult, WriteText, write_text_in_tx,
 };
-use dohc_engine_files::materialize::{AuthoredCreateStage, cleanup_authored_create_stages};
+use dohc_engine_files::materialize::{
+    AuthoredCreatePublishError, AuthoredCreateStage, cleanup_authored_create_stages,
+};
 use dohc_engine_files::search_policy::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, hex_sha256,
@@ -62,6 +64,11 @@ fn admit(store: &mut EngineStore, input: &WriteText, root: &Path) -> Result<(), 
     if versions.get_active_version(&input.workspace_id)?.version_id != input.version_id {
         return Err(DomainError::InvalidVersion.into());
     }
+    Ok(())
+}
+
+fn require_absent_head(store: &mut EngineStore, input: &WriteText) -> Result<(), RuntimeError> {
+    let versions = VersionedTextStore::new(store);
     match versions.read_text(&input.workspace_id, &input.version_id, &input.path) {
         Ok(None) => Ok(()),
         Ok(Some(_)) | Err(DomainError::BinaryHeadNotText) => {
@@ -89,11 +96,39 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        self.versioned_text_create_with_publish(
+            input,
+            root,
+            faults,
+            token,
+            AuthoredCreateStage::publish,
+        )
+        .await
+    }
+
+    async fn versioned_text_create_with_publish(
+        &self,
+        input: WriteText,
+        root: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        publish: impl FnOnce(&AuthoredCreateStage) -> Result<bool, AuthoredCreatePublishError>
+        + Send
+        + 'static,
+    ) -> Result<WriteResult, RuntimeError> {
         let state = Arc::clone(&self.state);
         let identity = self.identity.clone();
         self.run(move |store, cache| {
             cache.clear();
-            let result = create_on_store(store, &input, &root, &identity, faults.as_ref(), &token);
+            let result = create_on_store(
+                store,
+                &input,
+                &root,
+                &identity,
+                faults.as_ref(),
+                &token,
+                publish,
+            );
             if result.is_err() && pending(store).map_or(true, |row| row.is_some()) {
                 // The worker closes after this command. Queued capture requests
                 // fail, and workspace reopen recovers before starting a watcher.
@@ -122,6 +157,7 @@ impl ActorHandle {
                 let stage = AuthoredCreateStage::open(&root, &input.path, &id)?;
                 if stage.is_published()? {
                     admit(store, &input, &root)?;
+                    require_absent_head(store, &input)?;
                     let result = versioned_text_write_on_store(
                         store,
                         &input,
@@ -152,6 +188,7 @@ fn create_on_store(
     identity: &EngineDbIdentity,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    publish: impl FnOnce(&AuthoredCreateStage) -> Result<bool, AuthoredCreatePublishError>,
 ) -> Result<WriteResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -168,18 +205,44 @@ fn create_on_store(
     )?;
     validate_root(root, identity)?;
     admit(store, input, root)?;
-    // Exercise domain validation and reject reuse of an ordinary write request.
-    // Nothing from this preflight transaction is committed.
-    store.preview_write(|tx| {
-        let result = write_text_in_tx(tx, input)?;
-        if result.deduped {
-            return Err(RuntimeError::from(DomainError::TargetPathExists));
-        }
-        Ok::<_, RuntimeError>(())
+    let is_create_replay = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT kind = 'authored-create' FROM engine_requests WHERE request_id = ?1",
+            [&input.request_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+        .map_err(StorageError::corrupt_public)
     })?;
+    if !is_create_replay {
+        require_absent_head(store, input)?;
+    }
+    // The domain validates the exact request payload and reconstructs its
+    // original result. Only a committed create may bypass the absent-path rule.
+    let preview = store.preview_write(|tx| write_text_in_tx(tx, input))?;
+    if preview.deduped {
+        return if is_create_replay {
+            Ok(preview)
+        } else {
+            Err(DomainError::TargetPathExists.into())
+        };
+    }
+    if is_create_replay {
+        return Err(DomainError::StateCorrupt {
+            reason: "authored create replay has no prior result",
+        }
+        .into());
+    }
     let id = hex_sha256(format!("{}\0{}", input.workspace_id, input.moment_id).as_bytes());
     let stage = AuthoredCreateStage::open(root, &input.path, &id)?;
-    stage.prepare(&input.text)?;
+    // The actor proved no intent is pending. This private stage can only be
+    // an abandoned preparation from an earlier attempt with the same identity.
+    stage.cleanup()?;
+    if let Err(error) = stage.prepare(&input.text) {
+        let _ = stage.cleanup();
+        return Err(error.into());
+    }
     let json = serde_json::to_string(input).map_err(|_| DomainError::StateCorrupt {
         reason: "could not encode authored create intent",
     })?;
@@ -188,7 +251,11 @@ fn create_on_store(
         Ok::<_, RuntimeError>(())
     });
     if !matches!(saved, Ok(TxnOutcome::Committed(()))) {
-        // Retain private evidence on an ambiguous storage error. Reopen owns cleanup.
+        // A failed insert may have committed. Keep its evidence unless the
+        // actor can prove that no intent references the private stage.
+        if matches!(pending(store), Ok(None)) {
+            let _ = stage.cleanup();
+        }
         saved?;
         return Err(RuntimeError::OperationCrashed);
     }
@@ -198,10 +265,20 @@ fn create_on_store(
         return Err(RuntimeError::Cancelled);
     }
     validate_root(root, identity)?;
-    if !stage.publish()? {
-        discard(store)?;
-        let _ = stage.cleanup();
-        return Err(DomainError::TargetPathExists.into());
+    match publish(&stage) {
+        Ok(true) => {}
+        Ok(false) => {
+            discard(store)?;
+            let _ = stage.cleanup();
+            return Err(DomainError::TargetPathExists.into());
+        }
+        Err(error) => {
+            if !error.published {
+                discard(store)?;
+                let _ = stage.cleanup();
+            }
+            return Err(error.error.into());
+        }
     }
     // Cancellation after publication cannot abandon authorship. The durable
     // intent survives any failure here; recovery uses these exact IDs and author.
@@ -222,6 +299,7 @@ fn create_on_store(
 mod tests {
     use super::*;
     use crate::{EngineDbIdentity, WorkspaceActor};
+    use dohc_engine_files::materialize::MaterializeError;
     use dohc_engine_storage::FaultPoint;
     use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 
@@ -258,6 +336,274 @@ mod tests {
             })
             .await
             .expect("history");
+    }
+
+    #[tokio::test]
+    async fn create_replay_rejects_different_payload_and_ordinary_write_requests() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        actor
+            .handle()
+            .versioned_text_create(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("create");
+        let mut changed = input();
+        changed.text = "different input".into();
+        assert!(matches!(
+            actor
+                .handle()
+                .versioned_text_create(
+                    changed,
+                    scratch.path().into(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/record.md")).expect("bytes"),
+            input().text
+        );
+        actor.close().expect("close");
+        let ordinary = ScratchDir::new().expect("ordinary scratch");
+        let mut actor = open(ordinary.path());
+        actor
+            .handle()
+            .versioned_text_write(input(), Arc::new(NoFaults), CancellationToken::new())
+            .await
+            .expect("ordinary write");
+        assert!(matches!(
+            actor
+                .handle()
+                .versioned_text_create(
+                    input(),
+                    ordinary.path().into(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(DomainError::TargetPathExists))
+        ));
+        assert!(!ordinary.path().join("tasks/record.md").exists());
+        actor.close().expect("close");
+    }
+
+    #[tokio::test]
+    async fn abandoned_private_preparation_does_not_block_the_same_create() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        let input = input();
+        let id = hex_sha256(format!("{}\0{}", input.workspace_id, input.moment_id).as_bytes());
+        AuthoredCreateStage::open(scratch.path(), &input.path, &id)
+            .expect("stage")
+            .prepare("partial preparation")
+            .expect("abandoned bytes");
+        actor
+            .handle()
+            .versioned_text_create(
+                input,
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retry");
+        assert_moment(&actor.handle(), true).await;
+        actor.close().expect("close");
+    }
+
+    #[tokio::test]
+    async fn supervisor_replaces_an_actor_that_requires_recovery() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(scratch.path()).expect("db");
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let first = supervisor.open(&db, 1).expect("first actor");
+        // Hold the observable state at the point before the worker's Closed guard.
+        first
+            .actor
+            .state
+            .store(LifecycleState::RecoveryRequired.as_u8(), Ordering::Release);
+        let replacement = supervisor.open(&db, 2).expect("replacement actor");
+        assert!(
+            replacement.created_actor,
+            "reconnect must not reuse the fenced actor"
+        );
+        replacement
+            .actor
+            .run(|_, _| Ok(()))
+            .await
+            .expect("replacement accepts work");
+        supervisor.close_all().expect("close");
+    }
+
+    #[tokio::test]
+    async fn a_regular_file_parent_refuses_create_without_fencing_the_actor() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        std::fs::write(scratch.path().join("tasks"), "keep parent file").expect("parent file");
+        let result = actor
+            .handle()
+            .versioned_text_create(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Materialize(MaterializeError::Io {
+                kind: std::io::ErrorKind::NotADirectory,
+                ..
+            }))
+        ));
+        assert_moment(&actor.handle(), false).await;
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks")).expect("parent bytes"),
+            "keep parent file"
+        );
+        actor.close().expect("close");
+    }
+
+    #[tokio::test]
+    async fn unpublished_create_failure_preserves_actor_and_returns_filesystem_error() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        let result = actor
+            .handle()
+            .versioned_text_create_with_publish(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                |stage| {
+                    stage
+                        .cleanup()
+                        .expect("make publication evidence unavailable");
+                    Err(AuthoredCreatePublishError {
+                        published: false,
+                        error: MaterializeError::Io {
+                            path: "tasks/record.md".into(),
+                            kind: std::io::ErrorKind::Unsupported,
+                        },
+                    })
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Materialize(MaterializeError::Io {
+                kind: std::io::ErrorKind::Unsupported,
+                ..
+            }))
+        ));
+        assert!(!scratch.path().join("tasks/record.md").exists());
+        assert_moment(&actor.handle(), false).await;
+        actor
+            .handle()
+            .versioned_text_create(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retry in same actor");
+        assert_moment(&actor.handle(), true).await;
+        actor.close().expect("close");
+    }
+
+    #[tokio::test]
+    async fn published_create_error_keeps_recovery_evidence() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        let result = actor
+            .handle()
+            .versioned_text_create_with_publish(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                |stage| {
+                    assert!(stage.publish().map_err(|e| e.error).expect("publish"));
+                    Err(AuthoredCreatePublishError {
+                        published: true,
+                        error: MaterializeError::Io {
+                            path: "tasks/record.md".into(),
+                            kind: std::io::ErrorKind::PermissionDenied,
+                        },
+                    })
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(RuntimeError::ActorUnavailable)));
+        actor.close().expect("close");
+        let mut recovered = open(scratch.path());
+        recovered
+            .handle()
+            .recover_authored_create("create-test".into(), scratch.path().into())
+            .await
+            .expect("recover");
+        assert_moment(&recovered.handle(), true).await;
+        recovered.close().expect("close recovered");
+    }
+
+    #[tokio::test]
+    async fn failed_intent_insert_allows_same_moment_retry_without_reopen() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut actor = open(scratch.path());
+        actor.handle().run(|store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute_batch("CREATE TEMP TRIGGER reject_create_intent BEFORE INSERT ON authored_create_intent BEGIN SELECT RAISE(ABORT, 'test insertion failure'); END;").map_err(StorageError::persist_public)?;
+                Ok::<_, RuntimeError>(())
+            })?;
+            Ok(())
+        }).await.expect("install fault");
+        assert!(
+            actor
+                .handle()
+                .versioned_text_create(
+                    input(),
+                    scratch.path().into(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+        assert_moment(&actor.handle(), false).await;
+        actor
+            .handle()
+            .run(|store, _| {
+                store.write_with(&NoFaults, |tx| {
+                    tx.execute_batch("DROP TRIGGER reject_create_intent")
+                        .map_err(StorageError::persist_public)?;
+                    Ok::<_, RuntimeError>(())
+                })?;
+                Ok(())
+            })
+            .await
+            .expect("remove fault");
+        actor
+            .handle()
+            .versioned_text_create(
+                input(),
+                scratch.path().into(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("same moment retry");
+        assert_moment(&actor.handle(), true).await;
+        actor.close().expect("close");
     }
 
     #[tokio::test]
@@ -441,10 +787,7 @@ mod tests {
                 CancellationToken::new(),
             )
             .await;
-        assert!(matches!(
-            retry,
-            Err(RuntimeError::Domain(DomainError::TargetPathExists))
-        ));
+        assert!(retry.expect("exact create retry").deduped);
         assert_moment(&actor.handle(), true).await;
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("tasks/record.md")).expect("bytes"),

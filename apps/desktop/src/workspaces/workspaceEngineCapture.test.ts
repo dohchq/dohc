@@ -2615,9 +2615,9 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
-    expect(String(attempts.find((attempt) => attempt.status === "rejected")?.reason)).toContain(
-      "target-path-exists",
-    );
+    const collision = attempts.find((attempt) => attempt.status === "rejected")?.reason;
+    expect(collision).toBeInstanceOf(VersionedTextStoreError);
+    expect(collision).toMatchObject({ code: "target-path-exists", message: "File already exists: exclusive.txt" });
     await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
     await engine.stop();
   });

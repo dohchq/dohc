@@ -122,6 +122,11 @@ pub enum LifecycleState {
 }
 
 impl LifecycleState {
+    /// Reopening must replace an actor that cannot accept more workspace work.
+    pub const fn needs_reopen(self) -> bool {
+        matches!(self, Self::Closed | Self::RecoveryRequired)
+    }
+
     const fn as_u8(self) -> u8 {
         match self {
             LifecycleState::Opening => 0,

@@ -1258,8 +1258,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (params.createOnly !== undefined && typeof params.createOnly !== "boolean") {
       throw new Error("invalid-params");
     }
-    if (params.createOnly === true && (knownVersion?.files.has(path) ||
-        (parsed.requestId !== undefined && state.replays.has(parsed.requestId)))) {
+    if (params.createOnly === true && knownVersion?.files.has(path) &&
+        !(parsed.requestId !== undefined && state.replays.has(parsed.requestId))) {
       throw new Error("target-path-exists");
     }
     const requestId = parsed.requestId;
@@ -2789,6 +2789,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       versionId: params.versionId,
       path: params.path,
       text: params.text,
+      createOnly: params.createOnly === true,
       momentId,
       objectId,
       metadataOrigin: origin,

@@ -256,6 +256,11 @@ pub struct AuthoredCreateStage {
     target: PathBuf,
 }
 
+pub struct AuthoredCreatePublishError {
+    pub error: MaterializeError,
+    pub published: bool,
+}
+
 impl AuthoredCreateStage {
     pub fn open(root: &Path, path: &str, id: &str) -> Result<Self, MaterializeError> {
         if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -297,21 +302,32 @@ impl AuthoredCreateStage {
     }
 
     /// False means an existing entry won. Never overwrite or follow that entry.
-    pub fn publish(&self) -> Result<bool, MaterializeError> {
+    pub fn publish(&self) -> Result<bool, AuthoredCreatePublishError> {
+        let unpublished = |error| AuthoredCreatePublishError {
+            error,
+            published: false,
+        };
         walk_target_components(
             &self.root,
             self.target
                 .parent()
-                .ok_or(MaterializeError::UnsafeTargetPath)?,
+                .ok_or(MaterializeError::UnsafeTargetPath)
+                .map_err(unpublished)?,
             ensure_real_directory,
-        )?;
+        )
+        .map_err(unpublished)?;
         match std::fs::hard_link(&self.stage, &self.target) {
             Ok(()) => {
-                sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os())?;
+                sync_parent_dir(self.target.parent(), DurabilityPolicy::per_os()).map_err(
+                    |error| AuthoredCreatePublishError {
+                        error,
+                        published: true,
+                    },
+                )?;
                 Ok(true)
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(MaterializeError::io(&self.target, &e)),
+            Err(e) => Err(unpublished(MaterializeError::io(&self.target, &e))),
         }
     }
 
@@ -321,7 +337,9 @@ impl AuthoredCreateStage {
             .map_err(|e| MaterializeError::io(&self.stage, &e))?;
         let metadata = match std::fs::symlink_metadata(&self.target) {
             Ok(metadata) => metadata,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                return Ok(false);
+            }
             Err(e) => return Err(MaterializeError::io(&self.target, &e)),
         };
         if !metadata.is_file()

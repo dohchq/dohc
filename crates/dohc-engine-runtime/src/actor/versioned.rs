@@ -644,6 +644,13 @@ pub(super) fn versioned_text_write_on_store(
         )
         .map_err(RuntimeError::from)?;
         if finish_create {
+            if let Some(request_id) = &input.request_id {
+                tx.execute(
+                    "UPDATE engine_requests SET kind = 'authored-create' WHERE request_id = ?1",
+                    [request_id],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
             tx.execute("DELETE FROM authored_create_intent WHERE singleton = 1", [])
                 .map_err(StorageError::persist_public)?;
         }

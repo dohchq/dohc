@@ -23,6 +23,7 @@ use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::ActorHandle;
 use dohc_engine_runtime::FaultInjector;
+#[cfg(test)]
 use dohc_engine_runtime::LifecycleState;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RelayConfiguration;
@@ -486,7 +487,7 @@ impl EngineService {
             // close cannot tear down the desktop's actor, capture, or relay.
             // Same workspace: short-circuit only on a live binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
-            if open.actor.lifecycle() != LifecycleState::Closed {
+            if !open.actor.lifecycle().needs_reopen() {
                 if requested_mode == WorkspaceOpenMode::ReadOnly {
                     // Caller-supplied relay params and captureAuthor are
                     // deliberately ignored here: the attachment rides the

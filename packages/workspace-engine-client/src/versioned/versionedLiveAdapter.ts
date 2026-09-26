@@ -396,13 +396,14 @@ export class VersionedLiveAdapter {
     path: string;
     text: string;
     createOnly?: boolean;
+    requestId?: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
       {
