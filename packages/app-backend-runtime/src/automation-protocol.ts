@@ -101,8 +101,10 @@ export interface CodeStepReturn {
 export type AutomationWorkerItem = AutomationFormula | { kind: "code"; source: string };
 /** Time a request has spent reading its scope and running its items, in milliseconds. */
 export interface AutomationTimeSpent { prepareMs: number; runMs: number }
-/** `spent` is the time earlier workers spent on this request, before one was replaced. */
-export type AutomationWorkerRequest = { scope: AutomationScope; items: AutomationWorkerItem[]; spent: AutomationTimeSpent };
+/** A run sends its scope on first use of a worker, then continues until end. `spent` includes earlier phases and workers. */
+export type AutomationWorkerRequest =
+  | { kind: "evaluate"; runId: number; scope?: AutomationScope; items: AutomationWorkerItem[]; spent: AutomationTimeSpent }
+  | { kind: "end"; runId: number };
 /**
  * The worker answers each item in order with `result` and the time the item took. A result with `restart` is the
  * last one this worker sends for the request: its item broke the worker's QuickJS instance. A plain `restart` means the
