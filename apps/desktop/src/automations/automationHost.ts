@@ -204,10 +204,12 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
   }
 
   return {
-    /** A workspace opened. A synced one reads its host now. */
+    /** A workspace opened. A synced one reads its host now. Opening again changes nothing. */
     open(workspaceId: string): void {
       const kept = states.get(workspaceId);
       if (kept) {
+        // Opening an open workspace again changes nothing.
+        if (kept.open) return;
         kept.open = true;
         if (dependencies.synced(workspaceId)) void refresh(workspaceId, kept);
         return;

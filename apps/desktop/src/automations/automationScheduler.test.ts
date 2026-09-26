@@ -11,6 +11,7 @@ import {
   planScheduleStep,
   START_GRACE_MS,
   type ScheduleHost,
+  type ScheduleRecord,
   type ScheduleSource,
 } from "./automationScheduler";
 import { scheduleHash } from "./automationPlan";
@@ -532,6 +533,120 @@ describe("AutomationScheduler with an automation host", () => {
     work.setAnswering(false);
     expect(await scheduler.finishHere("ws"), "the engine did not answer").toBeNull();
     expect(await scheduler.finishHere("other"), "not open here").toBeNull();
+    scheduler.dispose();
+  });
+});
+
+describe("AutomationScheduler with closed workspaces", () => {
+  it("keeps a record of what it runs, and none for a workspace it does not run", async () => {
+    const time = fakeClock(NINE + 3 * MINUTE);
+    const records: Array<[string, ScheduleRecord | null]> = [];
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      onRecord: (workspaceId, record) => { records.push([workspaceId, record]); },
+    });
+    const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
+    scheduler.add("ws", work.source, here);
+    scheduler.add("theirs", fakeSource([daily]).source, elsewhere);
+    await idle(scheduler);
+    expect(records).toEqual([["ws", { schedules: [{ ...hourly, throughMs: NINE + 3 * MINUTE }] }]]);
+    expect(scheduler.runningSchedules()).toBe(1);
+
+    work.setSchedules([]);
+    scheduler.wake();
+    await idle(scheduler);
+    expect(records.at(-1)).toEqual(["ws", null]);
+    expect(scheduler.runningSchedules()).toBe(0);
+    scheduler.dispose();
+  });
+
+  it("opens a closed workspace in the background when a recorded schedule is due, and runs it", async () => {
+    const time = fakeClock(NINE - 10 * MINUTE);
+    const work = fakeSource([hourly], [markOf(hourly, NINE - 10 * MINUTE)]);
+    let open = true;
+    const source: ScheduleSource = { ...work.source, schedules: () => (open ? work.source.schedules() : null) };
+    const opened: string[] = [];
+    let background: Promise<void> = Promise.resolve();
+    const scheduler: AutomationScheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      openInBackground: (workspaceId) => {
+        opened.push(workspaceId);
+        background = (async () => {
+          open = true;
+          scheduler.wake();
+          await scheduler.idle();
+          open = false;
+        })();
+        return background;
+      },
+    });
+    scheduler.watch("ws", { schedules: [{ ...hourly, throughMs: NINE - 10 * MINUTE }] });
+    await idle(scheduler);
+    expect(opened).toEqual([]);
+    expect(time.timerAt(), "wakes at the recorded due time").toBe(NINE);
+    expect(scheduler.runningSchedules()).toBe(1);
+
+    // The workspace's executor exists but is closed until the background open.
+    open = false;
+    scheduler.add("ws", source, here);
+    await idle(scheduler);
+    time.advance(10 * MINUTE);
+    time.fire();
+    await idle(scheduler);
+    await background;
+    scheduler.wake();
+    await idle(scheduler);
+    expect(opened).toEqual(["ws"]);
+    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE }]);
+    expect(time.timerAt(), "closed again, it waits for ten").toBe(NINE + MAX_TIMER_MS);
+    scheduler.dispose();
+  });
+
+  it("skips a closed workspace's due time the computer slept through", async () => {
+    const time = fakeClock(NINE - 20 * MINUTE);
+    const opened: string[] = [];
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      openInBackground: async (workspaceId) => { opened.push(workspaceId); },
+    });
+    scheduler.watch("ws", { schedules: [{ ...daily, throughMs: NINE - 20 * MINUTE }] });
+    await idle(scheduler);
+    time.advance(10 * MINUTE);
+    scheduler.suspended();
+    time.advance(HOUR);
+    scheduler.resumed();
+    await idle(scheduler);
+    expect(opened).toEqual([]);
+    expect(time.timerAt(), "it waits for the next day within the cap").toBe(time.clock.now() + MAX_TIMER_MS);
+    scheduler.dispose();
+  });
+
+  it("tries a background open that ran nothing again within the cap, not at once", async () => {
+    const time = fakeClock(NINE + MINUTE);
+    const opened: number[] = [];
+    let background: Promise<void> = Promise.resolve();
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => { throw error; },
+      openInBackground: () => {
+        opened.push(time.clock.now());
+        background = Promise.resolve();
+        return background;
+      },
+    });
+    scheduler.watch("ws", { schedules: [{ ...hourly, throughMs: NINE - 10 * MINUTE }] });
+    await idle(scheduler);
+    await background;
+    await idle(scheduler);
+    expect(opened).toEqual([NINE + MINUTE]);
+    expect(time.timerAt()).toBe(NINE + MINUTE + MAX_TIMER_MS);
+    time.advance(MAX_TIMER_MS);
+    time.fire();
+    await idle(scheduler);
+    expect(opened).toEqual([NINE + MINUTE, NINE + MINUTE + MAX_TIMER_MS]);
     scheduler.dispose();
   });
 });
