@@ -2573,6 +2573,25 @@ pub fn unsubscribe_automation_group(
     })?)
 }
 
+/// Remove every Group subscription in the workspace, in one transaction:
+/// once it commits, no message this computer stores claims until a Group
+/// subscription is added again. The desktop calls it before it hands the
+/// workspace's automations to another computer, so a subscription it lost
+/// track of goes too. Returns how many it removed.
+pub fn unsubscribe_automation_groups(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<usize, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        tx.execute(
+            "DELETE FROM automation_group_subscriptions WHERE workspace_id = ?1",
+            params![workspace_id],
+        )
+        .map_err(DomainError::sql_persist)
+    })?)
+}
+
 pub fn unsubscribe_automation(
     store: &mut EngineStore,
     workspace_id: &str,

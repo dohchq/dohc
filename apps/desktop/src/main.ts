@@ -203,6 +203,7 @@ import {
   computersOfAnswer,
   createAutomationHosts,
   hostOfAnswer,
+  isAutomationHost,
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
@@ -3311,7 +3312,14 @@ const automationHosts = createAutomationHosts({
     }
   },
   startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
-  finishHere: (workspaceId) => automationScheduler.finishHere(workspaceId),
+  hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
+  // The release waits until the engine here holds no Group subscription,
+  // so no message that reaches this computer after the release claims here.
+  finishHere: async (workspaceId, stillHandingOver) => {
+    const automations = collectionAutomationsOf(workspaceId);
+    if (!automations || !(await automations.removeGroupSubscriptions(stillHandingOver))) return null;
+    return await automationScheduler.finishHere(workspaceId);
+  },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
 
@@ -3382,15 +3390,10 @@ async function scheduleHostState(
   };
 }
 
-// Whether this computer runs a workspace's schedules. A synced workspace
-// runs them on the computer its relay names. One that does not sync runs
-// them here only when its own folder says it never synced: this is its
-// only computer. A workspace shared with this person is never theirs to run.
+// Whether this computer runs a workspace's schedules: it is the automation
+// host, with a synced workspace's host read again when the copy is old.
 async function runsSchedulesHere(workspaceId: string): Promise<boolean> {
-  const entry = findWorkspace(workspaceId);
-  if (entry === null || entry.shareView !== undefined) return false;
-  if (entry.remote !== undefined) return automationHosts.runsHere(workspaceId);
-  return (await readSyncHistory(entry.rootPath)) === "never-synced";
+  return await isAutomationHost(findWorkspace(workspaceId), () => automationHosts.runsHere(workspaceId));
 }
 
 // Turning sync on or opening a share records it in the folder and the
@@ -3403,9 +3406,10 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
 }
 
-// Whether any computer can run this workspace's schedules as it stands.
-// One that synced before, or whose folder has no record, needs sync on.
-async function schedulesCanRun(workspaceId: string): Promise<boolean> {
+// Whether any computer can run this workspace's schedules and Group
+// triggers as it stands. One that synced before, or whose folder has no
+// record, needs sync on.
+async function hostCanRun(workspaceId: string): Promise<boolean> {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return false;
   return entry.remote !== undefined || (await readSyncHistory(entry.rootPath)) === "never-synced";
@@ -3542,13 +3546,14 @@ function createCollectionAutomationsFor(
       }),
     },
     postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
-    // Until dohc lets the owner choose a main computer, a workspace that does
-    // not sync is the only one that can be: its one computer claims each message.
-    runsGroupTriggers: () => findWorkspace(workspaceId)?.remote === undefined,
+    // From the last host read, with no relay request: the host module calls
+    // hostChanged when the answer may differ.
+    runsGroupTriggers: () => isAutomationHost(findWorkspace(workspaceId), () => automationHosts.stillRuns(workspaceId)),
+    requestHost: () => automationHosts.admit(workspaceId),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),
-    runsSchedules: () => schedulesCanRun(workspaceId),
+    hostCanRun: () => hostCanRun(workspaceId),
     personName: (userId) => (userId === localUserId() ? localUserDisplayName() : userId),
     mayRetryPress: async (pressedBy) => pressedBy === (await pressingPerson()) || (await localPersonOwns(workspaceId)),
     onPressSettled: (event) => {

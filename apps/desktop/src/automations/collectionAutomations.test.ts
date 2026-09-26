@@ -7,13 +7,16 @@ import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { AGENT_WAKES_AGENT, definitionHash, localIsoTime, stepKey } from "./automationPlan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "./automationReach";
-import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
+import { createAutomationRunStore, type AutomationRunStore, type StoredSubscription } from "./automationRunStore";
+import { createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, isAutomationHost, type AutomationHosts } from "./automationHost";
+import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import {
   CollectionAutomations,
   TIMEOUTS_BEFORE_SWITCH_OFF,
@@ -75,7 +78,7 @@ async function world(options: {
   refused?: { settle: number; stillRunning?: boolean };
   /** The workspace's chats, for automations that post. */
   channels?: ChatDirectoryChannel[];
-  /** Whether this computer runs Group-message automations; true unless a test says otherwise. */
+  /** Whether this computer is the automation host; true unless a test says otherwise. */
   runsGroupTriggers?: boolean;
   /** Whole message bodies by id, for claims that carried them truncated. */
   messageBodies?: Record<string, string>;
@@ -101,7 +104,7 @@ async function world(options: {
   const pending: AutomationClaim[] = [];
   const presses = new Map<string, string>();
   const pressEvents: unknown[] = [];
-  const subscriptions = new Map<string, unknown>();
+  const subscriptions = new Map<string, StoredSubscription>();
   const marks = new Map<string, Awaited<ReturnType<CollectionAutomationEngine["listAutomationScheduleMarks"]>>["marks"][number]>();
   const settleListeners = new Set<(paths: readonly string[] | null) => void>();
   const waiters = new Set<() => void>();
@@ -125,6 +128,7 @@ async function world(options: {
   let failOpenAt: number | null = null;
   let holdsChanged = 0;
   let automationsChanged = 0;
+  let hostRequests = 0;
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
   const until = (condition: () => boolean) => new Promise<void>((resolve) => {
     const check = () => { if (condition()) { waiters.delete(check); resolve(); } };
@@ -175,8 +179,14 @@ async function world(options: {
           : null,
       };
     },
-    subscribeAutomation: async (input) => { subscriptions.set(input.automationId, input); return { subscribed: true }; },
-    unsubscribeAutomation: async ({ automationId }) => { subscriptions.delete(automationId); return { unsubscribed: true }; },
+    subscribeAutomation: async (input) => { subscriptions.set(input.automationId, input); wake(); return { subscribed: true }; },
+    unsubscribeAutomation: async ({ automationId }) => { subscriptions.delete(automationId); wake(); return { unsubscribed: true }; },
+    unsubscribeAutomationGroups: async () => {
+      const groups = [...subscriptions].filter(([, subscription]) => "groupId" in subscription);
+      for (const [automationId] of groups) subscriptions.delete(automationId);
+      wake();
+      return { removed: groups.length };
+    },
     claimNextAutomation: async () => {
       const claim = pending.shift() ?? null;
       if (claim) { claim.state = "running"; claim.attempts += 1; } else { idleDrains += 1; wake(); }
@@ -443,7 +453,8 @@ async function world(options: {
         if (!messages.some((written) => written.effectId === message.effectId)) messages.push(message);
       },
     },
-    runsGroupTriggers: () => options.runsGroupTriggers ?? true,
+    runsGroupTriggers: async () => options.runsGroupTriggers ?? true,
+    requestHost: async () => { hostRequests += 1; },
     readMessageBody: async (messageId) => options.messageBodies?.[messageId] ?? null,
     postNotice: async (notice, signal) => {
       noticeSignals.push(signal);
@@ -486,6 +497,7 @@ async function world(options: {
     root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged, pressEvents,
     holdsChanged: () => holdsChanged,
     automationsChanged: () => automationsChanged,
+    hostRequests: () => hostRequests,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
     resumable,
@@ -748,7 +760,7 @@ describe("Collection automations", () => {
       { automationId: sweep!.automationId, scheduleHash: sweep!.scheduleHash, throughMs: due },
     ]);
     // A workspace that must sync before its schedules run says so.
-    const synced = w.makeExecutor({ runsSchedules: async () => false });
+    const synced = w.makeExecutor({ hostCanRun: async () => false });
     await synced.open();
     const syncedList = await synced.automationsIn("Tasks");
     expect(syncedList.status === "read" && syncedList.automations[0]?.valid ? syncedList.automations[0].cannotRun : null)
@@ -3133,21 +3145,53 @@ describe("Collection automations that a Group message starts", () => {
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { steps: [{ verdict: "held", target: "Trip", action: "read" }, { verdict: "allowed" }] } }] });
   });
 
-  it("subscribes to its Group's messages on the computer that runs them, and only there", async () => {
+  const cannotRunOf = async (executor: CollectionAutomations) => {
+    const file = await executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]?.valid) throw new Error("unreadable fixture");
+    return file.automations[0].cannotRun;
+  };
+
+  it("subscribes to its Group's messages on the automation host, and only there", async () => {
     const here = await world({ channels: [TRIP], automations: { Tasks: task } });
     await here.executor.open();
     await here.until(() => here.subscriptions.has("collection:Tasks#task"));
     expect(here.subscriptions.get("collection:Tasks#task")).toEqual({
       automationId: "collection:Tasks#task", groupId: "trip", startsWith: "/task",
     });
+    expect(here.hostRequests(), "it asks to be the host, as a schedule does").toBeGreaterThan(0);
 
     const elsewhere = await world({ channels: [TRIP], automations: { Tasks: task }, runsGroupTriggers: false });
+    // A crash after the engine subscribed, before this computer recorded it.
+    await elsewhere.engine.subscribeAutomation({ automationId: "collection:Tasks#task", groupId: "trip" });
     await elsewhere.executor.open();
-    const file = await elsewhere.executor.automationsIn("Tasks");
-    if (file.status !== "read") throw new Error("unreadable fixture");
-    const [automation] = file.automations;
-    expect(automation).toMatchObject({ cannotRun: expect.stringContaining("only on your main computer") });
-    expect(elsewhere.subscriptions.has("collection:Tasks#task")).toBe(false);
+    expect(await cannotRunOf(elsewhere.executor), "it runs, on the host").toBeNull();
+    expect(elsewhere.subscriptions.has("collection:Tasks#task"), "the engine keeps none off the host").toBe(false);
+    expect(elsewhere.hostRequests()).toBeGreaterThan(0);
+
+    const off = await world({ channels: [TRIP], automations: { Tasks: task.replace("    when:", "    enabled: false\n    when:") } });
+    await off.executor.open();
+    await off.executor.automationsIn("Tasks");
+    expect(off.hostRequests(), "switched off, it does not ask").toBe(0);
+  });
+
+  it("subscribes in a workspace that never synced, whose only computer this is, and not in one that synced before", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await mkdir(join(w.root, ".dohc"), { recursive: true });
+    await recordNeverSynced(w.root);
+    // No remote: the workspace does not sync now.
+    const host = () => isAutomationHost({ rootPath: w.root }, () => false);
+    const neverSynced = w.makeExecutor({ runsGroupTriggers: host });
+    await neverSynced.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    expect(await cannotRunOf(neverSynced)).toBeNull();
+    await neverSynced.dispose();
+
+    // Sync was on once and is off now: another computer may be the host.
+    recordSynced(w.root);
+    const syncedBefore = w.makeExecutor({ runsGroupTriggers: host, hostCanRun: async () => false });
+    await syncedBefore.open();
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
+    expect(await cannotRunOf(syncedBefore)).toBe("Turn on sync so Group messages start this automation.");
   });
 
   it("runs for a Group message with the message and its author in its formulas", async () => {
@@ -3206,20 +3250,324 @@ describe("Collection automations that a Group message starts", () => {
     expect(w.messages).toEqual([]);
   });
 
-  it("does not run a message claim, and drops its subscription, once this computer no longer runs Group triggers", async () => {
+  it("drops its subscription once this computer is no longer the host, and still runs a message it claimed as host", async () => {
     const options: Parameters<typeof world>[0] = { channels: [TRIP], automations: { Tasks: task } };
     const w = await world(options);
     await w.executor.open();
     await w.until(() => w.subscriptions.has("collection:Tasks#task"));
 
-    // Sync turned on: this computer is not the main one any more.
-    options.runsGroupTriggers = false;
+    // The engine claimed a message, then the owner chose another computer.
     const claim = messageClaim(w);
+    options.runsGroupTriggers = false;
+    w.executor.hostChanged();
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
     w.executor.notifyClaimed();
     await w.settledClaim(claim);
-    expect(claim).toMatchObject({ state: "failed", error: expect.stringContaining("only on your main computer") });
-    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
-    expect(added(w)).toEqual([]);
+    expect(claim.state).toBe("done");
+    expect(added(w)).toEqual([{ Title: "Buy tickets", "Asked by": "Ana" }]);
+  });
+
+  it("before a handover, has the engine remove every Group subscription, tracked or not, and answers only once it did", async () => {
+    const options: Parameters<typeof world>[0] = { channels: [TRIP], automations: { Tasks: task } };
+    const w = await world(options);
+    expect(await w.executor.removeGroupSubscriptions(() => true), "not open, so it cannot tell").toBe(false);
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    expect(await w.executor.removeGroupSubscriptions(() => false), "called off, so it keeps them").toBe(false);
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
+    // A crash after the engine subscribed, before this computer recorded it.
+    await w.engine.subscribeAutomation({ automationId: "collection:Tasks#lost", groupId: "trip" });
+
+    options.runsGroupTriggers = false;
+    const removeAll = w.engine.unsubscribeAutomationGroups;
+    w.engine.unsubscribeAutomationGroups = async () => { throw new Error("The workspace engine is not running."); };
+    expect(await w.executor.removeGroupSubscriptions(() => true)).toBe(false);
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
+
+    w.engine.unsubscribeAutomationGroups = removeAll;
+    expect(await w.executor.removeGroupSubscriptions(() => true)).toBe(true);
+    expect([...w.subscriptions.keys()]).toEqual([]);
+  });
+
+  it("subscribes again when the owner calls a handover off after a removal whose answer was lost", async () => {
+    const options: Parameters<typeof world>[0] = { channels: [TRIP], automations: { Tasks: task } };
+    const w = await world(options);
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // The engine removes them, and the answer never arrives.
+    options.runsGroupTriggers = false;
+    const removeAll = w.engine.unsubscribeAutomationGroups;
+    w.engine.unsubscribeAutomationGroups = async () => {
+      await removeAll();
+      throw new Error("The workspace engine stopped answering.");
+    };
+    expect(await w.executor.removeGroupSubscriptions(() => true)).toBe(false);
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(false);
+
+    // The owner calls the handover off, so this computer hosts again.
+    w.engine.unsubscribeAutomationGroups = removeAll;
+    options.runsGroupTriggers = true;
+    w.executor.hostChanged();
+    await w.executor.automationsIn("Tasks");
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
+  });
+
+  it("stays unsure of the engine until every change lands, so a trigger switched back on registers again", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    let host = true;
+    // While false, the engine gives no answer to single removals.
+    let removalsAnswer = true;
+    const executor = w.makeExecutor({
+      runsGroupTriggers: async () => host,
+      withEngine: async (work) => {
+        let unanswered = false;
+        const result = await work({
+          ...w.engine,
+          unsubscribeAutomation: async (input) => {
+            if (removalsAnswer) return await w.engine.unsubscribeAutomation(input);
+            unanswered = true;
+            return null;
+          },
+        });
+        return unanswered ? null : result;
+      },
+    });
+    await executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // A handover: the engine removes every Group subscription, and the answer is lost.
+    host = false;
+    const removeAll = w.engine.unsubscribeAutomationGroups;
+    w.engine.unsubscribeAutomationGroups = async () => {
+      await removeAll();
+      throw new Error("The workspace engine stopped answering.");
+    };
+    expect(await executor.removeGroupSubscriptions(() => true)).toBe(false);
+    w.engine.unsubscribeAutomationGroups = removeAll;
+
+    // Called off while the trigger is switched off, and the single removal gets no answer.
+    const reread = async () => {
+      executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      await executor.automationsIn("Tasks");
+    };
+    host = true;
+    removalsAnswer = false;
+    await w.writeAutomations("Tasks", task.replace("    when:", "    enabled: false\n    when:"));
+    await reread();
+    // Switched on again: the engine holds nothing, so it registers again.
+    removalsAnswer = true;
+    await w.writeAutomations("Tasks", task);
+    await reread();
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
+  });
+
+  it("removes nothing when the owner calls a handover off while the removal waits in line", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    // While a handover winds down this computer admits no new host work,
+    // even once the relay names it again.
+    let stillRuns = true;
+    let gate: Promise<void> = Promise.resolve();
+    const executor = w.makeExecutor({ runsGroupTriggers: async () => { await gate; return stillRuns; } });
+    await executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    let removals = 0;
+    const removeAll = w.engine.unsubscribeAutomationGroups;
+    w.engine.unsubscribeAutomationGroups = async () => { removals += 1; return await removeAll(); };
+
+    // The handover begins: a reconcile waits in line, and the removal behind it.
+    stillRuns = false;
+    let letThrough: () => void = () => undefined;
+    gate = new Promise((resolve) => { letThrough = resolve; });
+    executor.hostChanged();
+    let handingOver = true;
+    const removing = executor.removeGroupSubscriptions(() => handingOver);
+    // The owner calls it off before the removal's turn.
+    handingOver = false;
+    letThrough();
+    expect(await removing, "nothing to release").toBe(false);
+    expect(removals, "only the reconcile's, while this computer admitted no host work").toBe(1);
+
+    // The handover ends, and this computer hosts again.
+    stillRuns = true;
+    executor.hostChanged();
+    await executor.automationsIn("Tasks");
+    expect(w.subscriptions.has("collection:Tasks#task")).toBe(true);
+  });
+
+  type World = Awaited<ReturnType<typeof world>>;
+  type Workspace = { rootPath: string; remote?: unknown };
+  type FakeTimer = { wake: () => void; delayMs: number; done: boolean };
+  // The relay's record of the host, as the routes keep it, for all the owner's computers.
+  type Relay = { row: RelayAutomationHost | null; onRelease?: () => void; down?: boolean; checkIns?: number };
+  // One of the owner's computers: its host module and executor, wired as main.ts wires them.
+  const ownersComputer = (installId: string, w: World, relay: Relay, workspace: Workspace) => {
+    const clock = { ms: 0 };
+    const timers: FakeTimer[] = [];
+    const hostErrors: unknown[] = [];
+    const hosts: AutomationHosts = createAutomationHosts({
+      installId: () => installId,
+      label: () => installId,
+      synced: () => workspace.remote !== undefined,
+      send: async (_workspaceId, request) => {
+        // A workspace that does not sync has no relay to ask.
+        if (workspace.remote === undefined) return null;
+        if (request.action === "check-in") relay.checkIns = (relay.checkIns ?? 0) + 1;
+        if (relay.down) throw new TypeError("fetch failed");
+        if (request.action === "check-in" && request.body.claim && relay.row === null) {
+          relay.row = { installId, generation: 1, handoverFrom: null, releasedThroughMs: null };
+        }
+        if (request.action === "release" && relay.row !== null) {
+          relay.onRelease?.();
+          relay.row = { ...relay.row, generation: relay.row.generation + 1, handoverFrom: null, releasedThroughMs: request.body.releasedThroughMs };
+        }
+        return { status: 200, body: { ok: true, host: relay.row } };
+      },
+      stored: () => undefined,
+      store: () => undefined,
+      startedHere: () => undefined,
+      hostChanged: () => executor.hostChanged(),
+      finishHere: async (_workspaceId, stillHandingOver) =>
+        (await executor.removeGroupSubscriptions(stillHandingOver)) ? 5_000 : null,
+      logError: (_workspaceId, error) => { hostErrors.push(error); },
+      monotonicMs: () => clock.ms,
+      setTimer: (wake, delayMs) => {
+        const timer = { wake, delayMs, done: false };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer: (cleared) => { for (const timer of timers) if (timer === cleared) timer.done = true; },
+    });
+    const executor = w.makeExecutor({
+      runsGroupTriggers: () => isAutomationHost(workspace, () => hosts.stillRuns("ws")),
+      requestHost: () => hosts.admit("ws"),
+    });
+    hosts.open("ws");
+    const armed = () => timers.filter((timer) => !timer.done);
+    return { hosts, executor, clock, hostErrors, armed };
+  };
+  const subscribed = (w: World) => w.subscriptions.has("collection:Tasks#task");
+
+  // The laptop opens first and its Group trigger records it as the host; the desk opens after.
+  async function laptopAndDesk() {
+    const workspace = { rootPath: "", remote: {} };
+    const relay: Relay = { row: null };
+    const laptop = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const desk = await world({ channels: [TRIP], automations: { Tasks: task } });
+    const onLaptop = ownersComputer("laptop", laptop, relay, workspace);
+    await onLaptop.executor.open();
+    await laptop.until(() => subscribed(laptop));
+    expect(relay.row).toMatchObject({ installId: "laptop", handoverFrom: null });
+    const onDesk = ownersComputer("desk", desk, relay, workspace);
+    await onDesk.executor.open();
+    expect(subscribed(desk)).toBe(false);
+    expect(onDesk.armed(), "no handover, so no timer").toEqual([]);
+    // Neither computer holds a subscription when the laptop releases.
+    const atRelease: Array<{ laptop: boolean; desk: boolean }> = [];
+    let released: () => void = () => undefined;
+    const release = new Promise<void>((resolve) => { released = resolve; });
+    relay.onRelease = () => {
+      atRelease.push({ laptop: subscribed(laptop), desk: subscribed(desk) });
+      released();
+    };
+    return { relay, laptop, desk, onLaptop, onDesk, atRelease, release };
+  }
+
+  it("hands over from the desk's settings: the laptop drops its subscription before it releases, and the desk's timer finds the release", async () => {
+    const { relay, laptop, desk, onLaptop, onDesk, atRelease, release } = await laptopAndDesk();
+    relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+    onDesk.hosts.learned("ws", relay.row);
+    expect(onDesk.armed().map((timer) => timer.delayMs)).toEqual([HANDOVER_READ_FIRST_MS]);
+    // The laptop reads the host again before its next step, and hands over.
+    onLaptop.clock.ms += HOST_FRESH_MS + 1;
+    expect(await onLaptop.hosts.runsHere("ws")).toBe(false);
+    await release;
+    expect(atRelease).toEqual([{ laptop: false, desk: false }]);
+
+    // The desk's timer reads the release, and the desk subscribes at once:
+    // no schedule, no reopen.
+    const [next] = onDesk.armed();
+    next!.done = true;
+    next!.wake();
+    await desk.until(() => subscribed(desk));
+    expect(subscribed(laptop)).toBe(false);
+    expect(onDesk.armed(), "the handover ended").toEqual([]);
+    expect(onLaptop.armed()).toEqual([]);
+    expect([...onLaptop.hostErrors, ...onDesk.hostErrors]).toEqual([]);
+  });
+
+  it("hands over from the laptop's settings: the desk learns through its own read after a sync pull", async () => {
+    const { relay, laptop, desk, onLaptop, onDesk, atRelease, release } = await laptopAndDesk();
+    // The owner chooses the desk on the laptop, which hands over at once.
+    relay.row = { installId: "desk", generation: 2, handoverFrom: "laptop", releasedThroughMs: null };
+    onLaptop.hosts.learned("ws", relay.row);
+    await release;
+    expect(atRelease).toEqual([{ laptop: false, desk: false }]);
+
+    // The desk heard nothing. A sync pull with a fresh copy reads nothing;
+    // once its copy is a minute old, the next pull reads the host.
+    onDesk.hosts.relayAnswered("ws");
+    await onDesk.executor.automationsIn("Tasks");
+    expect(subscribed(desk)).toBe(false);
+    onDesk.clock.ms += HOST_FRESH_MS + 1;
+    onDesk.hosts.relayAnswered("ws");
+    await desk.until(() => subscribed(desk));
+    expect(subscribed(laptop)).toBe(false);
+    expect([...onLaptop.hostErrors, ...onDesk.hostErrors]).toEqual([]);
+  });
+
+  it("keeps its subscriptions when a workspace that never synced turns sync on", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await mkdir(join(w.root, ".dohc"), { recursive: true });
+    await recordNeverSynced(w.root);
+    const workspace: Workspace = { rootPath: w.root };
+    const relay: Relay = { row: null };
+    const here = ownersComputer("laptop", w, relay, workspace);
+    await here.executor.open();
+    await w.until(() => subscribed(w));
+    let removals = 0;
+    const removeAll = w.engine.unsubscribeAutomationGroups;
+    w.engine.unsubscribeAutomationGroups = async () => { removals += 1; return await removeAll(); };
+
+    // Sync turns on, and the relay records no host yet.
+    recordSynced(w.root);
+    workspace.remote = {};
+    here.executor.hostChanged();
+    await here.executor.automationsIn("Tasks");
+    expect(relay.row, "its Group trigger recorded it as the host").toMatchObject({ installId: "laptop" });
+    expect(removals, "no gap in which a message claims nowhere").toBe(0);
+    expect(subscribed(w)).toBe(true);
+    expect(here.hostErrors).toEqual([]);
+  });
+
+  it.each([
+    ["another computer is already the host", { row: { installId: "desk", generation: 1, handoverFrom: null, releasedThroughMs: null } }],
+    ["the relay does not answer", { row: null, down: true }],
+  ] as const)("drops its subscriptions when a workspace that never synced turns sync on and %s", async (_case, start) => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await mkdir(join(w.root, ".dohc"), { recursive: true });
+    await recordNeverSynced(w.root);
+    const workspace: Workspace = { rootPath: w.root };
+    const relay: Relay = { row: null };
+    const here = ownersComputer("laptop", w, relay, workspace);
+    await here.executor.open();
+    await w.until(() => subscribed(w));
+
+    // Only a computer the relay names keeps them. The first sync pull reads
+    // the host, and nothing else asks the executor.
+    relay.row = start.row;
+    relay.down = "down" in start;
+    recordSynced(w.root);
+    workspace.remote = {};
+    here.hosts.relayAnswered("ws");
+    await w.until(() => !subscribed(w));
+    expect(relay.checkIns, "one read decides; the reconcile it starts reads nothing more").toBe(1);
+    if (!("down" in start)) return;
+    // The relay answers again: the next pull claims the host, and the subscriptions come back.
+    relay.down = false;
+    here.hosts.relayAnswered("ws");
+    await w.until(() => subscribed(w));
+    expect(relay.row).toMatchObject({ installId: "laptop" });
   });
 
   it("holds a Group trigger an editor's leaving newly allows, until Allow", async () => {

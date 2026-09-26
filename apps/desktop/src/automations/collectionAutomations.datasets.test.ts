@@ -128,6 +128,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
+    unsubscribeAutomationGroups: async () => ({ removed: 0 }),
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),
     listAutomationFailures: async () => ({ failures: [] }),
@@ -145,7 +146,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     mayRetryPress: async () => false,
     onPressSettled: () => undefined,
     onPressWaiting: () => undefined,
-    runsGroupTriggers: () => options.groups ?? false,
+    runsGroupTriggers: async () => options.groups ?? false,
+    requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async () => { throw new Error("Dataset automations cannot notify people."); },
     chat: {

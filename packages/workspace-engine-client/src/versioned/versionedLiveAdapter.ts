@@ -33,6 +33,7 @@ import {
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
+  type AutomationUnsubscribeGroupsResult,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1172,6 +1173,18 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(
       WORKSPACE_METHOD.automationsUnsubscribe,
       input,
+    );
+  }
+
+  /**
+   * Removes every Group subscription in the workspace in one engine write,
+   * including one the desktop lost track of, so no message stored after it
+   * claims until one is added again.
+   */
+  async unsubscribeAutomationGroups(): Promise<AutomationUnsubscribeGroupsResult> {
+    return this.workspaceRequest(
+      WORKSPACE_METHOD.automationsUnsubscribeGroups,
+      {},
     );
   }
 

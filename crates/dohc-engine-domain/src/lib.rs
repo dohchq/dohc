@@ -52,7 +52,7 @@ pub use automations::{
     list_running_automation_attempts, press_automation, reclaim_running_automations,
     release_automation_claim, retry_automation_claim, settle_automation_claim,
     subscribe_automation, subscribe_automation_group, subscribe_automation_in_tx,
-    unsubscribe_automation, unsubscribe_automation_group,
+    unsubscribe_automation, unsubscribe_automation_group, unsubscribe_automation_groups,
 };
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,

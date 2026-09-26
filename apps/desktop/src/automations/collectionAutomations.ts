@@ -95,8 +95,10 @@ const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so i
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // A workspace that synced before, or that has no record of whether it did,
-// runs schedules only once it syncs and its relay names a computer.
+// runs schedules and Group triggers only once it syncs and its relay names
+// a computer.
 const SCHEDULES_NEED_SYNC = "Turn on sync to run this workspace's schedules.";
+const GROUP_MESSAGES_NEED_SYNC = "Turn on sync so Group messages start this automation.";
 // After the deadline, a run's writes stop at their next check. A write
 // still running after this long is not settled at all, so nothing can land
 // after the claim settles; the engine's recovery requeues the claim.
@@ -120,6 +122,8 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   /** Records under a path, or one Group's messages. */
   subscribeAutomation(input: StoredSubscription): Promise<unknown>;
   unsubscribeAutomation(input: { automationId: string; path: string } | { automationId: string; groupId: string }): Promise<unknown>;
+  /** Every Group subscription in the workspace, removed in one engine write. */
+  unsubscribeAutomationGroups(): Promise<unknown>;
   claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
@@ -193,10 +197,17 @@ export interface CollectionAutomationsOptions {
   /** Where automations post and send direct messages, and the writer they use. */
   chat: AutomationChatDependencies;
   /**
-   * Whether this computer runs Group-message automations: only the owner's
-   * main computer registers them, so each message claims once.
+   * Whether this computer is the workspace's automation host, from its last
+   * host read. Only the host registers Group subscriptions, so the engine
+   * claims each Group message on one computer (ADR 0012).
    */
-  runsGroupTriggers(): boolean;
+  runsGroupTriggers(): Promise<boolean>;
+  /**
+   * An enabled Group trigger asks the host module, as a schedule does, to
+   * record this computer as the host when the relay names none. Resolves at
+   * once when a host is named, or after the read that learns one.
+   */
+  requestHost(): Promise<unknown>;
   /** A message's whole body, for a claim that carried it truncated. */
   readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
   /** Sends one notice from this workspace. */
@@ -215,8 +226,8 @@ export interface CollectionAutomationsOptions {
   onAutomationsChanged(): void;
   /** The index was read again, so the schedules this executor can run may differ. */
   onSchedulesChanged?(): void;
-  /** Whether some computer can run the workspace's schedules. True unless set. */
-  runsSchedules?(): Promise<boolean>;
+  /** Whether some computer can run the workspace's schedules and Group triggers. True unless set. */
+  hostCanRun?(): Promise<boolean>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
   /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
@@ -545,6 +556,15 @@ export class CollectionAutomations {
   private chat: ChatDirectory | null = null;
   /** The Groups Group-message automations watch, found for their subscriptions. */
   private groups: ChatDirectory | null = null;
+  /** Whether this computer was the automation host at the last reconcile, so it registers Group subscriptions. */
+  private groupTriggersHere = false;
+  /**
+   * The engine may hold other Group subscriptions than `subscribed` lists:
+   * at open, after a crash between subscribing and saving, or after a bulk
+   * removal whose answer was lost. Until a reconcile settles it, the host
+   * registers each one again, and any other computer removes them all.
+   */
+  private groupSubscriptionsUncertain = true;
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
@@ -582,6 +602,7 @@ export class CollectionAutomations {
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
       this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
+      this.groupSubscriptionsUncertain = true;
       this.timeouts = timeouts;
       this.verdictsUnreadable = unreadable;
       for (const verdict of verdicts) {
@@ -739,6 +760,41 @@ export class CollectionAutomations {
     this.clearWaits("session");
   }
 
+  /**
+   * Whether this computer is the automation host may have changed: add or
+   * remove Group subscriptions to match.
+   */
+  hostChanged(): void {
+    if (this.opened === null) return;
+    void this.enqueue(() => this.reconcile(false))
+      .catch((error: unknown) => this.options.onError("update Group subscriptions for the automation host", error));
+  }
+
+  /**
+   * Before this computer hands the workspace's automations to another one:
+   * the engine removes every Group subscription in the workspace, including
+   * one this computer lost track of, so no message it stores after that
+   * claims here. Resolves true once the engine answered, or false when the
+   * executor has not opened, the owner called the handover off, or the
+   * engine did not answer; the handover then waits and tries again. A
+   * message claimed here before still runs here, as a claimed schedule does.
+   */
+  async removeGroupSubscriptions(stillHandingOver: () => boolean): Promise<boolean> {
+    await this.opened;
+    if (this.state !== "open") return false;
+    let removed = false;
+    try {
+      await this.enqueue(async () => {
+        // Called off while this waited in line: keep them.
+        if (stillHandingOver()) removed = await this.removeEngineGroupSubscriptions();
+      });
+    } catch (error) {
+      this.options.onError("remove Group subscriptions before a handover", error);
+      return false;
+    }
+    return removed;
+  }
+
   /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
   pauseForEngineRestart(): void {
     if (this.state === "disposed" || this.state === "paused") return;
@@ -868,7 +924,7 @@ export class CollectionAutomations {
     const unsupported = (automation: Automation) =>
       unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
     const roster = await this.options.cachedRoster();
-    const runsSchedules = (await this.options.runsSchedules?.()) ?? true;
+    const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -894,8 +950,10 @@ export class CollectionAutomations {
       const { automation } = entry;
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
-      const cannotRun = unsupported(automation) ?? this.groupTriggerProblem(automation) ??
-        (automation.when.kind === "schedule" && !runsSchedules ? SCHEDULES_NEED_SYNC : null);
+      const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun ? null
+        : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
+        : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
+        : null);
       const summary = {
         valid: true as const, automationId, automation, definitionHash: hash, cannotRun,
         lastRun: lastRuns.get(automationId) ?? null,
@@ -1866,7 +1924,7 @@ export class CollectionAutomations {
       if (!automation.enabled || this.datasets.has(collectionPath)) continue;
       const trigger = automation.when;
       if (trigger.kind === "group-message") {
-        if (this.groupTriggerProblem(automation) !== null) continue;
+        if (!this.groupTriggersHere) continue;
         const group = this.groups?.group(trigger.group);
         if (!group || "problem" in group) continue;
         desired.set(automationId, {
@@ -1899,12 +1957,9 @@ export class CollectionAutomations {
       : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId === held.claim.datasetId;
   }
 
-  /** Why a Group-message automation cannot run here, or null. */
-  private groupTriggerProblem(automation: Automation): string | null {
+  /** Why a Group-message automation's Group cannot start it, or null. */
+  private groupProblem(automation: Automation): string | null {
     if (automation.when.kind !== "group-message") return null;
-    if (!this.options.runsGroupTriggers()) {
-      return "A Group message starts this automation only on your main computer. Choosing it comes in a later version of dohc.";
-    }
     const group = this.groups?.group(automation.when.group);
     return group && "problem" in group ? group.problem : null;
   }
@@ -2011,8 +2066,26 @@ export class CollectionAutomations {
    */
   private async reconcile(all: boolean): Promise<void> {
     await this.loadGroups();
+    // Asked first, so a computer the relay names no host for yet claims it
+    // before this decides, and does not drop its Group subscriptions only
+    // to add them again. Once a host is named this waits for nothing.
+    if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
+      await this.options.requestHost();
+    }
+    // Only a computer the relay names keeps Group subscriptions.
+    this.groupTriggersHere = await this.options.runsGroupTriggers();
+    // Off the host the engine keeps no Group subscription, even one missing
+    // from this computer's record.
+    const tracksGroups = [...this.subscribed.values()].some(isGroupSubscription);
+    if (!this.groupTriggersHere && (this.groupSubscriptionsUncertain || tracksGroups)) {
+      await this.removeEngineGroupSubscriptions();
+    }
     const desired = this.desiredSubscriptions();
     let changed = false;
+    // After a removal with no answer, the host registers every Group
+    // subscription again. Once every change lands, the engine matches the record.
+    const uncertain = this.groupTriggersHere && this.groupSubscriptionsUncertain;
+    let settled = true;
     for (const [automationId, subscription] of [...this.subscribed]) {
       // A subscription to another path or Group goes; the same pair is replaced in place.
       const wanted = desired.get(automationId);
@@ -2021,19 +2094,42 @@ export class CollectionAutomations {
         engine.unsubscribeAutomation(unsubscribeParams(subscription)),
       );
       // Engine unavailable: keep the entry so the next reconcile retries it.
-      if (removed === null) continue;
+      if (removed === null) {
+        settled = false;
+        continue;
+      }
       this.subscribed.delete(automationId);
       changed = true;
     }
     for (const [automationId, subscription] of desired) {
-      if (!all && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
+      const again = all || (uncertain && isGroupSubscription(subscription));
+      if (!again && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
       const subscribed = await this.withLiveEngine((engine) => engine.subscribeAutomation(subscription));
-      if (subscribed === null) continue;
+      if (subscribed === null) {
+        settled = false;
+        continue;
+      }
       this.subscribed.set(automationId, subscription);
       changed = true;
     }
+    if (uncertain && settled) this.groupSubscriptionsUncertain = false;
     if (changed) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     await this.reconcileDatasets(all);
+  }
+
+  /**
+   * Removes every Group subscription the engine holds for this workspace,
+   * tracked or not, in one engine write. True once the engine answered.
+   */
+  private async removeEngineGroupSubscriptions(): Promise<boolean> {
+    // The removal may commit even when its answer is lost.
+    this.groupSubscriptionsUncertain = true;
+    if ((await this.withLiveEngine((engine) => engine.unsubscribeAutomationGroups())) === null) return false;
+    const tracked = [...this.subscribed].filter(([, subscription]) => isGroupSubscription(subscription));
+    for (const [automationId] of tracked) this.subscribed.delete(automationId);
+    this.groupSubscriptionsUncertain = false;
+    if (tracked.length > 0) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    return true;
   }
 
   /** The same diff against the dataset ledger, which keeps its own subscriptions. */
@@ -2230,16 +2326,6 @@ export class CollectionAutomations {
     const unsupported = this.cannotRun(id.collectionPath, automation);
     if (unsupported !== null) {
       return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
-    }
-    // A message claim runs, or resumes, only where Group triggers run: after
-    // sync turns on, this computer may no longer be the one. Its Group
-    // subscription goes at once, so no further message claims here.
-    if (held.source === "engine" && held.claim.change.kind === "message") {
-      const problem = this.groupTriggerProblem(automation);
-      if (problem !== null) {
-        void this.enqueue(() => this.reconcile(false));
-        return { kind: "settle", input: { state: "failed", error: problem }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
-      }
     }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
@@ -2529,6 +2615,8 @@ export class CollectionAutomations {
     }
   }
 }
+
+const isGroupSubscription = (subscription: StoredSubscription) => "groupId" in subscription;
 
 function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
   return reach.kind === "post"
