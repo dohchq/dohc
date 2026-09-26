@@ -21,6 +21,7 @@ import {
   type AutomationRunNowResult,
   type AutomationClaimSummary,
   type AutomationFailuresResult,
+  type AutomationGroupSkipsResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
   type AutomationPressParams,
@@ -33,7 +34,9 @@ import {
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
-  type AutomationUnsubscribeGroupsResult,
+  type AutomationReleaseGroupsResult,
+  type AutomationWatchGroupsParams,
+  type AutomationWatchGroupsResult,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1177,15 +1180,22 @@ export class VersionedLiveAdapter {
   }
 
   /**
-   * Removes every Group subscription in the workspace in one engine write,
-   * including one the desktop lost track of, so no message stored after it
-   * claims until one is added again.
+   * Stops every Group subscription in the workspace from claiming, in one
+   * engine write, and answers what the next automation host needs.
    */
-  async unsubscribeAutomationGroups(): Promise<AutomationUnsubscribeGroupsResult> {
-    return this.workspaceRequest(
-      WORKSPACE_METHOD.automationsUnsubscribeGroups,
-      {},
-    );
+  async releaseAutomationGroups(): Promise<AutomationReleaseGroupsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsReleaseGroups, {});
+  }
+
+  /**
+   * Sets every Group subscription this computer watches, in one engine
+   * write, taking the handover a release left for it at a new host
+   * generation.
+   */
+  async watchAutomationGroups(
+    input: AutomationWatchGroupsParams,
+  ): Promise<AutomationWatchGroupsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsWatchGroups, input);
   }
 
   /**
@@ -1278,6 +1288,11 @@ export class VersionedLiveAdapter {
    */
   async listAutomationFailures(): Promise<AutomationFailuresResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
+  }
+
+  /** When Group messages last started nothing here for a reason a person can act on. */
+  async readAutomationGroupSkips(): Promise<AutomationGroupSkipsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsGroupSkips, {});
   }
 
   /**

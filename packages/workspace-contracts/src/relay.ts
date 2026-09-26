@@ -609,6 +609,30 @@ export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
 // longest ago, unless it is the host or handing over.
 export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
+// A release carries, as `groups`, what the next host needs so each Group
+// message starts its automations exactly once across the handover: the
+// Collection automations the computer handing over watched, and the ids of
+// the Group messages it and earlier hosts already decided, at most 2,000 of
+// them. The relay keeps it, as a JSON object it does not read, for the
+// computer the release names, until the next release or take over.
+// `groupsWatched` is the host generation at which the releasing computer
+// last watched its Group subscriptions. When the relay recorded a release or
+// take over after that, that computer ran nothing since, so its handover is
+// stale: the relay carries a handover it holds on to the next computer, and
+// after a take over, the next computer starts from now.
+export const AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+// GET /sync/<workspaceId>/automation-host/groups?generation=<generation>,
+// for the current host's generation; another is refused with `conflict`.
+// `generation` is the host generation the relay's last release or take over
+// started, null for none. `groups` is that release's Group handover when it
+// names the current host, and null after a take over or for another
+// computer.
+export interface RelayAutomationGroupHandoverResponse {
+  ok: true;
+  generation: number | null;
+  groups: Record<string, unknown> | null;
+}
 
 export interface RelayAutomationHost {
   installId: string;

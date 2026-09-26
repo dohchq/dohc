@@ -74,6 +74,8 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
+  decodeAutomationGroupHandover,
+  type AutomationGroupRelayRecord,
   type EngineStoreRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -205,11 +207,13 @@ import {
   computersOfAnswer,
   createAutomationHosts,
   hostOfAnswer,
+  automationHostGeneration,
   isAutomationHost,
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "./automations/skippedRunsNotice";
+import { groupMessagesNotice } from "./automations/groupMessagesNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
@@ -1795,6 +1799,7 @@ function engineForWorkspace(
       const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
         runWorkspaceSharedChannelPass(workspace.workspaceId),
       );
+      if (outcome.changed) void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       return outcome.changed;
     },
     // A replicated chat message can mark a live bookmark pending without
@@ -1804,6 +1809,8 @@ function engineForWorkspace(
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       automationHosts.relayAnswered(workspace.workspaceId);
+      collectionAutomationsOf(workspace.workspaceId)?.relayAnswered();
+      void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();
       // The relay answers again, so this computer may be the host again.
       if (recovered) withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, (lease) => lease.state.relayedPresses)?.start();
       return withWorkspaceAttachmentAsync(workspace, () =>
@@ -3319,12 +3326,14 @@ const automationHosts = createAutomationHosts({
   },
   startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
   hostChanged: (workspaceId) => collectionAutomationsOf(workspaceId)?.hostChanged(),
-  // The release waits until the engine here holds no Group subscription,
-  // so no message that reaches this computer after the release claims here.
+  // The release waits until the engine here claims no more Group messages,
+  // and carries what it decided so the next host claims each one once.
   finishHere: async (workspaceId, stillHandingOver) => {
     const automations = collectionAutomationsOf(workspaceId);
-    if (!automations || !(await automations.removeGroupSubscriptions(stillHandingOver))) return null;
-    return await automationScheduler.finishHere(workspaceId);
+    const released = automations ? await automations.releaseGroupSubscriptions(stillHandingOver) : null;
+    if (released === null) return null;
+    const throughMs = await automationScheduler.finishHere(workspaceId);
+    return throughMs === null ? null : { throughMs, groups: released.handover, groupsWatched: released.watchedGeneration };
   },
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
@@ -3410,6 +3419,31 @@ function stillRunsSchedulesHere(workspaceId: string): boolean {
   const entry = findWorkspace(workspaceId);
   if (entry === null || entry.shareView !== undefined) return false;
   return entry.remote === undefined || automationHosts.stillRuns(workspaceId);
+}
+
+// The relay's last release or take over, read at this host generation, as
+// the engine takes it: 0 for none, with the handover when a release left it
+// for this computer. The engine checks a handover again before it takes it.
+async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
+  const entry = findWorkspace(workspaceId);
+  if (!entry?.remote) return { generation: 0, handover: null };
+  const { credentials } = await remoteForWorkspace(entry);
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/automation-host/groups?generation=${generation}`,
+    { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
+    ? body as { generation?: unknown; groups?: unknown }
+    : undefined;
+  if (kept === undefined || !(kept.generation === null || Number.isSafeInteger(kept.generation)) || kept.groups === undefined) {
+    throw new Error(`The relay answered the Group handover read with ${response.status}.`);
+  }
+  return {
+    generation: typeof kept.generation === "number" ? kept.generation : 0,
+    handover: kept.groups === null ? null : decodeAutomationGroupHandover(kept.groups),
+  };
 }
 
 // Whether any computer can run this workspace's schedules and Group
@@ -3554,8 +3588,10 @@ function createCollectionAutomationsFor(
     postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
-    runsGroupTriggers: () => isAutomationHost(findWorkspace(workspaceId), () => automationHosts.stillRuns(workspaceId)),
+    groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),
+    groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
     requestHost: () => automationHosts.admit(workspaceId),
+    groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),
     onSchedulesChanged: () => automationScheduler.wake(),

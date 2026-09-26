@@ -7,6 +7,7 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
+  decodeAutomationGroupHandover,
   decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
@@ -612,16 +613,34 @@ describe("automations wire schemas", () => {
         unsubscribed: false,
       }),
     ).toEqual({ unsubscribed: false });
+    const handover = {
+      floorMs: 10,
+      automations: [
+        {
+          automationId: "collection:Trip#task",
+          sinceMs: 10,
+          decided: [{ messageId: "m1", createdAtMs: 20 }],
+        },
+      ],
+    };
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
-        removed: 2,
-      }),
-    ).toEqual({ removed: 2 });
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { watchedGeneration: 3, handover }),
+    ).toEqual({ watchedGeneration: 3, handover });
+    expect(decodeAutomationGroupHandover(handover)).toEqual(handover);
     expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribeGroups, {
-        removed: true,
+      decodeAutomationGroupHandover({
+        ...handover,
+        automations: [{ ...handover.automations[0], decided: [{ messageId: "" }] }],
       }),
     ).toThrow();
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsWatchGroups, {
+        needsHandover: true,
+      }),
+    ).toEqual({ needsHandover: true });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsGroupSkips, { aheadAtMs: 5, lateAtMs: null }),
+    ).toEqual({ aheadAtMs: 5, lateAtMs: null });
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {

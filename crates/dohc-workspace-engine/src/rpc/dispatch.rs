@@ -829,8 +829,12 @@ impl EngineService {
                 self.automations_unsubscribe(&ctx, request.workspace, request.params)
                     .await?
             }
-            "automations.unsubscribeGroups" => {
-                self.automations_unsubscribe_groups(&ctx, request.workspace, request.params)
+            "automations.releaseGroups" => {
+                self.automations_release_groups(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.watchGroups" => {
+                self.automations_watch_groups(&ctx, request.workspace, request.params)
                     .await?
             }
             "automations.claimNext" => {
@@ -838,6 +842,10 @@ impl EngineService {
                     .await?
             }
             "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
+            "automations.groupSkips" => {
+                self.automations_group_skips(&ctx, request.workspace)
+                    .await?
+            }
             "automations.listClaims" => {
                 self.automations_list_claims(&ctx, request.workspace, request.params)
                     .await?
@@ -1154,16 +1162,18 @@ mod tests {
             "automations.claimNext",
             "automations.claimSchedule",
             "automations.failures",
+            "automations.groupSkips",
             "automations.listClaims",
             "automations.press",
             "automations.release",
+            "automations.releaseGroups",
             "automations.retry",
             "automations.runNow",
             "automations.scheduleMarks",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
-            "automations.unsubscribeGroups",
+            "automations.watchGroups",
             "capture.flush",
             "capture.reconcile",
             "capture.setAuthor",

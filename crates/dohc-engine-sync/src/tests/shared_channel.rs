@@ -690,18 +690,22 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
             )
         })
         .expect("shared Group");
-    dohc_engine_domain::subscribe_automation_group(
+    dohc_engine_domain::watch_automation_groups(
         &mut engine,
         "ws",
-        &dohc_engine_domain::AutomationGroupSubscription {
-            automation_id: "collection:Trip/Tasks#task".to_owned(),
-            channel_id,
-            starts_with: Some("/task".to_owned()),
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
         },
         3,
         &NoFaults,
     )
-    .expect("subscribe");
+    .expect("watch");
 
     let second = client
         .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)

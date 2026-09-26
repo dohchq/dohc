@@ -11,6 +11,7 @@ import {
   HANDOVER_READ_MAX_MS,
   HOST_FRESH_MS,
   hostOfAnswer,
+  automationHostGeneration,
   isAutomationHost,
   relayUnreachable,
   type HostAnswer,
@@ -22,6 +23,9 @@ const OTHER = "install-other";
 
 const host = (installId: string, generation: number, handoverFrom: string | null, releasedThroughMs: number | null): RelayAutomationHost =>
   ({ installId, generation, handoverFrom, releasedThroughMs });
+
+// The Group handover this computer's engine answers when it releases.
+const GROUPS = { floorMs: 1, automations: [] };
 
 const answer = (row: RelayAutomationHost | null): HostAnswer => ({ status: 200, body: { ok: true, host: row, computers: [] } });
 
@@ -70,7 +74,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     finishHere: async (_workspaceId, stillHandingOver) => {
       finishes += 1;
       whileFinishing?.(stillHandingOver);
-      return finish;
+      return finish === null ? null : { throughMs: finish, groups: GROUPS, groupsWatched: 2 };
     },
     logError: (_workspaceId, error) => { errors.push(error); },
     monotonicMs: () => clock,
@@ -161,7 +165,10 @@ describe("automation hosts", () => {
     w.setRelay(host(OTHER, 3, ME, null));
     w.hosts.open("ws");
     await w.settle();
-    expect(w.requests[1]).toEqual({ action: "release", body: { installId: ME, generation: 3, releasedThroughMs: 5_000 } });
+    expect(w.requests[1], "the release carries the Group handover").toEqual({
+      action: "release",
+      body: { installId: ME, generation: 3, releasedThroughMs: 5_000, groups: GROUPS, groupsWatched: 2 },
+    });
     expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
     expect(await w.hosts.runsHere("ws")).toBe(false);
   });
@@ -493,8 +500,30 @@ describe("the automation host", () => {
     expect(await isAutomationHost({ rootPath: root }, () => false)).toBe(true);
     expect(await isAutomationHost({ rootPath: root, shareView: {} }, () => true), "shared with this person").toBe(false);
     expect(await isAutomationHost(null, () => true)).toBe(false);
+    expect(await automationHostGeneration({ rootPath: root }, () => 7), "its only computer runs at 0").toBe(0);
+    expect(await automationHostGeneration({ rootPath: root, remote: {} }, () => 7)).toBe(7);
     recordSynced(root);
     expect(await isAutomationHost({ rootPath: root }, () => true), "synced before, so another computer may be the host").toBe(false);
+    expect(await automationHostGeneration({ rootPath: root }, () => 7)).toBeNull();
+  });
+
+  it("answers the generation it runs at only while it runs", async () => {
+    const w = world({ stored: host(ME, 2, null, null) });
+    w.setRelay(host(ME, 2, null, null));
+    w.hosts.open("ws");
+    await w.settle();
+    expect(w.hosts.runsAt("ws")).toBe(2);
+    // The owner chose the other computer: this one hands over.
+    w.setRelay(host(OTHER, 3, ME, null));
+    w.hosts.learned("ws", host(OTHER, 3, ME, null));
+    expect(w.hosts.runsAt("ws"), "handing over").toBeNull();
+    await w.settle();
+    expect(w.relay()).toEqual(host(OTHER, 4, null, 5_000));
+    expect(w.hosts.runsAt("ws")).toBeNull();
+    w.hosts.learned("ws", host(ME, 5, null, null));
+    expect(w.hosts.runsAt("ws"), "chosen again").toBe(5);
+    w.hosts.close("ws");
+    expect(w.hosts.runsAt("ws")).toBeNull();
   });
 });
 

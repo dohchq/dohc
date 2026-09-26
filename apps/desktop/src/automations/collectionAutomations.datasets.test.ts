@@ -131,10 +131,12 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   const engine = {
     listCollections: async () => ({ collections: [] }),
     subscribeAutomation: async (input: unknown) => { subscribed.push(input); },
-    unsubscribeAutomationGroups: async () => ({ removed: 0 }),
+    releaseAutomationGroups: async () => ({ watchedGeneration: 0, handover: { floorMs: 0, automations: [] } }),
+    watchAutomationGroups: async () => ({ needsHandover: false }),
     claimNextAutomation: async () => null,
     listAutomationClaims: async () => ({ claims: [] }),
     listAutomationFailures: async () => ({ failures: [] }),
+    readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
   let roster = options.roster ?? OWNER;
   let hostOpen = options.hostOpen ?? true;
@@ -157,7 +159,9 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     mayRetryPress: async () => options.mayRetryPress ?? false,
     onPressSettled: (event) => { settled.push(event); wake(); },
     onPressWaiting: (event) => { waiting.push(event); wake(); },
-    runsGroupTriggers: async () => options.groups ?? false,
+    groupHost: async () => (options.groups ? 0 : null),
+    groupRelayRecord: async () => ({ generation: 0, handover: null }),
+    groupMessagesSkipped: async () => undefined,
     requestHost: async () => undefined,
     readMessageBody: async () => { throw new Error("Dataset automations cannot use Group messages."); },
     postNotice: async (notice) => { notices.push(notice); wake(); },

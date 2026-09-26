@@ -2,9 +2,9 @@ use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
-    AutomationGroupSubscription, AutomationPress, AutomationPressed, AutomationRetry,
-    AutomationRunNow, AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark,
-    AutomationSettle, AutomationSubscription,
+    AutomationGroupRelease, AutomationGroupWatch, AutomationGroupWatched, AutomationPress,
+    AutomationPressed, AutomationRetry, AutomationRunNow, AutomationScheduleClaim,
+    AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle, AutomationSubscription,
 };
 use dohc_engine_storage::FaultInjector;
 use std::sync::Arc;
@@ -61,22 +61,20 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn automation_subscribe_group(
+    pub async fn automation_release_groups(
         &self,
         workspace_id: String,
-        subscription: AutomationGroupSubscription,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<AutomationGroupRelease, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                dohc_engine_domain::subscribe_automation_group(
+                dohc_engine_domain::release_automation_groups(
                     store,
                     &workspace_id,
-                    &subscription,
                     now_ms,
                     faults.as_ref(),
                 )
@@ -86,44 +84,23 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn automation_unsubscribe_group(
+    pub async fn automation_watch_groups(
         &self,
         workspace_id: String,
-        automation_id: String,
-        channel_id: String,
+        watch: AutomationGroupWatch,
+        now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<AutomationGroupWatched, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                dohc_engine_domain::unsubscribe_automation_group(
+                dohc_engine_domain::watch_automation_groups(
                     store,
                     &workspace_id,
-                    &automation_id,
-                    &channel_id,
-                    faults.as_ref(),
-                )
-                .map_err(RuntimeError::from)
-            }
-        })
-        .await
-    }
-
-    pub async fn automation_unsubscribe_groups(
-        &self,
-        workspace_id: String,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<usize, RuntimeError> {
-        self.run(move |store, _cache| {
-            if token.is_cancelled() {
-                Err(RuntimeError::Cancelled)
-            } else {
-                dohc_engine_domain::unsubscribe_automation_groups(
-                    store,
-                    &workspace_id,
+                    &watch,
+                    now_ms,
                     faults.as_ref(),
                 )
                 .map_err(RuntimeError::from)
@@ -358,6 +335,17 @@ impl ActorHandle {
     ) -> Result<Vec<AutomationClaimAttempt>, RuntimeError> {
         self.run(move |store, _cache| {
             dohc_engine_domain::list_running_automation_attempts(store, &workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn automation_group_skips(
+        &self,
+        workspace_id: String,
+    ) -> Result<dohc_engine_domain::AutomationGroupSkips, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_domain::read_automation_group_skips(store, &workspace_id)
                 .map_err(RuntimeError::from)
         })
         .await

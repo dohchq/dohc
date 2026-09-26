@@ -18,10 +18,12 @@ import { readSyncHistory } from "../workspaces/syncHistory";
 // moves the schedules to another computer, this one steps them one last
 // time and reports how far it ran, so the new host starts after it.
 //
-// The host is also the only computer that registers the workspace's Group
-// subscriptions, so the engine claims each Group message there. Before it
-// releases, it removes them. The new host adds its own only after it reads
-// the release, so in a handover the two never hold them at once. While a
+// The host is also the only computer that watches the workspace's Groups,
+// so the engine claims each Group message there. Before it releases, its
+// engine stops them, and the release carries what the next host needs:
+// the messages this host and earlier ones already decided. The new host
+// takes that before it watches, and claims each stored message nobody
+// decided, so each Group message starts its automations exactly once. While a
 // handover waits, every computer that has the workspace open reads the host
 // again on a short timer, so the new host starts soon after the release and
 // the old one retries a release that did not go through.
@@ -41,7 +43,24 @@ export type HostAnswer = { status: number; body: unknown } | null;
 
 export type HostRequest =
   | { action: "check-in"; body: { installId: string; label: string; claim: boolean } }
-  | { action: "release"; body: { installId: string; generation: number; releasedThroughMs: number } };
+  | {
+    action: "release";
+    // `groups` is the engine's Group handover, carried to the next host
+    // unread; `groupsWatched` is the host generation at which it last
+    // watched its Group subscriptions.
+    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsWatched: number };
+  };
+
+/**
+ * What a computer that hands over reports: how far its schedules ran, its
+ * Group handover, and the generation it last watched its Group
+ * subscriptions at.
+ */
+export interface FinishedHere {
+  throughMs: number;
+  groups: unknown;
+  groupsWatched: number;
+}
 
 export interface AutomationHostsDependencies {
   /** This computer's install id. */
@@ -63,13 +82,13 @@ export interface AutomationHostsDependencies {
    */
   hostChanged(workspaceId: string): void;
   /**
-   * Before this computer hands over: removes its Group subscriptions, then
+   * Before this computer hands over: stops its Group subscriptions, then
    * steps the workspace's schedules one last time. Resolves with the time
-   * it ran through, or null to try again at the next read.
-   * `stillHandingOver` answers whether the owner has not called this
+   * it ran through and the Group handover, or null to try again at the next
+   * read. `stillHandingOver` answers whether the owner has not called this
    * handover off since, from the last host read.
    */
-  finishHere(workspaceId: string, stillHandingOver: () => boolean): Promise<number | null>;
+  finishHere(workspaceId: string, stillHandingOver: () => boolean): Promise<FinishedHere | null>;
   logError(workspaceId: string, error: unknown): void;
   /** A clock that never steps backwards, for how old a copy is. */
   monotonicMs?(): number;
@@ -162,20 +181,31 @@ export function computerLabel(hostName: string): string {
   return label.length > 0 ? label : "This computer";
 }
 
+type HostedWorkspace = { remote?: unknown; shareView?: unknown; rootPath: string } | null;
+
 /**
- * Whether this computer is a workspace's automation host. For a synced
- * workspace, `relayNamesThis` answers from the relay's record. One that
- * does not sync has this computer as its host only when its folder says it
+ * The automation host generation this computer runs a workspace at, or null
+ * when it is not the host. For a synced workspace, `relayGeneration`
+ * answers from the relay's record. One that does not sync has this
+ * computer as its host, at generation 0, only when its folder says it
  * never synced: this is its only computer. A workspace shared with this
  * person is never theirs to run.
  */
+export async function automationHostGeneration(
+  workspace: HostedWorkspace,
+  relayGeneration: () => number | null | Promise<number | null>,
+): Promise<number | null> {
+  if (workspace === null || workspace.shareView !== undefined) return null;
+  if (workspace.remote !== undefined) return await relayGeneration();
+  return (await readSyncHistory(workspace.rootPath)) === "never-synced" ? 0 : null;
+}
+
+/** Whether this computer is a workspace's automation host; see automationHostGeneration. */
 export async function isAutomationHost(
-  workspace: { remote?: unknown; shareView?: unknown; rootPath: string } | null,
+  workspace: HostedWorkspace,
   relayNamesThis: () => boolean | Promise<boolean>,
 ): Promise<boolean> {
-  if (workspace === null || workspace.shareView !== undefined) return false;
-  if (workspace.remote !== undefined) return await relayNamesThis();
-  return (await readSyncHistory(workspace.rootPath)) === "never-synced";
+  return (await automationHostGeneration(workspace, async () => ((await relayNamesThis()) ? 0 : null))) !== null;
 }
 
 export function createAutomationHosts(dependencies: AutomationHostsDependencies) {
@@ -297,16 +327,22 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         await Promise.race([Promise.all([...state.held]), state.gone]);
       }
       if (!stillHandingOver()) return;
-      const through = await dependencies.finishHere(workspaceId, stillHandingOver);
+      const finished = await dependencies.finishHere(workspaceId, stillHandingOver);
       // Called off while this computer finished: there is nothing to release.
       if (!stillHandingOver()) return;
-      if (through === null) {
+      if (finished === null) {
         state.retry = true;
         return;
       }
       const answer = await dependencies.send(workspaceId, {
         action: "release",
-        body: { installId: dependencies.installId(), generation: host.generation, releasedThroughMs: through },
+        body: {
+          installId: dependencies.installId(),
+          generation: host.generation,
+          releasedThroughMs: finished.throughMs,
+          groups: finished.groups,
+          groupsWatched: finished.groupsWatched,
+        },
       });
       if (states.get(workspaceId) !== state) return;
       if (answer === null) {
@@ -397,6 +433,12 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     stillRuns(workspaceId: string): boolean {
       const state = states.get(workspaceId);
       return state?.open === true && !state.handingOver && runsOn(state.host);
+    },
+
+    /** The host generation this computer runs at when stillRuns, or null. */
+    runsAt(workspaceId: string): number | null {
+      const state = states.get(workspaceId);
+      return state?.open === true && !state.handingOver && runsOn(state.host) ? state.host?.generation ?? null : null;
     },
 
     /**

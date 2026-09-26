@@ -1449,18 +1449,22 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("imported Group");
-    dohc_engine_domain::subscribe_automation_group(
+    dohc_engine_domain::watch_automation_groups(
         engine,
         "ws",
-        &dohc_engine_domain::AutomationGroupSubscription {
-            automation_id: "collection:Trip/Tasks#task".to_owned(),
-            channel_id,
-            starts_with: Some("/task".to_owned()),
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
         },
         1,
         &NoFaults,
     )
-    .expect("subscribe");
+    .expect("watch");
 }
 
 /// Another member's message in the imported Group.
