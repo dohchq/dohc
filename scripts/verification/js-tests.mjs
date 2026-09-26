@@ -45,7 +45,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages } = {}) {
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
@@ -68,8 +68,12 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
     const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
-    const tasks = testPlan(packages);
-    if (!tasks.length) throw new Error("No workspace package tests were discovered.");
+    if (selectedPackages && selectedPackages.some(name => !packages.some(pkg => pkg.name === name))) {
+      throw new Error("A selected workspace package is missing from the installed inventory.");
+    }
+    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)));
+    if (!tasks.length && !selectedPackages) throw new Error("No workspace package tests were discovered.");
+    report.selectedPackages = selectedPackages ?? packages.map(pkg => pkg.name);
     report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
     save();
     await runBounded(tasks, task => command(task.name, task.args), report.concurrency);
