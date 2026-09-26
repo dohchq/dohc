@@ -197,10 +197,9 @@ export type AutomationUnsubscribeParams =
 export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
   /**
-   * Serve only claims whose automation id starts with this, so each
-   * executor drains its own namespace: the plugin executor "plugin:" (ids
-   * "plugin:<plugin name>/<automation id>"), the Collection executor
-   * "collection:" (ids "collection:<collection path>#<automation id>").
+   * Serve only claims whose automation id starts with this. The Collection
+   * executor drains "collection:" (ids
+   * "collection:<collection path>#<automation id>").
    */
   automationIdPrefix: string;
 };

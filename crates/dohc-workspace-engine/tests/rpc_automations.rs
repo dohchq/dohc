@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 const WORKSPACE_ID: &str = "ws-rpc-automations";
-const AUTOMATION: &str = "plugin:triage";
+const AUTOMATION: &str = "collection:tasks#triage";
 
 async fn call(
     transport: &InProcessTransport<EngineService>,
@@ -112,7 +112,7 @@ fn seed_claims(scratch: &ScratchDir) {
             claim_automation_triggers_in_tx(tx, WORKSPACE_ID, &facts(1), 20)?;
             claim_automation_triggers_in_tx(tx, WORKSPACE_ID, &facts(2), 30)?;
             let mut stopped = facts(3);
-            stopped.author_origin_id = Some("plugin:other".to_owned());
+            stopped.author_origin_id = Some("collection:tasks#other".to_owned());
             stopped.attribution = Some(ChangeAttribution {
                 actor_kind: ChangeActorKind::Automation,
                 on_behalf_of: None,
@@ -182,20 +182,20 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     for (method, params) in [
         (
             "automations.subscribe",
-            json!({ "automationId": "plugin:x", "path": "tasks", "kinds": ["changed"] }),
+            json!({ "automationId": "collection:x#y", "path": "tasks", "kinds": ["changed"] }),
         ),
         (
             "automations.unsubscribe",
-            json!({ "automationId": "plugin:x", "path": "tasks" }),
+            json!({ "automationId": "collection:x#y", "path": "tasks" }),
         ),
         (
             "automations.claimNext",
-            json!({ "automationIdPrefix": "plugin:" }),
+            json!({ "automationIdPrefix": AUTOMATION }),
         ),
         ("automations.failures", json!({})),
         (
             "automations.listClaims",
-            json!({ "automationId": "plugin:x" }),
+            json!({ "automationId": "collection:x#y" }),
         ),
         (
             "automations.settle",
@@ -254,7 +254,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &mut id,
         "automations.subscribe",
         json!({
-            "automationId": "plugin:janitor",
+            "automationId": "collection:tasks#janitor",
             "path": ".",
             "kinds": ["changed", "removed"],
             "fields": ["status"],
@@ -267,7 +267,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.subscribe",
-        json!({ "automationId": "plugin:janitor", "path": ".", "kinds": ["changed"] }),
+        json!({ "automationId": "collection:tasks#janitor", "path": ".", "kinds": ["changed"] }),
     )
     .await;
     assert_eq!(replaced, json!({ "subscribed": true }));
@@ -276,7 +276,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.unsubscribe",
-        json!({ "automationId": "plugin:janitor", "path": "." }),
+        json!({ "automationId": "collection:tasks#janitor", "path": "." }),
     )
     .await;
     assert_eq!(removed, json!({ "unsubscribed": true }));
@@ -285,7 +285,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.unsubscribe",
-        json!({ "automationId": "plugin:janitor", "path": "." }),
+        json!({ "automationId": "collection:tasks#janitor", "path": "." }),
     )
     .await;
     assert_eq!(missing, json!({ "unsubscribed": false }));
@@ -339,7 +339,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1000, "automationIdPrefix": "plugin:" }),
+        json!({ "nowMs": 1000, "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(requeued["claimId"], json!("atc_requeue"));
@@ -371,13 +371,13 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         "a claim the reaper terminally failed ({AUTOMATION_RECLAIM_EXHAUSTED}) is not running"
     );
 
-    // An executor drains only its own automation id prefix.
+    // A claim drains only under its own automation id prefix.
     let other_executor = call(
         &transport,
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1002, "automationIdPrefix": "collection:" }),
+        json!({ "nowMs": 1002, "automationIdPrefix": "collection:notes#" }),
     )
     .await;
     assert_eq!(other_executor, Value::Null);
@@ -407,7 +407,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1003, "automationIdPrefix": "plugin:" }),
+        json!({ "nowMs": 1003, "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(first["automationId"], json!(AUTOMATION));
@@ -464,7 +464,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1006, "automationIdPrefix": "plugin:" }),
+        json!({ "nowMs": 1006, "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(
@@ -492,7 +492,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "automationIdPrefix": "plugin:" }),
+        json!({ "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(drained, Value::Null, "nothing pending remains");
@@ -551,7 +551,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1010, "automationIdPrefix": "plugin:" }),
+        json!({ "nowMs": 1010, "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(rerun["claimId"], second["claimId"]);
@@ -602,7 +602,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1010, "automationIdPrefix": "plugin:" }),
+        json!({ "nowMs": 1010, "automationIdPrefix": AUTOMATION }),
     )
     .await;
     assert_eq!(rerun["claimId"], second["claimId"]);
@@ -1445,7 +1445,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
         "automations.press",
         json!({
             "pressId": "press-2",
-            "automationId": "plugin:triage",
+            "automationId": "collection:triage",
             "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
             "pressedBy": "user:ada",
         }),
