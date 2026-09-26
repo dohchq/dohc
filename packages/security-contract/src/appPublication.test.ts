@@ -7,11 +7,32 @@ const identity = (path: string) => ({ path, sha256: hash, byteLength: 1 });
 function candidate(): AppPublicationCandidate {
   return { versionId: "main", appRoot: "app", entryPath: "app/main.ts", packageMap: {}, sourceRevision: hash, sourceDigest: hash,
     dependencyLockDigest: hash, bundleDigest: hash, buildDigest: hash,
-    compilerIdentity: { recipe: "dohc-closed-app-v2", version: "0.28.1", binarySha256: hash },
+    compilerIdentity: { recipe: "dohc-closed-app-v3", version: "0.28.1", binarySha256: hash },
     inputs: [identity("app/main.ts")], dependencies: ["app/main.ts"],
     files: [{ ...identity("bundle.js"), contentType: "text/javascript; charset=utf-8" }], capabilities: [] };
 
 }
+
+describe("bundle files", () => {
+  const page = { ...identity("page.json"), contentType: "application/json; charset=utf-8" };
+  const style = { ...identity("bundle.css"), contentType: "text/css; charset=utf-8" };
+
+  it("accepts a page record beside the script and styles", () => {
+    const value = { ...candidate(), entryPath: "app/index.html", inputs: [identity("app/index.html")], dependencies: ["app/index.html"] };
+    value.files = [...value.files, style, page];
+    expect(parseAppPublicationCandidate(value, limits).files.map(file => file.path)).toEqual(["bundle.css", "bundle.js", "page.json"]);
+  });
+
+  it.each([
+    ["a page record typed as a script", [{ ...page, contentType: "text/javascript; charset=utf-8" }]],
+    ["another bundle file", [{ ...identity("page.html"), contentType: "text/html; charset=utf-8" }]],
+    ["a duplicate page record", [page, page]],
+  ])("rejects %s", (_name, extra) => {
+    const value = candidate();
+    value.files = [...value.files, ...extra];
+    expect(() => parseAppPublicationCandidate(value, limits)).toThrow();
+  });
+});
 
 it("rejects retired app-owned backend capabilities", () => {
   expect(() => parseAppPublicationCandidate({ ...candidate(), capabilities: [{ kind: "app-backend" }] }, limits)).toThrow();

@@ -86,7 +86,7 @@ function StatusPill(props: { state: SaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string) => void;
+  onError?: (message: string, cause?: unknown) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -250,7 +250,7 @@ export function SettingsDialog(props: {
       })
       .catch((cause) => {
         if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError(ipcErrorMessage(cause));
         }
       });
     return () => {
@@ -298,9 +298,10 @@ export function SettingsDialog(props: {
       setUserResult(previous);
       applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
     }
-  }, [markSaved, markSaving, userResult]);
+  }, [markSaved, markSaving, props.onError, userResult]);
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -354,10 +355,11 @@ export function SettingsDialog(props: {
         }
         setWorkspaceResult(previous);
         setSaveState("error");
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(ipcErrorMessage(cause));
+        props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
       }
     },
-    [markSaved, markSaving, onWorkspaceSettingsRead, props.workspaceId, workspaceResult],
+    [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
   );
 
   // Zoom goes through main's one serialized mutation instead of a full-file
@@ -377,7 +379,7 @@ export function SettingsDialog(props: {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       // The refusal names the file and the way out.
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
 
@@ -394,9 +396,10 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
     }
-  }, [markSaved, markSaving]);
+  }, [markSaved, markSaving, props.onError]);
 
   const resetWorkspaceSettings = useCallback(async () => {
     const requestId = workspaceSaveRequestRef.next();
@@ -424,9 +427,10 @@ export function SettingsDialog(props: {
         return;
       }
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
     }
-  }, [markSaved, markSaving, onWorkspaceSettingsRead, props.workspaceId]);
+  }, [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateBusy("check");

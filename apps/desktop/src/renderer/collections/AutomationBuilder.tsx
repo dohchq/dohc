@@ -505,9 +505,10 @@ export function AutomationBuilder(props: {
   const finalName = automation.name.trim() || sentenceText(automationSentence(automation)).slice(0, MAX_NAME_LENGTH);
   const candidate: Automation = { ...automation, name: finalName, id: isNew ? idFor(finalName, props.takenIds) : automation.id };
   const automationKey = JSON.stringify(candidate);
+  const draftKey = JSON.stringify(automation);
   useEffect(() => {
     props.onDraftChange({ automation, dirty });
-  }, [automationKey]);
+  }, [draftKey, dirty]);
 
   // Leaving with nothing changed needs no question.
   useEffect(() => {

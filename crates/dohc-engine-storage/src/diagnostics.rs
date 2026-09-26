@@ -21,8 +21,9 @@ pub enum CorruptionKind {
     /// The schema fingerprint is not one this build recognizes (e.g. a v1 TS
     /// database). Recovery: export/reset — never migrate or overwrite.
     UnsupportedFingerprint,
-    /// A migration failed to apply (or the ledger is incompatible). Recovery:
-    /// investigate the migration; the store is at its prior consistent state.
+    /// A migration failed to apply, or the ledger is incompatible with this
+    /// build, including a store a newer build migrated. Recovery: a build that
+    /// opens it; the store is at its prior consistent state.
     MigrationFailure,
     /// Structural corruption (bad rows, failed integrity check, foreign store).
     /// Recovery: read-only diagnostics / restore from backup.
@@ -56,7 +57,9 @@ impl CorruptionKind {
 pub fn classify(err: &StorageError) -> CorruptionKind {
     match err {
         StorageError::UnsupportedFingerprint { .. } => CorruptionKind::UnsupportedFingerprint,
-        StorageError::MigrationFailed { .. } => CorruptionKind::MigrationFailure,
+        StorageError::MigrationFailed { .. } | StorageError::MigratedByNewerBuild { .. } => {
+            CorruptionKind::MigrationFailure
+        }
         StorageError::DiskFull { .. } => CorruptionKind::DiskFull,
         StorageError::PermissionDenied { .. } => CorruptionKind::Permission,
         StorageError::FileLocked => CorruptionKind::TransientLock,
@@ -162,6 +165,9 @@ fn redacted_message(err: &StorageError) -> &'static str {
         }
         StorageError::ForeignDatabase => "the file is not a dohc engine database",
         StorageError::MigrationFailed { .. } => "a schema migration failed to apply",
+        StorageError::MigratedByNewerBuild { .. } => {
+            "a newer build migrated the store; open it with a build that defines its migrations"
+        }
         StorageError::DiskFull { .. } => "insufficient free space",
         StorageError::PermissionDenied { .. } => "permission denied accessing the database",
         StorageError::FileLocked => "the database is transiently locked; retry",

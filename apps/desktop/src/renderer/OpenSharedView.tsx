@@ -248,7 +248,7 @@ export function OpenSharedView(props: {
       }
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
-      setError(ipcErrorMessage(cause).trim() || "Couldn't open the share.");
+      setError(ipcErrorMessage(cause, "Couldn't open the share."));
     } finally {
       if (actionRequests.isCurrent(actionRequest)) setOpening(false);
     }

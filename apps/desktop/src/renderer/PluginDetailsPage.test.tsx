@@ -1767,7 +1767,7 @@ describe("PluginDetailsPage", () => {
       });
       bridgeMock.readWorkspaceText.mockRejectedValue(
         new Error(
-          "Error invoking remote method 'desktop:read-workspace-text': Error: EACCES: permission denied",
+          "Error invoking remote method 'desktop:read-workspace-text': Error [EACCES]: EACCES: permission denied",
         ),
       );
 
@@ -1775,7 +1775,8 @@ describe("PluginDetailsPage", () => {
 
       const error = await screen.findByTestId("plugin-readme-error");
       expect(error.textContent).toContain("plugins/t3-code/README.md");
-      expect(error.textContent).toContain("EACCES: permission denied");
+      expect(error.textContent).toContain("dohc does not have permission to use this file or folder.");
+      expect(error.textContent).not.toContain("EACCES");
       // The Electron wrapper never reaches the user.
       expect(error.textContent).not.toContain("invoking remote method");
       expect(screen.queryByTestId("plugin-readme-absent")).toBeNull();

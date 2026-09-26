@@ -1614,13 +1614,11 @@ fn sync_rollback_keeps_the_warmed_remote_cache_valid() {
     assert_remote_cache_crash_seam(FaultPoint::SyncBeforeApplyCommit, false);
 }
 
-#[cfg(feature = "fault-injection")]
 #[test]
 fn storage_rollback_keeps_the_warmed_remote_cache_valid() {
     assert_remote_cache_crash_seam(FaultPoint::StorageBeforePersist, false);
 }
 
-#[cfg(feature = "fault-injection")]
 #[test]
 fn storage_committed_crash_evicts_and_rebuilds_the_remote_cache() {
     assert_remote_cache_crash_seam(FaultPoint::StorageAfterCommitBeforeAck, true);

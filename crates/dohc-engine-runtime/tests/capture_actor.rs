@@ -266,10 +266,8 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     assert!(matches!(
         &first[1],
         Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "ydoc-session-live"
-            }
-        ))
+            dohc_engine_sync::SyncError::RetryableState { reason }
+        )) if *reason == dohc_engine_runtime::CAPTURE_NEW_FILE_LIVE
     ));
     assert!(
         first[2]
@@ -1160,9 +1158,8 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
         .expect_err("live lease must block text capture");
     assert!(matches!(
         refused,
-        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
-        })
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
+            if reason == dohc_engine_runtime::CAPTURE_NEW_FILE_LIVE
     ));
     assert_eq!(state(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     assert_eq!(durable_state(), before_text);

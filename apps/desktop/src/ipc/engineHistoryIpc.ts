@@ -25,7 +25,7 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
 // reads as its name and the Collection it belongs to; null leaves any other
 // automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
-  agent(author: Extract<MomentAuthor, {kind: "agent"}>): string;
+  agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   automation(automationId: string): { name: string; collection: string } | null;
 }
 
@@ -61,6 +61,7 @@ function engineMomentBaseForIpc(
   >,
   names: EngineMomentAuthorNames,
 ) {
+  const agentAuthorName = moment.author?.kind === "agent" ? names.agent(moment.author) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -68,8 +69,8 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
-    ...(moment.author?.kind === "agent"
-      ? { agentAuthorName: names.agent(moment.author) }
+    ...(agentAuthorName !== undefined
+      ? { agentAuthorName }
       : {}),
     ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
     ...automationAuthorOf(moment.author, names),

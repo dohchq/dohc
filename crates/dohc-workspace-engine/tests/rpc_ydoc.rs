@@ -2301,6 +2301,38 @@ async fn wait_for_capture_to_defer_under_live_session(
     panic!("capture did not report its deferred live-session write: {last_flush}");
 }
 
+/// Capture defers an empty new file a live session holds: the file is the
+/// session's creation baseline, and the session's settle records it. That is
+/// not a failure, so capture settles healthy with the file still unrecorded.
+///
+/// A healthy flush alone could come before capture saw the file. The forced
+/// reconcile rebuilds the files layer, whose first pass scans the whole
+/// workspace, so the settled flush after it covers the file.
+async fn wait_for_capture_to_settle_around_live_session(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id_base: u64,
+) {
+    call(transport, handle, id_base, "capture.reconcile", json!({})).await;
+    let id_base = id_base + 1;
+    let mut last_flush = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        last_flush = call(
+            transport,
+            handle,
+            id_base + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(true) && last_flush["degraded"] == json!(false) {
+            return;
+        }
+    }
+    panic!("capture did not settle around the live session: {last_flush}");
+}
+
 async fn moment_count_for_object(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -3348,12 +3380,15 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         );
         tokio::task::yield_now().await;
     }
+    // Capture sees the settled head as one another writer owns, and on first
+    // sight leaves it alone. The lease is not what stops it, so the pass is
+    // not a failure either.
     id += 1;
     let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
     assert_eq!(
-        flushed["settled"],
-        json!(false),
-        "capture must defer the new path while its Y.Doc session holds the lease"
+        (&flushed["settled"], &flushed["degraded"]),
+        (&json!(true), &json!(false)),
+        "capture must track the Y.Doc's head without degrading: {flushed}"
     );
 
     // The same scan must leave the settled head owned by the Y.Doc.
@@ -3507,8 +3542,10 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     // Capture sees the empty artifact, but the live Y.Doc is canonical. The
-    // lease keeps capture from minting a competing head under this session.
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    // lease keeps capture from minting a competing head under this session,
+    // and capture defers the file without degrading: it is the session's
+    // creation baseline, which the session's settle records.
+    wait_for_capture_to_settle_around_live_session(&transport, &handle, 100).await;
     let ingested = call(
         &transport,
         &handle,

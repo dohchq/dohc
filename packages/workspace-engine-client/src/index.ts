@@ -16,6 +16,7 @@ export {
   isYdocArtifactAssetsInvalidRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
+  DAEMON_ERROR_CODES,
   type CompletedDaemonBlob,
   type DaemonErrorCode,
   type EngineStoreRefusal,

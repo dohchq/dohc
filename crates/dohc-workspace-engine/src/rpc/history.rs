@@ -166,7 +166,7 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
 }
 
 /// Fail-closed author parsing (parity with the TS wire `MomentAuthorSchema`):
-/// only an exact agent, public, or named shape renders as an author. Anything
+/// only a supported author shape renders as an author. Anything
 /// else, such as bad JSON or a hand-edited shape, surfaces as an explicit
 /// corrupt marker, never a valid-looking attribution.
 fn parsed_moment_author(raw: &str) -> Value {
@@ -185,6 +185,9 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .is_some_and(|v| !v.is_empty() && v.len() <= 500)
         })
     };
+    let principal_ok = object
+        .get("onBehalfOf")
+        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
         return if valid { value } else { corrupt() };
@@ -205,9 +208,9 @@ fn parsed_moment_author(raw: &str) -> Value {
                 .and_then(Value::as_str)
                 .is_some_and(|v| !v.is_empty())
         };
-        let valid = object.len() == 4
+        let valid = object.len() == 3 + usize::from(object.contains_key("onBehalfOf"))
             && text("automationId")
-            && text("onBehalfOf")
+            && principal_ok
             && object
                 .get("depth")
                 .and_then(Value::as_u64)
@@ -228,12 +231,14 @@ fn parsed_moment_author(raw: &str) -> Value {
         Some(Value::String(v)) => !v.is_empty(),
         Some(_) => false,
     };
-    if kind_ok && nonempty("agentId") && nonempty("onBehalfOf") && run_ok {
+    if kind_ok && nonempty("agentId") && principal_ok && run_ok {
         let mut author = json!({
             "kind": "agent",
             "agentId": object["agentId"],
-            "onBehalfOf": object["onBehalfOf"],
         });
+        if let Some(principal) = object.get("onBehalfOf") {
+            author["onBehalfOf"] = principal.clone();
+        }
         // The contract field is OPTIONAL (`agentRunId?: string`), never
         // nullable — omit it when absent, exactly as pickMomentAuthor does.
         if let Some(run_id) = object.get("agentRunId") {
@@ -418,6 +423,36 @@ impl EngineService {
 mod relay_author_tests {
     use super::parsed_moment_author;
     use serde_json::json;
+
+    #[test]
+    fn preserves_declared_authors_without_inventing_a_principal() {
+        for author in [
+            json!({"kind":"agent", "agentId":"agent"}),
+            json!({"kind":"automation", "automationId":"collection:tasks#stamp", "depth":4}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            for principal in [json!(null), json!(""), json!(42)] {
+                let mut malformed = author.clone();
+                malformed["onBehalfOf"] = principal;
+                assert_eq!(
+                    parsed_moment_author(&malformed.to_string()),
+                    json!({"corrupt":true})
+                );
+            }
+        }
+        for malformed in [
+            json!({"kind":"agent"}),
+            json!({"kind":"automation", "automationId":"collection:tasks#stamp"}),
+            json!({"kind":"automation", "depth":4}),
+            json!({"kind":"automation", "automationId":"a", "depth":65}),
+            json!({"kind":"automation", "automationId":"a", "depth":4, "extra":true}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
 
     #[test]
     fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
