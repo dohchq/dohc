@@ -150,7 +150,16 @@ pub fn capture_imported_owner_activation(
         let local = durable::load_doc_in(tx, key)?;
         if local.has_missing_updates() { return Err(ApplicationError::Conflict); }
         let projection = local.project(ContentKind::Richdoc)?.content;
-        let text = local.preserved_markdown_source(&projection).unwrap_or(projection);
+        // The same rule as the version's settled file, so a document whose
+        // file keeps a body the engine reads differently still activates.
+        let text = local
+            .settled_markdown_source(&projection, || {
+                tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [&source_digest], |row| row.get(0))
+                    .optional()
+                    .map(Option::flatten)
+                    .map_err(read_sql)
+            })?
+            .unwrap_or(projection);
         if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
             return Err(invalid("ordinary activation source does not match imported document"));
         }

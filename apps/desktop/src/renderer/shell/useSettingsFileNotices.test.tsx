@@ -68,7 +68,7 @@ describe("useSettingsFileNotices", () => {
           workspaceIsReady: ready,
           userSettings,
           show: errors.showSettingsFileNotice,
-          reportError: errors.showShellError,
+          reportError: (message) => errors.reportShellFailure({ message }),
         });
         return { ...errors, onWorkspaceRead };
       },
@@ -123,7 +123,7 @@ describe("useSettingsFileNotices", () => {
         workspaceIsReady: true,
         userSettings: user([{ key: "accent", reason: "unknown" }]),
         show: errors.showSettingsFileNotice,
-        reportError: errors.showShellError,
+        reportError: (message) => errors.reportShellFailure({ message }),
       });
       return errors;
     });

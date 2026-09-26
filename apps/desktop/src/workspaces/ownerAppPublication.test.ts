@@ -16,17 +16,18 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
     ["app/rules.ts", "export const capacity: number = 20;"],
     ["app/schema.sql", "CREATE TABLE registrations(id TEXT PRIMARY KEY);"],
   ]);
-  const capturePaths: string[][] = [], methods: string[] = [];
+  const capturePaths: string[][] = [], listCalls: Record<string, unknown>[] = [];
+  const hooks = { onCapture: () => {} };
   const adapter = sourceCaptureAdapter(sources, { onRequest(method, params) {
-    methods.push(method);
-    if (method === "versionedText.captureSources") capturePaths.push(params.paths as string[]);
+    if (method === "versionedText.list") listCalls.push(params);
+    if (method === "versionedText.captureSources") { capturePaths.push(params.paths as string[]); if (capturePaths.length > 1) hooks.onCapture(); }
   } });
   const compile = vi.fn(compileClosedApp);
   const controller = new AbortController();
   const prepare = (appRoot = "app", shared = [appRoot]) => prepareOwnerAppPublication({ workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
     { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
     { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision });
-  return { declaration, sources, compile, capturePaths, methods, prepare, controller,
+  return { declaration, sources, compile, capturePaths, listCalls, hooks, prepare, controller,
     setDeclaration(value: unknown) { sources.set("app/app.publish.json", JSON.stringify(value)); } };
 }
 
@@ -53,7 +54,7 @@ describe("app.publish.json paths", () => {
     expect(candidate.inputs.map(file => file.path)).toEqual([`${root}/app.publish.json`, `${root}/deps/greeting.js`, `${root}/main.ts`, `${parent}shared/theme.css`].sort());
     expect(candidate.packageMap).toEqual({ greeting: `${root}/deps/greeting.js` });
     expect(files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
-    expect(h.methods).not.toContain("versionedText.list");
+    expect(h.listCalls).toEqual([{ versionId: "main", limit: 500, afterPath: `${root}/` }]);
   });
 
   it("names a listed file that does not exist, such as a path written from the workspace root", async () => {
@@ -80,9 +81,69 @@ describe("app.publish.json paths", () => {
   });
 
   it("names the missing app.publish.json after the engine refuses to capture it", async () => {
-    const h = harness(); h.sources.delete("app/app.publish.json");
-    await expect(h.prepare()).rejects.toThrow("dohc could not find app/app.publish.json.");
-    expect(h.methods).toContain("versionedText.list");
+    const h = harness(); place(h, "app", "");
+    h.hooks.onCapture = () => { h.sources.delete("app/app.publish.json"); };
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json changed while dohc prepared the app. Prepare the app again.");
+    expect(h.listCalls).toEqual([
+      { versionId: "main", limit: 500, afterPath: "app/" },
+      { versionId: "main", limit: 500 },
+    ]);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("names a file that disappears while dohc captures the app", async () => {
+    const h = harness(); place(h, "app", "");
+    h.hooks.onCapture = () => { h.sources.delete("app/deps/greeting.js"); };
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json lists app/deps/greeting.js, which does not exist. Write its paths relative to app.");
+  });
+});
+
+describe("app without app.publish.json", () => {
+  const page = (h: ReturnType<typeof harness>, files: Record<string, string>) => {
+    h.sources.clear();
+    for (const [path, text] of Object.entries(files)) h.sources.set(path, text);
+  };
+
+  it("publishes its folder as a static page with no capabilities", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<!doctype html><link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="App.JS"></script>',
+      "app/style.css": "h1 { color: red }", "app/App.JS": "document.title = 'Trip';", "app/notes.md": "# Notes", "app/dohc.json": "{}",
+      "app/my notes.js": "", "other/index.html": "<p>Other</p>" });
+    const { candidate, files } = await h.prepare();
+    expect(h.capturePaths).toEqual([["app/index.html", "app/App.JS", "app/style.css"]]);
+    expect(candidate.entryPath).toBe("app/index.html");
+    expect(candidate.capabilities).toEqual([]);
+    expect(candidate.dependencies).toEqual(["app/App.JS", "app/index.html", "app/style.css"]);
+    expect(files.map(file => file.path)).toEqual(["bundle.js", "page.json"]);
+  });
+
+  it("names the missing page before capturing anything", async () => {
+    const h = harness();
+    page(h, { "app/style.css": "h1 { color: red }" });
+    await expect(h.prepare()).rejects.toThrow("dohc found no index.html or app.publish.json in app. Add one to publish this app.");
+    expect(h.capturePaths).toEqual([]);
+  });
+
+  it("names a file the page links but the folder cannot publish", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
+    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
+  });
+
+  it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import data from './data.json'; document.title = data.title;",
+      "app/data.json": '{"title":"Trip"}', "app/package.json": "{}", "app/tsconfig.json": "{}", "app/dohc.json": "{}",
+      "app/node_modules/x/index.js": "", "app/.cache/x.js": "" });
+    const { candidate } = await h.prepare();
+    expect(h.capturePaths).toEqual([["app/index.html", "app/data.json", "app/main.ts"]]);
+    expect(candidate.dependencies).toEqual(["app/data.json", "app/index.html", "app/main.ts"]);
+  });
+
+  it("names a linked file of a type the compiler does not take", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>', "app/main.ts": "import './notes.yaml';", "app/notes.yaml": "a: 1" });
+    await expect(h.prepare()).rejects.toThrow("app/main.ts imports ./notes.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml.");
   });
 });
 

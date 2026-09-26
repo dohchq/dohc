@@ -437,6 +437,36 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
+  it("keeps an authored create request identity across a session retry", async () => {
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      throw SENTINEL;
+    });
+    const sessions = sessionsFor(client);
+    const run = sessions.run.bind(sessions);
+    sessions.run = async (workspace, operation, options) => {
+      try {
+        return await run(workspace, operation, options);
+      } catch (error) {
+        if (error !== SENTINEL) throw error;
+        return await run(workspace, operation, options);
+      }
+    };
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessions,
+    );
+    await expect(store.writeTextFile({
+      workspaceId: WORKSPACE_ID, versionId: "main", path: "note.md",
+      text: "hello", createOnly: true, metadata: { origin: "api" },
+    })).rejects.toBe(SENTINEL);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.params).toMatchObject({ createOnly: true, requestId: expect.any(String) });
+    expect(requests[1]?.params).toEqual(requests[0]?.params);
+    expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
+    expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
+  });
+
   it("retries transport failures for reads but not mutations", async () => {
     const optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [];
     const requests: Request[] = [];
@@ -1495,10 +1525,13 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
-  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
-    "keeps a named recipient's authorship returned by %s",
-    async (method) => {
-      const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const;
+  it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
+    { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
+    { method, author: { kind: "agent", agentId: "agent" } as const },
+    { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
+  ]))(
+    "keeps $author.kind authorship returned by $method",
+    async ({ method, author }) => {
       const namedMoment = { ...moment, author };
       const client = clientFor(async (request) => ({
         id: request.id,

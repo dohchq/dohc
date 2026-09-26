@@ -61,3 +61,22 @@ it("retains the timeout draft and saved command through profile selection and re
   await waitFor(() => expect(saved).toHaveBeenLastCalledWith(expect.objectContaining({ command: "node custom.mjs", timeoutMinutes: 45, profile: undefined })));
   expect((screen.getByTestId("runner-command-input") as HTMLInputElement).value).toBe("node custom.mjs");
 });
+
+it("reports a failed self-test with the error it came from, so Copy keeps it", async () => {
+  const refused = new Error(
+    "Error invoking remote method 'desktop:runner-self-test': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+  );
+  vi.stubGlobal("dohcDesktop", {
+    detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
+    runnerSelfTest: vi.fn(async () => { throw refused; }),
+  });
+  const onError = vi.fn<(message: string, cause?: unknown) => void>();
+  render(<RunnerSettingsCard workspaceId="workspace" runner={{ ...DEFAULT_RUNNER_SETTINGS, command: "node run.mjs" }}
+    agentName="Agent" sessionRecorderOn onRunnerChange={async () => undefined} onError={onError} />);
+  await userEvent.click(screen.getByTestId("runner-self-test-button"));
+  await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  expect(onError).toHaveBeenCalledWith(
+    "Runner self-test could not start. dohc is still reading this workspace's files. Try again when it finishes.",
+    refused,
+  );
+});

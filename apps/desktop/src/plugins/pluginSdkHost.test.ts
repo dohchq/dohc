@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
 import {
   localWorkspaceSdkDatabaseEditor,
@@ -18,7 +18,7 @@ import { createTestScratch } from "../workspaces/testTemp";
 interface AuthoredWrite {
   path: string;
   text: string;
-  options: { overwrite: boolean; author: MomentAuthor };
+  options: { overwrite: boolean; author: MomentWriteAuthor };
 }
 
 const requireModule = createRequire(import.meta.url);

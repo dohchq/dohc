@@ -1,0 +1,48 @@
+import { frontmatterAsWritten, leadingFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { useEffect, useState } from "react";
+import type * as Y from "yjs";
+
+/**
+ * A Markdown file's frontmatter block as written, and the body after it. A
+ * block that does not read but looks like properties is still the block, so
+ * it never renders as Markdown.
+ */
+export function splitFrontmatter(markdown: string): { block: string; body: string } {
+  const block = leadingFrontmatter(markdown)?.text ?? "";
+  return { block, body: markdown.slice(block.length) };
+}
+
+/**
+ * A live document's frontmatter text recorded from its file, following shared
+ * edits. A recipient cannot tell when the owner's engine saves, so a changed
+ * value can show stale until that engine next reads the file; the text still
+ * holds every comment the file can hold.
+ */
+export function useFrontmatterAsWritten(doc: Y.Doc): string {
+  const [block, setBlock] = useState(() => frontmatterAsWritten(doc, false));
+  useEffect(() => {
+    const update = () => setBlock(frontmatterAsWritten(doc, false));
+    const maps = [doc.getMap("frontmatter"), doc.getMap("meta")];
+    update();
+    for (const map of maps) map.observe(update);
+    return () => {
+      for (const map of maps) map.unobserve(update);
+    };
+  }, [doc]);
+  return block;
+}
+
+// The viewer has no property form, so the block shows exactly as written:
+// every comment, anchor, and key an agent reading the file receives.
+export function PropertiesAsWritten({ block }: { block: string }) {
+  const text = block.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+  if (!text) return null;
+  return (
+    <section className="markdown" aria-label="Properties">
+      <p className="section-label">Properties</p>
+      <pre>
+        <code>{text}</code>
+      </pre>
+    </section>
+  );
+}

@@ -8,6 +8,10 @@ use dohc_engine_storage::StorageError;
 /// Errors from the durable Y.Doc layer.
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
+    #[error(
+        "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
+    )]
+    FrontmatterEditRefused,
     /// An update failed to decode/apply (truncated or malformed). The doc is
     /// state-unchanged and the bytes are never journaled (binding constraint 5).
     #[error("malformed Y.Doc update: {reason}")]
@@ -199,6 +203,7 @@ impl CollabError {
     /// A stable machine-readable code.
     pub fn code(&self) -> &'static str {
         match self {
+            CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",

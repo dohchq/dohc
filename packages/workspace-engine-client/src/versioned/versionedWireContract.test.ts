@@ -30,6 +30,16 @@ const validMoment = {
 };
 
 describe("versioned result decoder rejection", () => {
+  it.each([
+    { kind: "agent", agentId: "agent" },
+    { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
+  ])("keeps a $kind author without a declared principal", (author) => {
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+      ...validMoment, author: { ...author, onBehalfOf: null },
+    })).toThrow(ProtocolShapeError);
+  });
+
   it("reports the wrong-typed nested write field path", () => {
     // The snapshot and moment stubs are complete so validation reaches the
     // one wrong-typed field this test pins: object.createdAtMs.

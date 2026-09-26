@@ -3,6 +3,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
+import { ipcErrorMessage } from "../ipcError";
 
 export function AgentNameControl(props: {
   value?: string;
@@ -25,7 +26,7 @@ export function AgentNameControl(props: {
       setSaving(true);
       await props.onChange(name);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save the agent name.");
+      setError(ipcErrorMessage(cause, "Could not save the agent name."));
     } finally {
       setSaving(false);
     }
