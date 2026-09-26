@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
-import { createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import type { LinkBrowserMaterial } from "./server";
@@ -91,11 +91,11 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const value = await readBoundedJson(response, 4096, signal);
       if (!exact(value, "authorityRevision,files,publicationId") || value.publicationId !== launch.publicationId ||
           !Number.isSafeInteger(value.authorityRevision) || (value.authorityRevision as number) < 1 ||
-          (launch.revision !== undefined && launch.revision !== value.authorityRevision) || !Array.isArray(value.files) || value.files.length < 1 || value.files.length > 2) throw new Error("Invalid publication.");
+          (launch.revision !== undefined && launch.revision !== value.authorityRevision) || !Array.isArray(value.files) || value.files.length < 1 || value.files.length > 3) throw new Error("Invalid publication.");
       let total = 0; const paths = new Set<string>();
       for (const file of value.files) {
         if (!exact(file, "byteLength,contentType,path,sha256") || typeof file.path !== "string" || paths.has(file.path) ||
-            !["bundle.js", "bundle.css"].includes(file.path) || file.contentType !== (file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8") ||
+            !Object.hasOwn(APP_BUNDLE_CONTENT_TYPES, file.path) || file.contentType !== APP_BUNDLE_CONTENT_TYPES[file.path] ||
             typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || (file.byteLength as number) < 0) throw new Error("Invalid bundle.");
         paths.add(file.path); if ((file.byteLength as number) > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Bundle file exceeds blob limit."); total += file.byteLength as number;
       }
@@ -109,7 +109,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const response = await relay(launch, `/blobs/${file.sha256}?authorityRevision=${launch.revision}`, signal);
       try { if (response.status === 429) throw new RelayRateLimited();
         if (response.status >= 500) throw new RelayUnavailable();
-        if (response.status !== 200 || response.redirected || response.headers.has("location") || !["text/javascript; charset=utf-8", "text/css; charset=utf-8"].includes(response.headers.get("content-type") ?? "")) throw new Error("Unavailable bundle.");
+        if (response.status !== 200 || response.redirected || response.headers.has("location") || response.headers.get("content-type") !== file.contentType) throw new Error("Unavailable bundle.");
         files.push({ ...file, bytes: await boundedBytes(response, file.byteLength, signal) });
       } finally { await response.body?.cancel().catch(() => {}); }
     }

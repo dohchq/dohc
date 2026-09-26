@@ -50,7 +50,7 @@ const linkLogSchema = z.object({
 type LinkLogOp = z.infer<typeof linkLogSchema>["ops"][number];
 
 // One change per logged moment, named like the engine's history: beforeBlobSha256 and afterBlobSha256.
-// The log names earlier content too, but a link reads only files still in the share.
+// A link reads an afterBlobSha256 only while its file is still in the share (docs/adr/0014).
 function linkChange(op: LinkLogOp): Record<string, unknown> | null {
   if (op.opKind === "workspace.init") return null;
   if (op.opKind === "version.create") return {recordedAtMs: op.recordedAtMs, operation: "version", versionId: op.payload.versionId,
@@ -96,7 +96,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(String(e)); }
   });
   server.registerTool("dohc_list_changes", {
-    description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads a hash only while its file is still in the share.",
+    description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads an afterBlobSha256 while its file is still in the share.",
     inputSchema: z.object({since: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(500).optional()}),
   }, async ({since, limit}) => {
     try {
@@ -105,14 +105,14 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(String(e)); }
   });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files. Earlier content named by dohc_list_changes is not readable through a share link. Markdown may lag the live document. Binary files are base64 encoded.",
+    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded. An earlier revision has no contentKind here, so it is returned as UTF-8 when its bytes decode and as base64 otherwise; use the contentKind from dohc_list_changes.",
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {
       const inventory = fileInventorySchema.parse(await jsonResponse(await options.request("/api/view/current")));
       const files = inventory.files.filter(file => file.blobSha256 === blobSha256);
-      if (files.length === 0) return error("No file in the share has this content now. A share link reads only current files, so list files again.");
       const response = await options.request(`/api/view/blob/${blobSha256}`);
+      if (response.status === 404) {await response.body?.cancel(); return error("No file in the share has this content now or in its history. Deleting a file or moving it out of the share withdraws its history, so list files or changes again.");}
       if (!response.ok) {await response.body?.cancel(); return error(`Share link request failed (${response.status}).`);}
       const bytes = await boundedBytes(response, 256 * 1024, options.signal);
       if (files.some(file => file.contentKind === "binary")) return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});

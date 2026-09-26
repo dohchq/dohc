@@ -20,6 +20,8 @@ export interface PersistentOpenInput {
   databaseBytes?: number;
   limits?: Partial<Omit<RuntimeLimits, "databaseBytes">>;
   queueDeadlineMs?: number;
+  // Cancels opening: the host kills the starting worker and rejects with the signal's reason.
+  signal?: AbortSignal;
 }
 export interface PersistentPrepareInput {
   expected: DatasetCursor;
@@ -61,7 +63,7 @@ export const REPLAY_BATCH_EVENTS=64;
 export const REPLAY_BATCH_BYTES=32*1024*1024;
 export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string; reportPath?:string }
 export interface MigratedCheckpoint { path:string; cursor:DatasetCursor; report?: { tables:MigrationPreviewTableSummary[]; bytes:number } }
-export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
+export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs" | "signal"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"prepare";expected:DatasetCursor;guest:GuestRequest}
   | {kind:"finalize";input:FinalizeOperation}
@@ -74,6 +76,8 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
 export type PersistentResult = DatasetCursor | PreparedOperation | MigratedCheckpoint | null;
 export type PersistentReply = {id:number;ok:true;result:PersistentResult}
   | {id:number;ok:false;error:string;code:string;refusal?:AppOperationRefusal};
+// The worker sends {ready:true} once, after it has loaded and listens for commands.
+export type PersistentWorkerMessage = PersistentReply | {ready:true};
 
 export class PersistentRuntimeError extends Error {
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }

@@ -150,6 +150,15 @@ impl DefaultPrelim for MapRef {
 }
 
 pub trait Map: AsRef<Branch> + Sized {
+    /// Returns the ID of the item that holds the live value under `key`, or
+    /// `None` when the key has no live value. Writing a key always creates a
+    /// new item, so the ID changes whenever the key is written. (dohc patch,
+    /// see DOHC-PATCH.md)
+    fn entry_id<T: ReadTxn>(&self, _txn: &T, key: &str) -> Option<ID> {
+        let item = self.as_ref().map.get(key)?;
+        (!item.is_deleted()).then(|| *item.id())
+    }
+
     /// Returns a number of entries stored within current map.
     fn len<T: ReadTxn>(&self, _txn: &T) -> u32 {
         let mut len = 0;

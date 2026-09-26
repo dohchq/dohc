@@ -116,7 +116,7 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
-  onBehalfOf: string;
+  onBehalfOf?: string;
   agentRunId?: string;
 }
 
@@ -141,7 +141,7 @@ interface NamedMomentAuthor {
 interface AutomationMomentAuthor {
   kind: "automation";
   automationId: string;
-  onBehalfOf: string;
+  onBehalfOf?: string;
   depth: number;
 }
 
@@ -150,6 +150,12 @@ export type MomentAuthor =
   | PublicMomentAuthor
   | NamedMomentAuthor
   | AutomationMomentAuthor;
+
+// Local file writes require a principal even when historical attribution has none.
+export type MomentWriteAuthor = (AgentMomentAuthor | AutomationMomentAuthor) & {
+  onBehalfOf: string;
+};
+
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
@@ -459,9 +465,10 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     text: string;
+    createOnly?: boolean;
     restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   writeBinaryFile(input: {
@@ -470,7 +477,7 @@ export interface VersionedTextStore {
     path: string;
     bytes: Uint8Array;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   readBinaryFile(input: {
@@ -544,7 +551,7 @@ export interface VersionedTextStore {
     expectedObjectId?: WorkspaceObjectId;
     requestId?: string;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer

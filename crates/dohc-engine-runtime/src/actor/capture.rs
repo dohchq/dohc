@@ -24,7 +24,7 @@ use dohc_engine_domain::{
     ensure_main_version_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -454,7 +454,7 @@ fn capture_ingest_in_tx(
             input,
             &mut batch.capture,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -463,7 +463,7 @@ fn capture_ingest_in_tx(
             tx,
             input,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -848,10 +848,8 @@ mod capture_batch_fast_path_tests {
         assert!(matches!(
             &results[1],
             Err(RuntimeError::Sync(
-                dohc_engine_sync::SyncError::RetryableState {
-                    reason: "ydoc-session-live"
-                }
-            ))
+                dohc_engine_sync::SyncError::RetryableState { reason }
+            )) if *reason == CAPTURE_NEW_FILE_LIVE
         ));
         assert!(results[2].is_ok(), "the final sibling must commit");
         let first_order = results[0]
@@ -951,7 +949,7 @@ fn capture_ingest_binary_on_store(
             tx,
             input,
             |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
@@ -988,21 +986,34 @@ fn capture_ingest_binary_on_store(
 }
 
 fn ensure_capture_target_not_leased(
+    conn: &Connection,
     leases: &LeaseRegistry,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
 ) -> Result<(), RuntimeError> {
     let key = DocKey::new(workspace_id, version_id, object_id)?;
-    if leases.is_held(&key) {
-        return Err(RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "ydoc-session-live",
-            },
-        ));
+    if !leases.is_held(&key) {
+        return Ok(());
     }
-    Ok(())
+    // A live session on a file the store has no head for yet: its settle
+    // creates the head, so capture can wait for it. A recorded head the
+    // session holds is refused as before.
+    let recorded = dohc_engine_domain::object_has_live_alias(conn, workspace_id, object_id)?;
+    Err(RuntimeError::Sync(
+        dohc_engine_sync::SyncError::RetryableState {
+            reason: if recorded {
+                "ydoc-session-live"
+            } else {
+                CAPTURE_NEW_FILE_LIVE
+            },
+        },
+    ))
 }
+
+/// The capture refusal for a new file whose live session holds it before the
+/// store has a head for it.
+pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
 
 fn capture_secret_on_store(
     store: &mut EngineStore,

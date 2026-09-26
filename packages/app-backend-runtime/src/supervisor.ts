@@ -326,6 +326,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(waiting){capacityWaiters--;capacityWaitBytes-=lane.admission!.bytes;}
     }
     let directory: string | undefined;
+    // A cancelled request, retirement, or host close stops a worker that is still starting.
+    const signal=input.signal ? AbortSignal.any([input.signal,lane.lifecycle.signal]) : lane.lifecycle.signal;
     try {
       const current = head(input);
       if (!current.active) throw new Error("Dataset authority was transferred.");
@@ -357,7 +359,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           ownership:{root:ownership.root,session:ownership.session},
           scope: { workspaceId: current.cursor.workspaceId, datasetId: current.cursor.datasetId, hostEpoch: current.cursor.hostEpoch,
             approvedRevisionHash: current.cursor.approvedRevisionHash }, cursor: { revision: checkpoint.cursor.revision, digest: checkpoint.cursor.digest },
-          databaseBytes: current.capacityBytes }, options.runtime);
+          databaseBytes: current.capacityBytes, signal }, options.runtime);
         return { runtime, directory, cursor: checkpoint.cursor, tables: [...input.tables] };
       }
       let worker:Worker;
@@ -365,7 +367,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         try {worker=await restore(true);}
         catch(error) {
           const after=head(input);
-          if(!after.active||!sameCursor(after.cursor,current.cursor))throw error;
+          if(signal.aborted||!after.active||!sameCursor(after.cursor,current.cursor))throw error;
           if(directory)await removeDirectory(directory);
           directory=undefined;
           reportMaintenanceError(input.scope,error);

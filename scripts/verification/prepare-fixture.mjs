@@ -49,7 +49,8 @@ export function createPrepareFixture(root, buildSource) {
         return {};
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
-      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','apps/desktop/resources/app-backend-runtime','packages/sdk/dist'])
+      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','apps/desktop/resources/app-backend-runtime','packages/sdk/dist',
+        ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/app-compiler']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       return {};
     }
@@ -59,14 +60,16 @@ export function createPrepareFixture(root, buildSource) {
   git(["add", "."]);
   git(["-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
     "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Fixture"]);
-  return ({ failInstall = false } = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `
+  return ({ failInstall = false, statusOnly = false, platform = process.platform, arch = process.arch, install = true } = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `
     import cp from 'node:child_process';
     import {syncBuiltinESMExports} from 'node:module';
     const exec=cp.execFileSync;
     cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
     syncBuiltinESMExports();
+    Object.defineProperty(process,'platform',{value:${JSON.stringify(platform)}});
+    Object.defineProperty(process,'arch',{value:${JSON.stringify(arch)}});
     const {prepare,preparedStatus}=await import('./scripts/verification/build.mjs');
-    await prepare();
-    console.log(JSON.stringify({desktopPrepared:preparedStatus('desktop')}));
+    if(!${statusOnly}) await prepare({install:${install}});
+    console.log(JSON.stringify({desktopPrepared:preparedStatus('desktop'),enginePrepared:preparedStatus('engine')}));
   `], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, FIXTURE_INSTALL_FAIL: failInstall ? "1" : "0" } });
 }

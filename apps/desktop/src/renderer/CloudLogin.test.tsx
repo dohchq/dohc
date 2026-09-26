@@ -72,7 +72,9 @@ describe("CloudLogin", () => {
   });
 
   it("keeps a connection failure in Notices with a report to copy", async () => {
-    bridgeMock.cloudStatus.mockRejectedValue(new Error("engine unavailable"));
+    bridgeMock.cloudStatus.mockRejectedValue(new Error(
+      "Error invoking remote method 'desktop:cloud-status': DaemonRefusalError [WORKSPACE_UNAVAILABLE]: workspace handle is unavailable",
+    ));
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -94,6 +96,10 @@ describe("CloudLogin", () => {
       expect(writeText).toHaveBeenCalledWith(
         expect.stringContaining("Error: dohc could not check this connection."),
       ),
+    );
+    // Copy keeps the refusal the words came from, on its own line.
+    expect(writeText.mock.calls[0]![0]).toContain(
+      "Cause: DaemonRefusalError [WORKSPACE_UNAVAILABLE]: workspace handle is unavailable",
     );
   });
 

@@ -92,7 +92,7 @@ export function LinkedChatsPanel(props: {
   // Reports a landed read so the Chats navigator can refetch its badges. The
   // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
 }) {
   const { workspaceId, filePath } = props;
   // Every received file share reads the chat about its files and adds nothing
@@ -217,7 +217,7 @@ export function LinkedChatsPanel(props: {
         });
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this chat."));
+        props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
       } finally {
         if (token === liveToken.current) setMessagesLoading(false);
       }
@@ -263,7 +263,7 @@ export function LinkedChatsPanel(props: {
         void openThread(result.thread);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not start a chat for this file."));
+        props.onError(ipcErrorMessage(error, "Could not start a chat for this file."), error);
       }
     },
     [filePath, openThread, props.onError, workspaceId],
@@ -287,7 +287,7 @@ export function LinkedChatsPanel(props: {
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."));
+      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
     } finally {
       // Reset unconditionally: switching threads/files bumps liveToken
       // without resetting `sending`, so a token-gated reset could leave this

@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
-  window: Window & typeof globalThis & { value?: string };
+  window: Window & typeof globalThis & { value?: string; log?: string[] };
 } };
 
 const limits = { maxBundleBytes: 4096, maxDocumentBytes: 8192 };
 function file(path: string, text: string): AppDocumentFile {
   const bytes = Buffer.from(text);
   return { path, bytes, byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
-    contentType: path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8" };
+    contentType: APP_BUNDLE_CONTENT_TYPES[path] ?? "text/css; charset=utf-8" };
 }
 
 describe("compiled app document", () => {
@@ -71,6 +71,56 @@ describe("compiled app document", () => {
     input.bytes = Uint8Array.from([0xff]);input.byteLength = 1;
     input.sha256 = createHash("sha256").update(input.bytes).digest("hex");
     expect(() => createAppDocument([input], limits)).toThrow();
+  });
+
+  describe("page record", () => {
+    const scripts = ["window.log = ['head:' + !!document.body];", "log.push('box:' + document.currentScript.parentElement.id + ':' + !!document.getElementById('after'));",
+      "throw new Error('stops only itself');", "log.push('last:' + !!document.getElementById('after'));"];
+    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ htmlAttributes: [["lang", "fr"], ["data-note", 'a "quoted" & value']],
+      head: `<title>Trip</title><script>${scripts[0]}</script>`,
+      body: `<body class="trip"><main id="box"><script>${scripts[1]}</script><p id="after">After</p></main><script>${scripts[2]}</script><!-- end --><script>${scripts[3]}</script></body>`,
+      scripts, ...overrides });
+    const build = (value: unknown, bundle = "window.registry = true;") =>
+      createAppDocument([file("bundle.js", bundle), file("page.json", JSON.stringify(value))], { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
+
+    it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
+      const output = build(page());
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>window\.registry = true;<\/script><title>Trip<\/title>/);
+      const dom = new JSDOM(output.html, { runScripts: "dangerously" });
+      expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
+      expect(dom.window.document.title).toBe("Trip");
+      expect(dom.window.document.body.className).toBe("trip");
+      expect(dom.window.log).toEqual(["head:false", "box:box:false", "last:true"]);
+      for (const text of [...scripts, "window.registry = true;"]) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
+      expect(output.scriptSources).toHaveLength(5);
+      dom.window.close();
+    });
+
+    it.each([
+      ["an unknown field", { ...page(), extra: true }],
+      ["a missing field", (() => { const { scripts: _, ...rest } = page(); return rest; })()],
+      ["a body that is not a <body> element", page({ body: "<p>no body</p>" })],
+      ["a script that is not text", page({ scripts: [1 as unknown as string] })],
+      ["an <html> attribute name that would split when parsed", page({ htmlAttributes: [["=x", ""]] })],
+      ["an <html> attribute name with a quote", page({ htmlAttributes: [['a"b', ""]] })],
+      [`more than ${APP_PAGE_MAX_SCRIPTS} scripts`, page({ scripts: Array.from({ length: APP_PAGE_MAX_SCRIPTS + 1 }, (_, index) => `${index}`) })],
+    ])("refuses a page record with %s", (_name, value) => {
+      expect(() => build(value)).toThrow("Invalid app page.");
+      expect(appPageProblem(value)).not.toBeNull();
+    });
+
+    it.each(["var a = '</script>';", "var a = '<!--<script>';"])("refuses a page whose bundle.js would end its own <script> early: %s", bundle => {
+      expect(() => build(page(), bundle)).toThrow("Invalid app page.");
+    });
+
+    it("refuses a page with a separate bundle.css, since its CSS belongs in the page", () => {
+      expect(() => createAppDocument([file("bundle.js", ""), file("bundle.css", "p{}"), file("page.json", JSON.stringify(page()))], limits)).toThrow("Invalid app page.");
+    });
+
+    it("says what is wrong in words that follow the page's name", () => {
+      expect(appPageProblem(page())).toBeNull();
+      expect(appPageProblem(page({ htmlAttributes: [["=x", ""]] }))).toBe('has an attribute named "=x" on <html>. A published page cannot carry that name. Rename or remove the attribute.');
+    });
   });
 
   it("produces one document identity regardless of input inventory order", () => {

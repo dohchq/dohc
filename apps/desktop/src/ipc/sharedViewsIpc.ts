@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
-import { OpenSharedViewPayload, OpenSharedViewResult, RefreshSharedViewPayload, RefreshSharedViewResult } from "./bridgeContract";
+import { OpenSharedViewPayload, OpenSharedViewResult, RefreshSharedViewPayload, RefreshSharedViewResult, engineStoreRefusalRecovery } from "./bridgeContract";
+import { engineStoreRefusalDetailOf, engineStoreRefusalOf, type EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
@@ -55,6 +56,11 @@ export function registerSharedViewsIpcHandlers<
   openWorkspaceActivity(workspace: CreatedWorkspace): Promise<unknown>;
   requireWorkspace(workspaceId: string): RegistryEntry;
   notifyRenderer(scope?: WorkspaceActivityScope): void;
+  recordShareViewStoreRefusal(
+    workspaceId: string,
+    refusal: EngineStoreRefusal | null,
+    detail: string | null,
+  ): void;
 }): void {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -62,8 +68,37 @@ export function registerSharedViewsIpcHandlers<
     fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace, setWorkspaceShareView,
     refreshNativeWorkspaceSurfaces, workspaceAuthorities, canonicalWorkspaceFor,
     withStaleSensitiveWorkspaceOperation, shareViewFiles, receivedShareEngine,
-    openWorkspaceActivity, requireWorkspace, notifyRenderer,
+    openWorkspaceActivity, requireWorkspace, notifyRenderer, recordShareViewStoreRefusal,
   } = dependencies;
+  // A shared view has no recorder, so its refresh is what meets a store only
+  // a newer dohc opens. That stops the whole workspace, so the refusal goes
+  // to the workspace status the stop state reads. Rebuild refusals stay a
+  // refresh error: a shared view cannot rebuild its store.
+  async function reportingShareStoreRefusal<Result>(
+    operation: Operation,
+    refresh: () => Promise<Result>,
+  ): Promise<Result> {
+    const record = (refusal: EngineStoreRefusal | null, detail: string | null) => {
+      try {
+        operation.assertCurrent();
+      } catch {
+        return;
+      }
+      recordShareViewStoreRefusal(operation.workspace.workspaceId, refusal, detail);
+    };
+    let result: Result;
+    try {
+      result = await refresh();
+    } catch (error) {
+      const refusal = engineStoreRefusalOf(error);
+      if (refusal !== null && engineStoreRefusalRecovery(refusal) === "update") {
+        record(refusal, engineStoreRefusalDetailOf(error));
+      }
+      throw error;
+    }
+    record(null, null);
+    return result;
+  }
   // Give a received share the sync identity used by its Edit proposal lane.
   // Run at open and on refresh so an older received share gains the identity
   // before it submits document changes.
@@ -250,7 +285,7 @@ export function registerSharedViewsIpcHandlers<
       event.sender,
       input.workspaceId,
       "Shared view refresh stopped because this window changed workspaces.",
-      async (operation) => {
+      (operation) => reportingShareStoreRefusal(operation, async () => {
         // The shell's on-open auto-refresh can run during the daemon handshake
         // now that the window loads during it; the reconcile needs sessions. The
         // physical operation is already held before this wait begins.
@@ -364,7 +399,7 @@ export function registerSharedViewsIpcHandlers<
         if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
         notifyRenderer({ workspaceId: workspace.workspaceId });
         return RefreshSharedViewResult.parse(outcome);
-      },
+      }),
     );
   });
 

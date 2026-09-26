@@ -3,7 +3,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -42,6 +42,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
+import { readError } from "../ipc/errorWords";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -70,6 +71,7 @@ import {
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
+import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useAutomationRetry } from "./collections/useAutomationRetry";
@@ -80,9 +82,10 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
-import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
@@ -760,6 +763,8 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // The error as it arrived, for Copy details.
+    cause?: string;
     // Admission stopped on pending writes or retained failures from another
     // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
@@ -808,14 +813,16 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportShellFailure,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
-    showShellError,
     showSettingsFileNotice,
     showSuccessNotice,
     showDirectWriteNotice,
@@ -823,12 +830,20 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  // For surfaces that report a failure as one sentence, with the error that
+  // caused it when they have one. One stable identity: ChatsView keys its
+  // polls and subscriptions off onError, so a fresh arrow per shell render
+  // tore them down and re-armed them every render.
+  const reportFailureMessage = useCallback(
+    (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
+    [reportShellFailure],
+  );
   const onWorkspaceSettingsRead = useSettingsFileNotices({
     workspaceId,
     workspaceIsReady,
     userSettings: props.userSettings,
     show: showSettingsFileNotice,
-    reportError: showShellError,
+    reportError: reportFailureMessage,
   });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
@@ -836,13 +851,17 @@ export function DesktopWorkspaceShell(props: {
   // the address that failed when the panel it came from has closed.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
-      reportShellError(error.message, new Error(error.message), () => {
-        if (error.retry?.()) return;
-        setCloudRetryServerUrl(error.serverUrl ?? "");
-        setCloudOpen(true);
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (error.retry?.()) return;
+          setCloudRetryServerUrl(error.serverUrl ?? "");
+          setCloudOpen(true);
+        },
       });
     },
-    [reportShellError],
+    [reportShellFailure],
   );
 
   // The live-document dialog's own reads and actions, straight through to
@@ -1492,7 +1511,6 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, reportShellError],
   );
 
-  const { shellNotice, showShellNotice, dismissShellNotice } = useShellNotice();
 
   const { onManageWorkspaces } = props;
   const manageWorkspaces = useCallback(() => {
@@ -2165,6 +2183,9 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Set once refreshShareView exists below; a failed import's Try again
+  // calls it.
+  const refreshShareViewRef = useRef<() => Promise<boolean>>(async () => true);
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2173,6 +2194,24 @@ export function DesktopWorkspaceShell(props: {
   // where, and how many sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (droppedPaths?: string[], targetDir?: string) => {
+      // Try again on a failed import refreshes the shared view first, since
+      // some files may have landed, then asks for files for the same folder.
+      // Try again already removed the row, so a refresh that leaves the view
+      // stale (damaged, failed, or overtaken by another refresh) says why
+      // nothing opened.
+      const retry = () => {
+        void refreshShareViewRef.current().then((current) => {
+          if (current) {
+            void importFiles(undefined, targetDir);
+            return;
+          }
+          reportShellFailure({
+            message:
+              "dohc did not start the import. Refresh the shared view before you import the files that are still missing.",
+            kind: "import-files",
+          });
+        });
+      };
       let outcome: ImportWorkspaceFilesResult;
       try {
         outcome = await bridge().importWorkspaceFiles({
@@ -2181,16 +2220,42 @@ export function DesktopWorkspaceShell(props: {
           ...(targetDir ? { targetDir } : {}),
         });
       } catch (error) {
-        reportShellError("Could not import files.", error);
+        reportShellError("Could not import files.", error, retry, "import-files");
         return;
       }
       const count = outcome.imported.length;
+      const skippedSuffix =
+        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      // The first copy failed, so nothing landed.
+      if (outcome.stop && !outcome.interrupted) {
+        reportShellFailure({
+          message: fitImportMessage(`Could not import files${skippedSuffix}. `, importStopSentence(outcome.stop), ""),
+          details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
+          retry,
+          kind: "import-files",
+        });
+        return;
+      }
       if (outcome.interrupted) {
-        showShellNotice(
-          count === 0
-            ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-            : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
-        );
+        // Importing the same files again would land second copies under
+        // collision names, so name what already landed.
+        reportShellFailure({
+          message:
+            count === 0
+              ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
+              : fitImportMessage(
+                  `Imported ${namedPaths(outcome.imported)} before the import stopped.`,
+                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : "",
+                  " Import only the files that are still missing.",
+                ),
+          // The message names at most two files; the report names them all.
+          details: [
+            ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
+            ...importedPathDetails(outcome.imported),
+          ],
+          retry,
+          kind: "import-files",
+        });
         try {
           await refreshFiles();
         } catch (error) {
@@ -2202,23 +2267,26 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
-      const skippedSuffix =
-        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
-      showShellNotice(
-        count === 0
-          ? `Nothing imported${skippedSuffix}.`
-          : `Imported ${count} ${count === 1 ? "file" : "files"}${
-              targetDir ? ` into ${targetDir}` : ""
-            }${skippedSuffix}.`,
+      // Every file was skipped for its name or kind; the same files would be
+      // skipped again, so there is nothing to try again.
+      if (count === 0) {
+        reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
+        return;
+      }
+      showSuccessNotice(
+        `Imported ${count} ${count === 1 ? "file" : "files"}${
+          targetDir ? ` into ${targetDir}` : ""
+        }${skippedSuffix}.`,
+        undefined,
+        "import-files",
       );
-      if (count === 0) return;
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3023,7 +3091,7 @@ export function DesktopWorkspaceShell(props: {
     onExplorerPathsChanged,
     refreshFiles,
     reportShellError,
-    showShellNotice,
+    showSuccessNotice,
   );
 
   // Reveal-then-create: the inline editbox lives in the explorer view, so
@@ -3501,11 +3569,12 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
-          const detail = error instanceof Error ? error.message.trim() : "";
+          const { words, cause } = readError(error);
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
-            message: detail || "dohc could not open this workspace.",
+            message: words ?? "dohc could not open this workspace.",
+            ...(cause ? { cause } : {}),
           });
         }
         return;
@@ -4049,9 +4118,16 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
+  const crashReportNotice = useCrashReport({
+    reportError: reportShellError,
+    showSuccess: showSuccessNotice,
+  });
 
-  const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewDamaged) return;
+  // Resolves true when the view is current: refreshed, or not a shared
+  // view at all. A failed, superseded, or ended refresh resolves false.
+  const refreshShareView = useCallback(async (): Promise<boolean> => {
+    if (!shareView) return true;
+    if (shareViewDamaged) return false;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -4070,20 +4146,21 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return;
+      if (token !== shareRefreshToken.current) return false;
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return;
+        if (token !== shareRefreshToken.current) return false;
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
         );
-        return;
+        return false;
       }
       if (outcome.collisionRecordQuarantined) {
-        showShellNotice(
-          "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-        );
+        reportShellFailure({
+          message:
+            "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+        });
       }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
@@ -4094,11 +4171,21 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
-      if (outcome.status === "ended") {
-        return;
-      }
+      return outcome.status !== "ended";
     } catch (error) {
+      // A store only a newer dohc opens stops the whole workspace, and the
+      // stop state already says so. A toast would repeat it.
+      const status = await bridge()
+        .getSyncStatus({ workspaceId })
+        .catch(() => null);
+      if (
+        status?.engineStoreRefused != null &&
+        engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
+      ) {
+        return false;
+      }
       reportShellError("Couldn't refresh the shared view.", error);
+      return false;
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
@@ -4111,6 +4198,7 @@ export function DesktopWorkspaceShell(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
+  refreshShareViewRef.current = refreshShareView;
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
     if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
@@ -4452,7 +4540,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={showShellError}
+        onError={reportFailureMessage}
         onNewCollection={setNewCollectionFolder}
       />
     </>
@@ -4470,12 +4558,6 @@ export function DesktopWorkspaceShell(props: {
         })),
     [props.workspaces],
   );
-  // Stable per-field identities (D2#5): ChatsView keys real work off these —
-  // its refresh callbacks depend on onError, so a fresh arrow per shell render
-  // tore down and re-armed its polls and activity subscription every render.
-  const onChatsError = useCallback((message: string) => {
-    showShellError(message);
-  }, [showShellError]);
   const openAgentSettings = useCallback(
     () => openSettings("agents"),
     [openSettings],
@@ -4498,7 +4580,7 @@ export function DesktopWorkspaceShell(props: {
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4533,7 +4615,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4606,7 +4688,11 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
+        details: errorDetails([
+          [error.tone === "success" ? "Notice" : "Error", error.message],
+          ...(error.details ?? []),
+          ...reportFacts(),
+        ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         ...(error.action ? { actionLabel: error.action.label } : {}),
@@ -4622,28 +4708,32 @@ export function DesktopWorkspaceShell(props: {
     setStoreUpdateCheckError(null);
     setStoreDetailsOpen(false);
   }, [workspaceId]);
+  // A store this build could not migrate, or one a newer build migrated, is
+  // intact. Nothing in this workspace can run against it, so the workspace
+  // stops here until a build that opens it. Other workspaces keep their own
+  // stores.
+  const storeUpdateRefusal =
+    syncStatus?.engineStoreRefused != null &&
+    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update"
+      ? syncStatus.engineStoreRefused
+      : null;
+  const storeUpdateRequired = storeUpdateRefusal !== null;
+  storeUpdateRequiredRef.current = storeUpdateRequired;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
-      ["Problem", engineStoreRefusalSentence("migration-failed")],
-      ["Code", "migration-failed"],
+      ["Problem", storeUpdateRefusal && engineStoreRefusalSentence(storeUpdateRefusal)],
+      ["Code", storeUpdateRefusal],
       ["Engine", syncStatus?.engineStoreRefusedDetail],
       ["Workspace id", props.workspace.workspaceId],
       ["Data store", `${props.workspace.rootPath}/.dohc/engine`],
       ...reportFacts(),
     ],
-    [syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
+    [storeUpdateRefusal, syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
   );
   const storeDetailsText = useMemo(
     () => errorDetails(storeDetailFields),
     [storeDetailFields],
   );
-  // A store this build could not migrate is intact. Nothing in this
-  // workspace can run against it, so the workspace stops here until a build
-  // that opens it. Other workspaces keep their own stores.
-  const storeUpdateRequired =
-    syncStatus?.engineStoreRefused != null &&
-    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
-  storeUpdateRequiredRef.current = storeUpdateRequired;
   // Dialogs float above the stop state and could still write to the
   // stopped workspace. A stop closes them; a running workspace is unchanged.
   useEffect(() => {
@@ -4697,6 +4787,28 @@ export function DesktopWorkspaceShell(props: {
       });
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
+  const retryCloudSyncCommand = useCallback(
+    (askedFor: string, reason: "person" | "reconnect") =>
+      bridge().retryCloudSync({ workspaceId: askedFor, reason }),
+    [],
+  );
+  const syncFailureNotice = useSyncFailureNotice({
+    workspaceId,
+    failure: syncStatus === null ? undefined : (syncStatus.syncFailure ?? null),
+    retryCloudSync: retryCloudSyncCommand,
+    report: reportSyncFailure,
+    clear: clearSyncFailure,
+  });
+  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const dismissWorkspaceError = useCallback(
+    (id: string) => {
+      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
+        syncFailureNotice.noteDismissed();
+      }
+      dismissShellError(id);
+    },
+    [dismissShellError, shellErrors, syncFailureNotice],
+  );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
@@ -4730,22 +4842,6 @@ export function DesktopWorkspaceShell(props: {
           onToggle: () => mutateWb(toggleChats),
         }}
       />
-      {shellNotice ? (
-        <div
-          data-testid="shell-notice"
-          className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
-        >
-          <span className="min-w-0 flex-1 truncate">{shellNotice}</span>
-          <button
-            type="button"
-            aria-label="Dismiss notice"
-            onClick={dismissShellNotice}
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
       {shareView ? (
         <div
           data-testid="shared-view-banner"
@@ -4978,7 +5074,7 @@ export function DesktopWorkspaceShell(props: {
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
-              onDismissWorkspaceError={dismissShellError}
+              onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView
                 ? {}
@@ -4989,6 +5085,7 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              {...crashReportNotice}
               onRetryAutomationFailure={automationFailureRetry.retry}
               onOpenAutomation={openAutomation}
               automationFailureToast={automationFailureToast}
@@ -5174,7 +5271,7 @@ export function DesktopWorkspaceShell(props: {
                   beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => showShellError(message)}
+                  onError={reportFailureMessage}
                   {...(shareView
                     ? {}
                     : {
@@ -5751,7 +5848,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={onChatsError}
+                    onError={reportFailureMessage}
                   />
                 </Suspense>
               ) : (
@@ -5764,7 +5861,7 @@ export function DesktopWorkspaceShell(props: {
         ) : null}
         </div>
       </div>
-      {storeUpdateRequired ? (
+      {storeUpdateRefusal !== null ? (
         <div
           data-testid="workspace-update-required"
           role="alert"
@@ -5781,7 +5878,7 @@ export function DesktopWorkspaceShell(props: {
             </h2>
             <div className="space-y-1">
               <p className="m-0 text-[13px] leading-relaxed text-muted">
-                {engineStoreRefusalSentence("migration-failed")} Your files are
+                {engineStoreRefusalSentence(storeUpdateRefusal)} Your files are
                 unchanged.
               </p>
               <p className="m-0 text-[13px] leading-relaxed text-muted">
@@ -5895,6 +5992,7 @@ export function DesktopWorkspaceShell(props: {
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
+                  ["Cause", workspaceOpenFailure.cause],
                   ...reportFacts(),
                 ])
               }
@@ -6213,7 +6311,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
-            onError={showShellError}
+            onError={reportFailureMessage}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

@@ -1,7 +1,15 @@
 import * as yaml from "js-yaml";
+import {
+  loadMarkdownFrontmatter,
+  writeMarkdownFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter";
 
-const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/;
-const FRONTMATTER_PRIORITY_KEYS = ["id", "title", "icon"] as const;
+// Frontmatter reads and writes with the rules the engine settles by, so a
+// local edit keeps the text a person wrote the way a settle does.
+export { orderFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+
+/** Why a document's properties cannot be edited one at a time. */
+export { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "@dohc/ydoc-projection/frontmatter";
 
 export type FrontmatterEntry = {
   key: string;
@@ -11,47 +19,13 @@ export type FrontmatterEntry = {
   rawValue?: unknown;
 };
 
-function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
+/** Frontmatter values and the text after the block. A document without a readable block is all body. */
 export function parseFrontmatter(src: string): {
   meta: Record<string, unknown>;
   body: string;
 } {
-  const match = FM_RE.exec(src);
-  if (!match) return { meta: {}, body: src };
-
-  const [, raw, rest] = match;
-  let meta: Record<string, unknown> = {};
-  if (isEmptyFrontmatter(raw ?? "")) return { meta, body: rest ?? "" };
-  try {
-    const parsed = yaml.load(raw ?? "");
-    if (parsed == null) return { meta: {}, body: src };
-    if (!isFrontmatterMap(parsed)) return { meta: {}, body: src };
-    meta = parsed;
-  } catch {
-    return { meta: {}, body: src };
-  }
-  return { meta, body: rest ?? "" };
-}
-
-function isEmptyFrontmatter(raw: string): boolean {
-  return raw.split(/\r?\n/).every((line) => {
-    const trimmed = line.trim();
-    return !trimmed || trimmed.startsWith("#");
-  });
-}
-
-export function stringifyFrontmatter(meta: Record<string, unknown>): string {
-  return yaml.dump(meta, {
-    lineWidth: -1,
-    sortKeys: false,
-  });
+  const loaded = loadMarkdownFrontmatter(src);
+  return loaded ? { meta: loaded.meta, body: loaded.rest } : { meta: {}, body: src };
 }
 
 export function displayFrontmatterValue(value: unknown): string {
@@ -68,22 +42,6 @@ export function displayFrontmatterValue(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-export function orderFrontmatter(
-  frontmatter: Record<string, unknown>,
-): Record<string, unknown> {
-  const ordered: Record<string, unknown> = {};
-
-  for (const key of FRONTMATTER_PRIORITY_KEYS) {
-    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key];
-  }
-
-  for (const key of Object.keys(frontmatter).sort()) {
-    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key];
-  }
-
-  return ordered;
 }
 
 export function frontmatterEntriesFromMeta(
@@ -105,11 +63,11 @@ export function frontmatterEntries(markdown: string): FrontmatterEntry[] {
   return frontmatterEntriesFromMeta(parseFrontmatter(markdown).meta);
 }
 
+/** Write frontmatter values into a document, keeping the text of every entry whose value did not change. */
 export function applyFrontmatter(
   markdown: string,
   props: Record<string, unknown>,
+  renamed?: ReadonlyMap<string, string>,
 ): string {
-  const { body } = parseFrontmatter(markdown);
-  if (Object.keys(props).length === 0) return body;
-  return `---\n${stringifyFrontmatter(props)}---\n${body}`;
+  return writeMarkdownFrontmatter(markdown, props, renamed);
 }

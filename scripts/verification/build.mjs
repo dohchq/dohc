@@ -21,7 +21,7 @@ const configFiles = {
   ],
 };
 const inputPaths = {
-  engine: ["crates", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
+  engine: ["crates", "vendor", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
   desktop: ["apps/desktop", "packages", "services", "scripts", "tools", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...configFiles.desktop],
 };
 const environmentInputs = {
@@ -112,6 +112,7 @@ function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist", "services/share-web/viewer/dist",
+    ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
 
@@ -167,7 +168,7 @@ export async function withBuildBudget(action) {
   finally { slot?.release(); }
 }
 
-export async function prepare({ engineOnly = false, output = join(repoRoot, ".dohc-dev/verification") } = {}) {
+export async function prepare({ engineOnly = false, output = join(repoRoot, ".dohc-dev/verification"), install = true } = {}) {
   mkdirSync(output, { recursive: true });
   mkdirSync(resolve(receiptPath, ".."), { recursive: true });
   const lock = receiptPath + ".lock";
@@ -178,7 +179,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
   await cancellation.checkpoint();
-  await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
+  if (install) await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
