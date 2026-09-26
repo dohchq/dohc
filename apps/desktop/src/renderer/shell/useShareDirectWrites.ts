@@ -34,7 +34,7 @@ export function useShareDirectWrites(input: {
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
   ownerName: string;
-  refreshShareView(): Promise<void>;
+  refreshShareView(): Promise<unknown>;
   sendShareChanges(): Promise<void>;
   showNotice(notice: DirectWriteNotice): void;
 }): void {
