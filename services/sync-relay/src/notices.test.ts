@@ -14,7 +14,7 @@ import {
 import { NOTICE_REMOVED_RETENTION_MS, NOTICE_REMOVED_ROW_LIMIT, NOTICE_ROWS_PER_SENDER } from "./storage/limits";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import { noticeReachReads, type PostNoticeInput } from "./storage/notices";
+import { NOTICE_DISMISSAL_RECEIPTS, noticeReachReads, type PostNoticeInput } from "./storage/notices";
 import type { StorageContext } from "./storage/context";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { authorizeShareGrantAction } from "./shareAuthorization";
@@ -590,6 +590,144 @@ describe("pulling changes", () => {
     await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
     const last = await pull(h, "owner", "5");
     expect(last.notices.map((row) => [row.noticeId, row.readAtMs, row.dismissedAtMs])).toEqual([["a", 20_000, 30_000]]);
+  });
+
+  it("tells only the first dismissal that it dismissed the notice", async () => {
+    const { h } = await relay();
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "b" }));
+    const answer = async (userId: string, marks: { noticeId: string; mark: "read" | "dismissed" }[]) => {
+      const response = await h(request(userId, "/sync/notices/marks", jsonBody({ marks })));
+      expect(response.status).toBe(200);
+      return await response.json();
+    };
+    expect(await answer("owner", [{ noticeId: "a", mark: "read" }, { noticeId: "b", mark: "read" }]))
+      .toEqual({ ok: true, dismissed: [] });
+    expect(await answer("ana", [{ noticeId: "a", mark: "dismissed" }]), "not ana's notice").toEqual({ ok: true, dismissed: [] });
+    // Two computers dismiss the same notice: only the first hears it did.
+    expect(await answer("owner", [{ noticeId: "a", mark: "dismissed" }, { noticeId: "a", mark: "dismissed" }]))
+      .toEqual({ ok: true, dismissed: ["a"] });
+    expect(await answer("owner", [{ noticeId: "a", mark: "dismissed" }, { noticeId: "gone", mark: "dismissed" }]))
+      .toEqual({ ok: true, dismissed: [] });
+  });
+
+  it("tells the computer that dismissed first that it did, each time it asks", async () => {
+    const { h } = await relay();
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    const dismiss = async (installId?: string) => {
+      const response = await h(request("owner", "/sync/notices/marks", jsonBody({
+        marks: [{ noticeId: "a", mark: "dismissed" }],
+        ...(installId === undefined ? {} : { installId }),
+      })));
+      return ((await response.json()) as { dismissed: string[] }).dismissed;
+    };
+    expect(await dismiss("laptop")).toEqual(["a"]);
+    expect(await dismiss("laptop"), "the answer was lost; the laptop asks again").toEqual(["a"]);
+    expect(await dismiss("desktop")).toEqual([]);
+    expect(await dismiss()).toEqual([]);
+    const bad = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: "a", mark: "dismissed" }], installId: "" })));
+    expect(bad.status).toBe(400);
+  });
+
+  it("never tells a second dismissal it was first, even after the notice is posted again", async () => {
+    const { h } = await relay();
+    const dismiss = async () => {
+      const response = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: "a", mark: "dismissed" }] })));
+      return ((await response.json()) as { dismissed: string[] }).dismissed;
+    };
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    expect(await dismiss()).toEqual(["a"]);
+    // The dismissed row outlives its retention and goes; a computer that
+    // kept the post sends it again, and the row comes back.
+    clock += NOTICE_DISMISSED_RETENTION_MS + 1;
+    await post(h, "owner", notice({ kind: "mention", noticeId: "b" }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    expect((await pull(h, "owner")).notices.find((row) => row.noticeId === "a")?.dismissedAtMs).toBeNull();
+    expect(await dismiss()).toEqual([]);
+  });
+
+  it("keeps a bounded number of receipts, and refuses only the reclaimed schedule's older notices", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    const skippedId = (automation: string, first: number) => `schedule-skipped:ws:collection:T#${automation}:${first}`;
+    context.tx(() => {
+      insert.run("owner", skippedId("report", 900), 1_000);
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, 1_000 + index);
+    });
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    const count = context.db
+      .prepare("SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?")
+      .get("owner") as { count: number };
+    expect(Number(count.count)).toBe(NOTICE_DISMISSAL_RECEIPTS);
+
+    // The report's notice, dismissed at 1000, lost its receipt: a notice for
+    // that schedule first skipped at or before then is refused.
+    const post_ = (automation: string, first: number) =>
+      h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId: skippedId(automation, first) }))));
+    await expectRefused(await post_("report", 900));
+    expect((await post_("report", 1_001)).status).toBe(200);
+    // Another schedule's notice, posted late by an offline computer, is not
+    // held to the report's floor.
+    expect((await post_("sweep", 500)).status).toBe(200);
+  });
+
+  it("never grants a first dismissal to a notice posted again before its receipt went", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    const report = `schedule-skipped:ws:collection:T#report:${clock - 100}`;
+    context.tx(() => {
+      insert.run("owner", report, clock - 50);
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, clock + index);
+    });
+    // The report's notice expired and was posted again while its receipt
+    // still stood; then that receipt is reclaimed.
+    await post(h, "owner", notice({ kind: "schedule-skipped", noticeId: report }));
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    const response = await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: report, mark: "dismissed" }] })));
+    expect(await response.json()).toEqual({ ok: true, dismissed: [] });
+  });
+
+  it("keeps a notice stamped a little ahead of the clock from being first again after reclaim", async () => {
+    const { h, storage } = await relay();
+    const context = storage as unknown as StorageContext;
+    const ahead = `schedule-skipped:ws:collection:T#report:${clock + 60 * 60 * 1000}`;
+    await post(h, "owner", notice({ kind: "schedule-skipped", noticeId: ahead }));
+    await mark(h, "owner", [{ noticeId: ahead, mark: "dismissed" }]);
+    const insert = context.db.prepare(
+      "INSERT INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms) VALUES (?, ?, ?)",
+    );
+    context.tx(() => {
+      for (let index = 1; index < NOTICE_DISMISSAL_RECEIPTS; index += 1) insert.run("owner", `old-${index}`, clock + index);
+    });
+    // One more receipt reclaims the oldest: the dismissal of the notice ahead.
+    clock += NOTICE_DISMISSAL_RECEIPTS;
+    await post(h, "owner", notice({ kind: "mention", noticeId: "a" }));
+    await mark(h, "owner", [{ noticeId: "a", mark: "dismissed" }]);
+    await expectRefused(await h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId: ahead })))));
+  });
+
+  it("takes only a skipped-schedule notice id in its own shape, with a time the clock allows", async () => {
+    const { h } = await relay();
+    const status = async (noticeId: string) =>
+      (await h(request("owner", "/sync/notices", jsonBody(notice({ kind: "schedule-skipped", noticeId }))))).status;
+    expect(await status(`schedule-skipped:ws:collection:T#r:${clock}`)).toBe(200);
+    for (const noticeId of [
+      "schedule-skipped:ws:collection:T#r:9999999999999999",
+      `schedule-skipped:ws:collection:T#r:${clock + 2 * 24 * 60 * 60 * 1000}`,
+      "schedule-skipped:ws:collection:T#r:01",
+      "schedule-skipped:collection:T#r",
+      "weekday-report:1000",
+    ]) {
+      expect(await status(noticeId), noticeId).toBe(400);
+    }
   });
 
   it("marks only the caller's own rows", async () => {
