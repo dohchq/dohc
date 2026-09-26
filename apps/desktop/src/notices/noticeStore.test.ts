@@ -481,6 +481,8 @@ describe("notices on one person's computers", () => {
 
       await rmdir(join(laptop.directory, `${name}.tmp`));
       await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
+      // dohc runs one store per profile; let this one's background sync finish before the next opens.
+      await laptop.store.sync();
       const restarted = await computer(signedIn, { directory: laptop.directory });
       expect(await titles(restarted)).toEqual([`${where}:First`, `${where}:Second`]);
     }
@@ -491,6 +493,8 @@ describe("notices on one person's computers", () => {
     const first = await computer(account(server, "ana"));
     server.online = false;
     await first.store.postNotice(notice());
+    // dohc runs one store per profile; let this one's background sync finish before the next opens.
+    await first.store.sync();
 
     const restarted = await computer(first.signedIn, { directory: first.directory });
     expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
