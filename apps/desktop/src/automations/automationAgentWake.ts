@@ -5,7 +5,9 @@ import type { AutomationChatMessage } from "./automationChat";
 // automation's text that says "@agent" wakes nobody. This step posts the
 // automation's message into "My agent", in one thread per automation, then
 // queues that message as the agent's trigger. The run's per-thread budget,
-// 10 runs in 10 minutes, bounds how often it can wake.
+// 10 runs in 10 minutes, bounds how often it can wake. The message carries
+// the claim's chain depth plus one, and the agent's run writes one deeper,
+// so an automation and the agent it wakes stop each other at the cap.
 
 export const AUTOMATION_NO_RUNNER =
   "No agent runner is set up. Set one up in Settings → Agents & MCP, then try again.";

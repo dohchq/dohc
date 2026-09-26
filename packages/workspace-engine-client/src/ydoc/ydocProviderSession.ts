@@ -106,6 +106,8 @@ export interface EngineYdocProviderSession {
     flush(): Promise<void>;
     applyRemoteUpdate(update: Uint8Array): Promise<void>;
     onDurableLocalChange(handler: () => void): () => void;
+    /** Resolves once a resync the engine requested has landed, and at once if none is pending. */
+    resyncIfNeeded(): Promise<void>;
   };
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
@@ -360,6 +362,10 @@ export async function openEngineYdocProviderSession(
         // Native application already committed. Event sequence tracking stays
         // with the daemon event lane; duplicate CRDT delivery is idempotent.
         session.receiveRemoteUpdate(update);
+      },
+      async resyncIfNeeded() {
+        if (closed) throw new Error("Owner session is closed.");
+        await session.resyncIfNeeded();
       },
     },
     get doc() {

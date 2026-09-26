@@ -97,7 +97,7 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   expect(rows.rows[0]!.values).toMatchObject({ [id(4)]: "Camera", [field.fieldId]: "New" });
   await f.host.action(call(next.revision, id(7), { id: rows.rows[0]!.id, expectedVersion: 1, values: { [field.fieldId]: "Done" } }, "edit"));
   expect(f.files.get("people/operations.js")).toBe(generateDatasetSources(definition).files[definition.operationsPath]);
-  await expect(f.host.query(call(f.revision, id(5)))).rejects.toThrow("Dataset access needs approval for the current revision.");
+  await expect(f.host.query(call(f.revision, id(5)))).rejects.toThrow("The Collection's rules changed. Its owner must approve this access again.");
 });
 
 it("adds a button through owner approval without SQL, operation changes, or new access", async () => {

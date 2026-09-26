@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RecordButton } from "./collections/RecordButton";
+import { useAutomationButtons } from "./collections/useAutomationButtons";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
-import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
@@ -97,6 +99,20 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, revision: dataset?.revision, revisionSha256: dataset?.revisionSha256, invoke, onError,
     onChanged: () => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); } });
   const columns = useMemo(() => dataset && transactionalDescription(dataset), [dataset]);
+  // Button fields: what each shows, and presses in flight from this window.
+  // A table with none asks main nothing.
+  const table = dataset?.tables.find(candidate => candidate.tableId === tableId);
+  const buttonFields = useMemo(() => table?.fields.flatMap(field => field.type === "button" ? [field.name] : []) ?? [], [table]);
+  const buttons = useAutomationButtons({ workspaceId, of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null, onError, onNotice: message => onNotice?.(message) });
+  useEffect(() => { void buttons?.refresh(); }, [buttons, dataset]);
+  useEffect(() => buttons === null ? undefined : bridge().onCollectionAutomationsChanged(event => { if (event.workspaceId === workspaceId) void buttons.refresh(); }), [buttons, workspaceId]);
+  // A run a press started changes records without touching a file, so the table reads them again when it ends.
+  useEffect(() => buttons?.onSettled(() => setRecordsVersion(value => value + 1)), [buttons]);
+  const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
+    fields: buttonFields,
+    // A dataset record's id goes to main as JSON, since the table's key can be a number.
+    render: (field, row) => <RecordButton buttons={buttons} field={field} recordId={JSON.stringify(row.id)} recordLabel={`record ${String(row.id)}`} />,
+  }, [buttons, buttonFields]);
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
@@ -144,6 +160,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       return result;
     }} />}</>;
   return <><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+    buttons={buttonColumns}
     activeView={owner ? activeView : null}
     viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
     copy={copy}

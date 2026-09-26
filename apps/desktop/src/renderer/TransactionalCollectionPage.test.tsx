@@ -376,3 +376,36 @@ describe("transactional Collection page", () => {
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 });
+
+it("draws each Button field as a labelled column before the record actions, and in the record's details", async () => {
+  const render = vi.fn((field: string, row: { id: string | number }) => <button type="button">{`${field} for record ${String(row.id)}`}</button>);
+  setup({ buttons: { fields: ["Mark paid"], render } });
+  const cell = await screen.findByRole("button", { name: "Mark paid for record 1" });
+  const headers = screen.getAllByRole("columnheader").map(header => header.textContent);
+  expect(headers.slice(-2)).toEqual(["Mark paid", "Actions"]);
+  // A button stores no value to sort by, so its header is a label.
+  expect(within(screen.getAllByRole("columnheader").at(-2)!).queryByRole("button")).toBeNull();
+  expect(cell.closest("td")?.nextElementSibling?.querySelector("[aria-label='Open record 1']")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+  const details = screen.getByRole("dialog", { name: "Record details" });
+  expect(within(details).getByRole("button", { name: "Mark paid for record 1" })).toBeTruthy();
+});
+
+it("keeps an open record's details, and the focus in them, when the records are read again", async () => {
+  const render = (field: string, row: { id: string | number }) => <button type="button">{`${field} for record ${String(row.id)}`}</button>;
+  let text = "Alice";
+  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page(text) }));
+  const { props, rerender } = setup({ invoke, buttons: { fields: ["Mark paid"], render } });
+  fireEvent.click(await screen.findByRole("button", { name: "Open record 1" }));
+  const details = screen.getByRole("dialog", { name: "Record details" });
+  const button = within(details).getByRole("button", { name: "Mark paid for record 1" });
+  button.focus();
+  text = "Alice Paid";
+  rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
+  await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Record details" })).getByText("Alice Paid")).toBeTruthy());
+  expect(document.activeElement).toBe(button);
+  // A record the new read no longer holds closes its details.
+  invoke.mockResolvedValue({ result: { rows: [], nextCursor: null } });
+  rerender(<TransactionalCollectionPage {...props} recordsVersion={2} />);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull());
+});

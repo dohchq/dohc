@@ -688,8 +688,9 @@ struct MessageAppend {
     parent_message_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     origin: Option<String>,
-    /// An automation message's chain depth, so a chain of automations stops
-    /// at the cap across computers. Nothing else carries one.
+    /// The chain depth of an automation's message, or of an agent's written
+    /// during a run an automation started, so a chain stops at the cap across
+    /// computers. A person's message never carries one.
     #[serde(default)]
     chain_depth: Option<u32>,
 }
@@ -1462,8 +1463,10 @@ fn apply_message(
             reason: "chat message payload is invalid",
         });
     }
+    // An automation's message, or an agent's written during a run an
+    // automation started, carries its chain depth; a person's never does.
     if payload.chain_depth.is_some_and(|depth| {
-        payload.author_kind != "automation"
+        !matches!(payload.author_kind.as_str(), "automation" | "agent")
             || !(1..=dohc_engine_domain::collections::MAX_CHANGE_ATTRIBUTION_DEPTH).contains(&depth)
     }) {
         return Err(SyncError::InvalidInput {

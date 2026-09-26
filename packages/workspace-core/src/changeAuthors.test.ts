@@ -20,12 +20,17 @@ describe("change authors", () => {
         kind: "agent",
         agentId: "codex-local",
         onBehalfOf: "user-1",
+        depth: 2,
       }),
     ).toEqual({
       kind: "agent",
       agentId: "codex-local",
       onBehalfOf: "user-1",
+      depth: 2,
     });
+    expect(() =>
+      parseChangeAuthor({ kind: "agent", agentId: "codex-local", onBehalfOf: "user-1" }),
+    ).toThrow(/depth/i);
     expect(parseChangeAuthor({ kind: "local", label: " Local file edit " })).toEqual({
       kind: "local",
       label: "Local file edit",

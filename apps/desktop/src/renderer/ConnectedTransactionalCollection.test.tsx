@@ -3,11 +3,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
+import type { AutomationRunSettledEvent } from "../ipc/bridgeContract";
 import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollection";
+import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
+import type { TransactionalButtons } from "./TransactionalCollectionPage";
 
-const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn() }));
+const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
+  listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+  settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
+  onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined) }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+  {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
   {props.onHistory && <button onClick={props.onHistory}>History</button>}
@@ -17,7 +24,48 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
 </> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); resetAutomationButtonsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
+
+describe("a dataset table's buttons", () => {
+  const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
+  const settle = (event: AutomationRunSettledEvent) => { for (const listener of backend.settled) listener(event); };
+
+  it("presses with the dataset, the table's name, and the record's key as JSON, runs until settled, says what ran, and reads the records again", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.onAutomationRunSettled.mockImplementation((listener: (event: AutomationRunSettledEvent) => void) => { backend.settled.push(listener); return () => undefined; });
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Confirm", table: "Registrations", state: { kind: "ready", automationId: "collection:Fundraiser#confirm" } },
+      { field: "Confirm", table: "Donors", state: { kind: "disabled", reason: "Only people who can edit Donors can use this button." } },
+    ] });
+    backend.pressAutomationButton.mockResolvedValue({ busy: false, claimId: "claim-1", settled: null });
+    const onNotice = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+    const button = await screen.findByRole("button", { name: "Confirm for record 12" });
+    expect(backend.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) });
+    // The state of this table's button, not another table's button of the same name.
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String),
+    }));
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBe("true"));
+    const version = () => Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));
+    const before = version();
+    act(() => settle({ workspaceId: "workspace-a", claimId: "claim-1", outcome: "done", error: null }));
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull());
+    expect(onNotice).toHaveBeenCalledWith("Ran Confirm on record 12");
+    // The run changed records without touching a file, so the table reads them again.
+    expect(version()).toBe(before + 1);
+  });
+
+  it("asks main nothing about buttons for a table that has none", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+    await screen.findByLabelText("Collection view state");
+    expect(backend.listAutomationButtons).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /for record/ })).toBeNull();
+  });
+});
 it("opens wrapped history through the real dialog and reverses the saved edit", async () => {
   let undone = false;
   const current: DatasetDescription = { ...dataset, operations: [...dataset.operations, { operationId: id(5), tableId: id(2), name: "edit", label: "Edit", kind: "edit", reversible: true, access: "owner", readOnly: false, fieldIds: [id(3)] }] };

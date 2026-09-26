@@ -1,9 +1,9 @@
-import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { Automation, AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { shareViewTakesLocalWrites } from "../workspaces/shareWriteGate";
-import { collectionAutomationId, definitionHash, operationsOf, RECORD_TRIGGERS_ONLY, unsupportedReason } from "./automationPlan";
+import { collectionAutomationId, definitionHash, unsupportedReason } from "./automationPlan";
 
 // Button fields (item 8): which automation a button runs, and who may press
 // it on this computer. Main decides both; a renderer only shows the answer.
@@ -20,6 +20,11 @@ export const RUNNING_FOR_RECORD = "Running for this record.";
 
 export function noAccessReason(collectionName: string): string {
   return `Only people who can edit ${collectionName} can use this button.`;
+}
+
+/** Why a press runs nothing: what it asked for is not what the button does now. */
+export function changedSincePressed(field: string): string {
+  return `${field} changed after it was pressed. Press it again.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,26 +134,13 @@ export function datasetButtonAccess(description: DatasetDescription, tableName: 
     invoked.every((name) => names.has(name));
 }
 
+export const SHARED_DATASET_BUTTONS = "dohc can't run buttons on shared dataset Collections yet.";
+
 /**
- * Why a dataset button cannot run. Access comes first: a person who cannot
- * press it learns nothing about its automation. A dataset automation starts
- * only from a record change, so a press that passes access still stops.
+ * What a dataset button shows in a shared view. Its dataset is on a server,
+ * which runs no automations yet, so no button runs. Someone who cannot edit
+ * the button's table is told that, as anywhere else.
  */
-export function datasetButtonRefusal(input: {
-  definition: DatasetDefinition;
-  file: AutomationsFileParseResult | null;
-  description: DatasetDescription;
-  field: string;
-  table: string | null;
-}): string {
-  const { definition } = input;
-  const only = definition.tables.length === 1 ? definition.tables[0]!.name : null;
-  const table = input.table ?? only;
-  if (table === null || !definition.tables.some((candidate) => candidate.name === table)) {
-    return noAccessReason(input.table ?? definition.name);
-  }
-  const resolution = resolveButton(input.file, input.field, (named) => named === table || (named === null && only !== null), definition.name);
-  const invoked = resolution.kind === "one" ? operationsOf(resolution.automation) : [];
-  if (!datasetButtonAccess(input.description, table, invoked)) return noAccessReason(table);
-  return resolution.kind === "state" ? resolution.state.reason : RECORD_TRIGGERS_ONLY;
+export function sharedDatasetButtonState(description: DatasetDescription, tableName: string): Extract<AutomationButtonState, { kind: "disabled" }> {
+  return { kind: "disabled", reason: datasetButtonAccess(description, tableName, []) ? SHARED_DATASET_BUTTONS : noAccessReason(tableName) };
 }

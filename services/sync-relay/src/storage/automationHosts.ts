@@ -6,6 +6,40 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
+import type { SqliteDb } from "./types";
+
+// The relay's last release or take over, at most one per workspace: the
+// host generation it started, the computer it named, and the Group handover
+// a release carried. A take over writes a mark with no handover. A reader
+// compares the generation with the one it last watched at to tell whether
+// another computer may have run since.
+export function initializeAutomationGroupHandoverSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_group_handovers (
+      workspace_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
+      for_install_id TEXT NOT NULL CHECK (length(for_install_id) BETWEEN 1 AND 256),
+      took_over INTEGER NOT NULL CHECK (took_over IN (0, 1)),
+      groups_json TEXT NOT NULL CHECK (json_valid(groups_json) AND length(groups_json) <= 4194304)
+    ) STRICT;
+  `);
+}
+
+function keepGroupHandover(
+  storage: StorageContext,
+  workspaceId: string,
+  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string },
+): void {
+  storage.db.prepare(
+    `INSERT INTO sync_relay_automation_group_handovers
+       (workspace_id, generation, for_install_id, took_over, groups_json)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id) DO UPDATE SET
+       generation = excluded.generation, for_install_id = excluded.for_install_id,
+       took_over = excluded.took_over, groups_json = excluded.groups_json`,
+  ).run(workspaceId, row.generation, row.forInstallId, row.tookOver ? 1 : 0, row.groups);
+}
 
 // Every input names the owner the route authenticated. Each call checks
 // ownership again inside its transaction, because reading the request body
@@ -31,6 +65,14 @@ export interface AutomationHostReleaseInput extends OwnerScope {
   installId: string;
   generation: number;
   releasedThroughMs: number;
+  /** The Group handover, as JSON text. */
+  groups: string;
+  /** The host generation the releasing computer last watched its Group subscriptions at. */
+  groupsWatched: number;
+}
+
+export interface AutomationGroupHandoverInput extends OwnerScope {
+  generation: number;
 }
 
 export interface AutomationHostTakeOverInput extends OwnerScope {
@@ -188,7 +230,45 @@ export function releaseAutomationHost(
       handoverFrom: null,
       releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
     }, host);
+    // A computer that has not watched since the relay's last record ran
+    // nothing since, so its own handover is stale. The record goes on
+    // instead: a handover that computer never took, or, after a take over
+    // it never watched at, a mark, so the next computer starts from now.
+    const held = storage.db.prepare(
+      "SELECT generation, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+    ).get(input.workspaceId);
+    const stale = held !== undefined && input.groupsWatched < Number(held.generation);
+    keepGroupHandover(storage, input.workspaceId, {
+      generation: host.generation + 1,
+      forInstallId: host.installId,
+      tookOver: stale && held.took_over === 1,
+      groups: stale ? String(held.groups_json) : input.groups,
+    });
     return readState(storage, input.workspaceId);
+  });
+}
+
+// The relay's last release or take over, read at the current host's
+// generation: the generation it started, and the Group handover when a
+// release left it for the current host. It stays across a handover the owner
+// called off, until the next release or take over replaces it.
+export function readAutomationGroupHandover(
+  storage: StorageContext,
+  input: AutomationGroupHandoverInput,
+): { generation: number | null; groups: Record<string, unknown> | null } {
+  return storage.readTx(() => {
+    requireOwner(storage, input);
+    const host = readHost(storage, input.workspaceId);
+    if (!host || host.generation !== input.generation) throw relayError("conflict");
+    const row = storage.db.prepare(
+      "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+    ).get(input.workspaceId);
+    if (!row) return { generation: null, groups: null };
+    const mine = row.took_over === 0 && row.for_install_id === host.installId;
+    return {
+      generation: Number(row.generation),
+      groups: mine ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,
+    };
   });
 }
 
@@ -208,6 +288,12 @@ export function takeOverAutomationHost(
       handoverFrom: null,
       releasedThroughMs: host.releasedThroughMs,
     }, host);
+    keepGroupHandover(storage, input.workspaceId, {
+      generation: host.generation + 1,
+      forInstallId: host.installId,
+      tookOver: true,
+      groups: "{}",
+    });
     return readState(storage, input.workspaceId);
   });
 }

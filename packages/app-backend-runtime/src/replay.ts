@@ -66,10 +66,10 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
         filter:name=>{const allowed=input.tables.includes(name);if(!allowed) forbidden=true;return allowed;},
         onConflict:()=>constants.SQLITE_CHANGESET_ABORT,
       });
-      if(!applied || forbidden) reject("invalid_changeset","The committed changeset cannot be replayed.");
+      if(!applied || forbidden) reject("invalid_changeset","dohc cannot reapply this saved change to the Collection.");
       return staged;
     });
-    steps.progress("saving the replay copy");
+    steps.progress("saving the reapplied records");
     shadow.exec("COMMIT");
 
     // Replay restores accepted predicates; structural constraints and generated columns still apply.
@@ -83,9 +83,9 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
         for(const table of tables) copyRows(shadow!,database,table.name,table.columns,()=>steps.progress(rebuilding));
         return database.prepare("PRAGMA foreign_key_check").iterate().next().done;
       });
-      if(!intact) reject("invalid_changeset","The committed changeset violates a foreign-key constraint.");
+      if(!intact) reject("invalid_changeset","The saved change breaks a foreign key between records.");
       for(const trigger of triggers) database.exec(String(trigger.sql));
-      steps.progress("saving the rebuilt dataset");
+      steps.progress("saving the rebuilt Collection");
       commit();database.exec("COMMIT");
     } catch(error) {if(database.isTransaction) database.exec("ROLLBACK");throw error;}
     finally {database.exec("PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF");}

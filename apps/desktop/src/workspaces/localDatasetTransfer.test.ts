@@ -37,7 +37,7 @@ it.each(["bound", "file IO"])("keeps authority active after %s export failure", 
   const transfers = createLocalDatasetTransfers({ ...f, workspaceId: f.scope.workspaceId, exportDirectory: join(f.directory, "exports"), assertCurrent: f.authorize, limits,
     exportRecovery: async () => { if (kind === "file IO") throw new Error("disk refused"); return prepareDatasetRecoveryExport({ ...f, directory: join(f.directory, "exports"), limits }); } });
   const target = { async importRecovery(): Promise<never> { throw new Error("Target must not be called"); } };
-  await expect(transfers.transfer({ datasetId: id(1), targetOrigin: "https://relay.example", target })).rejects.toThrow(kind === "bound" ? "storage reservation" : "disk refused");
+  await expect(transfers.transfer({ datasetId: id(1), targetOrigin: "https://relay.example", target })).rejects.toThrow(kind === "bound" ? "larger than the space reserved" : "disk refused");
   expect(transfers.status(id(1))).toBeNull();
   expect(f.journal.head(f.scope, f.authorize).active).toBe(true);
   expect(f.commit().kind).toBe("committed");

@@ -146,7 +146,7 @@ function integer(value: number, min = 0, max = Number.MAX_SAFE_INTEGER): number 
   if (!Number.isSafeInteger(value) || value < min || value > max) invalid("Invalid journal number."); return value;
 }
 function copyBytes(value: Uint8Array, max: number): Uint8Array {
-  if (!(value instanceof Uint8Array) || value.byteLength > max) invalid("Journal bytes exceed the limit.");
+  if (!(value instanceof Uint8Array) || value.byteLength > max) invalid("This change is too large to save.");
   return new Uint8Array(value);
 }
 function scope(value: DatasetScope): DatasetScope { return Object.freeze({workspaceId:text(value.workspaceId),datasetId:text(value.datasetId)}); }
@@ -182,8 +182,8 @@ function checkpointHash(c: Omit<DatasetCursor,"digest">, checkpointSha256: strin
     checkpointSha256,hash(source),hash(schemaSql),hash(definitionJson),capacityBytes]));
 }
 function resultText(value: string): string {
-  if (typeof value!=="string" || Buffer.byteLength(value)>256*1024) invalid("Operation result exceeds the limit.");
-  try { JSON.parse(value); } catch { invalid("Operation result must be JSON."); } return value;
+  if (typeof value!=="string" || Buffer.byteLength(value)>256*1024) invalid("The Collection action's result is too large.");
+  try { JSON.parse(value); } catch { invalid("A Collection action must return JSON."); } return value;
 }
 type StoredHead = DatasetHead & {checkpointId: string; checkpointSha256: string; checkpointCursor: DatasetCursor; checkpointPrevious: DatasetCursor | null};
 
@@ -230,13 +230,13 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       PRIMARY KEY(workspace_id,dataset_id)) STRICT;`));
   function notDeleted(key: DatasetScope): void {
     if(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId))
-      throw new JournalError("inactive","Dataset was permanently deleted.");
+      throw new JournalError("inactive","This Collection was permanently deleted.");
   }
   function storedHead(key: DatasetScope): StoredHead {
     notDeleted(key);
     const row=db.prepare(`SELECT workspace_id,dataset_id,host_epoch,approved_revision_hash,source,schema_sql,definition_json,revision,digest,active,
       capacity_bytes,checkpoint_id,checkpoint_sha256,checkpoint_revision,checkpoint_digest,checkpoint_previous_json FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).get(key.workspaceId,key.datasetId);
-    if(!row) throw new JournalError("conflict","Dataset is not initialized.");
+    if(!row) throw new JournalError("conflict","This Collection is not set up yet.");
     try {
       const head={cursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision:Number(row.revision),digest:String(row.digest)}),
         active:row.active===1,source:text(String(row.source),256*1024),schemaSql:text(String(row.schema_sql),256*1024),definitionJson:resultText(String(row.definition_json)),capacityBytes:integer(Number(row.capacity_bytes),4096),
@@ -245,45 +245,45 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         checkpointPrevious:row.checkpoint_previous_json===null?null:cursor(JSON.parse(String(row.checkpoint_previous_json)))};
       const previous=head.checkpointPrevious,current=head.checkpointCursor;
       if(current.revision>head.cursor.revision || (previous ? previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId||previous.revision+1!==current.revision : current.revision!==0) ||
-        checkpointHash(current,head.checkpointSha256,head.source,head.schemaSql,head.definitionJson,head.capacityBytes,previous)!==current.digest) return corrupt("Dataset definition integrity check failed.");
+        checkpointHash(current,head.checkpointSha256,head.source,head.schemaSql,head.definitionJson,head.capacityBytes,previous)!==current.digest) return corrupt("This Collection's saved rules are damaged.");
       return head;
-    } catch { return corrupt("Dataset header is damaged."); }
+    } catch { return corrupt("This Collection's saved state is damaged."); }
   }
-  function active(head: StoredHead) { if(!head.active)throw new JournalError("inactive","Dataset host is fenced."); }
+  function active(head: StoredHead) { if(!head.active)throw new JournalError("inactive","This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file."); }
   function readEvent(key: DatasetScope, revision: number): JournalEvent {
     const size=db.prepare(`SELECT storage_bytes,length(changeset)+length(CAST(result_json AS BLOB))+length(CAST(attached_file_ids AS BLOB))+
       length(CAST(caller_key AS BLOB))+length(CAST(proposal_id AS BLOB))+length(CAST(operation AS BLOB))+length(CAST(idempotency_key AS BLOB)) AS actual_bytes
       FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?`).get(key.workspaceId,key.datasetId,revision);
-    if(!size || !Number.isSafeInteger(size.storage_bytes)||Number(size.storage_bytes)>maxEvent || Number(size.actual_bytes)>Number(size.storage_bytes)) return corrupt("Journal event size is damaged.");
+    if(!size || !Number.isSafeInteger(size.storage_bytes)||Number(size.storage_bytes)>maxEvent || Number(size.actual_bytes)>Number(size.storage_bytes)) return corrupt("A saved change in this Collection's history is damaged.");
     const row=db.prepare("SELECT * FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?").get(key.workspaceId,key.datasetId,revision);
-    if(!row) return corrupt("Journal event is missing.");
+    if(!row) return corrupt("A saved change is missing from this Collection's history.");
     try {
       const event: JournalEvent={cursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision:Number(row.revision),digest:String(row.digest)}),
         previousDigest:digest(String(row.previous_digest)),proposalId:text(String(row.proposal_id),256),operation:text(String(row.operation),256),callerKey:text(String(row.caller_key),1024),
         idempotencyKey:text(String(row.idempotency_key),128),payloadSha256:digest(String(row.payload_sha256)),resultJson:resultText(String(row.result_json)),
         changeset:copyBytes(row.changeset as Uint8Array,maxEvent),changesetSha256:digest(String(row.changeset_sha256)),attachedFileIds:fileIds(JSON.parse(String(row.attached_file_ids))),recordedAtMs:integer(Number(row.recorded_at_ms))};
-      if(hash(event.changeset)!==event.changesetSha256 || eventHash(event)!==event.cursor.digest) return corrupt("Journal event digest mismatch.");
+      if(hash(event.changeset)!==event.changesetSha256 || eventHash(event)!==event.cursor.digest) return corrupt("A saved change in this Collection's history does not match its checksum.");
       return event;
-    } catch { return corrupt("Journal event is damaged."); }
+    } catch { return corrupt("A saved change in this Collection's history is damaged."); }
   }
   function readReceipt(key: DatasetScope, callerKey: string, idempotencyKey: string, payloadSha256: string): JournalReceipt | null {
     const row=db.prepare("SELECT payload_sha256,revision,result_json FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=? AND caller_key=? AND idempotency_key=?")
       .get(key.workspaceId,key.datasetId,callerKey,idempotencyKey);
     if(!row)return null;
     const event=readEvent(key,Number(row.revision));
-    if(event.callerKey!==callerKey || event.idempotencyKey!==idempotencyKey || event.payloadSha256!==row.payload_sha256 || event.resultJson!==row.result_json) return corrupt("Retry receipt differs from its journal event.");
-    if(row.payload_sha256!==payloadSha256)throw new JournalError("conflict","Idempotency key has another payload.");
+    if(event.callerKey!==callerKey || event.idempotencyKey!==idempotencyKey || event.payloadSha256!==row.payload_sha256 || event.resultJson!==row.result_json) return corrupt("This retry's saved result does not match the Collection's history.");
+    if(row.payload_sha256!==payloadSha256)throw new JournalError("conflict","This retry key was already used for different values. Start a new response.");
     return {revision:event.cursor.revision,payloadSha256:event.payloadSha256,resultJson:event.resultJson};
   }
   function assertCursor(wanted: DatasetCursor, actual: DatasetCursor) {
-    if(!sameCursor(wanted,actual))throw new JournalError("conflict","Dataset cursor changed.");
+    if(!sameCursor(wanted,actual))throw new JournalError("conflict","The Collection changed. Try again.");
   }
   function checkpointBytes(key: DatasetScope, checkpointId: string, sha256: string, authorize: Authorize): Uint8Array {
     const manifest=checkpoints.info(key,checkpointId),bytes=new Uint8Array(manifest.expectedBytes),hash=createHash("sha256");
     for(let offset=0;offset<bytes.byteLength;offset+=manifest.chunkSize) {
       callback(authorize);const chunk=checkpoints.read(key,checkpointId,offset,manifest.chunkSize);bytes.set(chunk,offset);hash.update(chunk);
     }
-    if(manifest.sha256!==sha256||hash.digest("hex")!==sha256)return corrupt("Checkpoint integrity check failed.");
+    if(manifest.sha256!==sha256||hash.digest("hex")!==sha256)return corrupt("This Collection's saved records are damaged.");
     return bytes;
   }
   function exportRecord(key: DatasetScope, revision: number): JournalExportRecord {
@@ -299,21 +299,21 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       const source=text(String(checkpoint.source),256*1024),schemaSql=text(String(checkpoint.schema_sql),256*1024),definitionJson=resultText(String(checkpoint.definition_json));
       const manifest=checkpoints.info(key,String(checkpoint.checkpoint_id));
       const capacityBytes=integer(Number(checkpoint.capacity_bytes),4096),byteLength=integer(manifest.expectedBytes,0,maxCheckpoint),sha256=digest(String(checkpoint.checkpoint_sha256));
-      if(manifest.sha256!==sha256)return corrupt("Export checkpoint manifest is damaged.");
+      if(manifest.sha256!==sha256)return corrupt("This Collection's saved records are damaged, so dohc cannot export it.");
       if(current.workspaceId!==key.workspaceId||current.datasetId!==key.datasetId||current.revision!==revision||
         (previous ? previous.revision+1!==revision||previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId : revision!==0)||
-        checkpointHash(current,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==current.digest) return corrupt("Export checkpoint metadata is damaged.");
+        checkpointHash(current,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==current.digest) return corrupt("This Collection's saved records are damaged, so dohc cannot export it.");
       return {kind:"checkpoint",cursor:current,previous,source,schemaSql,definitionJson,capacityBytes,byteLength,sha256};
     }
     const row=db.prepare(`SELECT workspace_id,dataset_id,revision,previous_digest,digest,host_epoch,approved_revision_hash,proposal_id,operation,
         caller_key,idempotency_key,payload_sha256,result_json,changeset_sha256,attached_file_ids,recorded_at_ms,length(changeset) AS byte_length
         FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?`).get(key.workspaceId,key.datasetId,revision);
-    if(!row)return corrupt("Export history is incomplete.");
+    if(!row)return corrupt("This Collection's history is incomplete, so dohc cannot export it.");
     const event:Omit<JournalEvent,"changeset">={cursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision,digest:String(row.digest)}),
       previousDigest:digest(String(row.previous_digest)),proposalId:text(String(row.proposal_id),256),operation:text(String(row.operation),256),callerKey:text(String(row.caller_key),1024),
       idempotencyKey:text(String(row.idempotency_key),128),payloadSha256:digest(String(row.payload_sha256)),resultJson:resultText(String(row.result_json)),
       changesetSha256:digest(String(row.changeset_sha256)),attachedFileIds:fileIds(JSON.parse(String(row.attached_file_ids))),recordedAtMs:integer(Number(row.recorded_at_ms))};
-    if(eventHash(event)!==event.cursor.digest)return corrupt("Export event metadata is damaged.");
+    if(eventHash(event)!==event.cursor.digest)return corrupt("A saved change in this Collection's history is damaged, so dohc cannot export it.");
     return {...event,kind:"event",byteLength:integer(Number(row.byte_length),0,maxEvent)};
   }
   function materializationRow(key: DatasetScope) {
@@ -331,7 +331,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
   }
   function assertCommittedPrefix(expected:DatasetCursor,h:StoredHead):void {
     if(!sameIdentity(expected,h.cursor)||expected.revision<h.checkpointCursor.revision||expected.revision>h.cursor.revision)
-      throw new JournalError("conflict","Materialization cursor changed authority or checkpoint.");
+      throw new JournalError("conflict","The Collection changed while dohc saved its records. Try again.");
     assertCursor(expected,expected.revision===h.checkpointCursor.revision?h.checkpointCursor:exportRecord(expected,expected.revision).cursor);
   }
   function readMaterialization(key: DatasetScope, h: StoredHead): JournalMaterialization | null {
@@ -357,7 +357,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         callback(input.authorize);const h=storedHead(key);active(h);
         const current=readMaterialization(key,h);
         if(!current||!sameCursor(cache.cursor,current.cursor)||cache.checkpointId!==current.checkpointId||cache.byteLength!==current.byteLength||cache.sha256!==current.sha256)return null;
-        if(offset>current.byteLength)invalid("Invalid materialization blob range.");
+        if(offset>current.byteLength)invalid("Invalid range in the Collection's saved records.");
         try {return checkpoints.read(key,current.checkpointId,offset,length);} catch {return null;}
       });
     },
@@ -368,16 +368,16 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(authorize);const h=storedHead(expected);active(h);assertCommittedPrefix(expected,h);
         const previous=readMaterialization(expected,h);
-        if(previous&&previous.cursor.revision>expected.revision)throw new JournalError("conflict","A newer materialization is already installed.");
+        if(previous&&previous.cursor.revision>expected.revision)throw new JournalError("conflict","A newer copy of this Collection's records is already saved.");
         const resolved=checkpoints.resolve(expected,checkpoint,true);
-        if(resolved.expectedBytes>h.capacityBytes)invalid("Materialization exceeds reserved capacity.");
+        if(resolved.expectedBytes>h.capacityBytes)invalid("This Collection's records are larger than the space reserved for them.");
         const releasedBytes=materializationRelease(expected);
         const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify(expected))+512;
         if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Materialization replacement requires quota accounting.");
         if(account)callback(()=>account(Object.freeze({bytes,stagedCreditBytes:resolved.stagedCreditBytes,releasedBytes})));
         callback(authorize);const current=storedHead(expected);active(current);assertCommittedPrefix(expected,current);
         const newer=readMaterialization(expected,current);
-        if(newer&&newer.cursor.revision>expected.revision)throw new JournalError("conflict","A newer materialization is already installed.");
+        if(newer&&newer.cursor.revision>expected.revision)throw new JournalError("conflict","A newer copy of this Collection's records is already saved.");
         removeMaterialization(expected);
         const checkpointId=checkpoints.activate(expected,checkpoint);
         db.prepare("INSERT INTO dohc_dataset_materializations VALUES(?,?,?,?,?,?,?)")
@@ -421,7 +421,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       const key=scope(input.scope);
       return tx(()=>{
         callback(input.authorize); const h=storedHead(key), checkpoint=exportRecord(key,h.checkpointCursor.revision);
-        if(checkpoint.kind!=="checkpoint")return corrupt("Export checkpoint is missing.");
+        if(checkpoint.kind!=="checkpoint")return corrupt("This Collection's saved records are missing, so dohc cannot export it.");
         synchronous(input.capture);const captured=callback(()=>input.capture({...h.cursor}));callback(input.authorize);
         return {cursor:h.cursor,checkpoint,captured};
       });
@@ -434,7 +434,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         const records:JournalExportRecord[]=[];let bytes=0;
         for(let revision=after+1;revision<=through.revision&&records.length<limit;revision++){
           const record=exportRecord(key,revision),size=Buffer.byteLength(JSON.stringify(record));
-          if(size>1024*1024)invalid("Export record metadata exceeds its limit.");
+          if(size>1024*1024)invalid("Part of this Collection is too large to export.");
           if(bytes+size>1024*1024)break;
           records.push(record);bytes+=size;
         }
@@ -447,14 +447,14 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(input.authorize);
         const current=exportRecord(key,revision);
-        if(JSON.stringify(current)!==JSON.stringify(record))return corrupt("Export record changed.");
+        if(JSON.stringify(current)!==JSON.stringify(record))return corrupt("The Collection changed during export. Try again.");
         const checkpoint=record.kind==="checkpoint" ? db.prepare(`SELECT checkpoint_id FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=?
           UNION ALL SELECT checkpoint_id FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=?`)
           .get(key.workspaceId,key.datasetId,revision,key.workspaceId,key.datasetId,revision) : undefined;
         const row=record.kind==="event"
           ? db.prepare("SELECT substr(changeset,?,?) AS bytes FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?").get(offset+1,length,key.workspaceId,key.datasetId,revision)
           : checkpoint ? {bytes:checkpoints.read(key,String(checkpoint.checkpoint_id),offset,length)} : undefined;
-        if(!row||!(row.bytes instanceof Uint8Array)||row.bytes.byteLength!==Math.min(length,record.byteLength-offset))return corrupt("Export blob is incomplete.");
+        if(!row||!(row.bytes instanceof Uint8Array)||row.bytes.byteLength!==Math.min(length,record.byteLength-offset))return corrupt("Part of this Collection's saved data is missing, so dohc cannot export it.");
         return new Uint8Array(row.bytes);
       });
     },
@@ -466,12 +466,12 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(authorize);notDeleted(key);
         const resolved=checkpoints.resolve(key,checkpoint),checkpointSha256=resolved.sha256;
-        if(resolved.expectedBytes>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
+        if(resolved.expectedBytes>capacityBytes)invalid("This Collection's records are larger than the space reserved for them.");
         const initial=cursor({...key,hostEpoch,approvedRevisionHash,revision:0,digest:checkpointHash({...key,hostEpoch,approvedRevisionHash,revision:0},checkpointSha256,source,schemaSql,definitionJson,capacityBytes,null)});
         const exists=db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
         if(exists) {
           const h=storedHead(key);active(h);
-          if(!sameIdentity(initial,h.cursor)||h.checkpointCursor.digest!==initial.digest||h.checkpointCursor.revision!==0||h.capacityBytes!==capacityBytes)throw new JournalError("conflict","Dataset initialization differs from its approved state.");
+          if(!sameIdentity(initial,h.cursor)||h.checkpointCursor.digest!==initial.digest||h.checkpointCursor.revision!==0||h.capacityBytes!==capacityBytes)throw new JournalError("conflict","This Collection's first saved state does not match its approved rules.");
           return h.cursor;
         }
         if(resolved.stagedCreditBytes&&!account)invalid("Staged checkpoint activation requires quota accounting.");
@@ -494,15 +494,15 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         const resolved=checkpoints.resolve(expected,checkpoint),checkpointSha256=resolved.sha256;
         const h=storedHead(expected);active(h);
         const capacityBytes=requestedCapacity??h.capacityBytes;
-        if(capacityBytes<h.capacityBytes)invalid("Checkpoint transition cannot release materialization capacity.");
-        if(resolved.expectedBytes>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
+        if(capacityBytes<h.capacityBytes)invalid("A Collection change cannot shrink the space reserved for its records.");
+        if(resolved.expectedBytes>capacityBytes)invalid("This Collection's records are larger than the space reserved for them.");
         const next=cursor({...expected,hostEpoch,approvedRevisionHash,revision:integer(expected.revision+1,1),
           digest:checkpointHash({...expected,hostEpoch,approvedRevisionHash,revision:expected.revision+1},checkpointSha256,source,schemaSql,definitionJson,capacityBytes,expected)});
         // Lost transition acknowledgments do not run host accounting twice.
         if(h.checkpointPrevious&&sameCursor(h.checkpointPrevious,expected)&&sameCursor(h.checkpointCursor,next))return next;
         assertCursor(expected,h.cursor);
         if(approvedRevisionHash===expected.approvedRevisionHash && (source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson))
-          invalid("Changed dataset artifacts require a new approved revision.");
+          invalid("Changed Collection rules need a new approval.");
         const releasedBytes=materializationRelease(expected);
         const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024+capacityBytes-h.capacityBytes-releasedBytes;
         if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Staged checkpoint activation requires quota accounting.");
@@ -519,32 +519,32 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           WHERE workspace_id=? AND dataset_id=? AND host_epoch=? AND approved_revision_hash=? AND revision=? AND digest=? AND active=1`)
           .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,capacityBytes,checkpointId,checkpointSha256,
             next.revision,next.digest,JSON.stringify(expected),expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
-        if(Number(changed.changes)!==1)throw new JournalError("conflict","Dataset cursor changed during checkpoint transition.");
+        if(Number(changed.changes)!==1)throw new JournalError("conflict","The Collection changed while dohc saved its records. Try again.");
         return next;
       });
     },
     claimInactiveCheckpoint(input) {
       const expected=cursor(input.expected),hostEpoch=text(input.hostEpoch,256),approvedRevisionHash=digest(input.approvedRevisionHash);
-      if (hostEpoch===expected.hostEpoch) invalid("A claimed dataset requires a fresh host epoch.");
+      if (hostEpoch===expected.hostEpoch) invalid("A restored Collection needs a new host session.");
       const source=text(input.source,256*1024),schemaSql=text(input.schemaSql,256*1024),definitionJson=resultText(input.definitionJson);
       const checkpoint=input.checkpoint instanceof Uint8Array?copyBytes(input.checkpoint,maxCheckpoint):structuredClone(input.checkpoint),authorize=input.authorize,account=input.account;
       synchronous(authorize);if(account)synchronous(account);
       return tx(()=>{
         callback(authorize);
         const h=storedHead(expected);
-        if(approvedRevisionHash!==expected.approvedRevisionHash)invalid("Inactive dataset claims cannot change approved rules.");
+        if(approvedRevisionHash!==expected.approvedRevisionHash)invalid("Restoring a Collection cannot change its approved rules.");
         const resolved=checkpoints.resolve(expected,checkpoint),capacityBytes=h.capacityBytes;
-        if(source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson)invalid("Inactive dataset claims cannot change approved artifacts.");
-        if(input.capacityBytes!==undefined&&input.capacityBytes!==capacityBytes)invalid("Inactive dataset claims cannot change reserved capacity.");
-        if(resolved.expectedBytes>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
+        if(source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson)invalid("Restoring a Collection cannot change its approved rules.");
+        if(input.capacityBytes!==undefined&&input.capacityBytes!==capacityBytes)invalid("Restoring a Collection cannot change the space reserved for its records.");
+        if(resolved.expectedBytes>capacityBytes)invalid("This Collection's records are larger than the space reserved for them.");
         const next=cursor({...expected,hostEpoch,approvedRevisionHash,revision:integer(expected.revision+1,1),
           digest:checkpointHash({...expected,hostEpoch,approvedRevisionHash,revision:expected.revision+1},resolved.sha256,source,schemaSql,definitionJson,capacityBytes,expected)});
         if(h.active&&h.checkpointPrevious&&sameCursor(h.checkpointPrevious,expected)&&sameCursor(h.checkpointCursor,next))return next;
-        if(h.active)throw new JournalError("conflict","Dataset authority is already active.");
+        if(h.active)throw new JournalError("conflict","This Collection is already open on this host.");
         assertCursor(expected,h.cursor);
         if(db.prepare("SELECT 1 FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND json_extract(cursor_json,'$.hostEpoch')=? LIMIT 1")
           .get(expected.workspaceId,expected.datasetId,hostEpoch)||db.prepare("SELECT 1 FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND host_epoch=? LIMIT 1")
-          .get(expected.workspaceId,expected.datasetId,hostEpoch))invalid("A claimed dataset requires a fresh host epoch.");
+          .get(expected.workspaceId,expected.datasetId,hostEpoch))invalid("A restored Collection needs a new host session.");
         const releasedBytes=materializationRelease(expected);
         const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024-releasedBytes;
         if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Staged checkpoint activation requires quota accounting.");
@@ -561,7 +561,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           WHERE workspace_id=? AND dataset_id=? AND host_epoch=? AND approved_revision_hash=? AND revision=? AND digest=? AND active=0`)
           .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,checkpointId,resolved.sha256,next.revision,next.digest,JSON.stringify(expected),
             expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
-        if(Number(changed.changes)!==1)throw new JournalError("conflict","Dataset claim changed during activation.");
+        if(Number(changed.changes)!==1)throw new JournalError("conflict","The Collection changed while dohc restored it. Try again.");
         return next;
       });
     },
@@ -578,14 +578,14 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       const payloadSha256=digest(input.payloadSha256),resultJson=resultText(input.resultJson),changeset=copyBytes(input.changeset,maxEvent),changesetSha256=digest(input.changesetSha256);
       const attachedFileIds=fileIds(input.attachedFileIds),recordedAtMs=integer(input.recordedAtMs??now()),authorize=input.authorize,accountAndAttach=input.accountAndAttach,recordCommit=input.recordCommit;
       synchronous(authorize);if(accountAndAttach)synchronous(accountAndAttach);if(recordCommit)synchronous(recordCommit);
-      if(hash(changeset)!==changesetSha256)invalid("Changeset digest mismatch.");
+      if(hash(changeset)!==changesetSha256)invalid("This change does not match its checksum.");
       const metadata={proposalId,operation,callerKey,idempotencyKey,payloadSha256,resultJson,changesetSha256,attachedFileIds,recordedAtMs};
       const storageBytes=changeset.byteLength+Buffer.byteLength(JSON.stringify([expected,metadata]))+Buffer.byteLength(JSON.stringify([expected.workspaceId,expected.datasetId,callerKey,idempotencyKey,payloadSha256,resultJson]))+1024;
-      if(storageBytes>maxEvent)invalid("Journal event exceeds the limit.");
+      if(storageBytes>maxEvent)invalid("This change is too large to save.");
       return tx(()=>{
         callback(authorize);
         const h=storedHead(expected);active(h);
-        if(!sameIdentity(expected,h.cursor))throw new JournalError("conflict","Dataset approval or host changed.");
+        if(!sameIdentity(expected,h.cursor))throw new JournalError("conflict","The Collection's rules or host changed. Try again.");
         const receipt=readReceipt(expected,callerKey,idempotencyKey,payloadSha256);
         if(receipt)return {kind:"replayed",receipt};
         assertCursor(expected,h.cursor);
@@ -603,7 +603,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         const updated=db.prepare(`UPDATE dohc_dataset_journals SET revision=?,digest=? WHERE workspace_id=? AND dataset_id=?
           AND revision=? AND digest=? AND host_epoch=? AND approved_revision_hash=? AND active=1`)
           .run(revision,event.cursor.digest,expected.workspaceId,expected.datasetId,expected.revision,expected.digest,expected.hostEpoch,expected.approvedRevisionHash);
-        if(Number(updated.changes)!==1)throw new JournalError("conflict","Dataset cursor changed during commit.");
+        if(Number(updated.changes)!==1)throw new JournalError("conflict","The Collection changed while dohc saved this change. Try again.");
         return {kind:"committed",receipt:{revision,payloadSha256,resultJson},event};
       });
     },
@@ -612,8 +612,8 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(authorize);
         const h=storedHead(key);
-        if(after.revision<h.checkpointCursor.revision)throw new JournalError("conflict","Dataset schema changed. Recover from its current checkpoint.");
-        if(!sameIdentity(after,h.cursor)||after.revision>h.cursor.revision)throw new JournalError("conflict","Cursor scope or revision changed.");
+        if(after.revision<h.checkpointCursor.revision)throw new JournalError("conflict","The Collection's tables changed. Download it again.");
+        if(!sameIdentity(after,h.cursor)||after.revision>h.cursor.revision)throw new JournalError("conflict","The Collection changed. Try again.");
         const previous=after.revision===h.checkpointCursor.revision?h.checkpointCursor:readEvent(key,after.revision).cursor;
         assertCursor(after,previous);
         const headers=db.prepare("SELECT revision,storage_bytes FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision>? ORDER BY revision LIMIT ?")
@@ -621,14 +621,14 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         let current=after,total=0;const events:JournalEvent[]=[];
         for(const header of headers) {
           const size=Number(header.storage_bytes);
-          if(!Number.isSafeInteger(size)||size<1||size>maxEvent)return corrupt("Journal event size is damaged.");
+          if(!Number.isSafeInteger(size)||size<1||size>maxEvent)return corrupt("A saved change in this Collection's history is damaged.");
           if(total+size>byteLimit){if(!events.length)invalid("Event exceeds the requested page byte limit.");break;}
           const event=readEvent(key,Number(header.revision));
-          if(event.cursor.revision!==current.revision+1||event.previousDigest!==current.digest||!sameIdentity(event.cursor,current))return corrupt("Journal sequence is broken.");
+          if(event.cursor.revision!==current.revision+1||event.previousDigest!==current.digest||!sameIdentity(event.cursor,current))return corrupt("This Collection's history has a gap.");
           events.push(event);total+=size;current=event.cursor;
         }
-        if(current.revision===h.cursor.revision) {if(current.digest!==h.cursor.digest)return corrupt("Journal head digest mismatch.");}
-        else if(headers.length<limit && events.length===headers.length)return corrupt("Journal tail is missing.");
+        if(current.revision===h.cursor.revision) {if(current.digest!==h.cursor.digest)return corrupt("This Collection's latest change does not match its checksum.");}
+        else if(headers.length<limit && events.length===headers.length)return corrupt("The latest changes are missing from this Collection's history.");
         return {events,head:h.cursor};
       });
     },
@@ -641,17 +641,17 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           const bytes=checkpointBytes(key,h.checkpointId,h.checkpointSha256,authorize);
           return {cursor:h.checkpointCursor,bytes,sha256:h.checkpointSha256,source:h.source,schemaSql:h.schemaSql,definitionJson:h.definitionJson};
         }
-        if(requested>h.checkpointCursor.revision)throw new JournalError("conflict","Checkpoint revision is not available.");
+        if(requested>h.checkpointCursor.revision)throw new JournalError("conflict","This Collection has no saved records for that point in its history.");
         const row=db.prepare("SELECT * FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=?").get(key.workspaceId,key.datasetId,requested);
-        if(!row)throw new JournalError("conflict","Checkpoint revision is not available.");
+        if(!row)throw new JournalError("conflict","This Collection has no saved records for that point in its history.");
         try {
           const oldCursor=cursor(JSON.parse(String(row.cursor_json))),previous=row.previous_json===null?null:cursor(JSON.parse(String(row.previous_json)));
           const source=text(String(row.source),256*1024),schemaSql=text(String(row.schema_sql),256*1024),definitionJson=resultText(String(row.definition_json)),capacityBytes=integer(Number(row.capacity_bytes),4096),sha256=digest(String(row.checkpoint_sha256)),bytes=checkpointBytes(key,String(row.checkpoint_id),sha256,authorize);
           if(oldCursor.workspaceId!==key.workspaceId||oldCursor.datasetId!==key.datasetId||oldCursor.revision!==requested ||
             (previous ? previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId||previous.revision+1!==requested : requested!==0) ||
-            hash(bytes)!==sha256||checkpointHash(oldCursor,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==oldCursor.digest)return corrupt("Checkpoint history integrity check failed.");
+            hash(bytes)!==sha256||checkpointHash(oldCursor,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==oldCursor.digest)return corrupt("An earlier saved copy of this Collection's records is damaged.");
           return {cursor:oldCursor,bytes,sha256,source,schemaSql,definitionJson};
-        } catch { return corrupt("Checkpoint history is damaged."); }
+        } catch { return corrupt("An earlier saved copy of this Collection's records is damaged."); }
       });
     },
     fence(input) {

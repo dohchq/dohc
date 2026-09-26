@@ -86,12 +86,12 @@ class Reader {
   }
 
   byte(): number {
-    if (this.done) fail("The changeset ends early.");
+    if (this.done) fail("The saved change ends early.");
     return this.bytes[this.offset++]!;
   }
 
   take(length: number): Uint8Array {
-    if (length > this.bytes.byteLength - this.offset) fail("The changeset ends early.");
+    if (length > this.bytes.byteLength - this.offset) fail("The saved change ends early.");
     const slice = this.bytes.subarray(this.offset, this.offset + length);
     this.offset += length;
     return slice;
@@ -108,7 +108,7 @@ class Reader {
       value = (value << 7n) | BigInt(byte & 0x7f);
       if ((byte & 0x80) === 0) return safe(value);
     }
-    return fail("The changeset holds an unreadable number.");
+    return fail("The saved change holds an unreadable number.");
   }
 }
 
@@ -116,12 +116,12 @@ function text(bytes: Uint8Array, what: string): string {
   try {
     return utf8.decode(bytes);
   } catch {
-    return fail(`The changeset holds ${what} that is not UTF-8.`);
+    return fail(`The saved change holds ${what} that is not UTF-8.`);
   }
 }
 
 function safe(value: bigint): number {
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) fail("The changeset holds a length it cannot have.");
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) fail("The saved change holds a length it cannot have.");
   return Number(value);
 }
 
@@ -143,7 +143,7 @@ function readValue(reader: Reader): ChangesetValue | undefined {
     case 5:
       return null;
     default:
-      return fail("The changeset holds a value of an unknown type.");
+      return fail("The saved change holds a value of an unknown type.");
   }
 }
 
@@ -151,7 +151,7 @@ function readRecord(reader: Reader, columns: number, defined: boolean): Array<Ch
   const values: Array<ChangesetValue | undefined> = [];
   for (let column = 0; column < columns; column += 1) {
     const value = readValue(reader);
-    if (defined && value === undefined) fail("An inserted or deleted row lacks a value.");
+    if (defined && value === undefined) fail("An added or removed record lacks a value.");
     values.push(value);
   }
   return values;
@@ -162,25 +162,25 @@ export function* decodeChangeset(bytes: Uint8Array): Generator<ChangesetRow> {
   const reader = new Reader(bytes);
   while (!reader.done) {
     const header = reader.byte();
-    if (header === PATCHSET_HEADER) fail("A patchset is not a changeset.");
-    if (header !== TABLE_HEADER) fail("The changeset lacks a table header.");
+    if (header === PATCHSET_HEADER) fail("The saved change has the wrong format.");
+    if (header !== TABLE_HEADER) fail("The saved change does not name its table.");
     const columns = reader.varint();
-    if (columns < 1 || columns > MAX_COLUMNS) fail("The changeset names a table with an impossible column count.");
+    if (columns < 1 || columns > MAX_COLUMNS) fail("The saved change names a table with an impossible field count.");
     const primaryKey = [...reader.take(columns)].map((flag) => flag !== 0);
-    if (!primaryKey.includes(true)) fail("The changeset names a table without a primary key.");
+    if (!primaryKey.includes(true)) fail("The saved change names a table without a primary key.");
     const end = reader.bytes.indexOf(0, reader.offset);
-    if (end < 0) fail("The changeset ends early.");
+    if (end < 0) fail("The saved change ends early.");
     const table = text(reader.take(end - reader.offset), "a table name");
     reader.byte();
-    if (table.length === 0) fail("The changeset names a table without a name.");
+    if (table.length === 0) fail("The saved change names a table without a name.");
     // A session never writes a table without a change to it.
     const nextHeader = () => reader.bytes[reader.offset] === TABLE_HEADER || reader.bytes[reader.offset] === PATCHSET_HEADER;
-    if (reader.done || nextHeader()) fail("The changeset names a table without changes.");
+    if (reader.done || nextHeader()) fail("The saved change names a table without changes.");
     while (!reader.done && !nextHeader()) {
       const operation = OPERATIONS.get(reader.byte());
-      if (operation === undefined) fail("The changeset holds an unknown operation.");
+      if (operation === undefined) fail("The saved change holds an unknown kind of edit.");
       const indirect = reader.byte();
-      if (indirect > 1) fail("The changeset holds an unreadable change.");
+      if (indirect > 1) fail("The saved change holds an unreadable edit.");
       const old = operation === "insert" ? [] : readRecord(reader, columns, operation === "delete");
       const next = operation === "delete" ? [] : readRecord(reader, columns, operation === "insert");
       if (operation === "update") checkUpdate(primaryKey, old, next);
@@ -200,7 +200,7 @@ function checkUpdate(
     const readable = key
       ? old[column] !== undefined && next[column] === undefined
       : (old[column] === undefined) === (next[column] === undefined);
-    if (!readable) fail("The changeset holds an unreadable update.");
+    if (!readable) fail("The saved change holds an unreadable update.");
   });
 }
 
@@ -225,15 +225,15 @@ function columnIndex(columns: readonly string[], name: string): number {
 function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: readonly string[] | undefined): TableMap {
   const { table } = row;
   const approved = definition.tables.find((candidate) => candidate.sqlName.toLowerCase() === table.toLowerCase());
-  if (!approved) fail(`The changeset changes ${table}, which the approved dataset does not have.`);
+  if (!approved) fail(`The saved change edits ${table}, which the Collection's approved rules do not have.`);
   if (!Array.isArray(columns) || columns.length !== row.primaryKey.length ||
     columns.some((column) => typeof column !== "string" || column.length === 0) ||
     new Set(columns.map((column) => column.toLowerCase())).size !== columns.length) {
-    fail(`The columns reported for ${table} do not match its changes.`);
+    fail(`The fields reported for ${table} do not match its changes.`);
   }
   const primaryKey = columnIndex(columns, approved.primaryKey);
   const fields = datasetColumnFields(approved).map((field) => ({ field, column: columnIndex(columns, field.sqlColumn) }));
-  if (primaryKey < 0 || fields.some(({ column }) => column < 0)) fail(`The columns reported for ${table} lack an approved field.`);
+  if (primaryKey < 0 || fields.some(({ column }) => column < 0)) fail(`The fields reported for ${table} lack an approved field.`);
   const version = columnIndex(columns, VERSION_COLUMN);
   const map = { table: approved, primaryKey, version: version < 0 ? null : version, fields };
   checkKey(map, row);
@@ -242,7 +242,7 @@ function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: rea
 
 function checkKey(map: TableMap, row: ChangesetRow): void {
   if (!row.primaryKey.every((key, column) => key === (column === map.primaryKey))) {
-    fail(`The changeset keys ${row.table} by other columns than its approved primary key, ${map.table.primaryKey}.`);
+    fail(`The saved change finds records in ${row.table} by something other than its approved primary key, ${map.table.primaryKey}.`);
   }
 }
 
@@ -264,7 +264,7 @@ function jsonArray(value: string, name: string): AppBackendJson[] | null {
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  if (inexact) fail(`${name} holds a number JSON cannot hold exactly.`);
+  if (inexact) fail(`${name} holds a number too large to read exactly.`);
   try {
     return parseAppBackendJson(parsed) as AppBackendJson[];
   } catch {
@@ -279,7 +279,7 @@ function fieldValue(field: DatasetColumnField, value: ChangesetValue): AppBacken
   if (value === null) return null;
   if (value instanceof Uint8Array) fail(`${field.name} holds bytes, which no field type can hold.`);
   const number = typeof value === "bigint" ? integer(value, field.name) : value;
-  if (typeof number === "number" && !Number.isFinite(number)) fail(`${field.name} holds a number JSON cannot hold.`);
+  if (typeof number === "number" && !Number.isFinite(number)) fail(`${field.name} holds a number dohc cannot read.`);
   if (field.type === "checkbox" && (number === 0 || number === 1)) return number === 1;
   if ((field.type === "multi-select" || field.relation?.many) && typeof number === "string") {
     return jsonArray(number, field.name) ?? number;
@@ -289,7 +289,7 @@ function fieldValue(field: DatasetColumnField, value: ChangesetValue): AppBacken
 
 function integer(value: bigint, name: string): number {
   if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
-    fail(`${name} holds an integer JSON cannot hold exactly.`);
+    fail(`${name} holds a whole number too large to read exactly.`);
   }
   return Number(value);
 }

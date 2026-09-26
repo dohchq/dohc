@@ -90,7 +90,7 @@ describe("owner Collection migration", () => {
     await host.close();
     const restarted = (await open({ workspaceRoot })).host;
     expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera migrated", note: null }]);
-    await expect(restarted.query(call(first, id(5)))).rejects.toThrow(/access needs approval/);
+    await expect(restarted.query(call(first, id(5)))).rejects.toThrow(/Its owner must approve this access again/);
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
     const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
     try {

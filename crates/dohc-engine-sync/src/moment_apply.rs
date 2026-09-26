@@ -96,6 +96,14 @@ enum MomentAuthor {
         on_behalf_of: Option<String>,
         #[serde(rename = "agentRunId", skip_serializing_if = "Option::is_none")]
         agent_run_id: Option<String>,
+        /// Named only past 0, by a run an automation started. An older
+        /// build sent any depth unchecked; one outside 1..=64 applies as none.
+        #[serde(
+            default,
+            deserialize_with = "agent_author_depth",
+            skip_serializing_if = "Option::is_none"
+        )]
+        depth: Option<u32>,
     },
     #[serde(rename = "public")]
     Public {
@@ -128,6 +136,13 @@ enum MomentAuthor {
         on_behalf_of: Option<String>,
         depth: u32,
     },
+}
+
+fn agent_author_depth<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    serde_json::Value::deserialize(deserializer)
+        .map(|value| dohc_engine_domain::agent_author_depth(Some(&value)))
 }
 
 fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
@@ -1151,6 +1166,7 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                 agent_id,
                 on_behalf_of,
                 agent_run_id,
+                ..
             } => {
                 agent_id.is_empty()
                     || on_behalf_of.as_ref().is_some_and(String::is_empty)

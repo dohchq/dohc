@@ -1227,26 +1227,27 @@ async fn group_messages_written_here_claim_through_rpc() {
     assert_eq!(
         mixed.code,
         ErrorCode::InvalidParams,
-        "one shape or the other"
+        "a record subscription names no Group; Groups are watched"
     );
+    let watch = |subscriptions: Value| json!({ "generation": 0, "subscriptions": subscriptions, "nowMs": 10 });
     let missing = call_error(
         &transport,
         &handle,
         &mut id,
-        "automations.subscribe",
-        json!({ "automationId": TASK, "groupId": "no-such-group" }),
+        "automations.watchGroups",
+        watch(json!([{ "automationId": TASK, "groupId": "no-such-group" }])),
     )
     .await;
     assert_eq!(missing.code, ErrorCode::InvalidParams, "only a Group here");
-    let subscribed = call(
+    let watched = call(
         &transport,
         &handle,
         &mut id,
-        "automations.subscribe",
-        json!({ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }),
+        "automations.watchGroups",
+        watch(json!([{ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }])),
     )
     .await;
-    assert_eq!(subscribed, json!({ "subscribed": true }));
+    assert_eq!(watched, json!({ "needsHandover": false }));
 
     claimed_events(&mut notices);
     call(
@@ -1336,17 +1337,124 @@ async fn group_messages_written_here_claim_through_rpc() {
     .await;
     assert_eq!(read["message"]["body"], json!("/task Buy tickets"));
 
-    let unsubscribed = call(
+    call(
         &transport,
         &handle,
         &mut id,
-        "automations.unsubscribe",
-        json!({ "automationId": TASK, "groupId": "trip" }),
+        "automations.watchGroups",
+        watch(json!([])),
     )
     .await;
-    assert_eq!(unsubscribed, json!({ "unsubscribed": true }));
     send(&mut id, "m4", "/task Again").await;
-    assert!(claimed_events(&mut notices).is_empty(), "unsubscribed");
+    assert!(claimed_events(&mut notices).is_empty(), "no longer watched");
+
+    // A handover: releasing freezes every Group subscription and answers what
+    // the next host needs.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.watchGroups",
+        json!({
+            "generation": 0,
+            "subscriptions": [{ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }],
+            "nowMs": 35,
+        }),
+    )
+    .await;
+    let stray = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.releaseGroups",
+        json!({ "groupId": "trip" }),
+    )
+    .await;
+    assert_eq!(stray.code, ErrorCode::InvalidParams, "it names no Group");
+    let released = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.releaseGroups",
+        json!({ "nowMs": 36 }),
+    )
+    .await;
+    assert_eq!(released["watchedGeneration"], json!(0));
+    let skips = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.groupSkips",
+        json!({}),
+    )
+    .await;
+    assert_eq!(skips, json!({ "aheadAtMs": null, "lateAtMs": null }));
+    let handover = released["handover"].clone();
+    assert_eq!(handover["automations"][0]["automationId"], json!(TASK));
+    assert_eq!(
+        handover["automations"][0]["decided"],
+        json!([
+            { "messageId": "m1", "createdAtMs": 20 },
+            { "messageId": "m2", "createdAtMs": 30 },
+        ])
+    );
+    send(&mut id, "m5", "/task Once more").await;
+    assert!(
+        claimed_events(&mut notices).is_empty(),
+        "a frozen subscription claims nothing"
+    );
+
+    // The next generation asks for its handover, then takes it.
+    let next = |relay: Option<Value>| {
+        let mut params = json!({
+            "generation": 2,
+            "subscriptions": [{ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }],
+            "nowMs": 40,
+        });
+        if let Some(relay) = relay {
+            params["relay"] = relay;
+        }
+        params
+    };
+    let asks = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.watchGroups",
+        next(None),
+    )
+    .await;
+    assert_eq!(asks, json!({ "needsHandover": true }));
+    let took = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.watchGroups",
+        next(Some(json!({
+            "generation": 2,
+            "handover": {
+                "floorMs": handover["floorMs"],
+                "automations": handover["automations"],
+            },
+        }))),
+    )
+    .await;
+    assert_eq!(took, json!({ "needsHandover": false }));
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.watchGroups",
+        next(Some(
+            json!({ "state": "fetched", "generation": 2, "handover": null }),
+        )),
+    )
+    .await;
+    assert_eq!(
+        unknown.code,
+        ErrorCode::InvalidParams,
+        "only the relay's record"
+    );
 }
 
 /// A button press and a schedule step claim through RPC: a new press

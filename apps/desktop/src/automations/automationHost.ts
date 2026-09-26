@@ -5,27 +5,62 @@ import {
   type RelayAutomationComputer,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
+import { readSyncHistory } from "../workspaces/syncHistory";
 
 // Which of the owner's computers runs a synced workspace's schedules
 // (ADR 0012). The relay records one host per workspace. This computer runs
 // them while the last host it read names it and no handover is under way.
 // It reads the host when the workspace opens, when the relay answers again
-// after a read failed, and before each scheduler step once its copy is a
-// minute old. Offline, or signed in to another account, it keeps its copy,
-// across restarts too. With schedules to run and no host recorded, it
-// claims the host. When the owner moves the schedules to another computer,
-// this one steps them one last time and reports how far it ran, so the new
-// host starts after it.
+// after a read failed, and before each scheduler step or after each sync
+// pull once its copy is a minute old. Offline, or signed in to another
+// account, it keeps its copy, across restarts too. With schedules or Group
+// triggers to run and no host recorded, it claims the host. When the owner
+// moves the schedules to another computer, this one steps them one last
+// time and reports how far it ran, so the new host starts after it.
+//
+// The host is also the only computer that watches the workspace's Groups,
+// so the engine claims each Group message there. Before it releases, its
+// engine stops them, and the release carries what the next host needs:
+// the messages this host and earlier ones already decided. The new host
+// takes that before it watches, and claims each stored message nobody
+// decided, so each Group message starts its automations exactly once. While a
+// handover waits, every computer that has the workspace open reads the host
+// again on a short timer, so the new host starts soon after the release and
+// the old one retries a release that did not go through.
 
 /** Before a step, a copy read longer ago than this is read again. */
 export const HOST_FRESH_MS = 60_000;
+/**
+ * While a handover waits, the host is read again after this long, then
+ * after twice as long each time up to HANDOVER_READ_MAX_MS: at most two
+ * reads a minute, for a handover whose old host stays off for days.
+ */
+export const HANDOVER_READ_FIRST_MS = 5_000;
+export const HANDOVER_READ_MAX_MS = 30_000;
 
 /** A relay answer, or null when this computer cannot ask as the workspace's owner. */
 export type HostAnswer = { status: number; body: unknown } | null;
 
 export type HostRequest =
   | { action: "check-in"; body: { installId: string; label: string; claim: boolean } }
-  | { action: "release"; body: { installId: string; generation: number; releasedThroughMs: number } };
+  | {
+    action: "release";
+    // `groups` is the engine's Group handover, carried to the next host
+    // unread; `groupsWatched` is the host generation at which it last
+    // watched its Group subscriptions.
+    body: { installId: string; generation: number; releasedThroughMs: number; groups: unknown; groupsWatched: number };
+  };
+
+/**
+ * What a computer that hands over reports: how far its schedules ran, its
+ * Group handover, and the generation it last watched its Group
+ * subscriptions at.
+ */
+export interface FinishedHere {
+  throughMs: number;
+  groups: unknown;
+  groupsWatched: number;
+}
 
 export interface AutomationHostsDependencies {
   /** This computer's install id. */
@@ -42,14 +77,24 @@ export interface AutomationHostsDependencies {
   /** This computer became the host, starting after `startAfterMs` or at now when null. */
   startedHere(workspaceId: string, startAfterMs: number | null): void;
   /**
-   * Steps the workspace's schedules one last time before this computer
-   * hands over. Resolves with the time it ran through, or null to try
-   * again at the next read.
+   * Whether this computer runs the workspace's automations may have
+   * changed: its copy of the host changed, or a handover ended.
    */
-  finishHere(workspaceId: string): Promise<number | null>;
+  hostChanged(workspaceId: string): void;
+  /**
+   * Before this computer hands over: stops its Group subscriptions, then
+   * steps the workspace's schedules one last time. Resolves with the time
+   * it ran through and the Group handover, or null to try again at the next
+   * read. `stillHandingOver` answers whether the owner has not called this
+   * handover off since, from the last host read.
+   */
+  finishHere(workspaceId: string, stillHandingOver: () => boolean): Promise<FinishedHere | null>;
   logError(workspaceId: string, error: unknown): void;
   /** A clock that never steps backwards, for how old a copy is. */
   monotonicMs?(): number;
+  /** The timer that reads the host again while a handover waits; a test drives it. */
+  setTimer?(wake: () => void, delayMs: number): unknown;
+  clearTimer?(timer: unknown): void;
 }
 
 interface HostState {
@@ -58,7 +103,7 @@ interface HostState {
   /** The last read or handover got no answer: try again when the relay answers. */
   retry: boolean;
   reading: Promise<void> | null;
-  /** This computer has schedules to run, so a read claims an unrecorded host. */
+  /** This computer has schedules or Group triggers to run, so a read claims an unrecorded host. */
   claims: boolean;
   handingOver: boolean;
   /** Work this computer admitted as host that has not finished yet. */
@@ -78,6 +123,11 @@ interface HostState {
   /** Resolves when the state goes, so nothing waits on its holds after. */
   gone: Promise<void>;
   forget: () => void;
+  /** The next read while a handover waits, and how long it waits. */
+  handoverTimer: unknown;
+  handoverDelayMs: number;
+  /** A read failed while this synced workspace named no host, and hostChanged said so once. */
+  failedUnnamed: boolean;
 }
 
 function isHost(value: unknown): value is RelayAutomationHost {
@@ -131,8 +181,37 @@ export function computerLabel(hostName: string): string {
   return label.length > 0 ? label : "This computer";
 }
 
+type HostedWorkspace = { remote?: unknown; shareView?: unknown; rootPath: string } | null;
+
+/**
+ * The automation host generation this computer runs a workspace at, or null
+ * when it is not the host. For a synced workspace, `relayGeneration`
+ * answers from the relay's record. One that does not sync has this
+ * computer as its host, at generation 0, only when its folder says it
+ * never synced: this is its only computer. A workspace shared with this
+ * person is never theirs to run.
+ */
+export async function automationHostGeneration(
+  workspace: HostedWorkspace,
+  relayGeneration: () => number | null | Promise<number | null>,
+): Promise<number | null> {
+  if (workspace === null || workspace.shareView !== undefined) return null;
+  if (workspace.remote !== undefined) return await relayGeneration();
+  return (await readSyncHistory(workspace.rootPath)) === "never-synced" ? 0 : null;
+}
+
+/** Whether this computer is a workspace's automation host; see automationHostGeneration. */
+export async function isAutomationHost(
+  workspace: HostedWorkspace,
+  relayNamesThis: () => boolean | Promise<boolean>,
+): Promise<boolean> {
+  return (await automationHostGeneration(workspace, async () => ((await relayNamesThis()) ? 0 : null))) !== null;
+}
+
 export function createAutomationHosts(dependencies: AutomationHostsDependencies) {
   const monotonicMs = dependencies.monotonicMs ?? (() => performance.now());
+  const setTimer = dependencies.setTimer ?? ((wake: () => void, delayMs: number) => setTimeout(wake, delayMs));
+  const clearTimer = dependencies.clearTimer ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
   const states = new Map<string, HostState>();
 
   const runsOn = (host: RelayAutomationHost | null | undefined) =>
@@ -146,13 +225,38 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     const before = state.host;
     state.host = host;
     state.readAtMs = monotonicMs();
-    if (JSON.stringify(before) !== JSON.stringify(host)) dependencies.store(workspaceId, host);
+    const changed = JSON.stringify(before) !== JSON.stringify(host);
+    if (changed) dependencies.store(workspaceId, host);
     if (runsOn(host) && !runsOn(before)) {
       // A release since this computer's last copy says where the last host stopped.
       const released = host?.releasedThroughMs ?? null;
       dependencies.startedHere(workspaceId, released !== (before?.releasedThroughMs ?? null) ? released : null);
     }
     if (host !== null && host.handoverFrom === dependencies.installId()) void handOver(workspaceId, state, host);
+    if (changed) dependencies.hostChanged(workspaceId);
+    // Another handover starts its reads short again.
+    followHandover(workspaceId, state, changed);
+  }
+
+  /**
+   * Keeps one timer that reads the host again while the open workspace's
+   * copy shows a handover, and none otherwise. The read skips the freshness
+   * check, and its answer goes through apply like any other.
+   */
+  function followHandover(workspaceId: string, state: HostState, restart = false): void {
+    const waits = state.open && (state.host?.handoverFrom ?? null) !== null && dependencies.synced(workspaceId);
+    if (!waits || restart) {
+      if (state.handoverTimer !== null) clearTimer(state.handoverTimer);
+      state.handoverTimer = null;
+      state.handoverDelayMs = HANDOVER_READ_FIRST_MS;
+    }
+    if (!waits || state.handoverTimer !== null) return;
+    state.handoverTimer = setTimer(() => {
+      state.handoverTimer = null;
+      if (states.get(workspaceId) !== state) return;
+      state.handoverDelayMs = Math.min(state.handoverDelayMs * 2, HANDOVER_READ_MAX_MS);
+      void refresh(workspaceId, state).finally(() => followHandover(workspaceId, state));
+    }, state.handoverDelayMs);
   }
 
   async function read(workspaceId: string, state: HostState): Promise<void> {
@@ -166,20 +270,35 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         if (states.get(workspaceId) !== state) return;
         if (answer === null) {
           state.retry = true;
+          failedUnnamed(workspaceId, state);
           return;
         }
         const host = hostOfAnswer(answer);
         if (host === undefined) throw new Error(`The relay answered the automation host check-in with ${answer.status}.`);
         state.retry = false;
+        state.failedUnnamed = false;
         apply(workspaceId, state, host);
       } catch (error) {
         state.retry = true;
         dependencies.logError(workspaceId, error);
+        failedUnnamed(workspaceId, state);
         return;
       }
       // Schedules arrived while a read without a claim was out: claim now.
       if (claim || !state.claims || state.host !== null) return;
     }
+  }
+
+  /**
+   * A read failed while this synced workspace names no host, as when sync
+   * just turned on: host work that kept its state while the read was out
+   * decides again now, with no host confirmed. Said once until a read
+   * answers, so the reads it starts do not repeat it.
+   */
+  function failedUnnamed(workspaceId: string, state: HostState): void {
+    if (state.failedUnnamed || (state.host ?? null) !== null || !dependencies.synced(workspaceId)) return;
+    state.failedUnnamed = true;
+    dependencies.hostChanged(workspaceId);
   }
 
   function refresh(workspaceId: string, state: HostState): Promise<void> {
@@ -193,31 +312,37 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     if (state.handingOver) return;
     state.handingOver = true;
     let reread = false;
+    // False once the workspace closed or the owner changed the host again:
+    // this handover is over.
+    const stillHandingOver = () => {
+      const current = state.host;
+      return states.get(workspaceId) === state &&
+        current?.generation === host.generation &&
+        current.handoverFrom === dependencies.installId();
+    };
     try {
       // Work admitted while this computer was host finishes first; once
       // the handover began, stillRuns and hold admit nothing new.
       while (state.held.size > 0 && states.get(workspaceId) === state) {
         await Promise.race([Promise.all([...state.held]), state.gone]);
       }
-      // The workspace closed, or the owner changed the host again, while
-      // the held work ran: this handover is over.
-      const current = state.host;
-      if (
-        states.get(workspaceId) !== state ||
-        current?.generation !== host.generation ||
-        current.handoverFrom !== dependencies.installId()
-      ) {
-        return;
-      }
-      const through = await dependencies.finishHere(workspaceId);
-      if (states.get(workspaceId) !== state) return;
-      if (through === null) {
+      if (!stillHandingOver()) return;
+      const finished = await dependencies.finishHere(workspaceId, stillHandingOver);
+      // Called off while this computer finished: there is nothing to release.
+      if (!stillHandingOver()) return;
+      if (finished === null) {
         state.retry = true;
         return;
       }
       const answer = await dependencies.send(workspaceId, {
         action: "release",
-        body: { installId: dependencies.installId(), generation: host.generation, releasedThroughMs: through },
+        body: {
+          installId: dependencies.installId(),
+          generation: host.generation,
+          releasedThroughMs: finished.throughMs,
+          groups: finished.groups,
+          groupsWatched: finished.groupsWatched,
+        },
       });
       if (states.get(workspaceId) !== state) return;
       if (answer === null) {
@@ -234,6 +359,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       dependencies.logError(workspaceId, error);
     } finally {
       state.handingOver = false;
+      // A handover the owner called off leaves this computer the host again.
+      dependencies.hostChanged(workspaceId);
     }
     if (reread) await refresh(workspaceId, state);
   }
@@ -247,6 +374,7 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         if (kept.open) return;
         kept.open = true;
         if (dependencies.synced(workspaceId)) void refresh(workspaceId, kept);
+        followHandover(workspaceId, kept);
         return;
       }
       const stored = dependencies.stored(workspaceId);
@@ -262,6 +390,9 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         open: true,
         gone: Promise.resolve(),
         forget: () => undefined,
+        handoverTimer: null,
+        handoverDelayMs: HANDOVER_READ_FIRST_MS,
+        failedUnnamed: false,
       };
       state.gone = new Promise<void>((resolve) => {
         state.forget = () => {
@@ -271,12 +402,15 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       });
       states.set(workspaceId, state);
       if (dependencies.synced(workspaceId)) void refresh(workspaceId, state);
+      // A handover the kept copy shows is followed from the start.
+      followHandover(workspaceId, state);
     },
 
     close(workspaceId: string): void {
       const state = states.get(workspaceId);
       if (!state) return;
       state.open = false;
+      followHandover(workspaceId, state);
       if (state.held.size === 0) state.forget();
     },
 
@@ -299,6 +433,29 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     stillRuns(workspaceId: string): boolean {
       const state = states.get(workspaceId);
       return state?.open === true && !state.handingOver && runsOn(state.host);
+    },
+
+    /** The host generation this computer runs at when stillRuns, or null. */
+    runsAt(workspaceId: string): number | null {
+      const state = states.get(workspaceId);
+      return state?.open === true && !state.handingOver && runsOn(state.host) ? state.host?.generation ?? null : null;
+    },
+
+    /**
+     * For Group triggers: records this computer as the host when the relay
+     * names none, as runsHere does for schedules. It reads only while this
+     * computer knows no host for a synced workspace, so once a host is named
+     * it answers at once, and a slow relay holds up only a computer that
+     * has not learned one yet. After such a read failed it waits for
+     * nothing: the next sync pull reads again. A workspace that does not
+     * sync reads nothing, and claims the host at its first read once it syncs.
+     */
+    async admit(workspaceId: string): Promise<void> {
+      const state = states.get(workspaceId);
+      if (!state?.open) return;
+      state.claims = true;
+      if ((state.host ?? null) !== null || state.failedUnnamed) return;
+      if (dependencies.synced(workspaceId)) await refresh(workspaceId, state);
     },
 
     /**
@@ -334,10 +491,17 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
       return state.host === undefined ? host : state.host;
     },
 
-    /** A sync pass reached the relay: read again if the last read or handover did not. */
+    /**
+     * A sync pass reached the relay: read again if the last read or handover
+     * did not, or once the copy is a minute old.
+     */
     relayAnswered(workspaceId: string): void {
       const state = states.get(workspaceId);
-      if (state && (state.retry || state.readAtMs === null)) void refresh(workspaceId, state);
+      if (!state) return;
+      // A computer with no schedules reads nowhere else, so this is where it
+      // learns that the owner chose it.
+      const stale = state.readAtMs === null || monotonicMs() - state.readAtMs > HOST_FRESH_MS;
+      if (state.retry || stale) void refresh(workspaceId, state);
     },
   };
 }

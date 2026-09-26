@@ -310,7 +310,7 @@ export async function runCollectionAutomation(
   for (const target of targets.values()) {
     // A dataset's records change only through its approved operations.
     if (await dependencies.isDatasetCollection(target.path)) {
-      return failed(`Automations cannot use ${target.name} yet, because it keeps its records in a dataset.`);
+      return failed(`Automations cannot use ${target.name} yet, because its records change only through its Collection actions.`);
     }
     if (!dependencies.isCollection(target.path)) return failed(`dohc cannot find the Collection ${target.path}.`);
   }
@@ -341,10 +341,37 @@ export async function runCollectionAutomation(
     // way continues with these values instead of evaluating again.
     await store.save(run);
   }
-  // Every message and notice is checked again under this roster before
-  // anything is sent. A person only a formula named has no verdict from the
-  // file, so they keep one here: one an editor's leaving allowed waits for
-  // Allow.
+  const messages = await checkPlannedMessages(dependencies, { automationId: claim.automationId, automation, collection, roster }, run, chat);
+  if ("outcome" in messages) return messages.outcome;
+  const outcome = await applyPlan(dependencies, input, run, resumed, messages.chat);
+  // A stopped run keeps its progress and no outcome; the next drain resumes it.
+  if (outcome.kind === "wait") return outcome;
+  if (outcome.kind === "failed") {
+    run.outcome = { state: "failed", error: outcome.error, run: claim.run };
+  } else {
+    run.outcome = { state: "done" };
+    run.plan = null;
+  }
+  run.updatedAtMs = dependencies.nowMs();
+  await store.save(run);
+  return outcome;
+}
+
+/**
+ * Checks every message and notice in a run's plan again under this roster,
+ * before anything is sent, and answers the directory the run sends with. A
+ * person only a formula named has no verdict from the file, so they keep one
+ * here: one an editor's leaving allowed waits for Allow. A saved direct
+ * message is checked against its conversation as it is now, read for the
+ * plan's own people, resumed or not.
+ */
+export async function checkPlannedMessages(
+  dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "recipientVerdicts">,
+  input: { automationId: string; automation: Automation; collection: ReachCollection; roster: Exclude<ReachRoster, { kind: "unknown" }> },
+  run: StoredRun,
+  chat: ChatDirectory | null,
+): Promise<{ chat: ChatDirectory | null } | { outcome: CollectionAutomationRunOutcome }> {
+  const { automation, collection, roster } = input;
   const planned = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
   const messages = planned.flatMap(({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
     if (effect.kind === "message") {
@@ -366,32 +393,16 @@ export async function runCollectionAutomation(
   }
   // Kept before anything fails, so a stop is remembered for the next run.
   const kept = recipients.length === 0 ? [] : await dependencies.recipientVerdicts({
-    automationId: claim.automationId, definitionHash: definitionHash(automation), recipients,
+    automationId: input.automationId, definitionHash: definitionHash(automation), recipients,
   });
   const stoppedReach = verdicts.find((reach) => !reach.allowed);
-  if (stoppedReach && !stoppedReach.allowed) return failed(stoppedReach.reason);
-  if (kept.includes("held")) return { kind: "wait", reason: "held" };
-  // A saved direct message is checked against its conversation as it is
-  // now, read for the plan's own people, resumed or not.
+  if (stoppedReach && !stoppedReach.allowed) return { outcome: failed(stoppedReach.reason) };
+  if (kept.includes("held")) return { outcome: { kind: "wait", reason: "held" } };
   const planPeople = new Set(planned.flatMap(({ effect }) =>
     effect.kind === "message" && effect.to.kind === "direct-message" ? [effect.to.userId] : []));
-  let sendChat = chat;
-  if (planPeople.size > 0) {
-    sendChat = await dependencies.chat.directory(roster, { groups: new Set(), people: planPeople });
-    if (sendChat === null) return { kind: "wait", reason: "engine" };
-  }
-  const outcome = await applyPlan(dependencies, input, run, resumed, sendChat);
-  // A stopped run keeps its progress and no outcome; the next drain resumes it.
-  if (outcome.kind === "wait") return outcome;
-  if (outcome.kind === "failed") {
-    run.outcome = { state: "failed", error: outcome.error, run: claim.run };
-  } else {
-    run.outcome = { state: "done" };
-    run.plan = null;
-  }
-  run.updatedAtMs = dependencies.nowMs();
-  await store.save(run);
-  return outcome;
+  if (planPeople.size === 0) return { chat };
+  const sendChat = await dependencies.chat.directory(roster, { groups: new Set(), people: planPeople });
+  return sendChat === null ? { outcome: { kind: "wait", reason: "engine" } } : { chat: sendChat };
 }
 
 async function plan(
@@ -649,52 +660,7 @@ async function applyEffect(
   mode: EffectMode,
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
-  if (effect.kind === "message") {
-    // A saved direct message goes only where the plan meant: the same
-    // conversation, still with exactly that person.
-    if (effect.to.kind === "direct-message") {
-      const now = context.chat?.directMessage(effect.to.userId);
-      if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
-        throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);
-      }
-    }
-    // The engine records the message under its effect id, so a retry, or an
-    // attempt that stopped after the write landed, replays it.
-    await dependencies.chat.write(signal, {
-      target: effect.to.kind === "group"
-        ? { kind: "group", channelId: effect.to.channelId, lane: effect.to.lane }
-        : { kind: "direct-message", threadId: effect.to.threadId },
-      effectId: effect.effectId,
-      messageId: effect.messageId,
-      threadId: effect.threadId,
-      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
-      body: effect.body,
-    });
-    return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
-  }
-  if (effect.kind === "wake") {
-    await dependencies.chat.write(signal, {
-      target: { kind: "agent" },
-      effectId: effect.effectId,
-      messageId: effect.messageId,
-      threadId: effect.threadId,
-      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
-      body: effect.body,
-    });
-    return [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
-  }
-  if (effect.kind === "notice") {
-    // Each person's notice is its own effect, recorded once it is sent, so a
-    // retry resumes with the people not yet notified. The outbox and the
-    // relay drop a repeat of the same id.
-    try {
-      await dependencies.postNotice(effect.notice, signal);
-    } catch (error) {
-      if (error instanceof NoticeNotSentError) throw new Error(`dohc could not notify ${effect.name}. ${error.message}`);
-      throw error;
-    }
-    return [{ kind: "notice", noticeId: effect.notice.noticeId, name: effect.name }];
-  }
+  if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "notice") return await applyChatEffect(dependencies, context, effect);
   const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (edit: CollectionRecordEditContext, path: string, recordId: string, fields: readonly PlannedField[]) =>
     setCollectionRecordFields(edit, {
@@ -742,6 +708,63 @@ async function applyEffect(
   const target = { recordId: planned.recordId, path };
   const result = await dependencies.withRecordWrites(signal, (edit) => seam(edit, path, planned.recordId, effect.fields));
   return fieldWrites(target, effect.fields, result, mode);
+}
+
+/**
+ * Sends one post, direct message, wake, or notice as the automation, at
+ * `depth`, and says what it sent. Every attempt sends the same ids, so a
+ * retry, or an attempt that stopped after the send landed, sends it once.
+ */
+export async function applyChatEffect(
+  dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "postNotice">,
+  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null },
+  effect: Extract<PlannedEffect, { kind: "message" | "wake" | "notice" }>,
+): Promise<RunWrite[]> {
+  const { run, signal } = context;
+  if (effect.kind === "message") {
+    // A saved direct message goes only where the plan meant: the same
+    // conversation, still with exactly that person.
+    if (effect.to.kind === "direct-message") {
+      const now = context.chat?.directMessage(effect.to.userId);
+      if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
+        throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);
+      }
+    }
+    // The engine records the message under its effect id, so a retry, or an
+    // attempt that stopped after the write landed, replays it.
+    await dependencies.chat.write(signal, {
+      target: effect.to.kind === "group"
+        ? { kind: "group", channelId: effect.to.channelId, lane: effect.to.lane }
+        : { kind: "direct-message", threadId: effect.to.threadId },
+      effectId: effect.effectId,
+      messageId: effect.messageId,
+      threadId: effect.threadId,
+      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
+      body: effect.body,
+    });
+    return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
+  }
+  if (effect.kind === "wake") {
+    await dependencies.chat.write(signal, {
+      target: { kind: "agent" },
+      effectId: effect.effectId,
+      messageId: effect.messageId,
+      threadId: effect.threadId,
+      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
+      body: effect.body,
+    });
+    return [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
+  }
+  // Each person's notice is its own effect, recorded once it is sent, so a
+  // retry resumes with the people not yet notified. The outbox and the
+  // relay drop a repeat of the same id.
+  try {
+    await dependencies.postNotice(effect.notice, signal);
+  } catch (error) {
+    if (error instanceof NoticeNotSentError) throw new Error(`dohc could not notify ${effect.name}. ${error.message}`);
+    throw error;
+  }
+  return [{ kind: "notice", noticeId: effect.notice.noticeId, name: effect.name }];
 }
 
 function addedRecord(run: StoredRun, ordinal: number): { recordId: string; collectionPath: string; path: string } | null {

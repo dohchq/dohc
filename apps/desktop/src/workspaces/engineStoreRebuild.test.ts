@@ -1382,6 +1382,7 @@ describe("moveEngineStoreAside", () => {
             agentId: "dohc-mcp",
             onBehalfOf: "local",
             agentRunId: "run-1",
+            depth: 0,
           }),
         ).toBe(true);
       },

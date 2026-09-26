@@ -602,7 +602,9 @@ export interface WorkspaceEngineCapture {
     momentId: string,
     options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
   ): Promise<WorkspaceEngineRestoreResult>;
-  undoAcceptedAppResponse(input: AppResponseUndoSelection): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
+  // `author` names an agent's removal during a run an automation started, so
+  // the removed record's claims carry the run's chain depth.
+  undoAcceptedAppResponse(input: AppResponseUndoSelection, author?: MomentWriteAuthor): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -2636,6 +2638,7 @@ export function createWorkspaceEngineCapture(
           },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
+          resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },
         };
       },
       get doc() {
@@ -3404,6 +3407,7 @@ export function createWorkspaceEngineCapture(
                 agentId: run.agentId,
                 onBehalfOf: run.onBehalfOf,
                 agentRunId: run.agentRunId,
+                ...(run.depth > 0 ? { depth: run.depth } : {}),
               },
         );
       });
@@ -5750,7 +5754,7 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    undoAcceptedAppResponse(input) {
+    undoAcceptedAppResponse(input, author) {
       return enqueueResult("remove app response", async () => {
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
@@ -5795,7 +5799,7 @@ export function createWorkspaceEngineCapture(
         if(!snapshot || snapshot.objectId!==input.objectId || snapshot.text!==disk.text)return {status:"conflict" as const};
         try {
           const result=await engine.deleteTextFile({workspaceId,versionId,path,expectedObjectId:input.objectId,requestId:input.requestId,
-            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId}});
+            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId},...(author?{author}:{})});
           await materialize([{kind:"delete",path}],policy);
           return {status:"deleted" as const,momentId:result.moment.id};
         } catch(error) {

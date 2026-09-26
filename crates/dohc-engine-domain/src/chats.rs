@@ -741,6 +741,11 @@ pub struct PendingBookmarkRow {
 pub struct DispatchClaim {
     pub dispatch: DispatchRecord,
     pub run: AgentRunRecord,
+    /// The chain depth the run's writes declare: one more than the deepest
+    /// automation message among the triggers it covers, or 0 when only
+    /// people's messages started it. Agent runs and automations share one
+    /// counter, so a chain of them stops at the cap.
+    pub chain_depth: u32,
 }
 
 /// A durable dispatch-ledger row.
@@ -1845,8 +1850,45 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
     handles
 }
 
-/// A message this computer wrote, as a Group automation's claim sees it.
-fn group_message(message: &ChatMessage) -> crate::AutomationGroupMessage<'_> {
+/// The chain depth a message this computer writes declares, which travels
+/// with it so a chain of automations and agent runs stops at the cap across
+/// computers: an automation's own depth, or, for an agent's message in a
+/// Group while an agent run is in progress, that run's depth past 0. Only a
+/// Group's messages claim, so an agent's other messages skip the read.
+fn written_message_chain_depth(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    author_kind: ChatActorKind,
+    automation: Option<&ChatMessageAutomation>,
+) -> Result<Option<u32>, DomainError> {
+    if let Some(automation) = automation {
+        return Ok(Some(automation.chain_depth));
+    }
+    if author_kind != ChatActorKind::Agent {
+        return Ok(None);
+    }
+    let in_group: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_threads t JOIN chat_channels c \
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+             WHERE t.workspace_id = ?1 AND t.thread_id = ?2 AND c.kind = 'channel')",
+            params![workspace_id, thread_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !in_group {
+        return Ok(None);
+    }
+    Ok(dispatch::running_run_chain_depth(conn, workspace_id)?.filter(|depth| *depth > 0))
+}
+
+/// A message this computer wrote, as a Group automation's claim sees it, at
+/// the chain depth its write declares.
+fn group_message(
+    message: &ChatMessage,
+    chain_depth: Option<u32>,
+) -> crate::AutomationGroupMessage<'_> {
     crate::AutomationGroupMessage {
         message_id: &message.message_id,
         thread_id: &message.thread_id,
@@ -1861,10 +1903,7 @@ fn group_message(message: &ChatMessage) -> crate::AutomationGroupMessage<'_> {
             .automation
             .as_ref()
             .map(|automation| automation.automation_id.as_str()),
-        chain_depth: message
-            .automation
-            .as_ref()
-            .map(|automation| automation.chain_depth),
+        chain_depth,
     }
 }
 
@@ -2628,6 +2667,13 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let chain_depth = written_message_chain_depth(
+                tx,
+                &input.workspace_id,
+                thread_id,
+                input.author_kind,
+                automation.as_ref(),
+            )?;
             let mut message_payload = serde_json::json!({
                 "messageId": input.message_id,
                 "threadId": thread_id,
@@ -2642,10 +2688,11 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(owner_name) = &owner_name {
                 message_payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
             }
-            // The depth travels so a chain of automations stops at the cap
-            // across computers. The automation and its Collection stay here.
-            if let Some(automation) = &automation {
-                message_payload.insert("chainDepth".to_owned(), serde_json::json!(automation.chain_depth));
+            // The depth travels so a chain of automations and agent runs
+            // stops at the cap across computers. The automation and its
+            // Collection stay here.
+            if let Some(chain_depth) = chain_depth {
+                message_payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
             }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -2723,7 +2770,7 @@ impl<'a> LinkedChatStore<'a> {
                 automation: automation.clone(),
                 attachments: message_attachments,
             };
-            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message))?);
+            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>((thread, message))
         })?;
         committed(outcome)
@@ -2897,6 +2944,13 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let chain_depth = written_message_chain_depth(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                input.author_kind,
+                automation.as_ref(),
+            )?;
             let mut payload = serde_json::json!({
                 "messageId": input.message_id,
                 "threadId": input.thread_id,
@@ -2911,8 +2965,8 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(owner_name) = &owner_name {
                 payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
             }
-            if let Some(automation) = &automation {
-                payload.insert("chainDepth".to_owned(), serde_json::json!(automation.chain_depth));
+            if let Some(chain_depth) = chain_depth {
+                payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -3007,7 +3061,7 @@ impl<'a> LinkedChatStore<'a> {
                 automation: automation.clone(),
                 attachments: message_attachments,
             };
-            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message))?);
+            claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>(message)
         })?;
         committed(outcome)

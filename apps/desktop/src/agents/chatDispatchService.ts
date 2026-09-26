@@ -150,9 +150,11 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  // Every write the agent makes while the run holds the slot is the run's,
+  // at the run's chain depth.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
+    run: { agentId: string; onBehalfOf: string; agentRunId: string; depth: number } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -882,6 +884,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         agentId: "dohc-chat-runner",
         onBehalfOf: "local",
         agentRunId: claim.run.runId,
+        depth: claim.chainDepth,
       });
       const markdown = await buildRunnerThreadContext({
         store: options.chatStoreFor(workspace),
@@ -1636,6 +1639,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           agentId: "dohc-chat-runner-self-test",
           onBehalfOf: "local",
           agentRunId: runId,
+          depth: 0,
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,

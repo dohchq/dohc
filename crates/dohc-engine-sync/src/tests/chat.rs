@@ -1309,13 +1309,14 @@ fn another_computers_automation_message_applies_without_its_automation() {
         }),
     );
     apply_chat_envelope(&mut engine, &message, &NoFaults).expect("automation message");
-    // Only an automation message carries a chain depth, within the depth
-    // bound.
+    // Only an automation's or an agent's message carries a chain depth,
+    // within the depth bound.
     for (seq, author_kind, owner, depth) in [
         (10, "human", None, json!(1)),
         (11, "automation", Some("Ana"), json!(0)),
         (12, "automation", Some("Ana"), json!(65)),
         (13, "automation", Some("Ana"), json!("2")),
+        (14, "agent", Some("Ana"), json!(0)),
     ] {
         let mut payload = json!({
             "messageId": format!("bad-depth-{seq}"),
@@ -1448,18 +1449,22 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("imported Group");
-    dohc_engine_domain::subscribe_automation_group(
+    dohc_engine_domain::watch_automation_groups(
         engine,
         "ws",
-        &dohc_engine_domain::AutomationGroupSubscription {
-            automation_id: "collection:Trip/Tasks#task".to_owned(),
-            channel_id,
-            starts_with: Some("/task".to_owned()),
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
         },
         1,
         &NoFaults,
     )
-    .expect("subscribe");
+    .expect("watch");
 }
 
 /// Another member's message in the imported Group.
@@ -1586,6 +1591,21 @@ fn an_applied_group_message_claims_once_however_it_arrives() {
         claims[0].chain_stopped(),
         "a high depth only stops the chain"
     );
+    // An agent an automation woke on another computer posts at its run's
+    // depth, so the chain keeps its count here too.
+    let mut woken = group_message(
+        "peer",
+        8,
+        "m-woken",
+        "thread-imported",
+        "agent",
+        "/task From Ana's agent",
+    );
+    woken.payload["authorOwnerDisplayName"] = json!("Ana");
+    woken.payload["chainDepth"] = json!(3);
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &woken, &NoFaults));
+    assert_eq!(claims[0].depth, 3);
+    assert_eq!(claims[0].change.actor_kind, Some(ChangeActorKind::Agent));
 
     let early = group_message(
         "early-peer",
