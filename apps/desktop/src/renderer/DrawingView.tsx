@@ -161,7 +161,9 @@ export function DrawingView({
         engine.saveState === "saving" ||
         engine.saveState === "deleted"
         ? engine.saveState
-        : "error",
+        : engine.saveState === "object-changed"
+          ? "deleted"
+          : "error",
     );
   }, [engineMode, engine.saveState, onSaveStateChange]);
 
@@ -265,8 +267,9 @@ export function DrawingView({
     };
   }, [assetHydrationAttempt, hydrationSession]);
   const drawingChipState =
-    engineMode && engine.saveState === "deleted"
-      ? "deleted"
+    engineMode &&
+    (engine.saveState === "deleted" || engine.saveState === "object-changed")
+      ? engine.saveState
       : readOnly || (truncated && !engineMode) || engineReadOnly
         ? "read-only"
         : engineMode

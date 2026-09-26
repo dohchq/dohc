@@ -109,6 +109,7 @@ function openResult(overrides: Record<string, unknown> = {}) {
     head: "present",
     lineage: "existing",
     lineageClaimId: null,
+    lineageOriginatedHere: false,
     ...overrides,
   };
 }

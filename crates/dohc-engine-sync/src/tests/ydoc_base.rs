@@ -1697,6 +1697,49 @@ fn imported_richdoc_base_binds_its_verified_path_before_owner_enrollment() {
     }
 }
 
+// A base imported from the relay names another device's history. A session
+// that opened the lineage unclaimed must not read it as its own claim.
+#[test]
+fn a_base_imported_from_the_relay_is_not_originated_here() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "From a peer")
+        .unwrap();
+    let bytes = doc.encode_full_state();
+    let sha = engine.put_binary_blob(&bytes).unwrap();
+    let op = envelope(
+        "owner-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId":"main","objectId":"peer-object","path":"notes/peer.md", "contentKind":"richdoc",
+            "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+        }),
+    );
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(outcome.refusals.is_empty());
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "peer-object").unwrap();
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .unwrap()
+        .expect("imported marker");
+    assert_eq!(marker.lineage_claim_id.as_deref(), Some(sha.as_str()));
+    assert_eq!(marker.base_origin_id.as_deref(), Some("owner-peer"));
+    assert!(
+        !engine
+            .read_with(|conn| crate::lineage_originated_here(conn, &key, &marker))
+            .unwrap()
+    );
+}
+
 #[test]
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already

@@ -1,6 +1,7 @@
 use crate::EngineService;
 use crate::events::emit_record_events;
 use crate::lock;
+use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
@@ -592,22 +593,119 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let outcome = self
-            .relay_execute(
-                ctx,
-                &open,
-                configuration,
-                RelayOperation::Push {
-                    workspace_id: open.workspace_id.clone(),
-                    now_ms: now_ms()?,
-                    max_read_bytes: self
-                        .relay_sync_admission()
-                        .map_or(0, |(policy, _)| policy.max_read_bytes),
-                },
-                "sync.push",
-            )
+        let push = || -> Result<RelayOperation, WireError> {
+            Ok(RelayOperation::Push {
+                workspace_id: open.workspace_id.clone(),
+                now_ms: now_ms()?,
+                max_read_bytes: self
+                    .relay_sync_admission()
+                    .map_or(0, |(policy, _)| policy.max_read_bytes),
+            })
+        };
+        let mut outcome = self
+            .relay_execute(ctx, &open, configuration.clone(), push()?, "sync.push")
             .await?;
+        // A push can be what makes enrollment ready. The sweep inside it left
+        // each open document to its session, so claim those now and send
+        // them in this same push rather than waiting for the next one.
+        let (claimed, declined) = self.originate_live_sessions(ctx, &open).await?;
+        if claimed > 0
+            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) = &outcome
+        {
+            let pushed_before = *pushed;
+            outcome = self
+                .relay_execute(ctx, &open, configuration, push()?, "sync.push")
+                .await?;
+            if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) =
+                &mut outcome
+            {
+                *pushed += pushed_before;
+            }
+        }
+        if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+            sharing_declined, ..
+        }) = &mut outcome
+        {
+            sharing_declined.extend(declined);
+        }
         relay_outcome_json(outcome)
+    }
+
+    /// Claim the unclaimed lineage of every live editor session in `open`
+    /// for the relay, once enrollment is ready, and hand each session its
+    /// claim. The session lock is held from before the claims are read until
+    /// every claim is handed over, so no write of these sessions can expect
+    /// the old claim. The work runs in its own task: a caller dropped on
+    /// cancellation or deadline cannot release the lock between a committed
+    /// claim and its handover. Each editor is then told to resync, which is
+    /// how its client learns the claim. Returns how many lineages were
+    /// claimed, and any declined as too large to share.
+    async fn originate_live_sessions(
+        &self,
+        ctx: &RequestContext,
+        open: &Arc<OpenWorkspace>,
+    ) -> Result<(usize, Vec<dohc_engine_sync::SharingDeclined>), WireError> {
+        let cancellation = OperationCancellation::new(ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("sync live origination (queued)"));
+            }
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
+        };
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        let unclaimed: Vec<(String, DocKey)> = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                handles.contains(&session.workspace)
+                    && session.lineage_claim_id.is_none()
+                    && session.owner_draft.is_none()
+                    && session.restore_generation.is_none()
+            })
+            .map(|(session_id, session)| (session_id.clone(), session.key.clone()))
+            .collect();
+        if unclaimed.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let sessions = Arc::clone(&self.sessions);
+        let events = self.events.clone();
+        let actor = open.actor.clone();
+        let now = now_ms()?;
+        let token = cancellation.token();
+        let task = tokio::spawn(async move {
+            let _serial = serial;
+            let mut claimed = 0;
+            let mut declined = Vec::new();
+            for (session_id, key) in unclaimed {
+                let (claim, decline) = actor
+                    .ydoc_originate_live_lineage(key, now, token.clone())
+                    .await?;
+                declined.extend(decline);
+                let Some(claim) = claim else { continue };
+                let handed = match lock(&sessions).get_mut(&session_id) {
+                    Some(session) => {
+                        session.lineage_claim_id = Some(claim);
+                        true
+                    }
+                    None => false,
+                };
+                if handed {
+                    claimed += 1;
+                    events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({ "sessionId": session_id, "resyncRequired": true }),
+                    );
+                }
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>((claimed, declined))
+        });
+        task.await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live origination task failed"))?
+            .map_err(map_runtime)
     }
 
     pub(super) async fn sync_pull(
@@ -853,9 +951,14 @@ impl EngineService {
                 cursor,
             },
         };
-        let outcome = self
+        let mut outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
+        // A cursor commit can be what makes enrollment ready, as a push can.
+        let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
+        if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
+            sharing_declined.extend(declined);
+        }
         relay_outcome_json(outcome)
     }
 
