@@ -51,13 +51,14 @@ Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, server
 
 ### `dohc_list_changes`
 
-List workspace history: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId.
+List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the workspace root, to list only that file's changes across its renames.
 
 - `sinceMs`: `integer`
 - `limit`: `integer`
 - `includeFiles`: `boolean`
+- `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, summary?, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
 ### `dohc_read_change`
 
@@ -65,7 +66,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, summary?, author?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
+Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
 
 ### `dohc_list_files`
 
@@ -1075,6 +1076,40 @@ operationId names this removal. Retry failed items with the same operationId.
 - `operationId`: `string`. Required.
 
 Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCursor }`.
+
+### `dohc history`
+
+Read the changes History records for files.
+
+Changes come from the active version of the workspace.
+
+#### `dohc history list`
+
+```sh
+dohc history list [<path>] [options]
+```
+
+List changes to files, newest first.
+
+With a path, list that file's own changes, across its renames. Each line starts with the change's ID.
+
+- `--limit <count>`: List at most this many changes. The default is 50, the most 500.
+
+With `--json`, prints `{ schemaVersion, changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+
+#### `dohc history show`
+
+```sh
+dohc history show <change> [options]
+```
+
+Print a file's text as one change left it.
+
+Find the change's ID with history list. With --json, print both sides and the change's details.
+
+- `--before`: Print the text from before the change instead.
+
+With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } }`.
 
 ## App channel
 

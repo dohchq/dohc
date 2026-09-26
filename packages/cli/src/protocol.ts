@@ -101,6 +101,7 @@ const momentsArgsSchema = z
     sinceMs: z.number().int().nonnegative().optional(),
     limit: z.number().int().positive().max(500).optional(),
     includeFiles: z.boolean().optional(),
+    path: z.string().min(1).max(4096).optional(),
   })
   .strict();
 const momentArgsSchema = z
@@ -552,7 +553,6 @@ const rawMomentSummarySchema = z
     operation: rawMomentOperationSchema,
     path: z.string().min(1),
     versionId: z.string().min(1),
-    summary: z.string().optional(),
     author: rawMomentAuthorSchema.optional(),
     fileCount: z.literal(1),
     files: z.array(rawMomentFileSchema).optional(),

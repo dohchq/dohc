@@ -142,11 +142,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_changes",
     {
       description:
-        "List workspace history: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId.",
+        "List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the workspace root, to list only that file's changes across its renames.",
       inputSchema: {
         sinceMs: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().max(500).optional(),
         includeFiles: z.boolean().optional(),
+        path: z.string().min(1).max(4096).optional(),
       },
     },
     async (args) => text(await listChanges(ctx, args)),

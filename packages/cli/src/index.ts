@@ -167,6 +167,23 @@ function buildCliRequest(
           outDir: command.outDir,
         },
       };
+    case "moments":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          limit: command.limit,
+          ...(command.path ? { path: command.path } : {}),
+        },
+      };
+    case "moment":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, id: command.id },
+      };
   }
 }
 
@@ -201,15 +218,20 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     } catch {
       throw new DohcCliError("desktop app returned an invalid response");
     }
+    if (command.verb === "moment" && "ok" in result && result.ok === false) throw new DohcCliError(result.reason);
     const output = command.json
       ? jsonOutput(result)
       : renderCliResult(command.verb, result, {
           grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
           grepContext: command.verb === "grep" ? command.context : 0,
+          momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
       exitCode: 0,
-      stdout: output ? `${output.replace(/\n$/, "")}\n` : "",
+      // A change's text prints byte for byte, so `history show > file` restores it.
+      stdout: command.verb === "moment" && !command.json
+        ? output
+        : output ? `${output.replace(/\n$/, "")}\n` : "",
       stderr: "",
     };
   } catch (error) {

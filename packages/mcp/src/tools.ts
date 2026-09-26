@@ -1411,7 +1411,7 @@ const LIST_CHANGES_HARD_LIMIT = 500;
 
 export async function listChanges(
   ctx: ToolContext,
-  args: { sinceMs?: number; limit?: number; includeFiles?: boolean } = {},
+  args: { sinceMs?: number; limit?: number; includeFiles?: boolean; path?: string } = {},
 ) {
   return requestCli(ctx, "moments", {
     ...args,

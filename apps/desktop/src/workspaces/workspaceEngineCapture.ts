@@ -566,9 +566,12 @@ export interface WorkspaceEngineCapture {
   // timeline the UI paints always includes the batch whose onRecorded
   // notification triggered the refresh (read-your-writes; the chain never
   // rejects, so this can only wait, not fail).
+  // With objectId, the page holds only that file's moments in the active
+  // version, across its renames.
   listMoments(input?: {
     limit?: number;
     beforeMomentOrder?: number;
+    objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
   // Engine restore (PR 0M-5): returns the file to its state before the given
@@ -5296,6 +5299,25 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
+      if (input.objectId !== undefined) {
+        const activeVersionId = await activeVersionIdOf(engine);
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: input.objectId,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.beforeMomentOrder !== undefined
+            ? { beforeMomentOrder: input.beforeMomentOrder }
+            : {}),
+        });
+        return {
+          moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
+          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+          latestMomentOrder: page.latestMomentOrder,
+          activeVersionId,
+          protectedTruncated: false,
+        };
+      }
       const history = await engine.listHistoryPage({
         workspaceId,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),

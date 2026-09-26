@@ -590,6 +590,35 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(0);
   });
 
+  it("narrows history to one tracked file inside the workspace", async () => {
+    const listed: Array<{ limit: number; objectId?: string }> = [];
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.listMoments = async (input) => {
+      listed.push(input);
+      return [moments.summary];
+    };
+    await mkdir(join(workspaceRoot, "notes"), { recursive: true });
+
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "tracked.md" })).resolves.toMatchObject({
+      changes: [{ id: "moment_primary" }],
+    });
+    await expect(invoke("moments", { cwd: join(workspaceRoot, "notes"), actor: "human", path: "../tracked.md" })).resolves.toMatchObject({
+      count: 1,
+    });
+    expect(listed).toEqual([
+      { limit: 500, objectId: "object_tracked" },
+      { limit: 500, objectId: "object_tracked" },
+    ]);
+
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "missing.md" })).rejects.toThrow(
+      "file is not a tracked workspace file: missing.md",
+    );
+    await expect(invoke("moments", { cwd: workspaceRoot, actor: "human", path: "../outside.md" })).rejects.toThrow(
+      "file is outside this workspace: ../outside.md",
+    );
+    expect(listed).toHaveLength(2);
+  });
+
   it("returns MCP-shaped history and chats with engine ids that post and reply accept", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -623,10 +652,10 @@ describe("CLI socket server", () => {
       changes: [{
         id: "moment_primary",
         path: "primary.md",
-        summary: "Updated primary",
         files: [{ path: "primary.md", operation: "write" }],
       }],
     });
+    expect(moments.changes[0]).not.toHaveProperty("summary");
     const moment = await invoke("moment", {
       cwd: workspaceRoot,
       actor: "agent",
