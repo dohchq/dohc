@@ -53,7 +53,8 @@ interface DesktopCliServerDependencies<State> {
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      | "listKeptCopies" | "saveKeptCopy"
     > | null;
     queueCloudSync(workspaceId: string): void;
   };
@@ -271,6 +272,14 @@ export function createDesktopCliServer<State>(
               documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
       },
+      ...(sharedViewOf(workspace.workspaceId)
+        ? {}
+        : {
+            keptCopies: {
+              list: () => capture.listKeptCopies(),
+              save: (id: number) => capture.saveKeptCopy(id),
+            },
+          }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit }) => {
         const page = await capture.listMoments({ limit });

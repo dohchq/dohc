@@ -36,12 +36,14 @@ import {
   importData,
   listWorkspaceFiles,
   listChanges,
+  listKeptCopies,
   listWorkspaces,
   moveWorkspacePath,
   queryDatabase,
   readChange,
   readDocument,
   readWorkspaceFile,
+  saveKeptCopy,
   searchWorkspaceFiles,
   testSite,
   writeWorkspaceFile,
@@ -147,6 +149,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await listChanges(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_kept_copies",
+    {
+      description:
+        "List files dohc kept while it saved them, because another program changed them at the same moment. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.",
+      inputSchema: {},
+    },
+    async () => text(await listKeptCopies(ctx)),
+  );
+
+  registerWrite(
+    "dohc_save_kept_copy",
+    {
+      description:
+        "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`, and return that `path`. The original file does not change. Read both, keep what you need, and delete the copy when you are done. `path` is null when nothing is kept under that id any more.",
+      inputSchema: { id: z.number().int() },
+    },
+    async (args) => text(await saveKeptCopy(ctx, args)),
   );
 
   server.registerTool(

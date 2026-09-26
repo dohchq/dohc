@@ -4,6 +4,14 @@ import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
+// A file dohc kept while it saved, as its Notices row reads, and the step
+// that moves it to a visible copy.
+export interface KeptCopyNotice {
+  id: number;
+  message: string;
+  save: () => void;
+}
+
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
   | "singleton-tab-split"
@@ -36,6 +44,8 @@ export interface ShellError {
   // `ends` the notice removes its row when it runs.
   action?: { label: string; run: () => void; ends?: boolean };
   kind?: ShellErrorKind;
+  // A kept copy's row: it stays while the engine lists that copy.
+  keptCopyId?: number;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -46,6 +56,9 @@ export function useShellError(workspaceId: string) {
   const shellErrorsRef = useRef(shellErrors);
   shellErrorsRef.current = shellErrors;
   const nextId = useRef(0);
+  // Kept copies already shown in this workspace. A row the person dismissed
+  // stays dismissed until the workspace opens again.
+  const shownKeptCopies = useRef(new Set<number>());
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -121,6 +134,7 @@ export function useShellError(workspaceId: string) {
 
   useEffect(() => {
     setShellErrors([]);
+    shownKeptCopies.current = new Set();
   }, [workspaceId]);
 
   const reportShellError = useCallback(
@@ -277,6 +291,43 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // One row per kept copy the engine lists. A copy listed for the first time
+  // arrives as a toast; a copy no longer listed, because it was saved, loses
+  // its row.
+  const showKeptCopies = useCallback((copies: readonly KeptCopyNotice[]) => {
+    const listed = new Set(copies.map((copy) => copy.id));
+    const atMs = Date.now();
+    const fresh: ShellError[] = copies
+      .filter((copy) => !shownKeptCopies.current.has(copy.id))
+      .map((copy) => {
+        shownKeptCopies.current.add(copy.id);
+        nextId.current += 1;
+        return {
+          id: `shell-error-${nextId.current}`,
+          message: copy.message,
+          retry: null,
+          action: { label: "Save copy", run: copy.save },
+          keptCopyId: copy.id,
+          atMs,
+          seen: false,
+        };
+      });
+    setShellErrors((current) => {
+      const stays = current.filter(
+        (error) => error.keptCopyId === undefined || listed.has(error.keptCopyId),
+      );
+      return fresh.length === 0 && stays.length === current.length
+        ? current
+        : [...stays, ...fresh];
+    });
+  }, []);
+  // A saved copy's row opens the copy.
+  const showKeptCopySaved = useCallback(
+    (message: string, open: () => void) => {
+      push({ message, retry: null, tone: "success", action: { label: "Open", run: open, ends: true } });
+    },
+    [push],
+  );
   // The toast closes; the row in Notices stays.
   const hideShellError = useCallback((id: string) => {
     setShellErrors((current) =>
@@ -311,6 +362,8 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showKeptCopies,
+    showKeptCopySaved,
     hideShellError,
     dismissShellError,
     retryShellError,

@@ -2138,6 +2138,88 @@ pub fn recover_path_displacements(
     Ok(())
 }
 
+/// Move a kept file from its hidden displaced name to a visible copy beside
+/// its path, `name (kept copy).ext`, and end its row. Capture then records
+/// the copy like any new file, and the person or an agent can open, compare
+/// or delete it. Returns the copy's workspace-relative path, or `None` when
+/// the workspace has no such kept row or its file is already gone; a row
+/// whose file is gone is ended too.
+pub fn save_kept_displacement(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    displacement_id: i64,
+    options: &MaterializeOptions<'_>,
+) -> Result<Option<String>, MaterializeError> {
+    let Some(row) = store
+        .list_kept_displacements(workspace_id)?
+        .into_iter()
+        .find(|row| row.displacement_id == displacement_id)
+    else {
+        return Ok(None);
+    };
+    if !is_displaced_name(&row.displaced_name) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, &row.target_path)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    let kept = sibling_with_name(&target, &row.displaced_name);
+    if !entry_exists(&kept)? {
+        store.resolve_displacement(
+            displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        return Ok(None);
+    }
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(MaterializeError::UnsafeTargetPath)?;
+    for n in 1..=MAX_DISPLACED_NAMES {
+        let name = kept_copy_name(file_name, n);
+        let copy = sibling_with_name(&target, &name);
+        match rename_no_replace(&kept, &copy) {
+            Ok(()) => {
+                sync_parent_dir(copy.parent(), options.policy)?;
+                store.resolve_displacement(
+                    displacement_id,
+                    DisplacementResolution::Discard,
+                    None,
+                    options.now_ms,
+                )?;
+                let copy_path = match row.target_path.rsplit_once('/') {
+                    Some((parent, _)) => format!("{parent}/{name}"),
+                    None => name,
+                };
+                return Ok(Some(copy_path));
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(MaterializeError::io(&kept, &err)),
+        }
+    }
+    Err(MaterializeError::io(
+        &target,
+        &std::io::Error::from(ErrorKind::AlreadyExists),
+    ))
+}
+
+/// `notes (kept copy).md`, then `notes (kept copy 2).md`. A name with no
+/// extension, or only a leading dot, takes the suffix at its end.
+fn kept_copy_name(file_name: &str, n: u32) -> String {
+    let suffix = match n {
+        1 => " (kept copy)".to_owned(),
+        n => format!(" (kept copy {n})"),
+    };
+    match file_name.rfind('.') {
+        Some(dot) if dot > 0 => format!("{}{suffix}{}", &file_name[..dot], &file_name[dot..]),
+        _ => format!("{file_name}{suffix}"),
+    }
+}
+
 /// Resolve this job's unresolved displacements, and any other job's for the
 /// same path, before it runs, including a displaced file whose row a power
 /// failure lost. `true` when one of them held bytes the store does not have
@@ -3893,6 +3975,15 @@ mod tests {
         assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Other);
         std::fs::remove_file(&target).expect("remove");
         assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Nothing);
+    }
+
+    #[test]
+    fn kept_copy_names_keep_the_extension() {
+        assert_eq!(kept_copy_name("notes.md", 1), "notes (kept copy).md");
+        assert_eq!(kept_copy_name("notes.md", 2), "notes (kept copy 2).md");
+        assert_eq!(kept_copy_name("a.tar.gz", 1), "a.tar (kept copy).gz");
+        assert_eq!(kept_copy_name(".env", 1), ".env (kept copy)");
+        assert_eq!(kept_copy_name("Makefile", 3), "Makefile (kept copy 3)");
     }
 
     /// The no-replace rename claims an empty name and refuses an occupied

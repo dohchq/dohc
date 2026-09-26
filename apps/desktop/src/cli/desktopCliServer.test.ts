@@ -45,6 +45,8 @@ function fixture(rootPath = resolve("cli-workspace")) {
     filePathForObjectId: vi.fn(async () => "notes.md"),
     listMoments: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listMoments"]>(),
     readMoment: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["readMoment"]>(),
+    listKeptCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listKeptCopies"]>(),
+    saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
     method === WORKSPACE_METHOD.searchQueryChatMessagesGranular

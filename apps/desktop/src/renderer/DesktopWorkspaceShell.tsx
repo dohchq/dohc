@@ -81,6 +81,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
+import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useShellError } from "./shell/useShellError";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -825,6 +826,8 @@ export function DesktopWorkspaceShell(props: {
     clearEditorGroupRefusalError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showKeptCopies,
+    showKeptCopySaved,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -2387,6 +2390,14 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  const refreshKeptCopies = useKeptCopyNotices({
+    workspaceId,
+    workspaceIsReady: workspaceIsReady && !isShareView,
+    show: showKeptCopies,
+    showSaved: showKeptCopySaved,
+    reportShellError,
+    openFile,
+  });
   // Read once: the shell remounts for each workspace.
   const openPathOnReady = useRef(props.openPathOnReady);
   useEffect(() => {
@@ -3668,6 +3679,7 @@ export function DesktopWorkspaceShell(props: {
       if (!isShareView || shareViewEditsCollections) void refreshCollections();
       if (!isShareView) {
         void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+        void refreshKeptCopies();
       }
     });
     const unsubscribe = bridge().onWorkspaceActivity(
@@ -3698,6 +3710,7 @@ export function DesktopWorkspaceShell(props: {
     isShareView,
     refreshCollections,
     refreshDatasets,
+    refreshKeptCopies,
     hasCommittedListing,
   ]);
 

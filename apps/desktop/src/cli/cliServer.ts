@@ -195,6 +195,14 @@ export interface CliDocumentsPort {
   }): Promise<LiveDocumentEditOutcome>;
 }
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile, and the step that moves one to a visible copy beside its
+// file. The desktop's Notices row offers the same step.
+export interface CliKeptCopiesPort {
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  save(id: number): Promise<string | null>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -219,6 +227,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
+  // Absent in a shared view, which keeps no copies of its own.
+  keptCopies?: CliKeptCopiesPort;
 }
 
 export interface CliRunMessageLink {
@@ -532,6 +542,13 @@ function documentEditOrigin(agent: string | undefined): LiveDocumentEditOrigin {
   return {
     ...(agent === undefined ? {} : { actorOriginId: agent }),
     attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+  };
+}
+
+function keptCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "kept copies are not available in this workspace",
   };
 }
 
@@ -2066,6 +2083,28 @@ async function dispatch(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "keptCopies": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept copies");
+      }
+    }
+
+    case "saveKeptCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        const path = await keptCopies.save(request.args.id);
+        if (path !== null) await notifyWrite(options, context);
+        return { ok: true as const, path };
+      } catch (error) {
+        return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
       }
     }
 

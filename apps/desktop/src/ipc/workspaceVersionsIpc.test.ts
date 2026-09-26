@@ -29,6 +29,7 @@ const conflict: VersionedTextConflictRecord = {
 };
 const conflictPage = { conflicts: [conflict], nextAfterConflictId: "next-conflict" };
 const tryResult = { versionId, versionName: "Draft", runId: "run" };
+const keptCopy = { id: 7, path: "notes.md", keptAtMs: 5 };
 
 const captureRequests = [
   [ops.listWorkspaceVersions.channel, { workspaceId }],
@@ -39,6 +40,8 @@ const captureRequests = [
   [ops.listWorkspaceVersionConflicts.channel, { workspaceId }],
   [ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } }],
   [ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" }],
+  [ops.listKeptCopies.channel, { workspaceId }],
+  [ops.saveKeptCopy.channel, { workspaceId, id: 7 }],
 ] as const;
 const allRequests = [
   ...captureRequests,
@@ -57,6 +60,8 @@ function harness() {
     mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1 }; }),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
+    listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
+    saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return "notes (kept copy).md"; }),
   };
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");
@@ -152,6 +157,17 @@ describe("registered workspace version handlers", () => {
     await expect(h.invoke(ops.createWorkspaceVersion.channel, { workspaceId, name: "Draft" })).rejects.toBe(refusal);
     expect(h.notifyRenderer).not.toHaveBeenCalled();
     expect(h.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("lists kept copies and saves one, repainting only when a copy was saved", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.listKeptCopies.channel, { workspaceId })).resolves.toEqual({ keptCopies: [keptCopy], more: false });
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ path: "notes (kept copy).md" });
+    expect(h.operations.saveKeptCopy).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.steps).toEqual(["capture", "kept", "capture", "save kept", "notify"]);
+    h.operations.saveKeptCopy.mockResolvedValue(null);
+    await expect(h.invoke(ops.saveKeptCopy.channel, { workspaceId, id: 7 })).resolves.toEqual({ path: null });
+    expect(h.notifyRenderer).toHaveBeenCalledOnce();
   });
 
   it("switches through the capture owner and returns its changed-file count", async () => {

@@ -8,7 +8,7 @@
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
     StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
-    run_pending_jobs,
+    run_pending_jobs, save_kept_displacement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -1453,6 +1453,88 @@ fn a_displaced_file_that_cannot_return_is_kept_and_conflicts() {
     );
     assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
     assert_eq!(job_status(&store), JobStatus::Conflict);
+}
+
+/// A kept file becomes a visible copy beside its path when asked, taking the
+/// next free name, and its row ends so nothing lists it again.
+#[test]
+fn a_kept_file_is_saved_as_a_visible_copy() {
+    let sc = Scratch::new("kept-copy");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racer = RaceBefore::new(
+        RenameStep::Displace,
+        write_in_place(sc.target("a.md"), OUTSIDE),
+    )
+    .then(
+        RenameStep::Place,
+        write_in_place(sc.target("a.md"), CREATED),
+    );
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    std::fs::write(sc.target("a (kept copy).md"), b"taken").expect("occupy the first name");
+    let options = MaterializeOptions {
+        policy: DurabilityPolicy::none(),
+        replacer: &StdReplacer,
+        backoff: &NoBackoff,
+        now_ms: 30,
+        faults: &NoFaults,
+    };
+
+    assert_eq!(
+        save_kept_displacement(
+            &store,
+            sc.workspace(),
+            "other-ws",
+            kept[0].displacement_id,
+            &options
+        )
+        .expect("another workspace"),
+        None,
+        "a row belongs to its own workspace"
+    );
+    let saved = save_kept_displacement(
+        &store,
+        sc.workspace(),
+        "ws",
+        kept[0].displacement_id,
+        &options,
+    )
+    .expect("save");
+
+    assert_eq!(saved.as_deref(), Some("a (kept copy 2).md"));
+    assert_eq!(read(&sc, "a (kept copy 2).md").as_deref(), Some(OUTSIDE));
+    assert_eq!(
+        read(&sc, "a (kept copy).md").as_deref(),
+        Some(&b"taken"[..])
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(CREATED));
+    assert!(
+        displaced_files(&sc).is_empty(),
+        "{:?}",
+        displaced_files(&sc)
+    );
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+    assert_eq!(
+        save_kept_displacement(
+            &store,
+            sc.workspace(),
+            "ws",
+            kept[0].displacement_id,
+            &options
+        )
+        .expect("again"),
+        None
+    );
 }
 
 #[test]

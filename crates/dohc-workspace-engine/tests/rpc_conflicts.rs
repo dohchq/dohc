@@ -2502,3 +2502,91 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
         json!(128 * 1024)
     );
 }
+
+/// A file a replace kept at its hidden displaced name is listed until it is
+/// saved as a visible copy beside its path, and saving it twice finds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
+    let (scratch, transport, handle, workspace_id) = fixture("kept-copy").await;
+    write_file(scratch.path(), "notes/a.md", b"a newer save");
+    write_file(
+        scratch.path(),
+        "notes/.dohc-write-job.displaced",
+        b"bytes another program wrote",
+    );
+    let store =
+        dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 10)
+            .expect("store");
+    let id = store
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: workspace_id.clone(),
+            target_path: "notes/a.md".to_owned(),
+            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            expected_sha256: dohc_engine_storage::hex_sha256(b"ours before"),
+            content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
+            now_ms: 10,
+        })
+        .expect("open displacement");
+    store
+        .resolve_displacement(
+            id,
+            dohc_engine_storage::DisplacementResolution::Keep {
+                displaced_sha256: Some(&dohc_engine_storage::hex_sha256(
+                    b"bytes another program wrote",
+                )),
+            },
+            None,
+            11,
+        )
+        .expect("keep");
+    drop(store);
+
+    let listed = call(&transport, &handle, 10, "keptCopies.list", json!({})).await;
+    assert_eq!(
+        listed,
+        json!({
+            "keptCopies": [{ "id": id, "path": "notes/a.md", "keptAtMs": 10 }],
+            "more": false,
+        })
+    );
+
+    let saved = call(
+        &transport,
+        &handle,
+        11,
+        "keptCopies.save",
+        json!({ "id": id }),
+    )
+    .await;
+    assert_eq!(saved, json!({ "path": "notes/a (kept copy).md" }));
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a (kept copy).md")).expect("copy"),
+        b"bytes another program wrote"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes/a.md")).expect("file"),
+        b"a newer save"
+    );
+    assert!(
+        !scratch
+            .path()
+            .join("notes/.dohc-write-job.displaced")
+            .exists()
+    );
+    assert_eq!(
+        call(&transport, &handle, 12, "keptCopies.list", json!({})).await,
+        json!({ "keptCopies": [], "more": false })
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            13,
+            "keptCopies.save",
+            json!({ "id": id })
+        )
+        .await,
+        json!({ "path": null })
+    );
+}

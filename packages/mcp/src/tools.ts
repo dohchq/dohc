@@ -2609,6 +2609,17 @@ export async function createRecord(
   });
 }
 
+// Files dohc moved aside while it saved, because another program changed them
+// meanwhile. The desktop shows each as a Notices row; an agent reads the same
+// list and takes the same step.
+export async function listKeptCopies(ctx: ToolContext) {
+  return requestCli(ctx, "keptCopies", {});
+}
+
+export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
+  return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
 // Live documents change through the desktop, which applies an edit to the
 // session an open editor holds. The path is checked here and again there.
 export async function readDocument(ctx: ToolContext, args: { path: string }) {

@@ -31,6 +31,8 @@ export const WORKSPACE_METHOD = {
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
+  keptCopiesList: "keptCopies.list",
+  keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
@@ -156,6 +158,18 @@ export type GranularChatMessageSearchResponse =
 
 export type WatcherStatusResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
+
+/**
+ * A file dohc moved aside while it saved, because another program changed
+ * it meanwhile. It waits at a hidden name beside `path` until
+ * `keptCopies.save` moves it to a visible copy.
+ */
+export type KeptCopy = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList]["keptCopies"][number];
+export type KeptCopiesListResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList];
+/** The copy's workspace-relative path, or null when nothing is kept under that id. */
+export type KeptCopySaveResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesSave];
 
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
@@ -310,6 +324,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
@@ -1042,6 +1058,19 @@ const WorkspaceResultSchemas = {
       Schema.Literal("degraded"),
     ]),
   }),
+  [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
+    keptCopies: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          id: Schema.Int,
+          path: Schema.NonEmptyString,
+          keptAtMs: Schema.Int,
+        }),
+      ),
+    ),
+    more: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.keptCopiesSave]: mutableStruct({ path: NullableString }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({

@@ -2718,6 +2718,27 @@ export const TryInVersionStateResult = z.object({
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits at a hidden name beside `path` until
+// saveKeptCopy moves it to a visible copy; `path` in that answer is the
+// copy's, or null when nothing is kept under the id any more.
+export const KeptCopy = z.object({
+  id: z.number().int(),
+  path: z.string().min(1),
+  keptAtMs: z.number().int().nonnegative(),
+});
+export type KeptCopy = z.infer<typeof KeptCopy>;
+export const ListKeptCopiesResult = z.object({
+  keptCopies: z.array(KeptCopy),
+  more: z.boolean(),
+});
+export type ListKeptCopiesResult = z.infer<typeof ListKeptCopiesResult>;
+export const SaveKeptCopyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  id: z.number().int(),
+});
+export const SaveKeptCopyResult = z.object({ path: z.string().min(1).nullable() });
+
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {
   guard: "active-workspace",
@@ -2753,6 +2774,14 @@ export const workspaceVersionOperations = {
   resolveWorkspaceVersionConflict: {
     channel: "desktop:resolve-workspace-version-conflict",
     payload: ResolveWorkspaceVersionConflictPayload, result: ResolveWorkspaceVersionConflictResult, ...versionGuard,
+  },
+  listKeptCopies: {
+    channel: "desktop:list-kept-copies",
+    payload: WorkspaceIdPayload, result: ListKeptCopiesResult, ...versionGuard,
+  },
+  saveKeptCopy: {
+    channel: "desktop:save-kept-copy",
+    payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
   },
   tryInWorkspaceVersion: {
     channel: "desktop:try-in-workspace-version",

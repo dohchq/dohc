@@ -725,6 +725,8 @@ function makeBaseBridge(
       sizes: { installedBytes: null, dataBytes: null },
     })),
     onPluginStatusChanged: vi.fn(() => () => undefined),
+    listKeptCopies: vi.fn(async () => ({ keptCopies: [], more: false })),
+    saveKeptCopy: vi.fn(async () => ({ path: null })),
     listAutomationFailures: vi.fn(
       async (
         _payload: ListAutomationFailuresPayload,

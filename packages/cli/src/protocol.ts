@@ -140,6 +140,11 @@ const documentReadArgsSchema = z
 // dohc runs instead of doing its work twice.
 export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
 
+const keptCopiesArgsSchema = z.object(argsBase).strict();
+const saveKeptCopyArgsSchema = z
+  .object({ ...argsBase, id: z.number().int() })
+  .strict();
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
@@ -318,6 +323,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
 ]);
 
@@ -779,6 +786,27 @@ const documentEditResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// Files dohc moved aside while it saved, because another program changed
+// them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
+// visible copy beside its file.
+const keptCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptCopies: z.array(z.object({
+      id: z.number().int(),
+      path: z.string().min(1),
+      keptAtMs: z.number().int().nonnegative(),
+    }).strict()),
+    more: z.boolean(),
+  }).strict(),
+  rawFailureSchema,
+]);
+// `path` is the copy's, or null when nothing is kept under that id any more.
+const saveKeptCopyResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1).nullable() }).strict(),
+  rawFailureSchema,
+]);
+
 const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
@@ -802,6 +830,8 @@ const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  keptCopies: keptCopiesResultSchema,
+  saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
 } as const;
 
