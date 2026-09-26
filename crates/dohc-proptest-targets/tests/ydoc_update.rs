@@ -132,7 +132,7 @@ fn seed_empty_bytes_are_rejected_without_crashing() {
 #[test]
 fn seed_multiple_valid_updates_compose() {
     let doc = Ydoc::wire();
-    doc.apply(&doc.frontmatter_set("title", "fuzz"))
+    doc.apply(&doc.frontmatter_set("title", "fuzz").unwrap())
         .expect("first");
     doc.apply(&doc.richdoc_append_paragraph("seed paragraph"))
         .expect("second");
@@ -356,7 +356,7 @@ proptest! {
         mutations in prop::collection::vec((any::<usize>(), any::<u8>()), 0..12),
     ) {
         let seed_doc = Ydoc::wire();
-        seed_doc.frontmatter_set("title", "mutation seed \u{1F600}");
+        seed_doc.frontmatter_set("title", "mutation seed \u{1F600}").unwrap();
         seed_doc.richdoc_append_paragraph("mutation seed paragraph \u{10437}");
         let mut bytes = seed_doc.encode_full_state();
         for (idx, value) in mutations {

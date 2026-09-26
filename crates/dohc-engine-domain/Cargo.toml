@@ -37,6 +37,11 @@ base64 = "0.23"
 # Collection schemas need an ordered YAML 1.2 value tree so the parser can
 # salvage valid Fields and Views while reporting invalid siblings.
 saphyr = { version = "0.0.11", default-features = false }
+# Frontmatter loads scalars unresolved, so the domain applies the same scalar
+# rules as the desktop's YAML loader instead of saphyr's.
+saphyr-parser = "0.0.11"
+# Frontmatter keys that are numbers read as JavaScript spells them.
+ryu-js = "1.0.3"
 # Record ids draw all 128 random bits in the domain helper that mints them.
 getrandom = "0.4"
 # Feed-cursor payloads are JSON arrays `[createdAtMs, messageId]`, byte-parity

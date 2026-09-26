@@ -10,12 +10,19 @@ import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject
 import { answerItems, evaluateItem, newQuickJS } from "./automation-evaluate.ts";
 import type { AutomationWorkerReply } from "./automation-protocol.ts";
 
-const threads = vi.hoisted(() => ({ started: 0, terminated: 0 }));
+const threads = vi.hoisted(() => ({ started: 0, terminated: 0,
+  sent: [] as Array<{ kind: string; runId: number; hasScope: boolean }>,
+}));
 vi.mock("node:worker_threads", async importOriginal => {
   const actual = await importOriginal<typeof import("node:worker_threads")>();
   class CountedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) { super(...args); threads.started++; }
     override terminate() { threads.terminated++; return super.terminate(); }
+    override postMessage(...args: Parameters<Worker["postMessage"]>) {
+      const message = args[0];
+      threads.sent.push({ kind: message.kind, runId: message.runId, hasScope: Object.hasOwn(message, "scope") });
+      return super.postMessage(...args);
+    }
   }
   return { ...actual, Worker: CountedWorker };
 });
@@ -44,7 +51,7 @@ async function standInWorker(handler: string) {
   const entryPath = join(directory, "worker.mjs");
   await writeFile(entryPath, `import { parentPort } from "node:worker_threads";
     const reply = message => parentPort.postMessage(message);
-    parentPort.on("message", ({ items, spent }) => { ${handler} });
+    parentPort.on("message", (request) => { if (request.kind === "end") return; const { items, spent } = request; ${handler} });
     reply({ kind: "ready" });`);
   return { entryPath, [Symbol.asyncDispose]: () => rm(directory, { recursive: true, force: true }) };
 }
@@ -61,6 +68,120 @@ async function values(sources: string[]) {
 }
 
 describe("formula helpers", () => {
+  it.each([64, 65])("validates comparison depth from its value root: %i", async depth => {
+    const comparison = nested(depth);
+    const results = await evaluator.evaluate(scope, [expression(JSON.stringify(comparison)), {
+      ...expression("42"), when: [{ index: 0, equals: comparison }],
+    }]);
+    expect(results).toEqual(depth === 64
+      ? [{ ok: true, value: comparison }, { ok: true, value: 42 }]
+      : [{ ok: false, error: tooDeep }, { ok: false, error: tooDeep }]);
+  });
+
+  it("compares guarded values deeply without rerunning their formula", async () => {
+    expect(await evaluator.evaluate(scope, [
+      expression('({b: [2, 3], a: 1})'),
+      { ...expression('"matched"'), when: [{ index: 0, equals: { a: 1, b: [2, 3] } }] },
+      { ...expression('record.Missing.name'), when: [{ index: 0, equals: { a: 1, b: [3, 2] } }] },
+    ])).toEqual([
+      { ok: true, value: { b: [2, 3], a: 1 } }, { ok: true, value: "matched" }, { ok: true, value: null },
+    ]);
+  });
+
+  it("bounds and validates comparison values with the request scope", async () => {
+    expect(await evaluator.evaluate(scope, [expression("null"), {
+      ...expression("1"), when: [{ index: 0, equals: "x".repeat(AUTOMATION_LIMITS.scopeBytes) }],
+    }])).toEqual([{ ok: false, error: tooLarge }, { ok: false, error: tooLarge }]);
+    await expect(evaluator.evaluate(scope, [expression("null"), {
+      ...expression("1"), when: [{ index: 0, equals: 1n as unknown as JsonValue }],
+    }])).rejects.toThrow("The automation scope must hold only JSON values.");
+  });
+
+  it("resolves comparison guards in the host without sending them to the worker", async () => {
+    await using standIn = await standInWorker(`
+      for (const item of items) reply({ kind: "result", result: { ok: true,
+        value: item.source === "predicate" ? true : Object.hasOwn(item, "when") }, prepareMs: 0, runMs: 0 });
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [expression("predicate"), {
+        ...expression("selected"), when: [{ index: 0, equals: true }],
+      }])).toEqual([{ ok: true, value: true }, { ok: true, value: false }]);
+    } finally { await fresh.close(); }
+  });
+  it("skips guarded runtime errors, loops, and oversized sources without evaluating them", async () => {
+    const when = [{ index: 0, truthy: true }];
+    expect(await evaluator.evaluate(scope, [
+      expression("false"),
+      { ...expression("record.Missing.name"), when },
+      { ...expression("(() => { for (;;) {} })()"), when },
+      { ...expression("x".repeat(AUTOMATION_LIMITS.sourceBytes + 1)), when },
+      { ...expression("42"), when: [{ index: 0, truthy: false }] },
+    ])).toEqual([false, null, null, null, 42].map(value => ({ ok: true, value })));
+  });
+
+  it.each([
+    { prepareMs: 0, runMs: 8000, error: runSpent },
+    { prepareMs: 8000, runMs: 0, error: readSpent },
+  ])("carries a predicate's budget into its selected branch: $error.message", async ({ prepareMs, runMs, error }) => {
+    await using standIn = await standInWorker(`
+      for (const item of items) reply({ kind: "result", result: { ok: true, value: true }, prepareMs: ${prepareMs}, runMs: ${runMs} });
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [
+        expression("predicate"),
+        { ...expression("dead"), when: [{ index: 0, truthy: false }] },
+        { ...expression("selected"), when: [{ index: 0, truthy: true }] },
+      ])).toEqual([{ ok: true, value: true }, { ok: true, value: null }, { ok: false, error }]);
+    } finally { await fresh.close(); }
+  });
+
+  it("keeps guards resolved across worker replacement without repeating predicates", async () => {
+    await using standIn = await standInWorker(`
+      for (const item of items) {
+        const result = item.source === "break" ? { ok: false, error: { code: "memory", message: "Stopped" } }
+          : { ok: true, value: item.source };
+        reply({ kind: "result", result, prepareMs: 0, runMs: 1, ...(item.source === "break" ? { restart: true } : {}) });
+        if (item.source === "break") break;
+      }
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [
+        expression("predicate"),
+        { ...expression("break"), when: [{ index: 0, truthy: true }] },
+        { ...expression("dead"), when: [{ index: 1, truthy: false }] },
+        { ...expression("next"), when: [{ index: 0, truthy: true }] },
+      ])).toEqual([
+        { ok: true, value: "predicate" }, { ok: false, error: { code: "memory", message: "Stopped" } },
+        { ok: true, value: null }, { ok: true, value: "next" },
+      ]);
+    } finally { await fresh.close(); }
+  });
+
+  it("retains selected errors and skips dependencies of a failed predicate", async () => {
+    const results = await evaluator.evaluate(scope, [
+      expression("true"),
+      { ...expression("record.Missing.name"), when: [{ index: 0, truthy: true }] },
+      { ...expression("42"), when: [{ index: 1, truthy: false }] },
+      expression("7"),
+    ]);
+    expect(results).toEqual([
+      { ok: true, value: true }, { ok: false, error: expect.objectContaining({ code: "runtime" }) },
+      { ok: true, value: null }, { ok: true, value: 7 },
+    ]);
+  });
+
+  it.each([
+    [{ index: 1, truthy: true }], [{ index: -1, truthy: true }], [{ index: 0.5, truthy: true }],
+    [{ index: 0, truthy: "yes" }], [{ index: 0, truthy: true }, { index: 0, truthy: true }], [null],
+  ].map(guards => ({ guards })))("rejects invalid or forward formula guards: $guards", async ({ guards }) => {
+    await expect(evaluator.evaluate(scope, [expression("true"), {
+      ...expression("1"), when: guards as NonNullable<AutomationFormula["when"]>,
+    }])).rejects.toThrow("A formula guard must refer to an earlier formula");
+  });
+
   it("reads the run's date and time on the clock of now", async () => {
     expect(await values(["today()", "now()"])).toEqual(["2026-09-24", "2026-09-24T09:30:00.000+08:00"]);
     // 23:30 in New York is already the next day in UTC; today() stays on the automation's clock.
@@ -477,11 +598,11 @@ describe("scope preparation", () => {
     try {
       await once(worker, "message");
       const spent = { prepareMs: 0, runMs: 0 };
-      worker.postMessage({ scope: { ...scope, record: { Bad: 1n } }, items: [expression("1")], spent });
+      worker.postMessage({ kind: "evaluate", runId: 1, scope: { ...scope, record: { Bad: 1n } }, items: [expression("1")], spent });
       expect((await once(worker, "message"))[0]).toEqual({ kind: "refused", message: "The automation scope must hold only JSON values." });
-      worker.postMessage({ scope: { ...scope, bindings: { rows: nested(65) } }, items: [expression("1")], spent });
+      worker.postMessage({ kind: "evaluate", runId: 2, scope: { ...scope, bindings: { rows: nested(65) } }, items: [expression("1")], spent });
       expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: false, error: tooDeep }, prepareMs: 0, runMs: 0 });
-      worker.postMessage({ scope, items: [expression("1 + 1")], spent });
+      worker.postMessage({ kind: "evaluate", runId: 3, scope, items: [expression("1 + 1")], spent });
       expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: true, value: 2 }, prepareMs: expect.any(Number), runMs: expect.any(Number) });
     } finally { await worker.terminate(); }
   });
@@ -560,7 +681,7 @@ describe("scope preparation", () => {
     try {
       await once(worker, "message");
       const ask = async (spent: { prepareMs: number; runMs: number }) => {
-        worker.postMessage({ scope, items: [expression("1")], spent });
+        worker.postMessage({ kind: "evaluate", runId: 1, scope, items: [expression("1")], spent });
         return ((await once(worker, "message"))[0] as { result: unknown }).result;
       };
       expect(await ask({ prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs })).toEqual({ ok: false, error: runSpent });
@@ -606,7 +727,89 @@ describe("scope preparation", () => {
 });
 
 describe("evaluator lifetime", () => {
-  beforeEach(() => { threads.started = 0; threads.terminated = 0; });
+  beforeEach(() => { threads.started = 0; threads.terminated = 0; threads.sent.length = 0; });
+
+  it("reuses one QuickJS memory across phases and releases it at the run boundary", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "dohc-automation-memory-"));
+    const entryPath = join(directory, "worker.mjs");
+    const allocations = new Int32Array(new SharedArrayBuffer(4));
+    await writeFile(entryPath, `
+      import { workerData } from "node:worker_threads";
+      const OriginalMemory = WebAssembly.Memory;
+      WebAssembly.Memory = class extends OriginalMemory {
+        constructor(options) { super(options); Atomics.add(workerData, 0, 1); }
+      };
+      await import(${JSON.stringify(new URL("../dist/automation-worker.mjs", import.meta.url).href)});
+    `);
+    const worker = new Worker(entryPath, { workerData: allocations });
+    const spent = { prepareMs: 0, runMs: 0 };
+    const ask = async (runId: number, source: string, input?: AutomationScope) => {
+      const answer = once(worker, "message");
+      worker.postMessage({ kind: "evaluate", runId, items: [expression(source)], spent, ...(input ? { scope: input } : {}) });
+      return (await answer)[0];
+    };
+    try {
+      await once(worker, "message");
+      const startup = Atomics.load(allocations, 0);
+      expect(await ask(1, "record.Name", scope)).toMatchObject({ result: { ok: true, value: "Ana Lopez" } });
+      expect(Atomics.load(allocations, 0)).toBe(startup + 1);
+      expect(await ask(1, "record.Name")).toMatchObject({ result: { ok: true, value: "Ana Lopez" } });
+      expect(Atomics.load(allocations, 0)).toBe(startup + 1);
+      worker.postMessage({ kind: "end", runId: 1 });
+      expect(await ask(1, "record.Name")).toMatchObject({ kind: "refused" });
+      expect(await ask(2, "record.Name", { ...scope, record: { Name: "Next" } })).toMatchObject({ result: { ok: true, value: "Next" } });
+      expect(Atomics.load(allocations, 0)).toBe(startup + 2);
+    } finally { await worker.terminate(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("sends an immutable scope once per run and ends it before the next queued run", async () => {
+    const fresh = createAutomationEvaluator();
+    const input = { ...scope, record: { Name: "First" } };
+    const formulas: AutomationFormula[] = [expression("true"), { ...expression("record.Name"), when: [{ index: 0, truthy: true }] }];
+    try {
+      const first = fresh.evaluate(input, formulas);
+      input.record.Name = "Second";
+      const second = fresh.evaluate(input, formulas);
+      expect(await first).toEqual([{ ok: true, value: true }, { ok: true, value: "First" }]);
+      expect(await second).toEqual([{ ok: true, value: true }, { ok: true, value: "Second" }]);
+      expect(threads.sent).toEqual([
+        { kind: "evaluate", runId: 1, hasScope: true }, { kind: "evaluate", runId: 1, hasScope: false }, { kind: "end", runId: 1, hasScope: false },
+        { kind: "evaluate", runId: 2, hasScope: true }, { kind: "evaluate", runId: 2, hasScope: false }, { kind: "end", runId: 2, hasScope: false },
+      ]);
+    } finally { await fresh.close(); }
+  });
+
+  it("terminates a prepared guarded run on close and rejects queued work", async () => {
+    await using worker = await standInWorker(`
+      if (items[0].source === "predicate") reply({ kind: "result", result: { ok: true, value: true }, prepareMs: 0, runMs: 0 });
+    `);
+    const fresh = createAutomationEvaluator(worker);
+    const running = fresh.evaluate(scope, [expression("predicate"), { ...expression("hang"), when: [{ index: 0, truthy: true }] }]);
+    const queued = fresh.evaluate(scope, [expression("next")]);
+    const stopped = Promise.allSettled([running, queued]);
+    await vi.waitFor(() => expect(threads.sent.some(message => message.kind === "evaluate" && !message.hasScope)).toBe(true));
+    await fresh.close();
+    expect((await stopped).map(result => result.status)).toEqual(["rejected", "rejected"]);
+    expect(threads.terminated).toBe(1);
+  });
+
+  it("resends the same run scope to a replacement worker", async () => {
+    await using worker = await standInWorker(`
+      for (const item of items) {
+        reply({ kind: "result", result: { ok: true, value: request.scope ? request.scope.record.Name : "phase" },
+          prepareMs: 0, runMs: 1, ...(item.source === "replace" ? { restart: true } : {}) });
+        if (item.source === "replace") return;
+      }
+    `);
+    const fresh = createAutomationEvaluator(worker);
+    try {
+      expect(await fresh.evaluate(scope, [expression("replace"), { ...expression("next"), when: [{ index: 0, truthy: true }] }]))
+        .toEqual([{ ok: true, value: "Ana Lopez" }, { ok: true, value: "Ana Lopez" }]);
+      expect(threads.sent.filter(message => message.kind === "evaluate")).toEqual([
+        { kind: "evaluate", runId: 1, hasScope: true }, { kind: "evaluate", runId: 1, hasScope: true },
+      ]);
+    } finally { await fresh.close(); }
+  });
 
   it("answers requests in order", async () => {
     const results = await Promise.all([1, 2, 3].map(number => value(`${number} * 2`)));

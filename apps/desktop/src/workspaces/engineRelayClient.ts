@@ -5,6 +5,7 @@ import {
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  RelayUnreachableError,
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
@@ -471,6 +472,13 @@ function pendingCursor(
   return cursor;
 }
 
+const SYNC_PASS_METHODS: ReadonlySet<string> = new Set([
+  "sync.push",
+  "sync.pull",
+  "sync.commitCursor",
+  "sync.recoverOrigin",
+]);
+
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
@@ -487,6 +495,11 @@ function translateRelayError(method: string, error: unknown): never {
   }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
+    // Only the sync pass names this cause today; the enable and join flows
+    // keep their own reading of an unavailable workspace.
+    if (SYNC_PASS_METHODS.has(method) && error.message === "relay-unreachable") {
+      throw new RelayUnreachableError();
+    }
     throw new RelayWorkspaceUnavailableError();
   }
   if (

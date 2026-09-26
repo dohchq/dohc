@@ -1,6 +1,7 @@
 import { SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -53,17 +54,8 @@ function versionName(
 
 const MENU_ITEM_CLASS =
   "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
-
-// Electron strips the daemon refusal's typed wire shape. Keep the retry
-// discriminator exact: an initial import may legitimately outlive any fixed
-// renderer deadline, while every other error still gets a bounded retry and
-// then the existing visible failure.
-function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
-  return ipcErrorMessage(error, "") === WORKSPACE_UPDATING_MESSAGE;
-}
 
 // Compact version selector for the editor chrome: shows the active version,
 // switches on click, creates inline, and opens compare / merge.
@@ -85,7 +77,7 @@ export function VersionMenu(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
-  onError: (message: string) => void;
+  onError: (message: string, cause: unknown) => void;
   // Bumped by the shell when another surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
   // version instead of showing a stale name.
@@ -148,7 +140,10 @@ export function VersionMenu(props: {
           return;
         } catch (error) {
           lastError = error;
-          if (!isWorkspaceUpdatingInvokeError(error)) {
+          // An initial import may outlive any fixed renderer deadline, so the
+          // engine's still-updating refusal is waited out; every other error
+          // gets a bounded retry and then the visible failure.
+          if (!isWorkspaceUpdatingError(error)) {
             failureAttempts += 1;
             if (failureAttempts >= VERSION_LOAD_FAILURE_ATTEMPTS) break;
           }
@@ -162,6 +157,7 @@ export function VersionMenu(props: {
       if (!cancelled) {
         props.onError(
           ipcErrorMessage(lastError, "Version controls are unavailable right now."),
+          lastError,
         );
       }
     })();
@@ -231,7 +227,7 @@ export function VersionMenu(props: {
         await refresh();
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
-        props.onError(ipcErrorMessage(error, "Could not switch versions."));
+        props.onError(ipcErrorMessage(error, "Could not switch versions."), error);
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.

@@ -257,6 +257,23 @@ impl EngineStore {
         Ok(TxnOutcome::Committed(value))
     }
 
+    /// Validate a mutation on a transaction that always rolls back.
+    pub fn preview_write<T, E>(
+        &mut self,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::persist)?;
+        let result = f(&tx);
+        tx.rollback().map_err(StorageError::persist)?;
+        result
+    }
+
     /// The database's `PRAGMA synchronous` setting (`1` = normal). Exposed so a
     /// weakened-durability configuration is directly assertable.
     pub fn synchronous_setting(&self) -> Result<i64, StorageError> {

@@ -41,6 +41,15 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
     await rm(root,{recursive:true,force:true,maxRetries:8,retryDelay:25});
   }
 }
+// Runs a stand-in script instead of the worker and reports the signal that ended it.
+function scriptLauncher(script:string,ended:(signal:NodeJS.Signals|null)=>void=()=>{}):AppRuntimeLauncher {
+  return options=>{
+    const child=spawn(process.execPath,["-e",script],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],windowsHide:true});
+    child.on("message",options.onMessage);child.on("error",options.onError);
+    child.on("close",(code,signal)=>{ended(signal);options.onExit(code);});
+    return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+  };
+}
 
 describe("persistent dataset worker",()=>{
   it("keeps an over-budget step armed when it finishes before the watch polls",()=>{
@@ -48,6 +57,23 @@ describe("persistent dataset worker",()=>{
     const section=armBudget(state,1n,10_000n,1_000n);
     expect(disarmBudget(state,section,12_000n)).toBe(false);
     expect(Atomics.load(state,0)).toBe(section);
+  });
+  it("fails the open when the worker exits before it is ready",async()=>{
+    await fixture(async({open})=>{
+      await expect(open({},scriptLauncher("process.exit(1)"))).rejects.toMatchObject({code:"worker_stopped"});
+    });
+  });
+  it("kills a worker that is still starting when opening is cancelled",async()=>{
+    await fixture(async({open})=>{
+      const controller=new AbortController();
+      let ended!:(signal:NodeJS.Signals|null)=>void;
+      const exit=new Promise<NodeJS.Signals|null>(resolve=>{ended=resolve;});
+      const launch=scriptLauncher("setInterval(()=>{},60_000)",ended);
+      // The stand-in never sends ready, so only the cancellation can end this open before the 30 s startup limit.
+      const opening=open({signal:controller.signal},options=>{const child=launch(options);setImmediate(()=>controller.abort(new Error("Opening was cancelled.")));return child;});
+      await expect(opening).rejects.toThrow("Opening was cancelled.");
+      expect(await exit).toBe("SIGKILL");
+    });
   });
   it("releases its private directory before the closed worker process exits",async()=>{
     await fixture(async({root,open})=>{
@@ -599,7 +625,7 @@ describe("persistent dataset worker",()=>{
       const launch:AppRuntimeLauncher=options=>{
         const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
         child.on("message",message=>{
-          if((message as {id:number}).id===finalizeId) child.kill("SIGKILL");
+          if(finalizeId!==undefined && (message as {id?:number}).id===finalizeId) child.kill("SIGKILL");
           else options.onMessage(message);
         });
         child.on("error",options.onError);child.on("close",options.onExit);

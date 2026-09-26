@@ -3,6 +3,7 @@ import {
   type RelayApiUpdate,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  RelayUnreachableError,
   type PullWorkspaceFromRelayResult,
   type MaterializeRelayPullPage,
   type PushWorkspaceToRelayResult,
@@ -76,8 +77,19 @@ export interface CloudSyncEngineOptions {
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
-  failureNoticeThreshold?: number;
   nowMs?: () => number;
+}
+
+// Why the last pass failed, as far as dohc knows. "server-unreachable" means
+// no connection reached the server; every other failure is "unknown", and its
+// detail is the only account of it. One failure runs from the first failed
+// pass (`sinceMs`) until a pass succeeds, and `attempts` counts its failed
+// passes, so a surface can tell a blip from an outage.
+export interface CloudSyncFailure {
+  cause: "server-unreachable" | "unknown";
+  detail: string;
+  sinceMs: number;
+  attempts: number;
 }
 
 export interface CloudSyncSnapshot {
@@ -92,13 +104,20 @@ export interface CloudSyncSnapshot {
   updateRequired?: RelayApiUpdate;
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
-  syncFailing?: boolean;
+  syncFailure: CloudSyncFailure | null;
+  // A pass someone asked for with retryNow is running.
+  retrying: boolean;
 }
 
 export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   queuePull(): void;
+  // Runs a pass now instead of waiting out the backoff, and settles when it
+  // ends. The outcome is in the next snapshot, not in the promise. A pass that
+  // does not count as an attempt (a retry on reconnecting or waking) updates
+  // a failure's detail without adding to its attempts.
+  retryNow(options: { countsAsAttempt: boolean }): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -108,7 +127,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   const debounceMs = options.debounceMs ?? 1500;
   const initialBackoffMs = options.initialBackoffMs ?? 5000;
   const maxBackoffMs = options.maxBackoffMs ?? 5 * 60_000;
-  const failureNoticeThreshold = options.failureNoticeThreshold ?? 3;
   const nowMs = options.nowMs ?? (() => Date.now());
 
   let syncing = false;
@@ -119,16 +137,19 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let bootstrapPullPending = options.joinBootstrap === true;
   let updateRequired: RelayApiUpdate | null = null;
   let authExpired = false;
-  let syncFailing = false;
+  let syncFailure: CloudSyncFailure | null = null;
+  let retrying = false;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
-  let consecutiveFailures = 0;
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   // A pull the Chats polls asked for while local writes held the debounce.
   let pullTimer: ReturnType<typeof setTimeout> | undefined;
+  // When the pending backoff pass is due, so a failed retry someone asked for
+  // can keep that deadline instead of moving it.
+  let backoffDueAtMs: number | null = null;
   // The pull a quiet engine makes on its own after `idlePullMs`.
   let idlePullTimer: ReturnType<typeof setTimeout> | undefined;
   // The wait on the relay for a change past `watchSince`, or its restart.
@@ -155,13 +176,20 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     options.onChange();
   }
 
-  function setSyncFailing(value: boolean): void {
-    if (syncFailing === value) return;
-    syncFailing = value;
+  function setSyncFailure(value: CloudSyncFailure | null): void {
+    if (syncFailure === value) return;
+    syncFailure = value;
     emitChange();
   }
 
   function clearTimers(): void {
+    clearPassTimers();
+    stopWatch();
+  }
+
+  // The timers that would start another pass. A pass leaves the wait on the
+  // relay running.
+  function clearPassTimers(): void {
     if (debounceTimer !== undefined) {
       clearTimeout(debounceTimer);
       debounceTimer = undefined;
@@ -178,7 +206,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       clearTimeout(idlePullTimer);
       idlePullTimer = undefined;
     }
-    stopWatch();
   }
 
   function stopWatch(): void {
@@ -239,7 +266,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         watch = undefined;
         // The sign-in expired: the engine stops, and the status says so.
         if (error instanceof RelayUnauthorizedError) {
-          handleFailure(error);
+          handleFailure(error, undefined, true);
           return;
         }
         console.error(`[desktop] relay change wait failed for ${options.rootDir}:`, error);
@@ -280,10 +307,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  function scheduleBackoff(): void {
+  // After a pass someone asked for fails, `keepDueAtMs` is the automatic
+  // pass it displaced: their retry says nothing new about the outage, so the
+  // next automatic pass stays where it was, and the interval does not grow.
+  function scheduleBackoff(options?: { manual: true; keepDueAtMs: number | null }): void {
     if (stopped || authExpired || backoffTimer !== undefined) return;
-    const delay = nextBackoffMs;
-    nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
+    const keepDueAtMs = options?.keepDueAtMs ?? null;
+    const delay =
+      keepDueAtMs === null ? nextBackoffMs : Math.max(0, keepDueAtMs - Date.now());
+    if (!options?.manual) nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
+    backoffDueAtMs = Date.now() + delay;
     retryQueued = true;
     backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
@@ -293,10 +326,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  function handleFailure(error: unknown): void {
+  function handleFailure(
+    error: unknown,
+    displacedDueAtMs: number | null | undefined,
+    countsAsAttempt: boolean,
+  ): void {
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
+      // The expired sign-in is the state now; an older failure is not.
+      syncFailure = null;
       clearTimers();
       emitChange();
       return;
@@ -305,15 +344,25 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (error instanceof RelayApiVersionError) {
       updateRequired = error.update;
       stopped = true;
-      syncFailing = false;
+      syncFailure = null;
       clearTimers();
       emitChange();
       return;
     }
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= failureNoticeThreshold) setSyncFailing(true);
+    setSyncFailure({
+      cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
+      detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      sinceMs: syncFailure?.sinceMs ?? nowMs(),
+      attempts: syncFailure
+        ? syncFailure.attempts + (countsAsAttempt ? 1 : 0)
+        : 1,
+    });
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
-    scheduleBackoff();
+    scheduleBackoff(
+      displacedDueAtMs === undefined
+        ? undefined
+        : { manual: true, keepDueAtMs: displacedDueAtMs },
+    );
   }
 
   // Resolves true when the workspace pull or the shared-channel pass applied
@@ -379,7 +428,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     pulled = { cursor: pullResult.nextCursor, servedChange };
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull({ recovered: consecutiveFailures > 0 });
+        await options.afterSuccessfulPull({ recovered: syncFailure !== null });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }
@@ -410,9 +459,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     ownerAdmissionPending = passOwnerPending;
     pendingChangeCount = Math.max(ownerAdmissionPending.length, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
-    consecutiveFailures = 0;
     nextBackoffMs = initialBackoffMs;
-    setSyncFailing(false);
+    setSyncFailure(null);
     if (ownerAdmissionPending.length > 0) scheduleBackoff();
     // The bootstrap pull done, immediately queue the first normal pass so
     // local identity/journal ops reconcile without waiting for an edit.
@@ -435,7 +483,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // quiet pass announces nothing at its start, and at its end only when it
   // applied ops, changed what the snapshot shows, or something announced
   // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
-  function runPass(rethrow: boolean, quiet = false): Promise<void> {
+  // `retry` marks a pass someone asked for with retryNow.
+  function runPass(
+    rethrow: boolean,
+    quiet = false,
+    retry?: { countsAsAttempt: boolean },
+  ): Promise<void> {
     passesPending += 1;
     // This pass pulls, so it serves a pull waiting on its own deadline.
     if (pullTimer !== undefined) {
@@ -449,18 +502,33 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const result = chain.then(async () => {
       try {
         if (stopped) return;
+        // A retry someone asked for keeps the automatic pass it displaces, in
+        // case it fails. `undefined` marks an automatic pass.
+        const displacedDueAtMs = retry
+          ? backoffTimer !== undefined
+            ? backoffDueAtMs
+            : null
+          : undefined;
+        // This pass carries everything queued so far, so any timer waiting to
+        // start another is now stale. Its own outcome sets the next one. Done
+        // here, in the serialized lifecycle, so a pass that ends before this
+        // one starts cannot leave its backoff behind.
+        clearPassTimers();
+        retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
         let applied = false;
         syncing = true;
+        retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
           applied = await doPass();
         } catch (error) {
-          handleFailure(error);
+          handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
           syncing = false;
+          retrying = false;
           if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
@@ -501,6 +569,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
     queuePull,
 
+    retryNow(options) {
+      if (authExpired || stopped) return Promise.resolve();
+      return runPass(false, false, options);
+    },
+
     snapshot() {
       return {
         syncing,
@@ -511,7 +584,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         ...(updateRequired ? { updateRequired } : {}),
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
-        ...(syncFailing ? { syncFailing: true } : {}),
+        syncFailure: syncFailure ? { ...syncFailure } : null,
+        retrying,
       };
     },
 

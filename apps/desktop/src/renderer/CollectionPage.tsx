@@ -35,6 +35,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
+import { withErrorWords } from "../ipc/errorWords";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 import {
   AUTOMATIONS_FILE,
@@ -128,7 +129,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(error instanceof Error ? error.message : String(error));
+      setLoadError(withErrorWords("dohc could not load this collection.", error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {
@@ -426,7 +427,7 @@ export function CollectionPage({
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
       >
         <span className="text-sm text-muted">
-          dohc could not load this collection. {loadError}
+          {loadError}
         </span>
         <SecondaryButton
           type="button"

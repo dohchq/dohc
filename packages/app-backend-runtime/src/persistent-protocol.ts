@@ -21,6 +21,8 @@ export interface PersistentOpenInput {
   databaseBytes?: number;
   limits?: Partial<Omit<RuntimeLimits, "databaseBytes">>;
   queueDeadlineMs?: number;
+  // Cancels opening: the host kills the starting worker and rejects with the signal's reason.
+  signal?: AbortSignal;
 }
 export interface PersistentPrepareInput {
   expected: DatasetCursor;
@@ -62,7 +64,7 @@ export const REPLAY_BATCH_EVENTS=64;
 export const REPLAY_BATCH_BYTES=32*1024*1024;
 export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string; reportPath?:string }
 export interface MigratedCheckpoint { path:string; cursor:DatasetCursor; report?: { tables:MigrationPreviewTableSummary[]; bytes:number } }
-export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
+export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs" | "signal"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"prepare";expected:DatasetCursor;guest:GuestRequest}
   | {kind:"finalize";input:FinalizeOperation}
@@ -98,6 +100,8 @@ export function databaseBytes(db:DatabaseSync):number {
 // A whole-dataset loop reports its step again after this many rows, so the
 // host's silence limit sees progress and the CPU budget decides how long it runs.
 export const HEARTBEAT_ROWS=1000;
+// The worker sends {ready:true} once, after it has loaded and listens for commands.
+export type PersistentWorkerMessage = PersistentReply | PersistentProgress | {ready:true};
 
 export class PersistentRuntimeError extends Error {
   /** Set by the supervisor when this failure makes the dataset wait before it reopens. */

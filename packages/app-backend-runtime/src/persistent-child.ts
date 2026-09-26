@@ -13,7 +13,7 @@ import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
 import { armBudget, BUDGET_STATE_SLOTS, disarmBudget, watchBudget } from "./budget-watch.js";
 import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
-import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
+import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentResult, PersistentWorkerMessage } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
@@ -302,8 +302,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
   return {path:command.path,cursor:{...cursor}};
 }
 
-const parentPort=(process as unknown as {parentPort?:{on(event:"message",callback:(event:{data:{id:number;command:PersistentCommand}})=>void):void;postMessage(message:PersistentReply):void}}).parentPort;
-const send=(reply:PersistentReply|PersistentProgress)=>parentPort ? (parentPort.postMessage as (message:PersistentReply|PersistentProgress)=>void)(reply) : process.send!(reply);
+const parentPort=(process as unknown as {parentPort?:{on(event:"message",callback:(event:{data:{id:number;command:PersistentCommand}})=>void):void;postMessage(message:PersistentWorkerMessage):void}}).parentPort;
+const send=(reply:PersistentWorkerMessage)=>parentPort ? parentPort.postMessage(reply) : process.send!(reply);
 let activeId:number|undefined;
 let batching=false;
 let step="";
@@ -334,3 +334,4 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
 else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }
+send({ready:true});

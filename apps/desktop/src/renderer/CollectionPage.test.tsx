@@ -681,6 +681,17 @@ describe("CollectionPage", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
+  it("says only what failed when the refusal names nothing a person can act on", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    bridge.getCollection.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:get-collection': DaemonRefusalError [INVALID_PARAMS]: invalid-input",
+    ));
+    renderPage(bridge);
+
+    const failure = await screen.findByTestId("collection-error");
+    expect(failure.querySelector("span")?.textContent).toBe("dohc could not load this collection.");
+  });
+
   it("retries a failed record query", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     bridge.queryCollectionRecords.mockRejectedValueOnce(

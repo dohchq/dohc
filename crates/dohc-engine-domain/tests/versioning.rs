@@ -633,6 +633,43 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_other_kinds() {
     assert_eq!(surviving_kind_after_merge.as_deref(), Some("chat"));
 }
 
+#[test]
+fn rollback_purges_authored_create_request() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut input = write(
+        "main",
+        "created.md",
+        "one",
+        "create-moment",
+        "create-object",
+        10,
+    );
+    input.request_id = Some("create-request".to_owned());
+    VersionedTextStore::new(&mut store)
+        .write_text(&input, &NO_FAULTS)
+        .expect("write");
+    store.write_with(&NO_FAULTS, |tx| {
+        tx.execute("UPDATE engine_requests SET kind = 'authored-create' WHERE request_id = 'create-request'", []).map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    }).expect("mark authored create");
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(&rollback("main", "created.md", "create-moment"), &NO_FAULTS)
+        .expect("rollback");
+    let count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'create-request'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("ledger count");
+    assert_eq!(count, 0);
+}
+
 // oracle: a reserved / absolute / traversal path is rejected.
 #[test]
 fn unsafe_paths_are_rejected() {

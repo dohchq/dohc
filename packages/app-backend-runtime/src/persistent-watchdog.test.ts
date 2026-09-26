@@ -21,6 +21,7 @@ async function open(script: Script, timing: { silenceMs: number; commandCapMs: n
     let exited = false;
     onLaunch?.(() => { exited = true; options.onExit(null); });
     const send = (message: unknown) => { if (!exited) setImmediate(() => options.onMessage(message)); };
+    send({ ready: true });
     return {
       postMessage(message) {
         const command = message as Command;

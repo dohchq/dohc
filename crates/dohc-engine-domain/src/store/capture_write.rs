@@ -2,9 +2,9 @@ use super::rollback::binary_rollback_job_version_prefix;
 use super::{
     MAX_TEXT_BYTES, MOMENT_TEXT_HYDRATION_CAP_BYTES, VersionedTextStore, alias_object_id,
     bounded_identifier, committed, delete_result_from_moment, delete_text_in_tx, get_file_object,
-    get_moment, get_snapshot, hash_author_fields, hash_fields, hash_optional_text_fields,
-    lookup_request, moment_by_order, moment_exists, next_moment_order, object_has_live_alias,
-    record_request, reject_reserved_capture_origin, text_blob_sha256,
+    get_moment, get_snapshot, get_snapshot_meta, hash_author_fields, hash_fields,
+    hash_optional_text_fields, lookup_request, moment_by_order, moment_exists, next_moment_order,
+    object_has_live_alias, record_request, reject_reserved_capture_origin, text_blob_sha256,
     validate_addressable_plaintext_path, validate_identifier, validate_moment_id,
     validate_moment_metadata, validate_plaintext_storable_path, version_exists,
     write_result_from_moment,
@@ -462,6 +462,14 @@ where
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    refuse_unclaimable_head(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        existing_alias.as_deref(),
+        &input.metadata_origin,
+        input.claim_foreign_head,
+    )?;
     let target_object_id = existing_alias.clone().unwrap_or_else(|| {
         derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
     });
@@ -910,6 +918,14 @@ where
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
+    refuse_unclaimable_head(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        existing_alias.as_deref(),
+        &input.metadata_origin,
+        input.claim_foreign_head,
+    )?;
     let target_object_id = existing_alias
         .clone()
         .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
@@ -1712,6 +1728,31 @@ fn reconstruct_write(
 /// that reserved order returned so the caller can pin it against the moment
 /// the write actually persists. A freshly inserted object record is returned
 /// too, so capture does not have to read back state it just established.
+/// Capture overwrites a head another route wrote (an API write, replication,
+/// a live document's settle) only when it saw the change on disk. The ingest
+/// checks that before admission as well as after: an ingest that cannot write
+/// needs no admission, so a live session holding such a head does not turn
+/// it into a refused capture.
+fn refuse_unclaimable_head(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    existing_alias: Option<&str>,
+    metadata_origin: &str,
+    claim_foreign_head: bool,
+) -> Result<(), DomainError> {
+    let Some(object_id) = existing_alias else {
+        return Ok(());
+    };
+    if claim_foreign_head {
+        return Ok(());
+    }
+    match get_snapshot_meta(tx, workspace_id, version_id, object_id)? {
+        Some(head) if head.metadata_origin != metadata_origin => Err(DomainError::CaptureNotOwned),
+        _ => Ok(()),
+    }
+}
+
 fn resolve_capture_object(
     tx: &Transaction<'_>,
     workspace_id: &str,

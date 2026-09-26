@@ -43,6 +43,7 @@ export function createLinkReadRoutes(
   linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   newestFilteredOpFreshness: ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],
+  linkRevisionByteLength: ReturnType<typeof createShareReadQueries>["linkRevisionByteLength"],
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
   linkLogReadRateLimiter: TokenBucketLimiter,
@@ -247,13 +248,19 @@ export function createLinkReadRoutes(
     }
 
     assertSha256(route.sha256);
+    // A current file first, then an earlier revision of a file still in the share.
     const byteLength = storage.currentFileBlobByteLength({
       workspaceId: share.workspaceId,
       versionId: targetVersionId(capability.effectiveSelector),
       selectorPaths: capability.effectiveSelector.paths,
       sha256: route.sha256,
       epochLogFloor,
-    });
+    }) ?? linkRevisionByteLength(
+      share.workspaceId,
+      capability.effectiveSelector,
+      route.sha256,
+      epochLogFloor,
+    );
     if (
       byteLength === null ||
       !Number.isSafeInteger(byteLength) ||

@@ -59,8 +59,14 @@ pub const ROOT_META: &str = "meta";
 pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
 /// Reserved engine metadata that preserves a CRLF Markdown artifact's line endings.
 const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
-const TAGGED_FRONTMATTER_PREFIX_META_KEY: &str = "dohcTaggedFrontmatterPrefix";
-const TAGGED_FRONTMATTER_BASELINE_META_KEY: &str = "dohcTaggedFrontmatterBaseline";
+/// The frontmatter text a document was imported with, kept while it reads as
+/// the current frontmatter. See [`frontmatter_yaml::kept`].
+const FRONTMATTER_SOURCE_META_KEY: &str = "dohcFrontmatterSource";
+/// The item a frontmatter key held when its text was kept, as `client:clock`,
+/// one meta entry per key so edits to different keys on different devices
+/// merge. Writing a key creates a new item, so a key written since, by any
+/// writer, no longer matches and its kept comments are not written back.
+const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
@@ -528,6 +534,12 @@ impl Ydoc {
     /// canonical Y.Doc never represented. Reprojection admits only lexical
     /// variants of the canonical state — the authority every collaborator
     /// already has by editing the document.
+    ///
+    /// The desktop seeds a file as its importer reads it, and the engine
+    /// records source over documents its fold rebuilt, so either reading can
+    /// be the one that reproduces the canonical state. Neither drops content.
+    /// Both keep a block's text as written, so the source's text must also
+    /// read, block by block, as the projection's text does.
     pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
         let reference = self.markdown_source_reference()?;
         if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
@@ -537,12 +549,75 @@ impl Ydoc {
         if source == canonical_projection {
             return Some(source);
         }
-        let staged = Ydoc::wire();
-        self.copy_tagged_frontmatter_to(&staged);
-        staged
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
-            .ok()?;
-        (staged.project_richdoc().ok()? == canonical_projection).then_some(source)
+        self.source_reproduces(&source, canonical_projection, true)
+            .then_some(source)
+    }
+
+    /// The exact Markdown source for the version's file, where `snapshot_text`
+    /// reads the file's current snapshot. This is
+    /// [`Ydoc::preserved_markdown_source`], or else a source whose body is the
+    /// snapshot's body and that still rebuilds the document. That body is
+    /// already the version's file, so keeping it writes no bytes the file did
+    /// not hold, even where a Markdown reader sees structure the engine's
+    /// reader keeps as text, such as a nested list. Without it, a
+    /// frontmatter-only engine edit rewrote such a body. Every projection
+    /// compared with the version's file uses this rule, so a settle, a later
+    /// check that the version is settled, and live activation agree. The
+    /// live baseline keeps the strict rule.
+    pub fn settled_markdown_source<E>(
+        &self,
+        canonical_projection: &str,
+        snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
+    ) -> Result<Option<String>, E> {
+        if let Some(source) = self.preserved_markdown_source(canonical_projection) {
+            return Ok(Some(source));
+        }
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(None);
+        };
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return Ok(None);
+        }
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(None);
+        };
+        let Some(snapshot) = snapshot_text()? else {
+            return Ok(None);
+        };
+        let body = |markdown: &'_ str| {
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+                .map_or(markdown.len(), |(_, body)| body.len())
+        };
+        let (source_body, snapshot_body) = (body(&source), body(&snapshot));
+        Ok(
+            (source[source.len() - source_body..] == snapshot[snapshot.len() - snapshot_body..]
+                && self.source_reproduces(&source, canonical_projection, false))
+            .then_some(source),
+        )
+    }
+
+    /// Whether `source` rebuilds a document that projects
+    /// `canonical_projection`, under the importer's reading or the fold's.
+    /// With `reads_alike`, each text block must also read as its projection
+    /// does; see [`markdown_reads_alike`].
+    fn source_reproduces(
+        &self,
+        source: &str,
+        canonical_projection: &str,
+        reads_alike: bool,
+    ) -> bool {
+        [MarkdownReading::Source, MarkdownReading::Projection]
+            .into_iter()
+            .any(|reading| {
+                let staged = Ydoc::wire();
+                staged
+                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                    .is_ok()
+                    && staged
+                        .project_richdoc()
+                        .is_ok_and(|projection| projection == canonical_projection)
+                    && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
+            })
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -570,29 +645,46 @@ impl Ydoc {
         }
         for (key, value) in meta.iter(&txn) {
             let valid = matches!(
-                (key, value),
+                (key, &value),
                 ("schemaVersion", Out::Any(Any::Number(1.0)))
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
-                        TAGGED_FRONTMATTER_PREFIX_META_KEY
-                            | TAGGED_FRONTMATTER_BASELINE_META_KEY
+                        FRONTMATTER_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_SHA_META_KEY
                             | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
                         Out::Any(Any::String(_)),
                     )
             );
-            if !valid {
+            let item_record = matches!(
+                (key, value),
+                (key, Out::Any(Any::String(_))) if key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
+            );
+            if !valid && !item_record {
                 return Err(invalid());
             }
         }
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
             return Err(invalid());
         }
-        if meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY)
-            != meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY)
-        {
+        if matches!(
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
+            Some(Out::Any(Any::String(text)))
+                if text.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+        ) {
             return Err(invalid());
+        }
+        // The item records name each frontmatter key once, as `client:clock`.
+        let mut item_bytes = 0usize;
+        for (key, value) in meta.iter(&txn) {
+            if let (true, Out::Any(Any::String(item))) =
+                (key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX), value)
+            {
+                item_bytes = item_bytes.saturating_add(key.len() + item.len());
+                if item_bytes > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                    return Err(invalid());
+                }
+            }
         }
         let source_fields = [
             MARKDOWN_SOURCE_META_KEY,
@@ -606,13 +698,15 @@ impl Ydoc {
             return Err(invalid());
         }
         drop(txn);
+        // A well-formed source the engine cannot prove equivalent is not
+        // refused: every projection drops it, as it drops a stale one, so the
+        // engine never writes those bytes.
         if source_fields == 3 {
             let reference = self.markdown_source_reference().ok_or_else(invalid)?;
             let source = self.markdown_source(&reference).ok_or_else(invalid)?;
-            let canonical = self.project_richdoc()?;
-            if reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes())
-                && (source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
-                    || self.preserved_markdown_source(&canonical).is_none())
+            if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+                && reference.projection_sha256
+                    == crate::hex_sha256(self.project_richdoc()?.as_bytes())
             {
                 return Err(invalid());
             }
@@ -923,6 +1017,7 @@ impl Ydoc {
         let mut source_text_bytes = 0usize;
         let mut frontmatter_yaml = ProjectionBuffer::new();
         let mut entries: BTreeMap<String, Value> = BTreeMap::new();
+        let mut rendered: BTreeMap<String, String> = BTreeMap::new();
         if frontmatter.len(&txn) > 0 {
             has_frontmatter = true;
             for (k, v) in frontmatter.iter(&txn) {
@@ -938,11 +1033,14 @@ impl Ydoc {
                     )?,
                 );
             }
-            let mut ordered: Vec<_> = entries.iter().collect();
+            for (key, value) in &entries {
+                rendered.insert(key.clone(), project_frontmatter(key, value)?);
+            }
+            let mut ordered: Vec<_> = rendered.iter().collect();
             ordered
                 .sort_by(|(left, _), (right, _)| frontmatter_yaml::compare_keys(left, right, true));
-            for (k, v) in ordered {
-                frontmatter_yaml.push_str(&project_frontmatter(k, v)?)?;
+            for (_, entry) in ordered {
+                frontmatter_yaml.push_str(entry)?;
             }
         }
         let children: Vec<MarkdownNode> = body
@@ -952,45 +1050,24 @@ impl Ydoc {
             })
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
-        if let (Some(Out::Any(Any::String(prefix))), Some(Out::Any(Any::String(baseline)))) = (
-            meta.get(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
-            meta.get(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY),
-        ) {
-            if baseline.as_ref()
-                == if has_frontmatter {
-                    &frontmatter_yaml.value
-                } else {
-                    "{}\n"
-                }
+        if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
+            let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
             {
-                checked_projection_len(0, prefix.len())?;
-                let equivalent =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&prefix)
-                        .is_some_and(|(parsed, trailing)| {
-                            prefix.starts_with("---")
-                                && trailing.trim_matches(['\r', '\n']).is_empty()
-                                && parsed.as_object().is_some_and(|map| {
-                                    map.len() == entries.len()
-                                        && entries.iter().all(|(key, value)| {
-                                            map.get(key).is_some_and(|parsed| {
-                                                project_frontmatter(key, parsed).is_ok_and(|left| {
-                                                    project_frontmatter(key, value)
-                                                        .is_ok_and(|right| left == right)
-                                                })
-                                            })
-                                        })
-                                })
-                        });
-                if equivalent {
-                    let mut preserved = ProjectionBuffer::new();
-                    preserved.push_str(&prefix)?;
-                    preserved.push_str(&if uses_crlf {
-                        body_markdown.replace('\n', "\r\n")
-                    } else {
-                        body_markdown
-                    })?;
-                    return Ok(preserved.into_string());
+                let kept = frontmatter_yaml::kept(&source, &rendered, &written)
+                    .ok_or(CollabError::FrontmatterEditRefused)?;
+                let mut preserved = ProjectionBuffer::new();
+                preserved.push_str(&kept)?;
+                // A closing delimiter at the end of the file needs a line
+                // break before the body a person adds under it.
+                if !kept.is_empty() && !body_markdown.is_empty() && !kept.ends_with('\n') {
+                    preserved.push_str(if uses_crlf { "\r\n\r\n" } else { "\n\n" })?;
                 }
+                preserved.push_str(&if uses_crlf {
+                    body_markdown.replace('\n', "\r\n")
+                } else {
+                    body_markdown
+                })?;
+                return Ok(preserved.into_string());
             }
         }
         let mut out = ProjectionBuffer::new();
@@ -1066,6 +1143,15 @@ impl Ydoc {
         content_kind: ContentKind,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
+        self.rewrite_content_to_markdown_as(content_kind, markdown, MarkdownReading::Projection)
+    }
+
+    fn rewrite_content_to_markdown_as(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+        reading: MarkdownReading,
+    ) -> Result<Vec<u8>, CollabError> {
         let update = match content_kind {
             ContentKind::Plaintext => {
                 let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
@@ -1081,19 +1167,16 @@ impl Ydoc {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
                 let meta = self.doc.get_or_insert_map(ROOT_META);
-                let (frontmatter, body) = split_markdown_frontmatter(markdown);
+                let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
+                let source = match prefix {
+                    Some(prefix) => frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?,
+                    None => None,
+                };
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
-                let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
+                let blocks =
+                    parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body), reading);
                 self.with_delta(|txn| {
-                    let retains_prefix = matches!(
-                        meta.get(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
-                        Some(Out::Any(Any::String(prefix))) if markdown.starts_with(prefix.as_ref())
-                    );
-                    if !retains_prefix {
-                        meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
-                        meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
-                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1106,6 +1189,7 @@ impl Ydoc {
                     for (key, value) in &frontmatter {
                         map.insert(txn, key.as_str(), json_to_any(value));
                     }
+                    keep_frontmatter_source(&map, &meta, txn, source.as_deref());
                     let len = frag.len(txn);
                     if len > 0 {
                         frag.remove_range(txn, 0, len);
@@ -1124,12 +1208,113 @@ impl Ydoc {
         Ok(update)
     }
 
+    /// Whether edits to this document's properties are refused, because its
+    /// kept frontmatter cannot split into entries without rewriting the others.
+    /// Callers check this before [`Ydoc::frontmatter_set`].
+    pub fn frontmatter_edits_refused(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        matches!(
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
+            Some(Out::Any(Any::String(source)))
+                if dohc_engine_domain::collections::markdown_frontmatter_edits_refused(&source)
+        )
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
-    pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
+    pub fn frontmatter_set(&self, key: &str, value: &str) -> Result<Vec<u8>, CollabError> {
+        self.frontmatter_set_value(key, Value::String(value.to_owned()))
+    }
+
+    /// Validate the candidate projection before changing a frontmatter item.
+    pub fn frontmatter_set_value(&self, key: &str, value: Value) -> Result<Vec<u8>, CollabError> {
+        let mut current = self.frontmatter_json();
+        current
+            .as_object_mut()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .insert(key.to_owned(), value.clone());
+        self.validate_frontmatter_edit(&current, &[key], None)?;
+        Ok(self.write_frontmatter_value(key, &value))
+    }
+
+    fn write_frontmatter_value(&self, key: &str, value: &Value) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
         self.with_delta(|txn| {
-            map.insert(txn, key, value);
+            let before = map.entry_id(txn, key);
+            map.insert(txn, key, json_to_any(value));
+            carry_frontmatter_source_item(&map, &meta, txn, key, before);
         })
+    }
+
+    fn validate_frontmatter_edit(
+        &self,
+        current: &Value,
+        edited: &[&str],
+        supplied_candidate: Option<&str>,
+    ) -> Result<(), CollabError> {
+        let original = supplied_candidate
+            .map(|_| self.project_richdoc())
+            .transpose()?;
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let rendered = current
+            .as_object()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), project_frontmatter(key, value)?)))
+            .collect::<ProjectionResult<BTreeMap<_, _>>>()?;
+        let expected = format!(
+            "---\n{}---\n",
+            rendered.values().cloned().collect::<String>()
+        );
+        let candidate = if let Some(candidate) = supplied_candidate {
+            candidate.to_owned()
+        } else if let Some(Out::Any(Any::String(source))) =
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY)
+        {
+            let written = written_frontmatter_keys(&map, &meta, &txn);
+            frontmatter_yaml::kept(&source, &rendered, &written)
+                .ok_or(CollabError::FrontmatterEditRefused)?
+        } else {
+            expected.clone()
+        };
+        if candidate.is_empty() && rendered.is_empty() {
+            return Ok(());
+        }
+        let reread = dohc_engine_domain::collections::markdown_frontmatter_block(&candidate)
+            .ok_or(CollabError::FrontmatterEditRefused)?;
+        let reloaded = reread
+            .value
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), project_frontmatter(key, value)?)))
+            .collect::<ProjectionResult<BTreeMap<_, _>>>()?;
+        if reloaded != rendered {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        if let Some(original) = original {
+            let untouched: Vec<_> = rendered
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !edited.contains(key))
+                .collect();
+            if !untouched.is_empty()
+                && !dohc_engine_domain::collections::frontmatter_preserves_yaml_values(
+                    &original, &candidate, &untouched,
+                )
+            {
+                return Err(CollabError::FrontmatterEditRefused);
+            }
+        }
+        if !edited.is_empty()
+            && !dohc_engine_domain::collections::frontmatter_preserves_yaml_values(
+                &expected, &candidate, edited,
+            )
+        {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        Ok(())
     }
 
     /// Set one frontmatter scalar and bind the resulting semantic projection
@@ -1140,8 +1325,21 @@ impl Ydoc {
         value: &str,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
+        if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(CollabError::ProjectionTooLarge {
+                actual: markdown.len(),
+                max: dohc_engine_domain::MAX_TEXT_BYTES,
+            });
+        }
+        let value = Value::String(value.to_owned());
+        let mut current = self.frontmatter_json();
+        current
+            .as_object_mut()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .insert(key.to_owned(), value.clone());
+        self.validate_frontmatter_edit(&current, &[key], Some(markdown))?;
         self.stage_source_preserving_edit(markdown, |staged| {
-            let _ = staged.frontmatter_set(key, value);
+            let _ = staged.write_frontmatter_value(key, &value);
             Ok(())
         })
     }
@@ -1169,40 +1367,23 @@ impl Ydoc {
         max_bytes: usize,
     ) -> Result<Vec<u8>, CollabError> {
         self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
-            point.copy_tagged_frontmatter_to(staged);
             restore_copy::copy(point, staged, max_bytes)
         })
     }
 
-    fn copy_tagged_frontmatter_to(&self, target: &Ydoc) {
-        let source = self.doc.get_or_insert_map(ROOT_META);
-        let source_txn = self.doc.transact();
-        let meta = target.doc.get_or_insert_map(ROOT_META);
-        let mut txn = target.doc.transact_mut();
-        for key in [
-            TAGGED_FRONTMATTER_PREFIX_META_KEY,
-            TAGGED_FRONTMATTER_BASELINE_META_KEY,
-        ] {
-            match source.get(&source_txn, key) {
-                Some(Out::Any(Any::String(value))) => {
-                    meta.insert(&mut txn, key, value.as_ref());
-                }
-                _ => {
-                    meta.remove(&mut txn, key);
-                }
-            }
-        }
-    }
-
     /// Remove one target from a relation field. A single relation removes the
     /// key; a many relation keeps the sequence and removes matching entries.
-    /// Returns `None` when the applied frontmatter has no such link.
+    /// Returns `None` when there is no such link or edits cannot preserve
+    /// other entries.
     pub fn frontmatter_drop_relation_target(
         &self,
         key: &str,
         target_record_id: &str,
         many: bool,
     ) -> Option<Vec<u8>> {
+        if self.frontmatter_edits_refused() {
+            return None;
+        }
         let current = self.frontmatter_json();
         let value = current.as_object()?.get(key)?;
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -1221,10 +1402,20 @@ impl Ydoc {
                     .cloned()
                     .collect(),
             );
+            let meta = self.doc.get_or_insert_map(ROOT_META);
+            let mut next = current.clone();
+            next.as_object_mut()?
+                .insert(key.to_owned(), retained.clone());
+            self.validate_frontmatter_edit(&next, &[key], None).ok()?;
             Some(self.with_delta(|txn| {
+                let before = map.entry_id(txn, key);
                 map.insert(txn, key, json_to_any(&retained));
+                carry_frontmatter_source_item(&map, &meta, txn, key, before);
             }))
         } else if value.as_str() == Some(target_record_id) {
+            let mut next = current.clone();
+            next.as_object_mut()?.remove(key);
+            self.validate_frontmatter_edit(&next, &[], None).ok()?;
             Some(self.with_delta(|txn| {
                 map.remove(txn, key);
             }))
@@ -1346,6 +1537,7 @@ impl Ydoc {
         staged.apply(&full)?;
         drop(full);
         edit(&staged)?;
+        staged.keep_frontmatter_source_of(markdown)?;
         staged.record_validated_markdown_source_reference(markdown)?;
         let update = if bounded {
             let mut encoder = bounded_encoder::BoundedEncoder::new(
@@ -1388,6 +1580,23 @@ impl Ydoc {
         Ok(update)
     }
 
+    /// Keep the frontmatter text of exact source bytes, so the frontmatter
+    /// survives once a later edit makes the bytes stale.
+    fn keep_frontmatter_source_of(&self, markdown: &str) -> Result<(), CollabError> {
+        let (frontmatter, prefix, _) = split_markdown_frontmatter(markdown);
+        let source = match prefix {
+            Some(prefix) => {
+                frontmatter_yaml::source(prefix, &frontmatter, markdown.contains("\r\n"))?
+            }
+            None => None,
+        };
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let mut txn = self.doc.transact_mut();
+        keep_frontmatter_source(&map, &meta, &mut txn, source.as_deref());
+        Ok(())
+    }
+
     fn record_validated_markdown_source_reference(
         &self,
         markdown: &str,
@@ -1408,6 +1617,84 @@ impl Ydoc {
             projection_sha256.as_str(),
         );
         Ok(())
+    }
+}
+
+fn item_text(id: yrs::ID) -> String {
+    format!("{}:{}", id.client.get(), id.clock)
+}
+
+fn item_meta_key(key: &str) -> String {
+    format!("{FRONTMATTER_SOURCE_ITEM_META_PREFIX}{key}")
+}
+
+/// Keep `source` as the document's frontmatter text, with the item each
+/// frontmatter key holds now, in the caller's transaction. `None` removes both.
+fn keep_frontmatter_source(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &mut yrs::TransactionMut,
+    source: Option<&str>,
+) {
+    let stale: Vec<String> = meta
+        .keys(txn)
+        .filter(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX))
+        .map(str::to_owned)
+        .collect();
+    for key in stale {
+        meta.remove(txn, &key);
+    }
+    let Some(source) = source else {
+        meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
+        return;
+    };
+    let items: Vec<(String, String)> = map
+        .keys(txn)
+        .filter_map(|key| {
+            map.entry_id(txn, key)
+                .map(|id| (item_meta_key(key), item_text(id)))
+        })
+        .collect();
+    meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source);
+    for (key, item) in items {
+        meta.insert(txn, key.as_str(), item);
+    }
+}
+
+/// The frontmatter keys still held by the items their kept text was written for.
+fn written_frontmatter_keys<T: ReadTxn>(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &T,
+) -> BTreeSet<String> {
+    meta.iter(txn)
+        .filter_map(|(meta_key, item)| {
+            let key = meta_key.strip_prefix(FRONTMATTER_SOURCE_ITEM_META_PREFIX)?;
+            matches!(item, Out::Any(Any::String(item))
+                if map.entry_id(txn, key).is_some_and(|id| item.as_ref() == item_text(id)))
+            .then(|| key.to_owned())
+        })
+        .collect()
+}
+
+/// After an edit writes `key`, move its kept text to the new item when the
+/// replaced item was the one the text was written for, so an edited value
+/// keeps its place and comments. A key that was absent, or written by someone
+/// else since, stays unmatched.
+fn carry_frontmatter_source_item(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &mut yrs::TransactionMut,
+    key: &str,
+    before: Option<yrs::ID>,
+) {
+    let (Some(before), Some(after)) = (before, map.entry_id(txn, key)) else {
+        return;
+    };
+    let meta_key = item_meta_key(key);
+    if matches!(meta.get(txn, &meta_key), Some(Out::Any(Any::String(item))) if item.as_ref() == item_text(before))
+    {
+        meta.insert(txn, meta_key.as_str(), item_text(after));
     }
 }
 
@@ -1457,10 +1744,9 @@ enum MdBlock {
         content: String,
     },
     Rule,
-    /// A GFM table under a row-height annotation. A table without one stays
-    /// paragraph text, which the projector reproduces verbatim; an annotated
-    /// one cannot, because the projector entity-encodes `<` in text, so the
-    /// fold rebuilds the table the projector wrote.
+    /// A GFM table. An annotated table cannot stay paragraph text, because
+    /// the projector entity-encodes `<` in text, so the fold rebuilds the
+    /// table the projector wrote.
     Table {
         rows: Vec<Vec<String>>,
         alignments: Vec<Option<TableAlign>>,
@@ -1468,24 +1754,513 @@ enum MdBlock {
     },
 }
 
-/// Split a leading `---` YAML frontmatter block off the chosen markdown.
-/// Values use the collection indexer's YAML parser so a richdoc seed and its
-/// index agree on scalar, sequence, and mapping types.
-fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
-    match dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown) {
-        Some((Value::Object(frontmatter), body)) => {
-            let body = body
-                .strip_prefix("\r\n")
-                .or_else(|| body.strip_prefix('\n'))
-                .unwrap_or(body);
-            (frontmatter, body)
+/// How [`parse_markdown_blocks`] reads Markdown that the projector may not
+/// have written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkdownReading {
+    /// Rebuild what the projector wrote, so the result projects the same
+    /// bytes back. A table without a row-height annotation stays paragraph
+    /// text, which the projector reproduces verbatim, and a blank line ends a
+    /// list, as it does between two lists the projector wrote.
+    Projection,
+    /// Read a file as the desktop's importer reads it. Every GFM table is a
+    /// table, and a list continues across blank lines.
+    Source,
+    /// Read the projection of a document built with `Source`, to compare the
+    /// two. Every GFM table is a table, and a blank line ends a list, since
+    /// the projector writes one only between two lists.
+    ProjectedSource,
+}
+
+/// Whether `source` reads, block by block, as `projection` does. Both are
+/// parsed with `reading` and must have the same blocks. Each pair of texts
+/// the engine keeps as written must then resolve to the same text and hold
+/// the same syntax in the same order. See [`read_text`].
+fn markdown_reads_alike(source: &str, projection: &str, reading: MarkdownReading) -> bool {
+    let blocks = |markdown: &str, reading| {
+        let (_, _, body) = split_markdown_frontmatter(markdown);
+        parse_markdown_blocks(&body.replace("\r\n", "\n"), reading)
+    };
+    let projected = match reading {
+        MarkdownReading::Source => MarkdownReading::ProjectedSource,
+        reading => reading,
+    };
+    blocks_read_alike(&blocks(source, reading), &blocks(projection, projected))
+}
+
+fn blocks_read_alike(source: &[MdBlock], projection: &[MdBlock]) -> bool {
+    let items_alike = |source: &[String], projection: &[String]| {
+        source.len() == projection.len()
+            && source
+                .iter()
+                .zip(projection)
+                .all(|(source, projection)| texts_read_alike(source, projection, TextPlace::Item))
+    };
+    source.len() == projection.len()
+        && source.iter().zip(projection).all(|pair| match pair {
+            (MdBlock::Paragraph(source), MdBlock::Paragraph(projection)) => {
+                texts_read_alike(source, projection, TextPlace::Block)
+            }
+            (
+                MdBlock::Heading { level, text },
+                MdBlock::Heading {
+                    level: projected_level,
+                    text: projected_text,
+                },
+            ) => {
+                level == projected_level
+                    && texts_read_alike(text, projected_text, TextPlace::Inline)
+            }
+            (MdBlock::Quote(source), MdBlock::Quote(projection)) => {
+                blocks_read_alike(source, projection)
+            }
+            (MdBlock::BulletList(source), MdBlock::BulletList(projection)) => {
+                items_alike(source, projection)
+            }
+            (
+                MdBlock::OrderedList { start, items },
+                MdBlock::OrderedList {
+                    start: projected_start,
+                    items: projected_items,
+                },
+            ) => start == projected_start && items_alike(items, projected_items),
+            (MdBlock::TaskList(source), MdBlock::TaskList(projection)) => {
+                source.len() == projection.len()
+                    && source.iter().zip(projection).all(
+                        |((checked, source), (projected, projection))| {
+                            checked == projected
+                                && texts_read_alike(source, projection, TextPlace::Item)
+                        },
+                    )
+            }
+            (
+                MdBlock::Table {
+                    rows,
+                    alignments,
+                    row_heights,
+                },
+                MdBlock::Table {
+                    rows: projected_rows,
+                    alignments: projected_alignments,
+                    row_heights: projected_heights,
+                },
+            ) => {
+                alignments == projected_alignments
+                    && row_heights == projected_heights
+                    && rows.len() == projected_rows.len()
+                    && rows.iter().zip(projected_rows).all(|(row, projected)| {
+                        row.len() == projected.len()
+                            && row.iter().zip(projected).all(|(cell, projected)| {
+                                texts_read_alike(cell, projected, TextPlace::Cell)
+                            })
+                    })
+            }
+            (source @ (MdBlock::CodeBlock { .. } | MdBlock::Rule), projection) => {
+                source == projection
+            }
+            _ => false,
+        })
+}
+
+/// Where a run of text the engine keeps as written sits in its block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextPlace {
+    /// A paragraph. Each of its lines can start a block for a reader.
+    Block,
+    /// A list item's text, which starts a block and then continues it.
+    Item,
+    /// Heading text, read inline.
+    Inline,
+    /// A table cell, read inline. A `<br>` here separates the cell's blocks,
+    /// and the projector writes it raw however the source spelled it.
+    Cell,
+}
+
+fn texts_read_alike(source: &str, projection: &str, place: TextPlace) -> bool {
+    read_text(source, place) == read_text(projection, place)
+}
+
+/// Stands for a table cell's `<br>`, however it is spelled.
+const CELL_BREAK: char = '\u{E000}';
+
+/// A character reference the desktop importer decodes. Others stay text.
+fn decoded_reference(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        _ => {
+            let code = name.strip_prefix('#')?.parse::<u32>().ok()?;
+            matches!(
+                code,
+                9 | 13 | 32 | 35 | 36 | 41 | 42 | 43 | 45 | 46 | 61 | 91 | 95 | 96 | 126 | 160
+            )
+            .then(|| char::from_u32(code))
+            .flatten()
         }
-        _ => (serde_json::Map::new(), markdown),
     }
 }
 
-fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
-    parse_markdown_blocks_at(body, 0)
+/// Whether renderers decode this reference, which the importer keeps as
+/// text, to a character a reader may not see as written: any numeric
+/// reference, which can name a control, format, or bidirectional character;
+/// a name with a capital letter, as in `&LT;` or `&ZeroWidthSpace;`; or a
+/// name for a space or an invisible character. `&copy;` stays text.
+fn rendered_reference(name: &str) -> bool {
+    name.starts_with('#')
+        || name.bytes().any(|byte| byte.is_ascii_uppercase())
+        || matches!(
+            name,
+            "nbsp"
+                | "ensp"
+                | "emsp"
+                | "emsp13"
+                | "emsp14"
+                | "numsp"
+                | "puncsp"
+                | "thinsp"
+                | "hairsp"
+                | "zwnj"
+                | "zwj"
+                | "lrm"
+                | "rlm"
+                | "shy"
+                | "af"
+                | "it"
+                | "ic"
+        )
+}
+
+/// HTML elements a Markdown renderer shows as HTML rather than text. A
+/// renderer hides a comment and may load what an element points at, so a
+/// source may not spell either where its projection holds text. A `<` before
+/// any other name, as in `Vec<T>`, is text to the importer and stays so.
+const HTML_ELEMENTS: &str =
+    "a abbr address applet area article aside audio b base basefont bdi bdo big blink \
+     blockquote body br button canvas caption center cite code col colgroup data datalist dd \
+     del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer \
+     form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img \
+     input ins kbd label legend li link main map mark marquee math menu meta meter nav nobr \
+     noembed noframes noscript object ol optgroup option output p param picture plaintext pre \
+     progress q rp rt ruby s samp script search section select slot small source span strike \
+     strong style sub summary sup svg table tbody td template textarea tfoot th thead time \
+     title tr track tt u ul var video wbr xmp";
+
+/// A run of text as the importer, or a renderer, reads it: the text with
+/// backslash escapes and decoded character references resolved, and, in
+/// order, the syntax that makes it more than text. That syntax is a block
+/// start at the start of a line, an HTML comment or element, and an
+/// autolink. The projector escapes each of them where the document holds
+/// text, so a source that spells one where its projection escapes it means
+/// something else. A plain `&`, `<` or `>` resolves to itself, as the
+/// projector's `&amp;`, `&lt;` and `&gt;` do.
+fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
+    let mut resolved = String::with_capacity(text.len());
+    let mut syntax = Vec::new();
+    if matches!(place, TextPlace::Block | TextPlace::Item) {
+        // A list item's text starts a paragraph too, so a link reference
+        // definition can open it.
+        for (index, line) in text.split('\n').enumerate() {
+            let starts = index == 0;
+            if let Some(kind) = block_start(line, starts, starts) {
+                syntax.push(format!("line {index}: {kind}"));
+            }
+        }
+    }
+    let mut rest = text;
+    while let Some(character) = rest.chars().next() {
+        if place == TextPlace::Cell {
+            if let Some(spelling) = ["<br>", "&lt;br&gt;", "&amp;lt;br&amp;gt;"]
+                .into_iter()
+                .find(|spelling| rest.starts_with(spelling))
+            {
+                resolved.push(CELL_BREAK);
+                rest = &rest[spelling.len()..];
+                continue;
+            }
+        }
+        match character {
+            '\\' if rest[1..].starts_with(|next: char| next.is_ascii_punctuation()) => {
+                resolved.push_str(&rest[1..2]);
+                rest = &rest[2..];
+                continue;
+            }
+            '&' => {
+                let name_end = rest[1..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
+                    .map_or(rest.len(), |end| end + 1);
+                if rest[name_end..].starts_with(';') {
+                    let name = &rest[1..name_end];
+                    if let Some(decoded) = decoded_reference(name) {
+                        resolved.push(decoded);
+                        rest = &rest[name_end + 1..];
+                        continue;
+                    }
+                    if rendered_reference(name) {
+                        syntax.push(format!("at {}: reference {name}", resolved.len()));
+                    }
+                }
+            }
+            '<' => {
+                if let Some(kind) = inline_syntax(rest) {
+                    syntax.push(format!("at {}: {kind}", resolved.len()));
+                }
+            }
+            _ => {}
+        }
+        resolved.push(character);
+        rest = &rest[character.len_utf8()..];
+    }
+    (resolved, syntax)
+}
+
+/// The raw HTML or autolink that `text`, which starts with `<`, opens: a
+/// comment, a processing instruction, a declaration, CDATA, a tag whose name
+/// is an HTML element, or any other tag with attributes. Browsers and the
+/// renderers that show shared files hide or act on each of these. A tag with
+/// no attributes and another name, as in `Vec<T>` or `<file>`, is text.
+fn inline_syntax(text: &str) -> Option<String> {
+    let rest = &text[1..];
+    if rest.starts_with("!--") {
+        return Some("comment".into());
+    }
+    if rest.starts_with('?')
+        || rest.starts_with("![CDATA[")
+        || rest
+            .strip_prefix('!')
+            .is_some_and(|declaration| declaration.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        return Some("declaration".into());
+    }
+    let tag = rest.strip_prefix('/').unwrap_or(rest);
+    let name_end = tag
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(tag.len());
+    let name = tag[..name_end].to_ascii_lowercase();
+    let element = HTML_ELEMENTS
+        .split_ascii_whitespace()
+        .any(|element| element == name)
+        && tag[name_end..]
+            .chars()
+            .next()
+            .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
+    if element || html_tag_has_attributes(text) {
+        return Some(format!("element {name}"));
+    }
+    let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
+    if !text[close..].starts_with('>') {
+        return None;
+    }
+    let inner = &text[1..close];
+    let scheme = inner.split_once(':').map_or("", |(scheme, _)| scheme);
+    let uri = (2..=32).contains(&scheme.len())
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    let email = inner.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty()
+            && !domain.is_empty()
+            && domain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    });
+    (uri || email).then(|| "autolink".into())
+}
+
+/// Whether `text` starts with a complete CommonMark open tag that has
+/// attributes: `<`, a tag name, attributes, optional whitespace and `/`, and
+/// `>`.
+fn html_tag_has_attributes(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+    let skip_space = |mut at: usize| {
+        while space(at) {
+            at += 1;
+        }
+        at
+    };
+    if !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    let mut at = 1;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        at += 1;
+    }
+    let mut attributes = false;
+    loop {
+        let name = skip_space(at);
+        if name == at
+            || !bytes
+                .get(name)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':'))
+        {
+            break;
+        }
+        at = name + 1;
+        while bytes.get(at).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
+        }) {
+            at += 1;
+        }
+        attributes = true;
+        let equals = skip_space(at);
+        if bytes.get(equals) != Some(&b'=') {
+            continue;
+        }
+        let value = skip_space(equals + 1);
+        at = match bytes.get(value) {
+            Some(quote @ (b'"' | b'\'')) => match text[value + 1..].find(char::from(*quote)) {
+                Some(close) => value + close + 2,
+                None => return false,
+            },
+            _ => {
+                let mut end = value;
+                while !space(end)
+                    && bytes.get(end).is_some_and(|byte| {
+                        !matches!(byte, b'"' | b'\'' | b'=' | b'<' | b'>' | b'`')
+                    })
+                {
+                    end += 1;
+                }
+                if end == value {
+                    return false;
+                }
+                end
+            }
+        };
+    }
+    let mut end = skip_space(at);
+    if bytes.get(end) == Some(&b'/') {
+        end += 1;
+    }
+    attributes && bytes.get(end) == Some(&b'>')
+}
+
+/// The block a Markdown reader starts on one line of a text run: a heading,
+/// quote, list item, fence, thematic break, math block, or indented code
+/// where a block starts, a link reference definition where a paragraph
+/// starts, or a setext underline under a paragraph line. A continuing
+/// paragraph line starts a numbered list only at `1`. The projector escapes
+/// each of these where the document holds text.
+fn block_start(line: &str, starts_block: bool, starts_paragraph: bool) -> Option<&'static str> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent >= 4 {
+        return starts_block.then_some("code");
+    }
+    let rest = &line[indent..];
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&hashes)
+        && rest[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    {
+        return Some("heading");
+    }
+    if rest.starts_with('>') {
+        return Some("quote");
+    }
+    if rest.starts_with("```") || rest.starts_with("~~~") {
+        return Some("fence");
+    }
+    if rest.starts_with("$$") {
+        return Some("math");
+    }
+    if thematic_break(rest) {
+        return Some("rule");
+    }
+    let bullet = rest.starts_with(['-', '*', '+']);
+    if bullet && rest[1..].chars().next().is_none_or(char::is_whitespace) {
+        return Some("list");
+    }
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=9).contains(&digits)
+        && (starts_block || &rest[..digits] == "1")
+        && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+        && rest[digits + 1..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    {
+        return Some("list");
+    }
+    if !starts_block
+        && !rest.is_empty()
+        && rest
+            .trim_end_matches([' ', '\t'])
+            .bytes()
+            .all(|byte| byte == b'=')
+    {
+        return Some("setext");
+    }
+    if starts_paragraph {
+        let label = rest.strip_prefix('[')?;
+        let close = label.find(']')?;
+        if close > 0 && label[close + 1..].starts_with(':') {
+            return Some("definition");
+        }
+    }
+    None
+}
+
+fn thematic_break(line: &str) -> bool {
+    line.chars().next().is_some_and(|marker| {
+        matches!(marker, '-' | '*' | '_')
+            && line.chars().filter(|c| *c == marker).count() >= 3
+            && line.chars().all(|c| c == marker || c == ' ' || c == '\t')
+    })
+}
+
+/// Split a leading `---` YAML frontmatter block, with the blank lines after
+/// it, off the chosen markdown. The prefix is `None` when the document has no
+/// readable block. Values use the collection indexer's YAML parser so a
+/// richdoc seed and its index agree on scalar, sequence, and mapping types.
+fn split_markdown_frontmatter(
+    markdown: &str,
+) -> (serde_json::Map<String, Value>, Option<&str>, &str) {
+    match dohc_engine_domain::collections::markdown_frontmatter_block(markdown) {
+        Some(block) => {
+            let mut body = block.body;
+            while let Some(rest) = body
+                .strip_prefix("\r\n")
+                .or_else(|| body.strip_prefix('\n'))
+            {
+                body = rest;
+            }
+            (
+                block.value,
+                Some(&markdown[..markdown.len() - body.len()]),
+                body,
+            )
+        }
+        None => match dohc_engine_domain::collections::unreadable_frontmatter_prefix(markdown) {
+            // A block neither loader reads stays as written, with no values.
+            Some(prefix) => {
+                let mut body = &markdown[prefix.len()..];
+                while let Some(rest) = body
+                    .strip_prefix("\r\n")
+                    .or_else(|| body.strip_prefix('\n'))
+                {
+                    body = rest;
+                }
+                (
+                    serde_json::Map::new(),
+                    Some(&markdown[..markdown.len() - body.len()]),
+                    body,
+                )
+            }
+            None => (serde_json::Map::new(), None, markdown),
+        },
+    }
+}
+
+fn parse_markdown_blocks(body: &str, reading: MarkdownReading) -> Vec<MdBlock> {
+    parse_markdown_blocks_at(body, 0, reading)
 }
 
 /// How many nested blockquote levels the fold will build before it stops
@@ -1512,7 +2287,8 @@ fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
 const QUOTE_FOLD_MAX_DEPTH: usize = 120;
 
 /// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
-fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
+fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) -> Vec<MdBlock> {
+    let tables = reading != MarkdownReading::Projection;
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
@@ -1574,6 +2350,7 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
                 blocks.push(MdBlock::Quote(parse_markdown_blocks_at(
                     &inner.join("\n"),
                     depth + 1,
+                    reading,
                 )));
             }
             continue;
@@ -1587,53 +2364,55 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
             blocks.push(MdBlock::TaskList(items));
             continue;
         }
-        if let Some(item) = line.strip_prefix("- ") {
+        // A marker change starts a new bullet list. A numbered list keeps
+        // its first number and ignores later numbers and delimiters, as the
+        // importer and CommonMark do.
+        let blank_lines = if reading == MarkdownReading::Source {
+            usize::MAX
+        } else {
+            0
+        };
+        if let Some((marker, item)) = parse_bullet_item(line) {
             let mut items = vec![item.to_string()];
-            index += 1;
-            while let Some(next) = lines.get(index).and_then(|line| {
-                (parse_task_item(line).is_none())
-                    .then(|| line.strip_prefix("- "))
-                    .flatten()
-            }) {
+            while let Some((at, (_, next))) =
+                next_list_item(&lines, index + 1, blank_lines, |line| {
+                    parse_bullet_item(line).filter(|(next_marker, _)| {
+                        *next_marker == marker && parse_task_item(line).is_none()
+                    })
+                })
+            {
                 items.push(next.to_string());
-                index += 1;
+                index = at;
             }
             blocks.push(MdBlock::BulletList(items));
+            index += 1;
             continue;
         }
         if let Some((start, item)) = parse_ordered_item(line) {
             let mut items = vec![item];
-            // A parsed ordinal can be i64::MAX, and the successor it implies
-            // cannot be represented: unchecked `+ 1` panics the workspace
-            // actor in debug and test builds and wraps in release, where the
-            // wrapped value then mis-parses every following line. The list
-            // simply ends when no successor exists.
-            let mut expected = start.checked_add(1);
-            index += 1;
-            while let Some(next_expected) = expected {
-                let Some((ordinal, next)) =
-                    lines.get(index).and_then(|line| parse_ordered_item(line))
-                else {
-                    break;
-                };
-                if ordinal != next_expected {
-                    break;
-                }
+            while let Some((at, (_, next))) =
+                next_list_item(&lines, index + 1, blank_lines, parse_ordered_item)
+            {
                 items.push(next);
-                expected = next_expected.checked_add(1);
-                index += 1;
+                index = at;
             }
             blocks.push(MdBlock::OrderedList { start, items });
+            index += 1;
             continue;
         }
-        if let Some((block, consumed)) = parse_annotated_table(&lines[index..]) {
+        let table = match parse_annotated_table(&lines[index..]) {
+            None if tables => parse_table(&lines[index..], Vec::new()),
+            annotated => annotated,
+        };
+        if let Some((block, consumed)) = table {
             blocks.push(block);
             index += consumed;
             continue;
         }
         // Paragraph: consecutive lines until a blank line or a structural
         // line. Interior single newlines stay inside one text run, which the
-        // projector re-emits verbatim.
+        // projector re-emits verbatim. Only a numbered list that starts at 1
+        // interrupts a paragraph.
         let mut para = vec![line];
         index += 1;
         while index < lines.len() {
@@ -1643,9 +2422,10 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
                 || next.starts_with("```")
                 || next == ">"
                 || next.starts_with("> ")
-                || next.starts_with("- ")
+                || parse_bullet_item(next).is_some()
                 || parse_heading(next).is_some()
-                || parse_ordered_item(next).is_some()
+                || parse_ordered_item(next).is_some_and(|(start, _)| start == 1)
+                || (tables && table_starts(&lines[index..]))
             {
                 break;
             }
@@ -1709,18 +2489,17 @@ fn decode_html_entities_once(value: &str) -> String {
     output
 }
 
-/// Splits one `| a | b |` line into trimmed cells, with the projector's pipe
-/// escaping and entity encoding undone.
+/// Splits one GFM table row, such as `| a | b |` or `a | b`, into trimmed
+/// cells as written. A line without an unescaped pipe is not a row.
 fn parse_table_row(line: &str) -> Option<Vec<String>> {
-    let inner = line.strip_prefix('|')?.strip_suffix('|')?;
+    let line = trim_js(line);
     let mut cells = Vec::new();
-    let mut cell = String::new();
+    let mut start = 0usize;
     let mut backslashes = 0usize;
-    for character in inner.chars() {
+    for (at, character) in line.char_indices() {
         if character == '|' && backslashes % 2 == 0 {
-            cells.push(std::mem::take(&mut cell));
-        } else {
-            cell.push(character);
+            cells.push(&line[start..at]);
+            start = at + 1;
         }
         backslashes = if character == '\\' {
             backslashes + 1
@@ -1728,11 +2507,25 @@ fn parse_table_row(line: &str) -> Option<Vec<String>> {
             0
         };
     }
-    cells.push(cell);
+    if cells.is_empty() {
+        return None;
+    }
+    let closed = start == line.len();
+    cells.push(&line[start..]);
+    // A leading or trailing pipe bounds the row; it holds no cell.
+    if line.starts_with('|') {
+        cells.remove(0);
+    }
+    if closed {
+        cells.pop();
+    }
+    if cells.is_empty() {
+        return None;
+    }
     Some(
         cells
             .into_iter()
-            .map(|cell| decode_html_entities_once(&trim_js(&cell).replace("\\|", "|")))
+            .map(|cell| trim_js(cell).to_string())
             .collect(),
     )
 }
@@ -1761,11 +2554,53 @@ fn parse_table_delimiter(line: &str) -> Option<Vec<Option<TableAlign>>> {
 /// table took. An annotation with no table under it stays ordinary text.
 fn parse_annotated_table(lines: &[&str]) -> Option<(MdBlock, usize)> {
     let row_heights = parse_table_row_heights(lines.first()?)?;
-    let header = parse_table_row(lines.get(1)?)?;
-    let alignments = parse_table_delimiter(lines.get(2)?)?;
+    let (table, consumed) = parse_table(&lines[1..], row_heights)?;
+    Some((table, consumed + 1))
+}
+
+/// Whether a GFM table starts here: a header row, then a delimiter row with
+/// as many cells. It reads the second line first, so prose costs one byte
+/// scan.
+fn table_starts(lines: &[&str]) -> bool {
+    lines.get(1).is_some_and(|line| {
+        line.contains('-')
+            && line
+                .bytes()
+                .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'))
+    }) && parse_table(&lines[..2], Vec::new()).is_some()
+}
+
+/// A GFM table with the number of lines it took: a header row, a delimiter
+/// row with as many cells, then each following line up to a blank line or
+/// the start of another block, as marked reads it. A line without a pipe is
+/// a one-cell row. A short row gains empty cells, and empty cells past the
+/// header are dropped. A row whose cells past the header hold text ends the
+/// table instead of losing that text, as the desktop importer does.
+fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBlock, usize)> {
+    let first = lines.first()?;
+    // marked reads a list item or HTML before a table, and so does this.
+    let rest = first.trim_start_matches(' ');
+    if ends_table(first) || rest.starts_with('<') || parse_ordered_item(rest).is_some() {
+        return None;
+    }
+    let header = parse_table_row(first)?;
+    let alignments = parse_table_delimiter(lines.get(1)?)?;
+    if alignments.len() != header.len() {
+        return None;
+    }
     let mut rows = vec![header];
-    let mut consumed = 3;
-    while let Some(row) = lines.get(consumed).and_then(|line| parse_table_row(line)) {
+    let mut consumed = 2;
+    while let Some(mut row) = lines.get(consumed).and_then(|line| {
+        (!trim_js(line).is_empty() && !ends_table(line))
+            .then(|| parse_table_row(line).unwrap_or_else(|| vec![trim_js(line).to_string()]))
+    }) {
+        if row[alignments.len().min(row.len())..]
+            .iter()
+            .any(|cell| !cell.is_empty())
+        {
+            break;
+        }
+        row.resize(alignments.len(), String::new());
         rows.push(row);
         consumed += 1;
     }
@@ -1783,6 +2618,61 @@ fn parse_annotated_table(lines: &[&str]) -> Option<(MdBlock, usize)> {
     ))
 }
 
+/// Block HTML that ends a table row in marked, besides `<script`, `<pre`,
+/// `<style`, `<textarea` and `<!--`.
+const TABLE_ENDING_HTML: &str =
+    "address article aside base basefont blockquote body caption center col colgroup dd \
+     details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 \
+     h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem meta nav \
+     noframes ol optgroup option p param search section summary table tbody td tfoot th thead \
+     title tr track ul";
+
+/// Whether marked ends a table before this line: indented code, an ATX
+/// heading, a quote, a fence, a thematic break, a bullet or a `1.` or `1)`
+/// item, or block HTML at the start of the line, in lowercase.
+fn ends_table(line: &str) -> bool {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    let rest = &line[indent..];
+    if indent >= 4 || rest.starts_with('\t') {
+        return true;
+    }
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    let heading = (1..=6).contains(&hashes)
+        && rest[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace);
+    let item = rest
+        .strip_prefix(['-', '*', '+'])
+        .or_else(|| rest.strip_prefix("1."))
+        .or_else(|| rest.strip_prefix("1)"))
+        .is_some_and(|after| after.starts_with([' ', '\t']));
+    let html = line.strip_prefix('<').is_some_and(|tag| {
+        ["script", "pre", "style", "textarea", "!--"]
+            .iter()
+            .any(|start| tag.starts_with(start))
+            || {
+                let tag = tag.strip_prefix('/').unwrap_or(tag);
+                let end = tag
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .unwrap_or(tag.len());
+                TABLE_ENDING_HTML
+                    .split_ascii_whitespace()
+                    .any(|element| element == &tag[..end])
+                    && (tag[end..].is_empty()
+                        || tag[end..].starts_with([' ', '>'])
+                        || tag[end..].starts_with("/>"))
+            }
+    });
+    rest.starts_with('>')
+        || rest.starts_with("```")
+        || rest.starts_with("~~~")
+        || heading
+        || thematic_break(rest)
+        || item
+        || html
+}
+
 fn parse_heading(line: &str) -> Option<(i64, String)> {
     let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
     if !(1..=6).contains(&hashes) {
@@ -1795,22 +2685,59 @@ fn parse_heading(line: &str) -> Option<(i64, String)> {
     Some((hashes as i64, rest.to_string()))
 }
 
-fn parse_task_item(line: &str) -> Option<(bool, String)> {
-    line.strip_prefix("- [x] ")
-        .map(|text| (true, text.to_string()))
-        .or_else(|| {
-            line.strip_prefix("- [ ] ")
-                .map(|text| (false, text.to_string()))
-        })
+/// A bullet item's marker and text: `-`, `*` or `+`, then one space.
+fn parse_bullet_item(line: &str) -> Option<(char, &str)> {
+    let marker = line
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '-' | '*' | '+'))?;
+    Some((marker, line[1..].strip_prefix(' ')?))
 }
 
+/// A task item after any bullet marker. The importer keeps one task list
+/// across marker changes.
+fn parse_task_item(line: &str) -> Option<(bool, String)> {
+    let (_, rest) = parse_bullet_item(line)?;
+    let checked = match rest.get(..4)? {
+        "[ ] " => false,
+        "[x] " | "[X] " => true,
+        _ => return None,
+    };
+    Some((checked, rest[4..].to_string()))
+}
+
+/// A numbered item: one to nine digits, then `.` or `)` and one space.
 fn parse_ordered_item(line: &str) -> Option<(i64, String)> {
-    let (ordinal, rest) = line.split_once(". ")?;
-    let ordinal = ordinal.parse::<i64>().ok()?;
-    if ordinal < 0 || rest.is_empty() {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 9 {
+        return None;
+    }
+    let rest = line[digits..]
+        .strip_prefix(". ")
+        .or_else(|| line[digits..].strip_prefix(") "))?;
+    let ordinal = line[..digits].parse::<i64>().ok()?;
+    if rest.is_empty() {
         return None;
     }
     Some((ordinal, rest.to_string()))
+}
+
+/// The next item of a list, looked for from `index`, just after the previous
+/// item, across at most `blank_lines` blank lines. Returns its line index.
+fn next_list_item<'a, T>(
+    lines: &[&'a str],
+    index: usize,
+    blank_lines: usize,
+    parse: impl Fn(&'a str) -> Option<T>,
+) -> Option<(usize, T)> {
+    let mut at = index;
+    while at - index < blank_lines && lines.get(at).is_some_and(|line| line.is_empty()) {
+        at += 1;
+    }
+    lines
+        .get(at)
+        .and_then(|line| parse(line))
+        .map(|item| (at, item))
 }
 
 fn insert_md_paragraph<F: XmlFragment>(
@@ -1902,7 +2829,11 @@ fn insert_md_block<F: XmlFragment>(
                     if let Some(Some(align)) = alignments.get(cell_index) {
                         cell.insert_attribute(txn, "align", align.attribute());
                     }
-                    insert_md_paragraph(txn, &cell, 0, text);
+                    // A cell keeps its text as written; the document holds it
+                    // with pipe escaping and the projector's one layer of
+                    // entity encoding undone.
+                    let text = decode_html_entities_once(&text.replace("\\|", "|"));
+                    insert_md_paragraph(txn, &cell, 0, &text);
                 }
             }
         }
@@ -6073,6 +7004,275 @@ mod projection_tests {
     }
 
     #[test]
+    fn resolution_fold_keeps_lists_the_projector_separated() {
+        let chosen = "- one\n\n- two\n\n1. first\n\n1. again";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+        assert_eq!(doc.project_richdoc().expect("projection"), chosen);
+    }
+
+    /// Binds `source` to the document's current projection, as a crafted
+    /// update from any collaborator can.
+    fn witness_source(doc: &Ydoc, source: &str) -> String {
+        let canonical = doc.project_richdoc().expect("projection");
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        let mut txn = doc.doc.transact_mut();
+        meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+        meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, source);
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            crate::hex_sha256(source.as_bytes()),
+        );
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            crate::hex_sha256(canonical.as_bytes()),
+        );
+        canonical
+    }
+
+    #[test]
+    fn a_source_with_content_the_document_lacks_is_not_preserved() {
+        for (document, forged) in [
+            // A row with more cells than the header keeps its extra cell.
+            (
+                "| a | b |\n|---|---|\n| c | d |",
+                "a | b\n--- | ---\nc | d | hidden\n",
+            ),
+            ("- one\n- two", "* one\n* two\n* hidden\n"),
+            ("1. one\n2. two", "1) one\n\n1) two, hidden\n"),
+            // Each source below spells, as syntax, text the document holds:
+            // a heading in a list item, an HTML comment that ends a table
+            // and hides a row, a link reference definition, raw HTML, an
+            // autolink, and a character reference the importer decodes.
+            ("- # Title", "- # Title\n"),
+            (
+                "- [x]: https://example.com/private",
+                "* [x]: https://example.com/private\n",
+            ),
+            (
+                "| a |\n|---|\n| <!-- x |\n| secret |\n| --> |",
+                "| a |\n|---|\n<!-- x |\nsecret |\n--> |\n",
+            ),
+            ("[x]: https://example.com", "[x]: https://example.com\n"),
+            ("Hello <b>hidden</b> world", "Hello <b>hidden</b> world\n"),
+            ("see <https://example.com>", "see <https://example.com>\n"),
+            ("a &quot; b", "a &quot; b\n"),
+            // A cell's `<br>` spelled `&lt;br&gt;` cannot pay for a comment
+            // or an element elsewhere.
+            (
+                "| a |\n|---|\n| <br> |\n\n<!-- secret -->",
+                "| a |\n|---|\n| &lt;br&gt; |\n\n<!-- secret -->\n",
+            ),
+            (
+                "| a |\n|---|\n| <br> |\n\n<img src=https://evil.example/p>",
+                "| a |\n|---|\n| &lt;br&gt; |\n\n<img src=https://evil.example/p>\n",
+            ),
+        ]
+        .into_iter()
+        .chain(
+            // Raw HTML a renderer hides or acts on, although its name is no
+            // HTML element, and references a renderer decodes to characters
+            // a reader does not see as written. The document holds each as
+            // text.
+            [
+                "Approve <?and wire the deposit to 4471?> the invoice",
+                "Approve <!note text here> the invoice",
+                "Approve <![CDATA[wire the deposit]]> the invoice",
+                "a <x hidden>secret</x> b",
+                "<x-y style=\"background:url(https://evil.example/p)\">",
+                "<x onmouseover=alert(1)>hover</x>",
+                "<x hidden>\nsecret",
+                "invoice&#x202E;fdp.exe",
+                "a&#8203;b",
+                "a &LT;b&GT; c",
+                "&#49;&#48;&#48;",
+                "a&nbsp;b",
+            ]
+            .map(|text| (text, text)),
+        ) {
+            let forged = &format!("{forged}\n");
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(
+                ContentKind::Richdoc,
+                document,
+                MarkdownReading::Source,
+            )
+            .expect("richdoc rewrite");
+            let canonical = witness_source(&doc, forged);
+            assert_eq!(
+                doc.preserved_markdown_source(&canonical),
+                None,
+                "{forged:?}"
+            );
+            // The baseline stays usable; its projection is the document.
+            assert!(
+                doc.validate_public_baseline(&doc.encode_full_state())
+                    .is_ok(),
+                "{forged:?}"
+            );
+            assert_eq!(doc.project_richdoc().unwrap(), canonical, "{forged:?}");
+        }
+    }
+
+    /// The relay's `renderedReferences` checks the same vectors.
+    #[test]
+    fn references_read_by_the_rule_the_relay_shares() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            text: String,
+            references: Vec<String>,
+        }
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../tests/owner-source/rendered-references.json"
+        ))
+        .expect("vectors");
+        for vector in vectors {
+            let references: Vec<String> = read_text(&vector.text, TextPlace::Inline)
+                .1
+                .iter()
+                .filter_map(|syntax| {
+                    syntax
+                        .split_once(": reference ")
+                        .map(|(_, name)| name.to_owned())
+                })
+                .collect();
+            assert_eq!(references, vector.references, "{:?}", vector.text);
+        }
+    }
+
+    #[test]
+    fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
+        // The fold reads the nested item as text, so a reader of the source
+        // sees structure the document lacks.
+        let file = "---\nid: rec\n---\n\n- parent\n  - nested\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)
+            .expect("richdoc rewrite");
+        let canonical = witness_source(&doc, file);
+        assert_eq!(doc.preserved_markdown_source(&canonical), None);
+        // The file on disk holds that body, so a local settle keeps it, also
+        // under other frontmatter.
+        for local in [
+            file,
+            "---\nid: rec\nrelated: old\n---\n\n- parent\n  - nested\n",
+        ] {
+            assert_eq!(
+                settled(&doc, &canonical, local).as_deref(),
+                Some(file),
+                "{local:?}"
+            );
+        }
+        // Any other body, or no snapshot, is dropped.
+        for local in ["---\nid: rec\n---\n\n- parent\n", "Hello\n"] {
+            assert_eq!(settled(&doc, &canonical, local), None, "{local:?}");
+        }
+        assert_eq!(
+            doc.settled_markdown_source(&canonical, || Ok::<_, ()>(None)),
+            Ok(None)
+        );
+        // A source that does not rebuild the document is dropped, even when
+        // the file holds it.
+        let forged = "---\nid: rec\n---\n\nHidden\n";
+        witness_source(&doc, forged);
+        assert_eq!(settled(&doc, &canonical, forged), None);
+    }
+
+    fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
+        doc.settled_markdown_source(canonical, || Ok::<_, ()>(Some(snapshot.to_owned())))
+            .expect("snapshot read")
+    }
+
+    #[test]
+    fn a_source_whose_text_reads_as_plain_text_is_preserved() {
+        for source in [
+            "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
+            // The projector escapes these, and the importer reads them as
+            // the same text.
+            "[WIP] fix\n",
+            "Vec<T> and cmd <file>\n",
+            "a &copy; b\n",
+            // Later numbers do not change a list.
+            "1. one\n7. two\n",
+            "1. a\n3. b\n",
+            // A cell's `<br>`, however it is spelled.
+            "| a |\n|---|\n| x &lt;br&gt; y |\n",
+            // A tag without attributes and another name stays text.
+            "a <x> b </x-y>\n",
+            // Two lists, which the projector separates with a blank line,
+            // then a table.
+            "* a\n\n- b\n\n| x |\n|---|\n| y |\n",
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(
+                ContentKind::Richdoc,
+                source,
+                MarkdownReading::Source,
+            )
+            .expect("richdoc rewrite");
+            let canonical = witness_source(&doc, source);
+            assert_ne!(canonical, source);
+            assert_eq!(
+                doc.preserved_markdown_source(&canonical).as_deref(),
+                Some(source),
+                "{source:?} projects as {canonical:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_ends_where_marked_starts_another_block() {
+        let blocks = |body: &str| parse_markdown_blocks(body, MarkdownReading::Source);
+        let table = |rows: &[&[&str]]| MdBlock::Table {
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+                .collect(),
+            alignments: vec![None],
+            row_heights: BTreeMap::new(),
+        };
+        assert_eq!(
+            blocks("| a |\n|---|\nplain\n# h"),
+            [
+                table(&[&["a"], &["plain"]]),
+                MdBlock::Heading {
+                    level: 1,
+                    text: "h".into()
+                }
+            ]
+        );
+        for next in [
+            "> q", "- x", "-\tx", "1. x", "1) x", "***", "```", "    code", "\tcode", "<div> |",
+            "</p>", "<!-- c",
+        ] {
+            assert_eq!(
+                blocks(&format!("| a |\n|---|\n{next}"))[0],
+                table(&[&["a"]]),
+                "{next:?}"
+            );
+        }
+        // marked keeps inline HTML, block HTML it does not match, and other
+        // numbers as rows.
+        for next in ["<b>x</b>", "<DIV>", " <div>", "2. x", "Vec<T>"] {
+            assert_eq!(
+                blocks(&format!("| a |\n|---|\n{next}"))[0],
+                table(&[&["a"], &[next.trim()]]),
+                "{next:?}"
+            );
+        }
+        for header in ["    a | b", "\ta | b", "> a | b", "- a | b", "<b> | c"] {
+            assert!(
+                !blocks(&format!("{header}\n--- | ---"))
+                    .iter()
+                    .any(|block| matches!(block, MdBlock::Table { .. })),
+                "{header:?}"
+            );
+        }
+    }
+
+    #[test]
     fn resolution_fold_reconstructs_rich_structure_and_projection() {
         // The fold must parse the chosen markdown into the projection's own
         // schema: the projection reproduces the chosen bytes and the body
@@ -6167,57 +7367,46 @@ fn main() {}
             "top": {},
             "nested": { "child": {} },
         });
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("seed empty frontmatter mappings");
+        for markdown in [chosen, canonical] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("seed empty frontmatter mappings");
 
-        assert_eq!(doc.frontmatter_json(), expected_frontmatter);
-        let settled = doc
-            .project(ContentKind::Richdoc)
-            .expect("settle empty frontmatter mappings")
-            .content;
-        assert_eq!(settled, canonical);
-
-        let roundtripped = Ydoc::wire();
-        roundtripped
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
-            .expect("roundtrip settled frontmatter");
-        assert_eq!(roundtripped.frontmatter_json(), expected_frontmatter);
-        assert_eq!(
-            roundtripped
-                .project(ContentKind::Richdoc)
-                .expect("settle roundtripped frontmatter")
-                .content,
-            settled
-        );
+            assert_eq!(doc.frontmatter_json(), expected_frontmatter);
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("settle empty frontmatter mappings")
+                    .content,
+                markdown
+            );
+        }
     }
 
     #[test]
     fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
         let chosen = "---\n1.5: value\n---\n\nbody text";
         let canonical = "---\n'1.5': value\n---\n\nbody text";
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+        for markdown in [chosen, canonical] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("seed floating-point frontmatter key");
+
+            assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("settle floating-point frontmatter key")
+                    .content,
+                markdown
+            );
+        }
+        let edited = Ydoc::wire();
+        edited
+            .rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("seed floating-point frontmatter key");
-
-        assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
-        let settled = doc
-            .project(ContentKind::Richdoc)
-            .expect("settle floating-point frontmatter key")
-            .content;
-        assert_eq!(settled, canonical);
-
-        let roundtripped = Ydoc::wire();
-        roundtripped
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
-            .expect("roundtrip settled floating-point frontmatter key");
-        assert_eq!(roundtripped.frontmatter_json(), json!({ "1.5": "value" }));
+        edited.frontmatter_set("1.5", "changed").unwrap();
         assert_eq!(
-            roundtripped
-                .project(ContentKind::Richdoc)
-                .expect("settle roundtripped floating-point frontmatter key")
-                .content,
-            settled
+            edited.project(ContentKind::Richdoc).unwrap().content,
+            "---\n'1.5': changed\n---\n\nbody text"
         );
     }
 
@@ -6285,23 +7474,20 @@ fn main() {}
     }
 
     #[test]
-    fn source_preserving_rewrite_clears_previous_tagged_frontmatter_projection() {
+    fn source_preserving_rewrite_replaces_the_previous_frontmatter_source() {
         let doc = Ydoc::wire();
         let selected = "---\npriority: high\n---\n\nRestored body";
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
             .unwrap();
         let meta = doc.doc.get_or_insert_map(ROOT_META);
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
         {
             let mut txn = doc.doc.transact_mut();
-            meta.insert(
+            keep_frontmatter_source(
+                &frontmatter,
+                &meta,
                 &mut txn,
-                TAGGED_FRONTMATTER_PREFIX_META_KEY,
-                "---\npriority: !custom high\n---\n\n",
-            );
-            meta.insert(
-                &mut txn,
-                TAGGED_FRONTMATTER_BASELINE_META_KEY,
-                "priority: high\n",
+                Some("---\npriority: !custom high\n---\n\n"),
             );
         }
         assert!(doc.project_richdoc().unwrap().contains("!custom"));
@@ -6314,12 +7500,466 @@ fn main() {}
             Some(selected)
         );
         let txn = doc.doc.transact();
-        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY));
-        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY));
+        assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
+        assert!(meta
+            .keys(&txn)
+            .all(|key| !key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
+    }
+
+    /// A collaborator can write any frontmatter source. One too deep, too
+    /// large, or too costly to expand must refuse settlement.
+    #[test]
+    fn hostile_frontmatter_sources_refuse_settlement() {
+        let ladder = (0..6)
+            .map(|level| {
+                let item = if level == 0 {
+                    "x".to_owned()
+                } else {
+                    format!("*l{}", level - 1)
+                };
+                format!("l{level}: &l{level} [{}]\n", vec![item; 10].join(", "))
+            })
+            .collect::<String>();
+        let oversized = format!(
+            "---\ntitle: Plan\npadding: '{}'\n---\n\n",
+            "x".repeat(crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+        );
+        for source in [
+            format!("---\ntitle:\n{}Plan\n---\n\n", "- ".repeat(500_000)),
+            format!(
+                "---\ntitle:\n{}Plan{}\n---\n\n",
+                "[".repeat(500_000),
+                "]".repeat(500_000)
+            ),
+            format!(
+                "---\n%TAG !e! tag:{}\n--- # x\ntitle: [{}Plan]\n---\n\n",
+                "x".repeat(512 * 1024),
+                "!e!x a, ".repeat(100_000)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\ntitle: {}{}{}\n---\n\n",
+                "x".repeat(1_900_000),
+                "&a [".repeat(128),
+                vec!["*s"; 256].join(", "),
+                "]".repeat(128)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\ntitle: [{}]\n---\n\n",
+                "x".repeat(2_000_000),
+                vec!["*s"; 256].join(", ")
+            ),
+            format!("---\n{ladder}title: Plan\n---\n\n"),
+            oversized,
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\ntitle: Plan\n---\n\nBody")
+                .unwrap();
+            let meta = doc.doc.get_or_insert_map(ROOT_META);
+            meta.insert(
+                &mut doc.doc.transact_mut(),
+                FRONTMATTER_SOURCE_META_KEY,
+                source.as_str(),
+            );
+            assert!(matches!(
+                doc.project_richdoc(),
+                Err(CollabError::FrontmatterEditRefused)
+            ));
+            if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                assert!(doc
+                    .validate_public_baseline(&doc.encode_full_state())
+                    .is_err());
+            }
+        }
+    }
+
+    /// Writes a frontmatter key the way a client with no knowledge of the
+    /// kept text does: a plain map write.
+    fn write_key_directly(doc: &Ydoc, key: &str, value: Option<&str>) {
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let mut txn = doc.doc.transact_mut();
+        match value {
+            Some(value) => {
+                frontmatter.insert(&mut txn, key, value);
+            }
+            None => {
+                frontmatter.remove(&mut txn, key);
+            }
+        }
+    }
+
+    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody";
+
+    /// A key deleted and written again, by any writer and in any number of
+    /// updates, no longer holds the item its kept text was written for, so
+    /// its old comment never comes back.
+    #[test]
+    fn a_deleted_key_written_again_never_brings_back_its_comment() {
+        let expected = "---\nwifi: new\n# Monthly\nbudget: 100\n---\n\nBody";
+        // A plain writer, in two updates and then in one.
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        write_key_directly(&doc, "wifi", None);
+        write_key_directly(&doc, "wifi", Some("new"));
+        assert_eq!(doc.project_richdoc().unwrap(), expected);
+        let together = Ydoc::wire();
+        together
+            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        let frontmatter = together.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = together.doc.transact_mut();
+            frontmatter.remove(&mut txn, "wifi");
+            frontmatter.insert(&mut txn, "wifi", "new");
+        }
+        assert_eq!(together.project_richdoc().unwrap(), expected);
+        // The engine's own writers.
+        let engine = Ydoc::wire();
+        engine
+            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        write_key_directly(&engine, "wifi", None);
+        engine.frontmatter_set("wifi", "new").unwrap();
+        assert_eq!(engine.project_richdoc().unwrap(), expected);
+    }
+
+    /// The engine's edits keep an edited key's comment; a plain writer's edit
+    /// keeps the key's place but not its comment.
+    #[test]
+    fn an_edited_key_keeps_its_comment_only_through_the_engine_edit() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        doc.frontmatter_set("budget", "200").unwrap();
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody"
+        );
+        write_key_directly(&doc, "wifi", Some("changed"));
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody"
+        );
+    }
+
+    /// Two devices drop different relations offline, and one sets both keys
+    /// again. Neither key holds the item the kept text was written for, so
+    /// neither comment comes back.
+    #[test]
+    fn a_key_dropped_on_another_device_returns_without_its_comment() {
+        let base = Ydoc::wire();
+        base.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            "---\n# owner note\nowner: rec_a\n# editor note\neditor: rec_b\nstatus:   open\n---\n\nBody",
+        )
+        .unwrap();
+        let (a, b) = (Ydoc::wire(), Ydoc::wire());
+        a.apply(&base.encode_full_state()).unwrap();
+        b.apply(&base.encode_full_state()).unwrap();
+        a.frontmatter_drop_relation_target("owner", "rec_a", false)
+            .expect("owner dropped");
+        b.frontmatter_drop_relation_target("editor", "rec_b", false)
+            .expect("editor dropped");
+        a.apply(&b.encode_full_state()).unwrap();
+        assert_eq!(
+            a.project_richdoc().unwrap(),
+            "---\nstatus:   open\n---\n\nBody"
+        );
+        a.frontmatter_set("owner", "rec_c").unwrap();
+        a.frontmatter_set("editor", "rec_d").unwrap();
+        assert_eq!(
+            a.project_richdoc().unwrap(),
+            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody"
+        );
+    }
+
+    /// Settling reads each key's item once. Prints the time to settle a
+    /// document with 2,000 written frontmatter keys, with and without kept text.
+    #[test]
+    fn settling_a_large_kept_frontmatter_stays_fast() {
+        let keys: String = (0..2_000)
+            .map(|index| format!("# note {index}\nkey{index}:   {index}\n"))
+            .collect();
+        let written = format!("---\n{keys}---\n\nBody");
+        let canonical: String = (0..2_000)
+            .map(|index| format!("key{index}: {index}\n"))
+            .collect();
+        for (name, markdown) in [
+            ("kept", written),
+            ("canonical", format!("---\n{canonical}---\n\nBody")),
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                .unwrap();
+            doc.frontmatter_set("key1000", "edited").unwrap();
+            let started = std::time::Instant::now();
+            let settled = doc.project_richdoc().unwrap();
+            println!("settle with {name} frontmatter: {:?}", started.elapsed());
+            assert!(settled.contains("key1000: edited"));
+        }
     }
 
     #[test]
-    fn forged_tagged_frontmatter_prefix_falls_back_to_canonical_projection() {
+    fn shared_frontmatter_edit_candidates() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/frontmatter-edits.json"
+        ))
+        .unwrap();
+        for vector in vectors.as_array().unwrap() {
+            let doc = Ydoc::wire();
+            let markdown = vector["markdown"].as_str().unwrap();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .unwrap();
+            let before = doc.encode_full_state();
+            let result =
+                doc.frontmatter_set_value(vector["key"].as_str().unwrap(), vector["value"].clone());
+            if vector["refused"] == true {
+                assert!(
+                    matches!(result, Err(CollabError::FrontmatterEditRefused)),
+                    "{}: {result:?}",
+                    vector["name"]
+                );
+                assert_eq!(doc.encode_full_state(), before, "{}", vector["name"]);
+                assert_eq!(doc.project_richdoc().unwrap(), markdown);
+            } else {
+                assert!(result.is_ok(), "{}: {result:?}", vector["name"]);
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    vector["expected"].as_str().unwrap(),
+                    "{}",
+                    vector["name"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supplied_frontmatter_candidate_preserves_values_before_mutation() {
+        let original = "---\n{score: .nan, title: Plan}\n---\n\nBody";
+        for (candidate, accepted) in [
+            (
+                "---\n{score: .nan, title: Plan, id: \"record\"}\n---\n\nBody",
+                true,
+            ),
+            (
+                "---\n{score: '.nan', title: Plan, id: record}\n---\n\nBody",
+                false,
+            ),
+            (
+                "---\n{score: .nan, title: Plan, id: different}\n---\n\nBody",
+                false,
+            ),
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, original)
+                .unwrap();
+            let before = doc.encode_full_state();
+            let result = doc.frontmatter_set_preserving_markdown_source("id", "record", candidate);
+            if accepted {
+                result.unwrap();
+                assert_eq!(doc.project_richdoc().unwrap(), candidate);
+            } else {
+                assert!(matches!(result, Err(CollabError::FrontmatterEditRefused)));
+                assert_eq!(doc.encode_full_state(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn relation_cleanup_refuses_alias_dependencies_before_mutation() {
+        for yaml in [
+            "owner: &v rec_a\ncopy: *v",
+            "owner: &v [rec_a, rec_b]\ncopy: {nested: *v}",
+        ] {
+            let doc = Ydoc::wire();
+            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                .unwrap();
+            let before = doc.encode_full_state();
+            assert!(doc
+                .frontmatter_drop_relation_target("owner", "rec_a", yaml.contains('['))
+                .is_none());
+            assert_eq!(doc.encode_full_state(), before);
+            assert_eq!(doc.project_richdoc().unwrap(), markdown);
+        }
+    }
+
+    #[test]
+    fn requested_string_cannot_keep_a_yaml_number_with_the_same_projection() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            "---\na: &v .nan\nb: *v\n---\n\nBody",
+        )
+        .unwrap();
+        let before = doc.encode_full_state();
+        assert!(matches!(
+            doc.frontmatter_set("b", ".nan"),
+            Err(CollabError::FrontmatterEditRefused)
+        ));
+        assert_eq!(doc.encode_full_state(), before);
+    }
+
+    #[test]
+    fn shared_frontmatter_import_and_edit_refusal_vectors() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        for row in fixtures.as_array().unwrap() {
+            if let Some(markdown) = row["bodyMarkdown"].as_str() {
+                // Compare frontmatter loading without the limited test Markdown parser.
+                let (values, prefix, body) = split_markdown_frontmatter(markdown);
+                assert!(values.is_empty(), "{}", row["name"]);
+                assert!(prefix.is_none(), "{}", row["name"]);
+                assert_eq!(body, markdown, "{}", row["name"]);
+            }
+            let Some(source) = row["sourceMarkdown"].as_str() else {
+                continue;
+            };
+            for from_wire in [false, true] {
+                let doc = Ydoc::wire();
+                if from_wire {
+                    doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
+                        .unwrap();
+                } else {
+                    doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                        .unwrap();
+                }
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    row["markdown"].as_str().unwrap(),
+                    "{}",
+                    row["name"]
+                );
+                if let Some(kept) = row["keptFrontmatter"].as_str() {
+                    assert!(source.starts_with(kept), "{}", row["name"]);
+                    assert!(
+                        doc.project_richdoc().unwrap().starts_with(kept),
+                        "{}",
+                        row["name"]
+                    );
+                }
+                if let Some(refused) = row["editsRefused"].as_bool() {
+                    assert_eq!(doc.frontmatter_edits_refused(), refused, "{}", row["name"]);
+                    if refused {
+                        assert_eq!(doc.project_richdoc().unwrap().as_bytes(), source.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsplittable_frontmatter_refuses_relation_cleanup_without_changing_bytes() {
+        for yaml in [
+            "{owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            "&root {owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            "!!map &root {owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            ": note\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: .nan",
+        ] {
+            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            for exact_source in [false, true] {
+                for (key, many) in [("owner", false), ("editors", true)] {
+                    let doc = Ydoc::wire();
+                    if exact_source {
+                        doc.rewrite_content_to_markdown_preserving_source(
+                            ContentKind::Richdoc,
+                            &markdown,
+                        )
+                        .unwrap();
+                    } else {
+                        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                            .unwrap();
+                    }
+                    assert!(doc.frontmatter_edits_refused(), "{yaml}");
+                    let before = doc.encode_full_state();
+                    assert!(doc
+                        .frontmatter_drop_relation_target(key, "rec_a", many)
+                        .is_none());
+                    assert!(doc
+                        .frontmatter_drop_relation_target_preserving_markdown_source(
+                            key, "rec_a", many
+                        )
+                        .unwrap()
+                        .is_none());
+                    assert_eq!(doc.encode_full_state(), before, "{yaml}");
+                    let projected = doc.project_richdoc().unwrap();
+                    assert_eq!(projected.as_bytes(), markdown.as_bytes());
+                    if exact_source {
+                        assert_eq!(
+                            doc.preserved_markdown_source(&projected).as_deref(),
+                            Some(markdown.as_str())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relation_cleanup_keeps_untouched_nested_flow_entries() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "---\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody",
+        )
+        .unwrap();
+        assert!(!doc.frontmatter_edits_refused());
+        doc.frontmatter_drop_relation_target_preserving_markdown_source("owner", "rec_a", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody"
+        );
+    }
+
+    #[test]
+    fn empty_frontmatter_blocks_stay_until_a_key_arrives() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody")
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody");
+        doc.frontmatter_set("title", "Plan").unwrap();
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\ntitle: Plan\n---\n\nBody"
+        );
+
+        let removed = Ydoc::wire();
+        removed
+            .rewrite_content_to_markdown(
+                ContentKind::Richdoc,
+                "---\nz: 1\ntitle: Plan\n---\n\nBody",
+            )
+            .unwrap();
+        let frontmatter = removed.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = removed.doc.transact_mut();
+            frontmatter.remove(&mut txn, "z");
+            frontmatter.remove(&mut txn, "title");
+        }
+        assert_eq!(removed.project_richdoc().unwrap(), "Body");
+    }
+
+    #[test]
+    fn documents_without_frontmatter_or_with_canonical_frontmatter_keep_no_source() {
+        for markdown in ["\n\n# Title\n", "---\npadding: xxx\n---\n\n"] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .unwrap();
+            let meta = doc.doc.get_or_insert_map(ROOT_META);
+            let txn = doc.doc.transact();
+            assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
+            assert!(!meta
+                .keys(&txn)
+                .any(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
+        }
+    }
+
+    #[test]
+    fn forged_frontmatter_source_cannot_inject_body() {
         for prefix in [
             "---\npriority: !custom foreign\n---\n\n",
             "---\npriority: !custom high\n---\n\ninjected body\n",
@@ -6333,17 +7973,19 @@ fn main() {}
             let meta = doc.doc.get_or_insert_map(ROOT_META);
             {
                 let mut txn = doc.doc.transact_mut();
-                meta.insert(&mut txn, TAGGED_FRONTMATTER_PREFIX_META_KEY, prefix);
-                meta.insert(
-                    &mut txn,
-                    TAGGED_FRONTMATTER_BASELINE_META_KEY,
-                    "priority: high\n",
+                meta.insert(&mut txn, FRONTMATTER_SOURCE_META_KEY, prefix);
+            }
+            if prefix.contains("injected body") {
+                assert!(matches!(
+                    doc.project_richdoc(),
+                    Err(CollabError::FrontmatterEditRefused)
+                ));
+            } else {
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    "---\npriority: high\n---\n\nReal body"
                 );
             }
-            assert_eq!(
-                doc.project_richdoc().unwrap(),
-                "---\npriority: high\n---\n\nReal body"
-            );
         }
     }
 
@@ -6357,10 +7999,9 @@ fn main() {}
             let mut txn = doc.doc.transact_mut();
             meta.insert(
                 &mut txn,
-                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                FRONTMATTER_SOURCE_META_KEY,
                 "---\nvalue: -0.0\n---\n\n",
             );
-            meta.insert(&mut txn, TAGGED_FRONTMATTER_BASELINE_META_KEY, "value: 0\n");
         }
         assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody");
     }
@@ -6558,17 +8199,28 @@ fn main() {}
     #[test]
     fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
         let doc = Ydoc::wire();
-        let chosen = "---\ndone: \"true\"\nsummary: \"TODO: call Bob\"\n---\n\nbody text";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body text")
             .expect("richdoc rewrite");
+        for (key, value) in [
+            ("done", "true"),
+            ("summary", "TODO: call Bob"),
+            ("score", ".nan"),
+            ("id", "99999999999999999999"),
+            ("hex", "0x_1F"),
+        ] {
+            doc.frontmatter_set(key, value).unwrap();
+        }
 
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
             projected.content,
-            "---\ndone: 'true'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
+            "---\nid: '99999999999999999999'\ndone: 'true'\nhex: 0x_1F\nscore: '.nan'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
         );
-        assert_eq!(doc.frontmatter_json()["done"], json!("true"));
-        assert_eq!(doc.frontmatter_json()["summary"], json!("TODO: call Bob"));
+        let reread = Ydoc::wire();
+        reread
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &projected.content)
+            .expect("richdoc rewrite");
+        assert_eq!(reread.frontmatter_json(), doc.frontmatter_json());
     }
 
     #[test]
@@ -6618,12 +8270,9 @@ fn main() {}
 
     #[test]
     fn an_ordered_list_ordinal_at_the_integer_ceiling_does_not_overflow() {
-        // A parsed ordinal can be i64::MAX, and the successor it implies
-        // cannot be represented: unchecked `+ 1` panics the workspace actor
-        // in debug and test builds, and wraps in release, where the wrapped
-        // value then mis-parses every following line. A resolution body is
-        // user-supplied text, so this is reachable from a tiny input.
-        //
+        // A parsed ordinal can be i64::MAX. A resolution body is
+        // user-supplied text, so this is reachable from a tiny input, and
+        // the parse must neither overflow nor lose the text after the list.
         let doc = Ydoc::wire();
         let chosen = format!("{}. item\n\nafter", i64::MAX);
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
@@ -6631,7 +8280,7 @@ fn main() {}
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert!(
             projected.content.contains("item") && projected.content.contains("after"),
-            "the list ends where no successor exists and the rest still parses: {}",
+            "the list and the text after it both parse: {}",
             projected.content
         );
     }
