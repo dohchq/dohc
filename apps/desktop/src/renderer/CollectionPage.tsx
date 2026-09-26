@@ -11,6 +11,7 @@ import {
   BoardView,
   CalendarView,
   createCollectionStore,
+  recordLabel,
   TableView,
   useCollectionStore,
   type CollectionCellChange,
@@ -20,6 +21,7 @@ import type {
   CollectionQueryParams,
   CollectionRecord,
   CollectionSchema,
+  FieldDefinition,
   ViewDefinition,
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
@@ -42,6 +44,8 @@ import {
   AutomationsPanel,
   useCollectionAutomations,
 } from "./collections/AutomationsPanel";
+import { RecordButton } from "./collections/RecordButton";
+import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -82,6 +86,9 @@ export interface CollectionPageProps {
   // each ask. The page reports when it has taken the ask.
   automationFocus: { automationId: string; seq: number } | null;
   onAutomationFocused: () => void;
+  // Opens the automation builder with the trigger set to this button. Absent
+  // until the builder ships, so the Fields dialog offers nothing.
+  onChooseButtonAutomation?: (field: string) => void;
 }
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
@@ -109,6 +116,7 @@ export function CollectionPage({
   onNotice,
   automationFocus,
   onAutomationFocused,
+  onChooseButtonAutomation,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -247,14 +255,29 @@ export function CollectionPage({
   // Invalidation: refresh when a settled batch touches this collection's
   // folder (or arrives without path detail), on the shell's trailing-edge
   // coalescing cadence. The store's token makes the refresh latest-wins.
+  // Button fields: what each shows, and presses in flight from this window.
+  // Their states follow the Collection's files, automations.yaml included.
+  const buttons = useAutomationButtons({ workspaceId, collectionPath, onError, onNotice });
+  useEffect(() => {
+    void buttons?.refresh();
+  }, [buttons]);
   const refreshCoalescer = useMemo(
     () => createActivityCoalescer(() => {
       void store.refresh();
       void refreshDetails();
       if (automationsOpenRef.current || automationsTouched.current) void reloadAutomations();
       automationsTouched.current = false;
+      void buttons?.refresh();
     }),
-    [store, refreshDetails, reloadAutomations],
+    [store, refreshDetails, reloadAutomations, buttons],
+  );
+  // Stable while the store is, so the table keeps each cell's element.
+  const renderButton = useCallback(
+    (field: FieldDefinition, record: CollectionRecord) =>
+      buttons === null ? null : (
+        <RecordButton buttons={buttons} field={field.name} recordId={record.id} recordLabel={recordLabel(record)} />
+      ),
+    [buttons],
   );
   useEffect(() => {
     const prefix = `${collectionPath}/`;
@@ -358,6 +381,9 @@ export function CollectionPage({
   // user-facing sentence on failure, null on success, so both dialogs
   // share one contract.
   const [fieldsOpen, setFieldsOpen] = useState(false);
+  // The Fields dialog shows what each button does; the page follows the
+  // store only while it is open, so a press re-renders just its button.
+  const buttonStates = useButtonStates(fieldsOpen ? buttons : null);
   const [viewsOpen, setViewsOpen] = useState(false);
   const applySchemaChange = useCallback(
     async (
@@ -522,6 +548,8 @@ export function CollectionPage({
       schema={schema}
       relationTargets={relationTargets}
       apply={applySchemaChange}
+      buttonStates={buttonStates}
+      onChooseButtonAutomation={onChooseButtonAutomation}
       onClose={() => setFieldsOpen(false)}
     />
   ) : null;
@@ -661,6 +689,7 @@ export function CollectionPage({
             onOpenRecord={openRecord}
             relationExecutor={executor}
             fieldMarks={tableFieldMarks}
+            renderButton={renderButton}
             onNearEnd={loadNextPage}
           />
         )}

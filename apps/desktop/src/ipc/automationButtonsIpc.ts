@@ -1,5 +1,6 @@
 import { parseDatasetDefinition, type DatasetDefinition, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile, type AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
+import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
@@ -12,10 +13,12 @@ import {
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations, type PressSettled, type PressWaitReason } from "../automations/collectionAutomations";
 import {
   ListAutomationButtonsPayload,
+  ListRecordButtonsPayload,
   PressAutomationButtonPayload,
   type AutomationRunSettledEvent,
   type AutomationRunWaitingEvent,
   type ListAutomationButtonsResult,
+  type ListRecordButtonsResult,
   type PressAutomationButtonResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
@@ -111,6 +114,8 @@ export function registerAutomationButtonsIpc<
   readText(rootPath: string, relativePath: string): Promise<TextFile | null>;
   /** The Button fields the engine's schema for this Collection names, in schema order. */
   buttonFields(operation: Operation, collectionPath: string): Promise<string[]>;
+  /** The record a file is, in the nearest document Collection that holds it, or null. */
+  recordAt(operation: Operation, path: string): Promise<{ collectionPath: string; record: CollectionRecord } | null>;
   /** The dataset as the host describes it to this window's person. */
   describeDataset(sender: Sender, workspaceId: string, datasetId: string): Promise<DatasetDescription>;
   /** The person this computer is signed in as, or its own id when signed out. */
@@ -164,6 +169,27 @@ export function registerAutomationButtonsIpc<
     return access === "press" ? null : access === "owner-only" ? OWNER_ONLY : noAccessReason(nameOf(collectionPath));
   }
 
+  /** A document Collection's buttons, or the one reason this workspace refuses them all. */
+  async function documentButtons(operation: Operation, collectionPath: string): Promise<ListAutomationButtonsResult["buttons"]> {
+    const fields = await dependencies.buttonFields(operation, collectionPath);
+    const reason = documentRefusal(operation.workspace.shareView, collectionPath);
+    if (reason !== null) return fields.map((field) => ({ field, state: { kind: "disabled", reason } }));
+    return fields.length === 0 ? [] : await operation.state.collectionAutomations.buttons(collectionPath, fields);
+  }
+
+  registerHandler(CHANNELS.listRecordButtons, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListRecordButtonsPayload.parse(payload);
+    // A file mounted under shared-with-me is a projection, not a record of
+    // this workspace's Collections, so it has no buttons here.
+    if (!isNormalizedRelativePath(input.path) || isSharedWithMePath(input.path)) return { record: null };
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListRecordButtonsResult> => {
+      const found = await dependencies.recordAt(operation, input.path);
+      if (found === null) return { record: null };
+      return { ...found, buttons: await documentButtons(operation, found.collectionPath) };
+    });
+  });
+
   registerHandler(CHANNELS.listAutomationButtons, async (event, payload): Promise<ListAutomationButtonsResult> => {
     assertTrustedSender(event);
     const input = ListAutomationButtonsPayload.parse(payload);
@@ -171,12 +197,7 @@ export function registerAutomationButtonsIpc<
     const read = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) => {
       const dataset = await readDataset(operation, input.collectionPath);
       if (dataset !== null) return { kind: "dataset" as const, dataset };
-      const fields = await dependencies.buttonFields(operation, input.collectionPath);
-      const reason = documentRefusal(operation.workspace.shareView, input.collectionPath);
-      const buttons: ListAutomationButtonsResult["buttons"] = reason !== null
-        ? fields.map((field) => ({ field, state: { kind: "disabled", reason } }))
-        : await operation.state.collectionAutomations.buttons(input.collectionPath, fields);
-      return { kind: "document" as const, buttons };
+      return { kind: "document" as const, buttons: await documentButtons(operation, input.collectionPath) };
     });
     if (read.kind === "document") return { buttons: read.buttons };
     const { buttons } = read.dataset;

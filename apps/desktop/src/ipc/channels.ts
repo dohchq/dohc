@@ -305,6 +305,7 @@ export const CHANNELS = {
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.
   listAutomationButtons: "desktop:list-automation-buttons",
+  listRecordButtons: "desktop:list-record-buttons",
   pressAutomationButton: "desktop:press-automation-button",
   automationRunSettled: "desktop:automation-run-settled",
   automationRunWaiting: "desktop:automation-run-waiting",

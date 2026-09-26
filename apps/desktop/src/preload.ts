@@ -488,6 +488,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
   listAutomationButtons: (payload) =>
     ipcRenderer.invoke(CHANNELS.listAutomationButtons, payload),
+  listRecordButtons: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRecordButtons, payload),
   pressAutomationButton: (payload) =>
     ipcRenderer.invoke(CHANNELS.pressAutomationButton, payload),
   listAutomationHolds: (payload) =>

@@ -21,8 +21,14 @@ const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
+type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
   "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+// The secondary recipe at a table row's height, for a control inside a
+// cell. `aria-disabled` keeps a button that says why it cannot run in the
+// tab order, where `disabled` would drop it.
+const rowSecondaryButtonClass =
+  "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
 const compactSecondaryButtonClass =
   "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
 
@@ -40,17 +46,11 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
   },
 );
 
-/** Quiet bordered action — the default button. Forwards its ref so a caller can return focus to it. */
-export const SecondaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
+/** Quiet bordered action — the default button. */
+export const SecondaryButton = forwardRef<HTMLButtonElement, SecondaryButtonProps>(
   function SecondaryButton({ className, type, size, ...rest }, ref) {
-    return (
-      <button
-        ref={ref}
-        type={type ?? "button"}
-        className={cx(size === "compact" ? compactSecondaryButtonClass : secondaryButtonClass, className)}
-        {...rest}
-      />
-    );
+    const sized = size === "compact" ? compactSecondaryButtonClass : size === "row" ? rowSecondaryButtonClass : secondaryButtonClass;
+    return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
   },
 );
 

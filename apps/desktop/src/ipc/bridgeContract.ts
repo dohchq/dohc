@@ -5527,6 +5527,17 @@ export const ListAutomationButtonsPayload = z.object({
 export type ListAutomationButtonsPayload = z.infer<typeof ListAutomationButtonsPayload>;
 export type ListAutomationButtonsResult = { buttons: CollectionAutomationButton[] };
 
+// The record an open file is, and its Collection's buttons. Null when the
+// file is not a record in a Collection.
+export const ListRecordButtonsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type ListRecordButtonsPayload = z.infer<typeof ListRecordButtonsPayload>;
+export type ListRecordButtonsResult =
+  | { record: null }
+  | { record: CollectionRecord; collectionPath: string; buttons: CollectionAutomationButton[] };
+
 export const PressAutomationButtonPayload = z.object({
   workspaceId: WORKSPACE_ID,
   collectionPath: PATH_STRING,
@@ -6973,6 +6984,7 @@ export interface DohcDesktopBridge
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
+  listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;
   pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(

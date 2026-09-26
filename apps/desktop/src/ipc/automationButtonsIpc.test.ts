@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { CollectionAutomations } from "../automations/collectionAutomations";
 import { createPressWindows, registerAutomationButtonsIpc } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
@@ -48,6 +49,8 @@ function fixture(options: {
     }),
   };
   const buttonFields = vi.fn(async () => ["Mark paid"]);
+  const invoice: CollectionRecord = { id: "rec_invoice12", path: "Invoices/12.md", conflicted: false, values: [] };
+  const recordAt = vi.fn(async (_operation: unknown, path: string) => (path === "Invoices/12.md" ? { collectionPath: "Invoices", record: invoice } : null));
   const describeDataset = vi.fn(async (): Promise<DatasetDescription> => {
     const definition = JSON.parse(dataset) as { operations: DatasetDescription["operations"] };
     return {
@@ -71,6 +74,7 @@ function fixture(options: {
       return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
     },
     buttonFields,
+    recordAt,
     describeDataset,
     pressedBy: async () => "user-main",
     pressWindows,
@@ -79,7 +83,7 @@ function fixture(options: {
     handlers.get(channel)!({ sender: window }, { workspaceId: WORKSPACE_ID, collectionPath: "Invoices", ...payload });
   const press = (payload: Record<string, unknown> = {}) =>
     call(CHANNELS.pressAutomationButton, { field: "Mark paid", recordId: "Invoices/12.md", pressId: PRESS_ID, table: null, ...payload });
-  return { call, press, executor, buttonFields, describeDataset, window, pressWindows };
+  return { call, press, executor, buttonFields, describeDataset, window, pressWindows, invoice };
 }
 
 const editShare = (paths: string[], access = "edit") => ({
@@ -106,6 +110,37 @@ describe("listing a Collection's buttons", () => {
     });
     expect(owner.executor.buttons).not.toHaveBeenCalled();
     expect(viewer.executor.buttons).not.toHaveBeenCalled();
+  });
+});
+
+describe("listing an open record's buttons", () => {
+  it("names the record the file is, with its Collection's buttons", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listRecordButtons, { path: "Invoices/12.md" })).resolves.toEqual({
+      record: f.invoice, collectionPath: "Invoices",
+      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#Mark paid" } }],
+    });
+    expect(f.executor.buttons).toHaveBeenCalledWith("Invoices", ["Mark paid"]);
+  });
+
+  it("answers no record for a file mounted under shared-with-me, without asking anything", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listRecordButtons, { path: "shared-with-me/Ana/Invoices/12.md" })).resolves.toEqual({ record: null });
+    expect(f.buttonFields).not.toHaveBeenCalled();
+  });
+
+  it("answers no record for a file outside any Collection", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listRecordButtons, { path: "Notes/todo.md" })).resolves.toEqual({ record: null });
+    expect(f.buttonFields).not.toHaveBeenCalled();
+  });
+
+  it("shows a shared view's record buttons as the owner's", async () => {
+    const f = fixture({ shareView: editShare(["Invoices"]) });
+    await expect(f.call(CHANNELS.listRecordButtons, { path: "Invoices/12.md" })).resolves.toMatchObject({
+      buttons: [{ field: "Mark paid", state: { kind: "disabled", reason: "Only the owner can use this button." } }],
+    });
+    expect(f.executor.buttons).not.toHaveBeenCalled();
   });
 });
 

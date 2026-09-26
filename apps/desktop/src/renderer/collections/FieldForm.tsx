@@ -38,10 +38,11 @@ export const FIELD_TYPE_LABELS: Record<CollectionFieldType, string> = {
   button: "Button",
 };
 
-// A button field does nothing until an automation uses it, so the form
-// does not offer one yet.
-export const FIELD_TYPES = (Object.keys(FIELD_TYPE_LABELS) as CollectionFieldType[])
-  .filter((type) => type !== "button");
+/** Every field type, as an open Collection's Fields dialog offers them. */
+export const FIELD_TYPES_WITH_BUTTON = Object.keys(FIELD_TYPE_LABELS) as CollectionFieldType[];
+// A button does nothing until an automation uses it. A new Collection has no
+// automations, so its form leaves Button out; the Fields dialog offers it.
+export const FIELD_TYPES = FIELD_TYPES_WITH_BUTTON.filter((type) => type !== "button");
 
 export function emptyFieldDraft(name = "", type: CollectionFieldType = "text"): FieldDraft {
   return { name, type, optionsText: "", relationTarget: "", relationMany: false };
@@ -116,12 +117,15 @@ export function FieldDraftRow({
   onChange,
   relationTargets,
   disabled,
+  types = FIELD_TYPES,
 }: {
   draft: FieldDraft;
   onChange: (draft: FieldDraft) => void;
   /** Collection folder paths a relation field can target. */
   relationTargets: readonly string[];
   disabled?: boolean;
+  /** The field types to offer. */
+  types?: readonly CollectionFieldType[];
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -144,7 +148,7 @@ export function FieldDraftRow({
           }
           className="w-36 shrink-0 rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink focus:border-ink disabled:opacity-50"
         >
-          {FIELD_TYPES.map((type) => (
+          {types.map((type) => (
             <option key={type} value={type}>
               {FIELD_TYPE_LABELS[type]}
             </option>

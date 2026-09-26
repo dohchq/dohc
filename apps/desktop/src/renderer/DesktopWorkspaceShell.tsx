@@ -118,6 +118,7 @@ import {
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
+import { disposeAutomationButtons } from "./collections/useAutomationButtons";
 import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
@@ -840,6 +841,8 @@ export function DesktopWorkspaceShell(props: {
     (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
     [reportShellFailure],
   );
+  // The workspace's Button runs report through this shell's toasts, so they go with it.
+  useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
     workspaceId,
     workspaceIsReady,
@@ -5725,6 +5728,8 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
+                onButtonError={reportShellError}
+                onButtonNotice={showSuccessNotice}
                 readOnly={
                   (!!shareView && !shareViewDocumentsWritable) ||
                   isMountedSharePath(tabPath)
