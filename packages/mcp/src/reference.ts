@@ -3,7 +3,7 @@
 // summaries, and fields come from CLI_COMMANDS, the table `dohc --help`
 // prints. Result shapes come from the CLI's zod schemas. This file adds only
 // what those lack: which result each verb returns, what each MCP tool
-// returns, the app channel, and the SDK. reference.test.ts fails when any of
+// returns and the app channel. reference.test.ts fails when any of
 // them drifts.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -14,7 +14,6 @@ import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { OwnerAppResponsesResult, type OwnerAppResponsesRequest } from "@dohc/cli/app-responses";
 import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
-import type { DohcClient, DohcFileReadResult, DohcFileWatchEvent, DohcSubscriptionEvent } from "@dohc/sdk";
 import { createDohcMcpServer } from "./server";
 
 export const REFERENCE_PATH = "docs/reference/cli-mcp-sdk.md";
@@ -199,57 +198,6 @@ export const APP_CHANNEL_REQUESTS: { example: Record<string, unknown>; does: str
     returns: "`{ kind: \"accepted\", acceptanceId, acceptedAtMs, momentId, objectId, path }`",
   },
 ];
-
-type SdkMethodPath<T, Prefix extends string = ""> = {
-  [K in keyof T & string]: T[K] extends (...args: never[]) => unknown
-    ? `${Prefix}${K}`
-    : T[K] extends object
-      ? SdkMethodPath<T[K], `${Prefix}${K}.`>
-      : never;
-}[keyof T & string];
-
-export const SDK_FILE_READ_RESULT = z.object({
-  text: z.string(),
-  truncated: z.boolean(),
-}).strict() satisfies z.ZodType<DohcFileReadResult>;
-
-export const SDK_FILE_WATCH_EVENT = z.object({
-  event: z.string(),
-  data: z.object({
-    path: z.string(),
-    operation: z.enum(["update", "delete"]),
-    sha256: z.string().optional(),
-  }),
-}).strict() satisfies z.ZodType<DohcSubscriptionEvent<DohcFileWatchEvent>>;
-
-// The `dohc` client from @dohc/sdk. A method added to the client fails
-// typecheck here until it has an entry.
-export const SDK_METHODS: Record<SdkMethodPath<DohcClient>, { call: string; returns: string; does: string; needs?: string }> = {
-  capabilities: { call: "capabilities()", returns: "`DohcCapabilityMap`", does: "Reads what this context can do, such as `files.write`. It is a map of what is available, not a permission request." },
-  request: { call: "request(method, params?, options?)", returns: "the host's result", does: "Calls a host method this SDK has no typed wrapper for." },
-  invoke: { call: "invoke(method, params?, options?)", returns: "the host's result", does: "Another name for `request`." },
-  subscribe: { call: "subscribe(method, params, listener, options?)", returns: "a function that stops the subscription", does: "Subscribes to host events this SDK has no typed wrapper for." },
-  "files.read": { call: "files.read(path, options?)", returns: "the text", does: "Reads a text file. It throws `DOHC_RESPONSE_TRUNCATED` when the host sent only part of the file.", needs: "files.read" },
-  "files.readInfo": { call: "files.readInfo(path, options?)", returns: `\`${shapeText(jsonSchema(SDK_FILE_READ_RESULT, "output"))}\``, does: "Reads a text file and says whether the host cut it short.", needs: "files.read" },
-  "files.list": { call: "files.list(path?, listOptions?, options?)", returns: "`{ path, name?, kind?, size?, modifiedAt? }[]`", does: "Lists files. `listOptions` takes `recursive` and `includeHidden`.", needs: "files.list" },
-  "files.write": { call: "files.write(path, text, writeOptions?, options?)", returns: "`{ path }`", does: "Writes a text file. `writeOptions.overwrite: false` refuses an existing file. Live Markdown documents are refused.", needs: "files.write" },
-  "files.watch": { call: "files.watch(path, listener, options?)", returns: "a function that stops the watch", does: `Reports settled changes at or below \`path\`. The listener receives \`${shapeText(jsonSchema(SDK_FILE_WATCH_EVENT, "output"))}\`. Read the file path from \`data.path\`; \`data.operation\` is \`update\` or \`delete\`.`, needs: "files.watch" },
-  "workspace.search": { call: "workspace.search(query, searchOptions?, options?)", returns: "`{ path?, title?, excerpt?, score? }[]`", does: "Searches the workspace. `searchOptions` takes `path`, `limit`, and `types`.", needs: "workspace.search" },
-  "databases.read": { call: "databases.read({ path, query?, params? }, options?)", returns: "the host's database snapshot", does: "The desktop host supports snapshots only and rejects every supplied `query`. Call `databases.read({ path })` without SQL.", needs: "databases.read" },
-  "databases.edit": { call: "databases.edit({ path, query?, params?, operations? }, options?)", returns: "the host's result", does: "Changes a workspace database with one query or exactly one operation.", needs: "databases.edit" },
-  "ui.open": { call: "ui.open(target, openOptions?, options?)", returns: "`{ target, position? }`", does: "Opens a workspace path in dohc. `openOptions.position` is `active`, `beside`, or `new-tab`.", needs: "ui.open" },
-  "ui.openWebApp": { call: "ui.openWebApp(webAppId, instanceKey, options?)", returns: "the host's result", does: "Opens one instance of the plugin's own web app in a tab. Only a panel can call it.", needs: "ui.open" },
-  "ui.theme": { call: "ui.theme(options?)", returns: "`DohcTheme`", does: "Reads dohc's design tokens as they are on screen." },
-  "ui.applyTheme": { call: "ui.applyTheme(applyOptions?)", returns: "a function that stops following the theme", does: "Writes dohc's design tokens onto the page and keeps them current." },
-  "collections.list": { call: "collections.list(options?)", returns: "an array of Collection objects", does: "Lists the Collections this context can read.", needs: "collections.read" },
-  "collections.get": { call: "collections.get(path, options?)", returns: "the Collection object", does: "Reads one Collection.", needs: "collections.read" },
-  "collections.query": { call: "collections.query(path, queryOptions?, options?)", returns: "an object with `records`", does: "Queries records. `queryOptions` takes `filter`, `sort`, `groupBy`, `resolveRelations`, `limit`, and `cursor`, as `dohc_query_collection` does.", needs: "collections.read" },
-  "collections.getRecord": { call: "collections.getRecord(path, recordId, recordOptions?, options?)", returns: "the record with its history", does: "Reads one record. `recordOptions` takes `historyLimit` and `beforeHistoryId`.", needs: "collections.read" },
-  "collections.setFields": { call: "collections.setFields(recordPath, fields, options?)", returns: "`{ path }`", does: "Sets fields on a record.", needs: "collections.edit" },
-  "collections.createRecord": { call: "collections.createRecord(path, { name, fields? }, options?)", returns: "the new record's id and path", does: "Creates a record in a Collection.", needs: "collections.edit" },
-  "collections.watch": { call: "collections.watch(collectionPath, listener, options?)", returns: "a function that stops the watch", does: "Reports record changes at or below `collectionPath`, at most once each. Read record history to catch up on missed events.", needs: "collections.read" },
-  "provenance.record": { call: "provenance.record(summary, options?)", returns: "nothing", does: "Records a summary of what the caller did. `summary` is a string or `{ summary, ... }`.", needs: "provenance.record" },
-};
 
 // --- Rendering ---------------------------------------------------------------
 
@@ -489,20 +437,14 @@ function appChannelSection(): string {
   }).join("\n\n");
 }
 
-function sdkSection(): string {
-  return Object.values(SDK_METHODS).map(({ call, returns, does, needs }) =>
-    `- \`${call}\` returns ${returns}. ${does}${needs ? ` Needs the \`${needs}\` capability.` : ""}`,
-  ).join("\n");
-}
-
 export async function renderReference(): Promise<string> {
   const mcp = await mcpSection();
-  return `# CLI, MCP, and SDK reference
+  return `# CLI, MCP, and app channel reference
 
 <!-- Generated by packages/mcp/src/reference.ts. Change that file or the definitions it reads, then run:
 pnpm --filter @dohc/mcp exec vitest run src/reference.test.ts -u -->
 
-Agents and developers use this page to work with dohc from outside the app. It lists every tool of the desktop MCP server, every \`dohc\` command, and every app channel request and \`@dohc/sdk\` method, with its arguments and what it returns.
+Agents and developers use this page to work with dohc from outside the app. It lists every tool of the desktop MCP server, every \`dohc\` command, and every app channel request, with its arguments and what it returns.
 
 ## Connect
 
@@ -550,11 +492,5 @@ When the page loads, its parent window posts \`{ kind: "dohc-app-channel", versi
 The app calls only the operations its owner approved when publishing it. \`app.publish.json\` names them under \`dataset.operationIds\`. The page never sends a workspace, user, or revision, because the host supplies them.
 
 ${appChannelSection()}
-
-## SDK
-
-\`@dohc/sdk\` is the client that plugin panels use. The [SDK README](../../packages/sdk/README.md) shows how to load it. Each \`options\` argument takes \`signal\` and \`timeoutMs\`. A method that needs a capability throws \`DOHC_CAPABILITY_DISABLED\` when the host turns it off.
-
-${sdkSection()}
 `;
 }

@@ -1145,6 +1145,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
         "automation_host_rate_limited" | "notice_rate_limited" => RelayError::HttpStatus(429),
+        "automation_press_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,

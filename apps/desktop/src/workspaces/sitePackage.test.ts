@@ -177,7 +177,7 @@ describe("shareMountRootForSite", () => {
     );
     await writeFile(
       join(root, "shared-with-me", "alex", "plain", "package.json"),
-      JSON.stringify({ dependencies: { "@dohc/sdk": "file:vendor/dohc-sdk" } }),
+      JSON.stringify({ dependencies: { "chart-lib": "file:vendor/chart-lib" } }),
     );
 
     const site = (await listSitePackages(root)).find(
@@ -2245,14 +2245,14 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
     await mkdir(join(root, "report", "data"), { recursive: true });
     await mkdir(join(root, "report", "private"), { recursive: true });
-    await mkdir(join(root, "report", "vendor", "dohc-sdk"), { recursive: true });
+    await mkdir(join(root, "report", "vendor", "chart-lib"), { recursive: true });
     await writeFile(
       join(root, "report", "index.html"),
       [
         '<link rel="icon" href="./assets/logo.png">',
         '<link rel="manifest" href="./site.webmanifest">',
         '<img src="./assets/hero.avif">',
-        '<script src="./vendor/dohc-sdk/index.js"></script>',
+        '<script src="./vendor/chart-lib/index.js"></script>',
         '<script src=./app.js></script>',
       ].join(""),
     );
@@ -2283,7 +2283,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "report", "start.js"), "window.started = true;");
     await writeFile(join(root, "report", "data", "customers.json"), "[]");
-    await writeFile(join(root, "report", "vendor", "dohc-sdk", "index.js"), "sdk");
+    await writeFile(join(root, "report", "vendor", "chart-lib", "index.js"), "library");
     await writeFile(join(root, "report", "private", "secret.json"), "{}");
     await writeFile(join(root, "report", "secret.json"), "{}");
     await writeFile(join(root, "report", "notes.txt"), "private notes");
@@ -2304,7 +2304,7 @@ describe("listSitePackages", () => {
         "report/site.webmanifest",
         "report/start.html",
         "report/start.js",
-        "report/vendor/dohc-sdk/index.js",
+        "report/vendor/chart-lib/index.js",
       ],
     });
     expect(manifestOf(site)?.assets).not.toContain("report/private/secret.json");

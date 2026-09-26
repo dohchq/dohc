@@ -2,13 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter, type Request } from "@dohc/workspace-engine-client";
-import { EngineWorkspaceSessions, type EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import { deferred } from "../testing/deferred";
-import { createDesktopWorkspaceReads, type DesktopWorkspaceReadsDependencies } from "./desktopWorkspaceReads";
+import { createDesktopWorkspaceReads } from "./desktopWorkspaceReads";
 import { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
-import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
-import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import type { RegistryEntry, ShareMountRecord } from "./registryStore";
 import { assertRealMountRoot } from "./shareMounts";
 import { createShareViewFiles, type ShareViewFilesStore } from "./shareViewFiles";
@@ -75,18 +71,12 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
     },
     createMount: unused, removeMount: unused,
   });
-  const sessions = new EngineWorkspaceSessions({ currentClient: unused });
-  const receivedShareEngine = createReceivedShareEngineAccess({
-    sessions: () => sessions, relayClient: unused, createStores: unused,
-  });
   const startupAccessed = deferred();
   const startup = { promise: Promise.resolve(true) };
   const lateReads: string[] = [];
-  const adapterRoute = { run: (async () => null) as DesktopWorkspaceReadsDependencies["withEngineAdapter"] };
   const repair = { run: createOwnedProjectionRepairer(shareViewFiles) };
   const reads = createDesktopWorkspaceReads({
     withPhysicalWorkspaceOperation: (id, work) => authority.withOperation(id, work),
-    withEngineAdapter: (location, work) => adapterRoute.run(location, work),
     isRecordValue: (value): value is Record<string, unknown> =>
       typeof value === "object" && value !== null && !Array.isArray(value),
     get desktopEngine() {
@@ -94,7 +84,6 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
       return { get startup() { startupAccessed.resolve(); return startup.promise; } };
     },
     get shareViewFiles() { lateReads.push("files"); return shareViewFiles; },
-    get receivedShareEngine() { lateReads.push("received"); return receivedShareEngine; },
     get ensureOwnedProjectionTargetCurrent() { lateReads.push("repair"); return repair.run; },
   });
   async function disk(path: string, content: string | Buffer) {
@@ -103,13 +92,13 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
   }
   return {
     rootPath, workspace, attached, authority, canonical, store, beforeRead,
-    startup, startupAccessed, lateReads, adapterRoute, repair, reads, disk,
+    startup, startupAccessed, lateReads, repair, reads, disk,
     path: (path: string) => mode === "mount" ? `shared-with-me/alice/${path}` : path,
   };
 }
 
 describe("desktop workspace reads", () => {
-  it("narrows ordinary SDK listings while complete workspace listings stay complete", async () => {
+  it("narrows ordinary scoped listings while complete workspace listings stay complete", async () => {
     const test = await fixture();
     await test.disk("notes/a.md", "---\nicon: 🚀\n---\n");
     await test.disk("notes/deep/b.md", "nested");
@@ -122,7 +111,7 @@ describe("desktop workspace reads", () => {
     expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files).toHaveLength(3);
   });
 
-  it.each(["standalone", "mount"] as const)("keeps the complete canonical %s listing for scoped SDK reads", async (mode) => {
+  it.each(["standalone", "mount"] as const)("keeps the complete canonical %s listing for scoped reads", async (mode) => {
     const test = await fixture(mode);
     await test.disk("local.md", "local");
     await test.disk(test.path("recipient-only.md"), "stale disk");
@@ -247,85 +236,7 @@ describe("desktop workspace reads", () => {
     await expect(test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "note.md" }))
       .resolves.toEqual({ files: [], folders: [] });
     expect(test.store.listTextFileMetadata).toHaveBeenCalledTimes(2);
-    const routes: EngineWorkspace[] = [];
-    test.adapterRoute.run = async (location) => { routes.push(location); return null; };
-    const port = test.reads.ownedWorkspaceReadsFor(attached);
-    expect(await port.listCollections()).toEqual({ collections: [] });
-    expect(routes).toEqual([{
-      workspaceId: "workspace-a", rootPath: test.rootPath,
-      attachmentId: test.attached.attachmentId, shareMount: true,
-    }]);
-    await expect(port.prepareSearch()).rejects.toThrow();
-  });
-
-  it("keeps SDK canonical reads ungated while desktop share reads wait", async () => {
-    const test = await fixture("standalone");
-    const handshake = deferred<boolean>();
-    test.startup.promise = handshake.promise;
-    test.canonical.set("note.md", { kind: "text", bytes: Buffer.from("canonical") });
-    try {
-      const port = test.reads.ownedWorkspaceReadsFor(test.attached);
-      expect(await port.readText("note.md")).toMatchObject({ text: "canonical" });
-      expect(test.lateReads).not.toContain("engine");
-    } finally { handshake.resolve(true); }
-  });
-
-  it.each(["local", "standalone"] as const)("routes %s collection requests through the real received-share owner and adapter", async (mode) => {
-    const test = await fixture(mode);
-    const routes: EngineWorkspace[] = [];
-    const requests: Request[] = [];
-    const refused = new Error("engine collection refusal");
-    const adapter = new VersionedLiveAdapter({
-      close: () => undefined,
-      sendRequest: async (request) => { requests.push(request); throw refused; },
-    }, "engine-handle", { workspaceId: "workspace-a" });
-    test.adapterRoute.run = async (location, work) => { routes.push(location); return work(adapter); };
-    const port = test.reads.ownedWorkspaceReadsFor(test.attached);
-    const query = { collectionPath: "projects", limit: 7 };
-    const record = { collectionPath: "projects", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", historyLimit: 3 };
-    await expect(port.listCollections()).rejects.toBe(refused);
-    await expect(port.getCollection({ collectionPath: "projects" })).rejects.toBe(refused);
-    await expect(port.queryCollectionRecords(query)).rejects.toBe(refused);
-    await expect(port.getCollectionRecord(record)).rejects.toBe(refused);
-    await expect(port.getCollectionRecord({ ...record, beforeHistoryId: 17 })).rejects.toBe(refused);
-    expect(requests.map(({ method, workspace, params }) => ({ method, workspace, params }))).toEqual([
-      { method: "collections.list", workspace: "engine-handle", params: {} },
-      { method: "collections.get", workspace: "engine-handle", params: { collectionPath: "projects" } },
-      { method: "collections.query", workspace: "engine-handle", params: query },
-      { method: "collections.getRecord", workspace: "engine-handle", params: record },
-      { method: "collections.getRecord", workspace: "engine-handle", params: { ...record, beforeHistoryId: 17 } },
-    ]);
-    for (const route of routes) expect(route).toEqual({
-      workspaceId: "workspace-a", rootPath: test.rootPath, attachmentId: test.attached.attachmentId,
-      ...(mode === "standalone" ? { shareMount: true } : {}),
-    });
-    test.adapterRoute.run = async () => null;
-    expect(await port.listCollections()).toEqual({ collections: [] });
-    await expect(port.getCollection({ collectionPath: "projects" })).rejects.toThrow("The workspace engine is not running.");
-    await expect(port.queryCollectionRecords(query)).rejects.toThrow("The workspace engine is not running.");
-    await expect(port.getCollectionRecord(record)).rejects.toThrow("The workspace engine is not running.");
-  });
-
-  it("passes the optional database reader verified local paths and canonical share bytes", async () => {
-    const test = await fixture("mount");
-    const bytes = Buffer.from("database transport payload");
-    await test.disk("local.sqlite", bytes);
-    await test.disk(test.path("shared.sqlite"), "stale projection");
-    test.canonical.set("shared.sqlite", { kind: "binary", bytes });
-    const refused = new Error("database worker refusal");
-    const verifiedPaths: string[] = [];
-    const databaseReader: OwnedWorkspaceDatabaseReader = {
-      readPrepared: vi.fn<OwnedWorkspaceDatabaseReader["readPrepared"]>(async (_path, source) => source.withVerifiedPath(async (path) => {
-        verifiedPaths.push(path); throw refused;
-      })),
-      readBytes: vi.fn(async () => { throw refused; }),
-      readPagePrepared: unused, readPageBytes: unused,
-    };
-    const port = test.reads.ownedWorkspaceReadsFor(test.attached, databaseReader);
-    await expect(port.readDatabase("local.sqlite")).rejects.toBe(refused);
-    await expect(port.readDatabase(test.path("shared.sqlite"))).rejects.toBe(refused);
-    expect(verifiedPaths).toEqual([join(test.rootPath, "local.sqlite")]);
-    expect(databaseReader.readBytes).toHaveBeenCalledWith(test.path("shared.sqlite"), bytes);
+    await expect(test.reads.ownedWorkspaceReadsFor(attached).prepareSearch()).rejects.toThrow();
   });
 
   it.each(["standalone", "mount"] as const)("repairs %s search projections through the real share owner", async (mode) => {
@@ -341,6 +252,5 @@ describe("desktop workspace reads", () => {
     expect(await readFile(join(test.rootPath, test.path("missing.md")), "utf8")).toBe("canonical search text");
     expect(view.allowPath(test.path("missing.md"))).toBe(true);
     expect(view.listing?.files.map((file) => file.path)).toContain(test.path("missing.md"));
-    expect(await port.readText(test.path("missing.md"))).toMatchObject({ text: "canonical search text" });
   });
 });

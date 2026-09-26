@@ -174,15 +174,19 @@ export function newAutomation(fields: readonly FieldDefinition[]): Automation {
 
 /**
  * For each top-level step, the places of its reach verdicts among all of an
- * automation's verdicts. The reach check has one verdict per step that
- * changes or finds records, in the order the executor walks the steps: a
+ * automation's verdicts, in the order the executor walks the steps: a
  * step, then the steps an If runs, then its otherwise steps.
  */
-export function reachPlaces(steps: readonly AutomationStep[]): number[][] {
-  let next = 0;
+export function reachPlaces(steps: readonly AutomationStep[], first = 0): number[][] {
+  let next = first;
   const walk = (list: readonly AutomationStep[], into: number[]) => {
     for (const step of list) {
-      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find") into.push(next++);
+      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find" || step.kind === "post" || step.kind === "wake-agent") into.push(next++);
+      if (step.kind === "direct-message" || step.kind === "notify") {
+        for (const person of step.to) {
+          if (person.kind === "literal" && typeof person.value === "string") into.push(next++);
+        }
+      }
       if (step.kind === "if") {
         walk(step.do, into);
         walk(step.otherwise, into);

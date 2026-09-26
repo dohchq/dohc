@@ -5,8 +5,7 @@ import {
 import { CHANNELS } from "./channels";
 
 // What a call site knows about the activity it reports. `workspaceId` scopes
-// the send to windows with that workspace active — the pluginStatusChanged
-// rule. No scope means a genuinely global event (logout, registry change,
+// the send to windows with that workspace active. No scope means a genuinely global event (logout, registry change,
 // daemon relaunch) that every window must hear.
 export interface WorkspaceActivityScope {
   workspaceId: string;
@@ -32,8 +31,7 @@ export function workspaceActivityPayload(
 }
 
 // One send decision for the workspace-activity channel: a scoped event
-// reaches only windows whose active workspace matches (exactly like
-// pluginStatusChanged); a global event reaches every window. A window on
+// reaches only windows whose active workspace matches; a global event reaches every window. A window on
 // workspace B must never be made to refetch its world for workspace A's
 // activity.
 export function broadcastWorkspaceActivity(options: {

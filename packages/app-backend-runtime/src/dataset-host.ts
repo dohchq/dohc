@@ -291,7 +291,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   const host = {
     /** For the trusted executor. Commits claim through the host; deleting a dataset forgets its claims. */
     automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
-      next: automations.next, settle: automations.settle, retry: automations.retry },
+      next: automations.next, settle: automations.settle, release: automations.release, retry: automations.retry,
+      claims: automations.claims, claim: automations.claim, failures: automations.failures },
     deletionStatus(context: Context, raw: DatasetScope) {
       const key = scope(raw); owner(context,key);
       return { deleted: Boolean(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) };
@@ -657,6 +658,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         datasets.push(description); bytes += size;
       }
       return { datasets, nextCursor: rows.length > datasets.length ? datasets.at(-1)!.datasetId : null };
+    },
+    /** Every unarchived dataset's id, owner only, without reading any dataset's rules. */
+    datasetIds(context: Context, raw: { workspaceId: string }): string[] {
+      const workspaceId = text(raw.workspaceId); owner(context, { workspaceId });
+      return db.prepare("SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 ORDER BY c.dataset_id")
+        .all(workspaceId).map(row => String(row.dataset_id));
+    },
+    /** The approved revision alone, without its source artifacts. */
+    approvedRevision(context: Context, raw: DatasetScope): DatasetRevision {
+      const key = scope(raw); owner(context, key); return revision(key);
     },
     approvedArtifacts(context: Context, raw: DatasetScope) {
       const key = scope(raw);

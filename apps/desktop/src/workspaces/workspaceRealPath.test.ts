@@ -9,11 +9,7 @@ import {
   deletePath,
   movePath,
 } from "./workspaceFiles";
-import {
-  createWorkspaceTextExclusive,
-  resolveWorkspaceFile,
-  restoreWorkspaceText,
-} from "./workspaceAssets";
+import { resolveWorkspaceFile, writeWorkspaceAsset } from "./workspaceAssets";
 import { importToDatabase } from "./workspaceDatabase";
 import { createDefaultDiskWriter } from "./workspaceEngineCapture";
 import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
@@ -147,49 +143,19 @@ describe("workspaceAssets through an in-workspace alias", () => {
     ).rejects.toThrow(/Asset path leads to a reserved area/);
   });
 
-  it("restoreWorkspaceText refuses a write that lands in .dohc", async () => {
+  it("writeWorkspaceAsset refuses a write that lands in .dohc", async () => {
     await expect(
-      restoreWorkspaceText(root, "meta/settings.json", "clobbered"),
-    ).rejects.toThrow(/Restore path leads to a reserved area/);
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
-      SETTINGS,
-    );
+      writeWorkspaceAsset(root, "meta/pixel.png", new Uint8Array([1])),
+    ).rejects.toThrow(/reserved area/);
+    expect(existsSync(join(root, ".dohc", "pixel.png"))).toBe(false);
   });
 
-  // A restore commits with rename over the entry, so it never writes through
-  // the leaf. Following it would refuse the very file the restore repairs.
-  //
-  it("heals a file someone replaced with a link into .dohc", async () => {
-    await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
-    await restoreWorkspaceText(root, "note.md", "# Restored\n");
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
-      SETTINGS,
-    );
-    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
-  });
-
-  it("heals a file someone replaced with a link out of the workspace", async () => {
-    const outside = await createTestScratch("dohc-real-path-assets-outside-");
-    await writeFile(join(outside, "victim.md"), "untouched");
-    await symlink(join(outside, "victim.md"), join(root, "note.md"));
-    await restoreWorkspaceText(root, "note.md", "# Restored\n");
-    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe(
-      "untouched",
-    );
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
-  });
-
-  // `wx` does not refuse every existing entry: on a dangling link it follows
-  // the link and creates its target. So the exclusive path judges the leaf
-  // while the rename path does not — the commit mode decides.
-  //
-  it("refuses an exclusive create through a dangling link into .dohc", async () => {
-    await symlink(join(root, ".dohc", "planted.json"), join(root, "note.md"));
+  it("refuses an asset write through a dangling link into .dohc", async () => {
+    await symlink(join(root, ".dohc", "planted.png"), join(root, "note.png"));
     await expect(
-      createWorkspaceTextExclusive(root, "note.md", "# New\n"),
-    ).rejects.toThrow(/Restore path has a symlink with no target/);
-    expect(existsSync(join(root, ".dohc", "planted.json"))).toBe(false);
+      writeWorkspaceAsset(root, "note.png", new Uint8Array([1])),
+    ).rejects.toThrow();
+    expect(existsSync(join(root, ".dohc", "planted.png"))).toBe(false);
   });
 });
 

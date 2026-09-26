@@ -535,9 +535,8 @@ export function registerShareProposalsIpcHandlers<
   // Writes the share view's changes to a Collection's own files straight into
   // the owner's workspace (ADR 0013), as main's own operation, so a push goes
   // after the window leaves the view. Saves are already in the share view's
-  // journal, so nothing is captured first. A relay that does not take direct
-  // writes answers as the share being unavailable; the changes then wait for
-  // Send changes.
+  // journal, so nothing is captured first. After the owner ends the share or
+  // stops the person, the relay answers that the share is unavailable.
   function pushDirectWrites(workspaceId: string): Promise<PushShareDirectWritesResult> {
     return withRecipientScope(
       (inner) => dependencies.withWorkspaceAuthority(workspaceId, inner),

@@ -55,7 +55,7 @@ if(args[0]==='run' && args[1]==='test') {
   const name=args[1].split('/')[1];
   process.on('SIGTERM',()=>appendFileSync(join(root,'terms.jsonl'),JSON.stringify({name,pid:process.pid})+'\\n'));
   setInterval(()=>{},1000);
-  writeFileSync(join(root,name+'.worker.json'),JSON.stringify({name,pid:process.pid,env:{POSTGRES_URL:process.env.POSTGRES_URL,DOHC_REQUIRE_POSTGRES:process.env.DOHC_REQUIRE_POSTGRES,DOHC_REQUIRE_ENGINE_E2E:process.env.DOHC_REQUIRE_ENGINE_E2E,DOHC_REQUIRE_PLUGIN_INSTALL_E2E:process.env.DOHC_REQUIRE_PLUGIN_INSTALL_E2E}}));
+  writeFileSync(join(root,name+'.worker.json'),JSON.stringify({name,pid:process.pid,env:{POSTGRES_URL:process.env.POSTGRES_URL,DOHC_REQUIRE_POSTGRES:process.env.DOHC_REQUIRE_POSTGRES,DOHC_REQUIRE_ENGINE_E2E:process.env.DOHC_REQUIRE_ENGINE_E2E}}));
 }
 `);
   put('owner.mjs',`

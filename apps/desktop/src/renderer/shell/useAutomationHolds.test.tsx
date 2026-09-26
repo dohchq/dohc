@@ -10,7 +10,7 @@ afterEach(() => {
 
 const hold = (workspace: string): AutomationHoldNotice => ({
   automationId: `collection:${workspace}#spend`, automationName: "Spend", definitionHash: "0123456789abcdef",
-  step: 0, seq: 1, collection: workspace, target: "Budget", action: "change", stoppedFor: "bob@dohc.test",
+  step: "0", seq: 1, collection: workspace, target: "Budget", action: "change", stoppedFor: "bob@dohc.test",
 });
 
 it("never lets an Allow that finishes after a workspace switch repaint the new workspace's holds", async () => {
@@ -74,7 +74,7 @@ it("dismisses the stopped steps by the verdicts it showed, then reads the notice
   await act(async () => { result.current.dismissAutomationStops([stop]); });
   expect(dismissAutomationStops).toHaveBeenCalledWith({
     workspaceId: "Trip",
-    stops: [{ automationId: stop.automationId, definitionHash: stop.definitionHash, step: 0, seq: 7 }],
+    stops: [{ automationId: stop.automationId, definitionHash: stop.definitionHash, step: "0", seq: 7 }],
   });
   expect(listAutomationHolds).toHaveBeenCalledTimes(2);
 });

@@ -12,13 +12,10 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import { bridgeCaptureEventsToRenderer } from "./captureActivityBridge";
-import { bridgeRecordEventsToPlugins } from "./recordEventsBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
-import type { PluginWorkspaceRuntimes } from "../plugins/pluginWorkspaceRuntimes";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
 import {EngineClient} from "@dohc/workspace-engine-client/daemon";
@@ -44,7 +41,6 @@ export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
 type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "restart-required";
 
 type EngineAuthorityState = {
-  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   collectionAutomations: CollectionAutomationsLifecycle;
 };
 
@@ -76,7 +72,6 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
       work: (lease: WorkspaceAuthorityLease<RegistryEntry, State>) => Result | Promise<Result>,
     ): Promise<Result>;
   };
-  pluginWorkspaceRuntimes: Pick<PluginWorkspaceRuntimes<CreatedWorkspace>, "current">;
   collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed"> | undefined };
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   notifyAutomationFailuresChanged(workspaceId: string): void;
@@ -91,7 +86,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
 ) {
   const {
     app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
-    isQuitting, recordEngineProblem, workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
+    isQuitting, recordEngineProblem, workspaceAuthorities, notifyRenderer,
     notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
   } = dependencies;
 
@@ -358,7 +353,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   async function startRustEngineDaemon(): Promise<boolean> {
-    const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
     const restartingCollectionAutomations = new Set<CollectionAutomationsLifecycle>();
     // Everything, including resolving the binary path, runs inside the try: a
     // throw while building the options would otherwise reject this whenReady
@@ -401,11 +395,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           resourcesPath: process.resourcesPath,
         }),
         onFailure: (error, terminal) => {
-          if (terminal) {
-            for (const runtimes of restartingPluginRuntimes) {
-              runtimes.failEngineRestart(error);
-            }
-          }
           // The supervisor's diagnostic is for us: it names engine.ping, probe
           // counts and wedge budgets, which tell a developer or an agent exactly
           // which limit was hit. It goes to the log in full.
@@ -441,9 +430,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const automations = lease.state.collectionAutomations;
               automations.pauseForEngineRestart();
               restartingCollectionAutomations.add(automations);
-              const runtimes = lease.state.pluginRuntimes;
-              restartingPluginRuntimes.add(runtimes);
-              return runtimes.prepareForEngineRestart();
             }),
           ));
         },
@@ -456,10 +442,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           engineProblemRecorded = false;
           startOwnerHost();
           startOwnerDelivery();
-          for (const runtimes of restartingPluginRuntimes) {
-            runtimes.resumeAfterEngineRestart();
-          }
-          restartingPluginRuntimes.clear();
           for (const automations of restartingCollectionAutomations) {
             automations.resumeAfterEngineRestart();
           }
@@ -472,23 +454,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // signal that a moment landed, so bridge them onto the renderer's
       // workspace-activity ping or the history timeline goes permanently stale.
       bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
-      // The daemon also records collection changes autonomously: its record
-      // events are the only live signal behind a plugin's collections.watch
-      // subscription, so route each one to the owning workspace's registry.
-      bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
-        pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
-      );
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim
       // inserted already failed (the depth cap's chain-stopped stop report)
-      // pokes the owner's failure notice instead. Each executor drains only
-      // its own namespace, so both wake.
+      // pokes the owner's failure notice instead.
       bridgeAutomationClaimsToExecutors(
         rustEngineDaemon,
         (workspaceId) => ({
           notifyClaimed() {
-            pluginWorkspaceRuntimes.current(workspaceId)?.automations.notifyClaimed();
             dependencies.collectionAutomations.current(workspaceId)?.notifyClaimed();
           },
         }),
@@ -529,9 +503,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     } catch (error) {
       stopOwnerHost();
       await stopOwnerDelivery();
-      for (const runtimes of restartingPluginRuntimes) {
-        runtimes.failEngineRestart(error);
-      }
       const message =
         error instanceof Error ? error.message : "Unknown Rust engine startup error.";
       console.error("[desktop] Rust engine daemon failed to start:", error);

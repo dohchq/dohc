@@ -235,7 +235,7 @@ mod tests {
         let claims = vec![
             dohc_engine_domain::AutomationClaim {
                 claim_id: "atc_one".to_owned(),
-                automation_id: "plugin:triage".to_owned(),
+                automation_id: "collection:tasks#triage".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::Coordinate {
                     origin_id: "origin-a".to_owned(),
                     origin_seq: 41,
@@ -258,7 +258,7 @@ mod tests {
             },
             dohc_engine_domain::AutomationClaim {
                 claim_id: "atc_two".to_owned(),
-                automation_id: "plugin:janitor".to_owned(),
+                automation_id: "collection:tasks#janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },
                 record_id: Some("rec_a".to_owned()),
                 collection_path: "tasks".to_owned(),
@@ -295,7 +295,7 @@ mod tests {
             json!({
                 "workspaceId": "ws-1",
                 "claimId": "atc_one",
-                "automationId": "plugin:triage",
+                "automationId": "collection:tasks#triage",
                 "trigger": { "originId": "origin-a", "originSeq": 41 },
                 "recordId": "rec_a",
                 "collectionPath": "tasks",

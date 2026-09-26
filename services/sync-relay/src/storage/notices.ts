@@ -85,6 +85,9 @@ function formatNoticeCursor(cursor: NoticeCursor): string {
 export interface MarkNoticesInput {
   recipientUserId: string;
   marks: readonly { noticeId: string; mark: NoticeMark }[];
+  // The computer that dismisses. A first dismissal names it, and it hears
+  // "first" again when it asks again.
+  installId?: string;
   nowMs: number;
 }
 
@@ -118,6 +121,11 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
   if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
   storage.tx(() => {
+    if (input.kind === "schedule-skipped") {
+      const skipped = skippedScheduleNotice(noticeId, input.nowMs);
+      if (skipped === null) throw badRequest("noticeId is not a skipped schedule's notice");
+      if (reclaimedFor(storage, input.recipientUserId, skipped) !== null) throw relayError("notice_refused");
+    }
     const placement = self ? ownPlacement(storage, input) : sharedPlacement(storage, input);
     const existing = storage.db
       .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
@@ -371,14 +379,38 @@ export function readNoticeChanges(
   });
 }
 
-/** Sets read or dismissed once. A row already marked, removed, expired, or gone is left as it is. */
-export function markNotices(storage: StorageContext, input: MarkNoticesInput): void {
-  storage.tx(() => {
+/**
+ * Sets read or dismissed once. A row already marked, removed, expired, or
+ * gone is left as it is. Returns the notices this call dismissed for the
+ * first time ever: a receipt outlives the row, so a notice posted again
+ * after its retention is not dismissed first twice.
+ */
+export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
+  return storage.tx(() => {
+    const dismissed: string[] = [];
+    let receipts = 0;
+    const receipt = storage.db.prepare(
+      `INSERT OR IGNORE INTO sync_relay_notice_dismissals (recipient_user_id, notice_id, dismissed_at_ms, winner_install_id)
+       VALUES (?, ?, ?, ?)`,
+    );
+    const winner = storage.db.prepare(
+      `SELECT winner_install_id FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    // A skipped-schedule notice at or below its schedule's floor may be one
+    // whose earlier receipt went: its dismissal is never first.
+    const floored = (noticeId: string) => {
+      const skipped = skippedScheduleNotice(noticeId, Number.MAX_SAFE_INTEGER);
+      return skipped !== null && reclaimedFor(storage, input.recipientUserId, skipped) !== null;
+    };
     const read = storage.db.prepare(
       `SELECT read_at_ms, dismissed_at_ms FROM sync_relay_notices
        WHERE recipient_user_id = ? AND notice_id = ? AND expires_at_ms > ? AND removed_at_ms IS NULL`,
     );
     for (const { noticeId, mark } of input.marks) {
+      if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
+        const held = winner.get(input.recipientUserId, noticeId) as { winner_install_id: string | null } | undefined;
+        if (held?.winner_install_id === input.installId && !floored(noticeId)) dismissed.push(noticeId);
+      }
       const row = read.get(input.recipientUserId, noticeId, input.nowMs);
       if (!row || row.dismissed_at_ms !== null || (mark === "read" && row.read_at_ms !== null)) continue;
       const [column, retentionMs] = mark === "read"
@@ -394,8 +426,80 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): v
         input.recipientUserId,
         noticeId,
       );
+      const inserted = mark === "dismissed" &&
+        Number(receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null).changes ?? 0) === 1;
+      if (inserted) {
+        receipts += 1;
+        if (!floored(noticeId) && !dismissed.includes(noticeId)) dismissed.push(noticeId);
+      }
     }
+    if (receipts > 0) reclaimOldReceipts(storage, input.recipientUserId);
+    return dismissed;
   });
+}
+
+/** A person keeps at most this many first-dismissal receipts. */
+export const NOTICE_DISMISSAL_RECEIPTS = 10_000;
+
+// Past the quota, the oldest receipts go. A reclaimed skipped-schedule
+// notice raises its own schedule's floor to when it was dismissed, which is
+// after its first skipped time.
+function reclaimOldReceipts(storage: StorageContext, recipientUserId: string): void {
+  const { count } = storage.db
+    .prepare("SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?")
+    .get(recipientUserId) as { count: number };
+  const excess = Number(count) - NOTICE_DISMISSAL_RECEIPTS;
+  if (excess <= 0) return;
+  const oldest = storage.db.prepare(
+    `SELECT notice_id, dismissed_at_ms FROM sync_relay_notice_dismissals
+     WHERE recipient_user_id = ? ORDER BY dismissed_at_ms, notice_id LIMIT ?`,
+  ).all(recipientUserId, excess) as Array<{ notice_id: string; dismissed_at_ms: number }>;
+  const remove = storage.db.prepare(
+    "DELETE FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?",
+  );
+  const floor = storage.db.prepare(
+    `INSERT INTO sync_relay_notice_dismissal_floors (recipient_user_id, schedule_key, reclaimed_through_ms)
+     VALUES (?, ?, ?)
+     ON CONFLICT(recipient_user_id, schedule_key) DO UPDATE SET
+       reclaimed_through_ms = max(reclaimed_through_ms, excluded.reclaimed_through_ms)`,
+  );
+  for (const row of oldest) {
+    remove.run(recipientUserId, row.notice_id);
+    const skipped = skippedScheduleNotice(row.notice_id, Number.MAX_SAFE_INTEGER);
+    // A first skipped time a little ahead of the relay's clock can be later
+    // than the dismissal: the floor covers both.
+    if (skipped) floor.run(recipientUserId, skipped.schedule, Math.max(row.dismissed_at_ms, skipped.firstMs));
+  }
+}
+
+/** How far ahead of the relay's clock a skipped time may be. */
+const SKIPPED_TIME_CLOCK_ALLOWANCE_MS = 24 * 60 * 60 * 1000;
+
+// schedule-skipped:<workspace>:<automation>:<first skipped ms>, as the owner's
+// computer posts it: the schedule it names and when it first skipped, a safe
+// integer no later than the relay's clock allows. Null for any other shape.
+function skippedScheduleNotice(noticeId: string, nowMs: number): { schedule: string; firstMs: number } | null {
+  const match = /^schedule-skipped:([^:]+:.+):(0|[1-9]\d{0,15})$/u.exec(noticeId);
+  const firstMs = match ? Number(match[2]) : Number.NaN;
+  if (!match || !Number.isSafeInteger(firstMs) || firstMs > nowMs + SKIPPED_TIME_CLOCK_ALLOWANCE_MS) return null;
+  return { schedule: match[1]!, firstMs };
+}
+
+// A notice for a schedule first skipped at or before that schedule's floor
+// may be one whose receipt went, and a repost of it could be dismissed first
+// again. Answers the floor that refuses it, or null.
+function reclaimedFor(
+  storage: StorageContext,
+  recipientUserId: string,
+  skipped: { schedule: string; firstMs: number },
+): number | null {
+  const floor = storage.db
+    .prepare(
+      `SELECT reclaimed_through_ms FROM sync_relay_notice_dismissal_floors
+       WHERE recipient_user_id = ? AND schedule_key = ?`,
+    )
+    .get(recipientUserId, skipped.schedule) as { reclaimed_through_ms: number } | undefined;
+  return floor !== undefined && skipped.firstMs <= floor.reclaimed_through_ms ? floor.reclaimed_through_ms : null;
 }
 
 // A post to yourself is placed where you said. A share must be one you

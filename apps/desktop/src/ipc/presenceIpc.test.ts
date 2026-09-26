@@ -63,8 +63,6 @@ async function harness() {
     retirement: createDesktopRendererWorkspaceRetirement({
       engineYDoc: { retireSender: async () => undefined },
       sitePreviews: { cancelSender: () => undefined, stopWorkspace: async () => undefined },
-      pluginSurfaces: { stop: async () => undefined },
-      pluginRuntimes: { stop: async (_workspace, beforeDispose) => beforeDispose() },
       workspaceSearch: { disposeSender: async () => undefined },
       presencePolls: { disposeSender: id => {
         capability.presencePollRegistry.disposeSender(id);

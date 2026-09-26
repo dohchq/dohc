@@ -5,7 +5,6 @@ import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { executeCli } from "@dohc/cli";
 import { CLI_COMMANDS } from "@dohc/cli/args";
 import { cliResultSchemas } from "@dohc/cli/protocol";
-import { createDohcClient, DOHC_SDK_PROTOCOL, type DohcSdkRequestMessage } from "@dohc/sdk";
 import {
   APP_CHANNEL_REQUESTS,
   APP_RESPONSE_RESULTS,
@@ -14,9 +13,6 @@ import {
   DATASET_RESULTS,
   MCP_RETURNS,
   REFERENCE_PATH,
-  SDK_FILE_READ_RESULT,
-  SDK_FILE_WATCH_EVENT,
-  SDK_METHODS,
   mcpToolNames,
   renderReference,
 } from "./reference";
@@ -25,7 +21,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("CLI, MCP, and SDK reference", () => {
+describe("CLI, MCP, and app channel reference", () => {
   // On a mismatch, regenerate the page with the command at its top.
   it(`matches ${REFERENCE_PATH}`, async () => {
     await expect(await renderReference()).toMatchFileSnapshot(`../../../${REFERENCE_PATH}`);
@@ -73,19 +69,6 @@ describe("CLI, MCP, and SDK reference", () => {
     }
   });
 
-  it("lists exactly the SDK client's methods", () => {
-    const client = createDohcClient({ transport: { request: async () => undefined } });
-    const methods: string[] = [];
-    const walk = (value: object, prefix: string) => {
-      for (const [key, child] of Object.entries(value)) {
-        if (typeof child === "function") methods.push(`${prefix}${key}`);
-        else if (child && typeof child === "object") walk(child, `${prefix}${key}.`);
-      }
-    };
-    walk(client, "");
-    expect(Object.keys(SDK_METHODS).sort()).toEqual(methods.sort());
-  });
-
   it("renders every CLI argument-source mapping alongside its notes", async () => {
     const page = await renderReference();
     for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {
@@ -96,58 +79,6 @@ describe("CLI, MCP, and SDK reference", () => {
         }
         for (const note of verb.notes ?? []) expect(section).toContain(note);
       }
-    }
-  });
-
-  it("matches documented file result and callback shapes through the SDK transport", async () => {
-    const currentWindow = Object.assign(new EventTarget(), {
-      setTimeout: globalThis.setTimeout.bind(globalThis),
-      clearTimeout: globalThis.clearTimeout.bind(globalThis),
-    }) as unknown as Window;
-    const targetOrigin = "https://host.dohc.test";
-    const targetWindow = {
-      postMessage(message: DohcSdkRequestMessage) {
-        let result: unknown;
-        switch (message.method) {
-          case "capabilities": result = {
-            files: { read: true, write: false, watch: true },
-            collections: { read: false },
-            provenance: { record: false },
-          }; break;
-          case "files.read": result = { text: "bounded prefix", truncated: true }; break;
-          case "files.watch": result = { subscriptionId: "watch-1" }; break;
-          case "subscriptions.unsubscribe": result = { ok: true }; break;
-          default: throw new Error(`Unexpected SDK method: ${message.method}`);
-        }
-        dispatch({ protocol: DOHC_SDK_PROTOCOL, id: message.id, ok: true, result });
-      },
-    } as unknown as Window;
-    function dispatch(data: unknown) {
-      currentWindow.dispatchEvent(Object.assign(new Event("message"), { data, source: targetWindow, origin: targetOrigin }));
-    }
-    const client = createDohcClient({ currentWindow, targetWindow, targetOrigin });
-    const read = await client.files.readInfo("notes/today.md");
-    expect(SDK_FILE_READ_RESULT.parse(read)).toEqual(read);
-    expect(read).toEqual({ text: "bounded prefix", truncated: true });
-    await expect(client.files.read("notes/today.md")).rejects.toMatchObject({ code: "DOHC_RESPONSE_TRUNCATED" });
-
-    const events: unknown[] = [];
-    const stop = await client.files.watch("notes", (event) => events.push(event));
-    try {
-      for (const data of [
-        { path: "notes/today.md", operation: "update", sha256: "a".repeat(64) },
-        { path: "notes/today.md", operation: "delete" },
-      ]) {
-        dispatch({ protocol: DOHC_SDK_PROTOCOL, type: "event", subscriptionId: "watch-1", event: "changed", data });
-        const received = events.at(-1);
-        expect(SDK_FILE_WATCH_EVENT.parse(received)).toEqual(received);
-        expect(received).toEqual({ event: "changed", data });
-      }
-      expect(events).toHaveLength(2);
-      expect(SDK_METHODS["files.watch"].does).toContain("`{ event, data: { path, operation, sha256? } }`");
-      expect(SDK_METHODS["files.readInfo"].returns).toBe("`{ text, truncated }`");
-    } finally {
-      await stop();
     }
   });
 

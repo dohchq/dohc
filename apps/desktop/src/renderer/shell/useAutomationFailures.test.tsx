@@ -26,8 +26,8 @@ describe("automation failure notices", () => {
     );
     await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalledWith({ workspaceId: "ws-a" }));
 
-    act(() => result.current.dismissAutomationFailure("collection:Tasks#stamp", 1));
-    act(() => result.current.dismissAutomationFailure("collection:Tasks#nudge", 1));
+    act(() => result.current.dismissAutomationFailure({ automationId: "collection:Tasks#stamp", generation: 1, datasetInstance: null }));
+    act(() => result.current.dismissAutomationFailure({ automationId: "collection:Tasks#nudge", generation: 1, datasetInstance: null }));
     rerender({ workspaceId: "ws-b" });
     await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalledWith({ workspaceId: "ws-b" }));
     const reads = bridge.listAutomationFailures.mock.calls.length;

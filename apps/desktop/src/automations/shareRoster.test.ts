@@ -7,6 +7,7 @@ import {
   createShareRosters,
   listRosterGrants,
   reachRosterFor,
+  rosterAuthorLabel,
   SHARE_ROSTER_FRESH_MS,
   SHARE_ROSTER_REFRESH_MS,
   type ListedGrant,
@@ -38,7 +39,7 @@ const ana: ListedGrant = {
   selector: { paths: ["Trip"], versionId: null }, access: "edit",
 };
 const anaOnRoster = {
-  recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
+  grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test",
   files: { paths: ["Trip"], versionId: null, access: "edit" }, channel: null,
 };
 
@@ -89,11 +90,11 @@ describe("roster from the relay's listings", () => {
     expect(reachRosterFor({ entry, localUserId: null, latest: listing, next: "" })).toEqual({
       kind: "owner", ownerUserId: "u-owner", grants: [
         { ...anaOnRoster, files: null, channel: { wireId: "wire-family", canPost: true } },
-        { ...anaOnRoster, files: { paths: ["Trip"], versionId: null, access: "view" }, channel: { wireId: "wire-trip", canPost: false } },
-        { ...anaOnRoster, channel: { wireId: "wire-trip", canPost: true } },
-        { recipientUserId: null, recipientEmail: "cai@dohc.test", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: null },
-        anaOnRoster,
-        { ...anaOnRoster, files: { paths: [], versionId: "v-1", access: "edit" } },
+        { ...anaOnRoster, grantId: "g-2", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: { wireId: "wire-trip", canPost: false } },
+        { ...anaOnRoster, grantId: "g-3", channel: { wireId: "wire-trip", canPost: true } },
+        { grantId: "g-4", recipientUserId: null, recipientEmail: "cai@dohc.test", files: { paths: ["Trip"], versionId: null, access: "view" }, channel: null },
+        { ...anaOnRoster, grantId: "g-5" },
+        { ...anaOnRoster, grantId: "g-6", files: { paths: [], versionId: "v-1", access: "edit" } },
       ],
     });
   });
@@ -329,6 +330,19 @@ describe("keeping the roster current", () => {
     r.close(WORKSPACE);
     vi.advanceTimersByTime(SHARE_ROSTER_REFRESH_MS * 3);
     expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the cached roster without listing; a run refreshes after a pull", async () => {
+    seed();
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    r.pullStarting(WORKSPACE)();
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    expect(list).not.toHaveBeenCalled();
+    // A run lists first, and the listing clears the pull.
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    expect(list).toHaveBeenCalledTimes(1);
   });
 
   it("lists again before a run only when the last listing is older than a minute", async () => {
@@ -617,5 +631,27 @@ describe("keeping the roster current", () => {
     r.open("ws-local");
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe("a direct write's author in History", () => {
+  const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
+    ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
+  const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")] };
+
+  it("names the person and the level of the grant they wrote through", () => {
+    expect(rosterAuthorLabel(roster, { userId: "ana", grantId: "g-1" })).toBe("ana@example.com (Edit)");
+  });
+
+  it("names the person without a level when that grant is gone", () => {
+    expect(rosterAuthorLabel(roster, { userId: "ben", grantId: "revoked" })).toBe("ben@example.com");
+  });
+
+  it("names nobody it cannot match", () => {
+    expect(rosterAuthorLabel(roster, { userId: "cy", grantId: "revoked" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel(roster, { userId: "cy", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel(undefined, { userId: "ana", grantId: "g-1" })).toBe("Someone you shared with");
+    expect(rosterAuthorLabel({ version: 1, grants: null, problem: { kind: "unusable-listing" } }, { userId: "ana", grantId: "g-1" }))
+      .toBe("Someone you shared with");
   });
 });

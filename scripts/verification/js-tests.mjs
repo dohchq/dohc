@@ -59,7 +59,6 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   }
   try {
     if (!prepared) {
-      await command("sdk-build", ["--filter", "@dohc/sdk", "build"]);
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
     // These tests change tracked files temporarily. Keep provenance probes and

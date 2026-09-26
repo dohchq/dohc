@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { acquireBuildSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
-import { stagedEsbuildExecutable } from "../../apps/desktop/scripts/stage-plugin-tools.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 
@@ -111,7 +110,7 @@ export function directoryFingerprint(path) {
 function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist", "services/share-web/viewer/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
     ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
@@ -123,8 +122,7 @@ export function preparedStatus(kind, receipt = readJson(receiptPath)) {
     }
     return receipt?.[kind]?.source === sourceFingerprint(kind)
       && (kind === "engine" ? engineArtifactMatches(enginePath, receipt[kind].artifact)
-        : receipt[kind].artifact === artifactFingerprint(kind)
-          && stagedEsbuildExecutable(join(repoRoot, "apps/desktop/resources/plugin-tools")));
+        : receipt[kind].artifact === artifactFingerprint(kind));
   } catch (error) {
     if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) return false;
     throw error;

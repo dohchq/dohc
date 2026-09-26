@@ -49,8 +49,7 @@ fn subscription(
     }
 }
 
-/// Subscribe to added and changed records on any field, as plugin
-/// automations do.
+/// Subscribe to added and changed records on any field.
 fn subscribe(store: &mut EngineStore, automation_id: &str, prefix: &str) -> bool {
     subscribe_automation(
         store,
@@ -156,13 +155,13 @@ fn subscriptions_round_trip_replace_their_filter_and_validate() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
 
-    assert!(subscribe(&mut store, "plugin:triage", "tasks"));
+    assert!(subscribe(&mut store, "collection:triage", "tasks"));
     assert!(
-        !subscribe(&mut store, "plugin:triage", "tasks"),
+        !subscribe(&mut store, "collection:triage", "tasks"),
         "the same filter again changes nothing"
     );
     let narrowed = subscription(
-        "plugin:triage",
+        "collection:triage",
         "tasks",
         &[AutomationChangeKind::Changed],
         Some(&["status", "status"]),
@@ -175,11 +174,11 @@ fn subscriptions_round_trip_replace_their_filter_and_validate() {
         !subscribe_automation(&mut store, WS, &narrowed, 12, &NO_FAULTS).expect("narrow again"),
     );
     assert!(
-        unsubscribe_automation(&mut store, WS, "plugin:triage", "tasks", &NO_FAULTS)
+        unsubscribe_automation(&mut store, WS, "collection:triage", "tasks", &NO_FAULTS)
             .expect("unsubscribe")
     );
     assert!(
-        !unsubscribe_automation(&mut store, WS, "plugin:triage", "tasks", &NO_FAULTS)
+        !unsubscribe_automation(&mut store, WS, "collection:triage", "tasks", &NO_FAULTS)
             .expect("second unsubscribe finds nothing"),
     );
 
@@ -197,31 +196,41 @@ fn subscriptions_round_trip_replace_their_filter_and_validate() {
             "an id outside the executor namespaces",
         ),
         (
-            subscription("plugin:", "tasks", ADDED_AND_CHANGED, None),
+            subscription("collection:", "tasks", ADDED_AND_CHANGED, None),
             "a bare namespace",
         ),
         (
-            subscription("plugin:triage", "", ADDED_AND_CHANGED, None),
+            subscription("collection:triage", "", ADDED_AND_CHANGED, None),
             "a blank path",
         ),
         (
-            subscription("plugin:triage", "tasks", &[], None),
+            subscription("collection:triage", "tasks", &[], None),
             "no change kind",
         ),
         (
-            subscription("plugin:triage", "tasks", ADDED_AND_CHANGED, Some(&[])),
+            subscription("collection:triage", "tasks", ADDED_AND_CHANGED, Some(&[])),
             "an empty field list",
         ),
         (
-            subscription("plugin:triage", "tasks", ADDED_AND_CHANGED, Some(&[""])),
+            subscription("collection:triage", "tasks", ADDED_AND_CHANGED, Some(&[""])),
             "a blank field name",
         ),
         (
-            subscription("plugin:triage", "tasks", ADDED_AND_CHANGED, Some(&["a\0b"])),
+            subscription(
+                "collection:triage",
+                "tasks",
+                ADDED_AND_CHANGED,
+                Some(&["a\0b"]),
+            ),
             "a NUL in a field name",
         ),
         (
-            subscription("plugin:triage", "tasks", ADDED_AND_CHANGED, Some(&too_many)),
+            subscription(
+                "collection:triage",
+                "tasks",
+                ADDED_AND_CHANGED,
+                Some(&too_many),
+            ),
             "too many field names",
         ),
     ] {
@@ -338,10 +347,10 @@ fn a_local_apply_claims_once_per_subscribed_automation_and_replay_dedupes() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     for (automation, prefix) in [
-        ("plugin:triage", "tasks"),
-        ("plugin:triage", "."),
-        ("plugin:janitor", "."),
-        ("plugin:elsewhere", "notes"),
+        ("collection:triage", "tasks"),
+        ("collection:triage", "."),
+        ("collection:janitor", "."),
+        ("collection:elsewhere", "notes"),
     ] {
         subscribe(&mut store, automation, prefix);
     }
@@ -350,7 +359,7 @@ fn a_local_apply_claims_once_per_subscribed_automation_and_replay_dedupes() {
     let claims = claim_for(&mut store, WS, &applied, 20);
     assert_eq!(
         claimed_ids(&claims),
-        vec!["plugin:janitor", "plugin:triage"],
+        vec!["collection:janitor", "collection:triage"],
         "one claim per matching automation, even with two matching prefixes"
     );
     for claim in &claims {
@@ -383,7 +392,7 @@ fn a_local_apply_claims_once_per_subscribed_automation_and_replay_dedupes() {
 fn a_never_synced_change_keys_on_its_history_row_id() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
 
     let applied = facts("tasks", None, &[9, 12], Some("alice"), None);
     let claims = claim_for(&mut store, WS, &applied, 20);
@@ -409,7 +418,7 @@ fn a_never_synced_change_keys_on_its_history_row_id() {
 fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
 
     let big = format!("\"{}\"", "x".repeat(MAX_FIELD_FACT_VALUE_BYTES));
     let deep = format!("{}1{}", "[".repeat(40), "]".repeat(40));
@@ -451,7 +460,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
     );
 
     let (served, served_facts) =
-        claim_next_pending_automation(&mut store, WS, "plugin:", 30, &NO_FAULTS)
+        claim_next_pending_automation(&mut store, WS, "collection:", 30, &NO_FAULTS)
             .expect("claim next")
             .expect("the claim is pending");
     assert_eq!(served.change, claims[0].change);
@@ -498,7 +507,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
 fn a_claims_field_facts_stay_within_their_budget() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
 
     // Each value fits the per-value bound, but together they pass the
     // claim's budget; a field name longer than the budget cannot travel at
@@ -521,7 +530,7 @@ fn a_claims_field_facts_stay_within_their_budget() {
         .collect();
     claim_for(&mut store, WS, &applied, 20);
     let (_, served_facts) =
-        claim_next_pending_automation(&mut store, WS, "plugin:", 30, &NO_FAULTS)
+        claim_next_pending_automation(&mut store, WS, "collection:", 30, &NO_FAULTS)
             .expect("claim next")
             .expect("the claim is pending");
 
@@ -551,13 +560,13 @@ fn a_claims_field_facts_stay_within_their_budget() {
 fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
 
     let own_write = facts(
         "tasks",
         Some(("origin-a", 1)),
         &[1],
-        Some("plugin:triage"),
+        Some("collection:triage"),
         Some(1),
     );
     assert!(
@@ -571,7 +580,7 @@ fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
         "tasks",
         Some(("origin-a", 2)),
         &[2],
-        Some("plugin:other"),
+        Some("collection:other"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP),
     );
     let stopped = claim_for(&mut store, WS, &at_cap, 30);
@@ -594,7 +603,7 @@ fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
         .expect("stopped claim facts");
     assert_eq!(stored_facts, "[]", "a stopped chain keeps no facts");
     assert!(
-        claim_next(&mut store, "plugin:", 31).is_none(),
+        claim_next(&mut store, "collection:", 31).is_none(),
         "a chain-stopped row is never drained as work"
     );
     assert!(
@@ -607,7 +616,7 @@ fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
         "tasks",
         Some(("origin-a", 4)),
         &[4],
-        Some("plugin:triage"),
+        Some("collection:triage"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP),
     );
     assert!(
@@ -619,7 +628,7 @@ fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
         "tasks",
         Some(("origin-a", 3)),
         &[3],
-        Some("plugin:other"),
+        Some("collection:other"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP - 1),
     );
     let claims = claim_for(&mut store, WS, &below_cap, 40);
@@ -629,27 +638,27 @@ fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
 }
 
 #[test]
-fn claim_next_drains_only_the_executors_namespace() {
+fn claim_next_drains_only_the_given_prefix() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:hello/triage", "tasks");
+    subscribe(&mut store, "collection:notes#triage", "tasks");
     subscribe(&mut store, "collection:tasks#stamp", "tasks");
     claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
     claim_for(&mut store, WS, &field_change(2, &["status"]), 30);
 
-    let collection = claim_next(&mut store, "collection:", 40).expect("collection claim");
-    assert_eq!(collection.automation_id, "collection:tasks#stamp");
-    let plugin = claim_next(&mut store, "plugin:", 41).expect("plugin claim");
-    assert_eq!(plugin.automation_id, "plugin:hello/triage");
+    let stamp = claim_next(&mut store, "collection:tasks#", 40).expect("stamp claim");
+    assert_eq!(stamp.automation_id, "collection:tasks#stamp");
+    let triage = claim_next(&mut store, "collection:notes#", 41).expect("triage claim");
+    assert_eq!(triage.automation_id, "collection:notes#triage");
     assert_eq!(
-        plugin.trigger, collection.trigger,
-        "each executor takes the oldest of its own claims"
+        triage.trigger, stamp.trigger,
+        "each prefix takes the oldest of its own claims"
     );
     assert!(
         claim_next(&mut store, "other:", 42).is_none(),
-        "another namespace serves nothing"
+        "another prefix serves nothing"
     );
-    let second = claim_next(&mut store, "plugin:", 43).expect("second plugin claim");
+    let second = claim_next(&mut store, "collection:notes#", 43).expect("second triage claim");
     assert_eq!(
         second.trigger,
         AutomationTrigger::Coordinate {
@@ -669,7 +678,7 @@ fn claim_next_drains_only_the_executors_namespace() {
 fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_generation() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
 
     assert!(
         list_automation_failures(&store, WS)
@@ -683,7 +692,7 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
     let first = facts("tasks", Some(("origin-a", 1)), &[1], None, None);
     let claims = claim_for(&mut store, WS, &first, 20);
     assert_eq!(claims.len(), 1);
-    claim_next(&mut store, "plugin:", 21).expect("one pending claim");
+    claim_next(&mut store, "collection:", 21).expect("one pending claim");
     settle_automation_claim(
         &mut store,
         WS,
@@ -699,14 +708,14 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
         "tasks",
         Some(("origin-a", 2)),
         &[2],
-        Some("plugin:other"),
+        Some("collection:other"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP),
     );
     let stopped = claim_for(&mut store, WS, &at_cap, 30);
 
     let failures = list_automation_failures(&store, WS).expect("list failures");
     assert_eq!(failures.len(), 1, "one row per automation");
-    assert_eq!(failures[0].automation_id, "plugin:triage");
+    assert_eq!(failures[0].automation_id, "collection:triage");
     assert_eq!(
         failures[0].claim_id, stopped[0].claim_id,
         "the row names the newest failed claim"
@@ -729,7 +738,7 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
     // leak in.
     let done = facts("tasks", Some(("origin-a", 3)), &[3], None, None);
     let done_claims = claim_for(&mut store, WS, &done, 40);
-    claim_next(&mut store, "plugin:", 41).expect("one pending claim");
+    claim_next(&mut store, "collection:", 41).expect("one pending claim");
     settle_automation_claim(
         &mut store,
         WS,
@@ -754,13 +763,13 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
 fn claim_next_and_settle_walk_the_state_machine() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
     let first = facts("tasks", Some(("origin-a", 1)), &[1], Some("alice"), None);
     let second = facts("tasks", Some(("origin-a", 2)), &[2], Some("alice"), None);
     claim_for(&mut store, WS, &first, 20);
     claim_for(&mut store, WS, &second, 30);
 
-    let running = claim_next(&mut store, "plugin:", 40).expect("a pending claim exists");
+    let running = claim_next(&mut store, "collection:", 40).expect("a pending claim exists");
     assert_eq!(running.state, AutomationClaimState::Running);
     assert_eq!(running.attempts, 1);
     assert_eq!(
@@ -798,7 +807,7 @@ fn claim_next_and_settle_walk_the_state_machine() {
     );
 
     let second_running =
-        claim_next(&mut store, "plugin:", 60).expect("the second claim is pending");
+        claim_next(&mut store, "collection:", 60).expect("the second claim is pending");
     assert!(
         matches!(
             settle_automation_claim(
@@ -830,7 +839,7 @@ fn claim_next_and_settle_walk_the_state_machine() {
     assert_eq!(failed.error.as_deref(), Some("handler threw"));
 
     assert!(
-        claim_next(&mut store, "plugin:", 70).is_none(),
+        claim_next(&mut store, "collection:", 70).is_none(),
         "nothing pending remains"
     );
     assert!(
@@ -853,7 +862,7 @@ fn claim_next_and_settle_walk_the_state_machine() {
 fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
     let claims = claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
     let claim_id = claims[0].claim_id.clone();
     assert_eq!(claims[0].run, 1);
@@ -881,7 +890,7 @@ fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
         ),
         "a pending claim is returned unchanged"
     );
-    let running = claim_next(&mut store, "plugin:", 22).expect("served");
+    let running = claim_next(&mut store, "collection:", 22).expect("served");
     assert_eq!((running.attempts, running.run), (1, 1));
     assert_eq!(
         retry(&mut store, 23),
@@ -913,7 +922,7 @@ fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
         "a retried claim is no longer a failure"
     );
     let (again, again_facts) =
-        claim_next_pending_automation(&mut store, WS, "plugin:", 26, &NO_FAULTS)
+        claim_next_pending_automation(&mut store, WS, "collection:", 26, &NO_FAULTS)
             .expect("claim next")
             .expect("the retried claim is served");
     assert_eq!(again.claim_id, claim_id);
@@ -927,7 +936,7 @@ fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
     );
 
     retry(&mut store, 28);
-    claim_next(&mut store, "plugin:", 29).expect("served");
+    claim_next(&mut store, "collection:", 29).expect("served");
     settle_automation_claim(
         &mut store,
         WS,
@@ -946,7 +955,7 @@ fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
         "tasks",
         Some(("origin-a", 9)),
         &[9],
-        Some("plugin:other"),
+        Some("collection:other"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP),
     );
     let stopped = claim_for(&mut store, WS, &at_cap, 40);
@@ -967,7 +976,7 @@ fn a_retried_claim_runs_again_as_its_next_run_and_its_failures_keep_counting() {
 fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
     let claims = claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
     let claim_id = claims[0].claim_id.clone();
     let reclaim = |store: &mut EngineStore, now_ms| {
@@ -977,13 +986,13 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
 
     // Run 1 crashes: the reaper requeues it, and the next serve is the same
     // run, so its writes repeat under the same keys.
-    let first = claim_next(&mut store, "plugin:", 30).expect("served");
+    let first = claim_next(&mut store, "collection:", 30).expect("served");
     assert_eq!((first.attempts, first.run), (1, 1));
     assert_eq!(
         reclaim(&mut store, 40)[0].state,
         AutomationClaimState::Pending
     );
-    let requeued = claim_next(&mut store, "plugin:", 50).expect("served again");
+    let requeued = claim_next(&mut store, "collection:", 50).expect("served again");
     assert_eq!((requeued.attempts, requeued.run), (2, 1));
     settle_automation_claim(
         &mut store,
@@ -1002,7 +1011,7 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
     // bound: the reaper fails it instead of requeueing it, and the owner can
     // retry again.
     retry_automation_claim(&mut store, WS, &claim_id, 70, &NO_FAULTS).expect("retry");
-    let retried = claim_next(&mut store, "plugin:", 80).expect("served");
+    let retried = claim_next(&mut store, "collection:", 80).expect("served");
     assert_eq!((retried.attempts, retried.run), (3, 2));
     let exhausted = reclaim(&mut store, 90);
     assert_eq!(exhausted[0].state, AutomationClaimState::Failed);
@@ -1023,58 +1032,11 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
 }
 
 #[test]
-fn an_upgraded_plugin_claim_drains_and_retries_in_the_plugin_namespace() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let mut store = open_store(&scratch);
-    // Claims as the change facts migration leaves them: only the columns a
-    // claim held before it, and the legacy id moved into `plugin:`.
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "INSERT INTO automation_claims \
-                 (workspace_id, claim_id, automation_id, trigger_history_id, record_id, \
-                  collection_path, depth, state, attempts, error, created_at_ms, updated_at_ms) \
-                 VALUES (?1, 'atc_failed', 'plugin:hello/triage', 1, 'rec', 'tasks', 0, \
-                         'failed', 1, 'threw', 5, 5), \
-                        (?1, 'atc_pending', 'plugin:hello/triage', 2, 'rec', 'tasks', 0, \
-                         'pending', 0, NULL, 6, 6)",
-                [WS],
-            )
-            .map_err(dohc_engine_storage::StorageError::persist_public)?;
-            Ok::<_, dohc_engine_storage::StorageError>(())
-        })
-        .expect("seed upgraded claim rows");
-    let failures = list_automation_failures(&store, WS).expect("failures");
-    assert_eq!(failures[0].generation, 1, "the old failure still counts");
-    assert_eq!(failures[0].claim_id, "atc_failed");
-    assert!(!failures[0].chain_stopped, "it ran, so it is no chain stop");
-
-    let (served, facts) = claim_next_pending_automation(&mut store, WS, "plugin:", 10, &NO_FAULTS)
-        .expect("claim next")
-        .expect("the pending upgraded claim drains in the plugin namespace");
-    assert_eq!(served.claim_id, "atc_pending");
-    assert_eq!(
-        (served.run, served.change.kind),
-        (1, AutomationChangeKind::Changed)
-    );
-    assert!(facts.fields.is_empty(), "an upgraded claim has no facts");
-
-    let AutomationRetry::Requeued(retried) =
-        retry_automation_claim(&mut store, WS, "atc_failed", 20, &NO_FAULTS).expect("retry")
-    else {
-        panic!("the upgraded failed claim is retryable");
-    };
-    assert_eq!(retried.run, 2);
-    let again = claim_next(&mut store, "plugin:", 30).expect("the retried claim drains");
-    assert_eq!((again.claim_id.as_str(), again.run), ("atc_failed", 2));
-}
-
-#[test]
 fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
-    subscribe(&mut store, "plugin:other", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
+    subscribe(&mut store, "collection:other", "tasks");
     let limit = AUTOMATION_CLAIM_HISTORY_LIMIT;
 
     // The oldest triage claim fails and must survive pruning; the rest
@@ -1089,8 +1051,8 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
     }
     let mut failed_one = false;
     for index in 0..2 * (limit + 5) {
-        let claim = claim_next(&mut store, "plugin:", 1_000 + index).expect("pending claim");
-        let settle = if !failed_one && claim.automation_id == "plugin:triage" {
+        let claim = claim_next(&mut store, "collection:", 1_000 + index).expect("pending claim");
+        let settle = if !failed_one && claim.automation_id == "collection:triage" {
             failed_one = true;
             AutomationSettle::Failed {
                 error: "first run threw".to_owned(),
@@ -1109,7 +1071,7 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
         .expect("settle");
     }
 
-    let history = list_automation_claims(&store, WS, "plugin:triage").expect("list claims");
+    let history = list_automation_claims(&store, WS, "collection:triage").expect("list claims");
     assert_eq!(history.len(), limit as usize);
     assert!(
         history
@@ -1120,7 +1082,7 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
     assert!(
         history
             .iter()
-            .all(|claim| claim.automation_id == "plugin:triage")
+            .all(|claim| claim.automation_id == "collection:triage")
     );
     let rows = |automation: &str| -> i64 {
         store
@@ -1135,18 +1097,18 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
             .expect("count claims")
     };
     assert_eq!(
-        rows("plugin:triage"),
+        rows("collection:triage"),
         limit + 1,
         "done claims past the limit are pruned; the failed one stays"
     );
-    assert_eq!(rows("plugin:other"), limit);
+    assert_eq!(rows("collection:other"), limit);
     assert_eq!(
         list_automation_failures(&store, WS).expect("failures")[0].generation,
         1,
         "pruning never lowers the failure generation"
     );
     assert!(
-        list_automation_claims(&store, WS, "plugin:missing")
+        list_automation_claims(&store, WS, "collection:missing")
             .expect("list claims")
             .is_empty()
     );
@@ -1161,7 +1123,7 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
 fn a_released_claim_is_pending_again_without_an_attempt() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
     let claims = claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
     let claim_id = claims[0].claim_id.clone();
     let release = |store: &mut EngineStore, now_ms| {
@@ -1175,7 +1137,7 @@ fn a_released_claim_is_pending_again_without_an_attempt() {
         "a pending claim is refused"
     );
 
-    let served = claim_next(&mut store, "plugin:", 22).expect("served");
+    let served = claim_next(&mut store, "collection:", 22).expect("served");
     assert_eq!((served.attempts, served.run), (1, 1));
     let released = release(&mut store, 23).expect("release");
     assert_eq!(released.state, AutomationClaimState::Pending);
@@ -1185,7 +1147,7 @@ fn a_released_claim_is_pending_again_without_an_attempt() {
         "a release is not an attempt"
     );
 
-    let again = claim_next(&mut store, "plugin:", 24).expect("served again");
+    let again = claim_next(&mut store, "collection:", 24).expect("served again");
     assert_eq!(again.claim_id, claim_id);
     assert_eq!((again.attempts, again.run), (1, 1));
     let reclaimed = reclaim_running_automations(&mut store, WS, None, 3, 24, 100, &NO_FAULTS)
@@ -1199,7 +1161,7 @@ fn a_released_claim_is_pending_again_without_an_attempt() {
         "the reaper requeues a claim whose holder died"
     );
 
-    claim_next(&mut store, "plugin:", 110).expect("served after the reaper");
+    claim_next(&mut store, "collection:", 110).expect("served after the reaper");
     settle_automation_claim(
         &mut store,
         WS,
@@ -1216,7 +1178,7 @@ fn a_released_claim_is_pending_again_without_an_attempt() {
 fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe(&mut store, "plugin:triage", "tasks");
+    subscribe(&mut store, "collection:triage", "tasks");
     for seq in 1..=3 {
         let applied = facts(
             "tasks",
@@ -1230,8 +1192,8 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     // First and second claims start running at t=30; the second exhausts its
     // attempts through a settle-less reclaim cycle below. The third stays
     // pending and must be untouched.
-    let first = claim_next(&mut store, "plugin:", 30).expect("first");
-    let second = claim_next(&mut store, "plugin:", 30).expect("second");
+    let first = claim_next(&mut store, "collection:", 30).expect("first");
+    let second = claim_next(&mut store, "collection:", 30).expect("second");
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(
@@ -1271,7 +1233,7 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
         "an exhausted claim counts as a failure"
     );
 
-    let fresh = claim_next(&mut store, "plugin:", 200).expect("requeued or untouched pending");
+    let fresh = claim_next(&mut store, "collection:", 200).expect("requeued or untouched pending");
     assert!(
         reclaim_running_automations(&mut store, WS, None, 2, 150, 210, &NO_FAULTS)
             .expect("reclaim again")
@@ -1392,7 +1354,7 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
         "a new starting text replaces the old one"
     );
     for (automation_id, starts_with) in [
-        ("plugin:triage", None),
+        ("collection:triage", None),
         ("collection:../Secrets#task", None),
         (TASK, Some("")),
         (TASK, Some(" /task")),

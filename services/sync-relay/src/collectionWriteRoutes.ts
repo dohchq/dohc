@@ -1,13 +1,14 @@
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError, RELAY_ERRORS } from "./errors";
-import { readBytes } from "./relayBytes";
+import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
-import { authorizeShareGrantAction, type AuthorizedShareAction } from "./shareAuthorization";
-import { filterCollectionWriteForShare, type ShareSelector } from "./shareFilter";
+import { namedCollectionEditGrant } from "./collectionEditGrant";
+import { filterCollectionWriteForShare } from "./shareFilter";
 import { CollectionWriteStaleError, type SyncRelayStorage } from "./storage";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
+export type OwnerCollectionWriteRoute = { route: "owner-collection-writes"; workspaceId: string; grantId: string };
 
 // A burst of 30 direct writes per grant, then one every two seconds.
 const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
@@ -16,7 +17,8 @@ const COLLECTION_WRITE_MAX_GRANTS = 10_000;
 const MAX_SUBMIT_ID_CHARS = 128;
 // A new Collection's 502 changes with long paths fit well inside this.
 export const MAX_COLLECTION_WRITE_BODY_BYTES = 1024 * 1024;
-export const COLLECTION_WRITES_PATH = /^\/sync\/shares\/[^/]+\/collection-writes$/u;
+// The body streams in only after the grant and its rate token pass.
+const COLLECTION_WRITE_BODY_TIMEOUT_MS = 60_000;
 
 export function createCollectionWriteRateLimiter(): TokenBucketLimiter {
   return new TokenBucketLimiter(
@@ -24,13 +26,6 @@ export function createCollectionWriteRateLimiter(): TokenBucketLimiter {
     COLLECTION_WRITE_REFILL_PER_SECOND,
     COLLECTION_WRITE_MAX_GRANTS,
   );
-}
-
-/** Direct writes stay off unless a deployment sets DOHC_RELAY_COLLECTION_WRITES=1. */
-export function readCollectionWritesConfig(value: string | undefined): boolean {
-  if (value === undefined || value === "0") return false;
-  if (value !== "1") throw new Error("DOHC_RELAY_COLLECTION_WRITES must be 0 or 1.");
-  return true;
 }
 
 /**
@@ -41,7 +36,6 @@ export function readCollectionWritesConfig(value: string | undefined): boolean {
  */
 export function createCollectionWriteRoutes(input: {
   storage: SyncRelayStorage;
-  enabled: boolean;
   rateLimiter: TokenBucketLimiter;
   nowMs: () => number;
   newId: () => string;
@@ -50,39 +44,14 @@ export function createCollectionWriteRoutes(input: {
 }) {
   const { storage } = input;
 
-  // The caller's own named grant with Edit on files. A grant opened from a
-  // public link is refused until the owner promotes it.
-  const namedEditGrant = (shareId: string, userId: string): AuthorizedShareAction<ShareSelector> => {
-    let denied = false;
-    for (const grant of storage.listActiveShareGrantsForRecipient(shareId, userId)) {
-      const result = authorizeShareGrantAction({
-        storage,
-        grantId: grant.grantId,
-        action: "propose",
-        principal: { kind: "user", userId },
-      });
-      if (!result.ok) {
-        denied ||= result.reason === "denied";
-        continue;
-      }
-      if (result.grant.parentGrantId !== null) {
-        denied = true;
-        continue;
-      }
-      return result as AuthorizedShareAction<ShareSelector>;
-    }
-    throw denied ? relayError("share_read_only") : notFound();
-  };
-
   return async function respondToCollectionWrites(
     request: Request,
     route: CollectionWriteRoute,
     actorUserId: string,
   ): Promise<Response> {
-    if (!input.enabled) throw notFound();
     if (request.method !== "POST") throw relayError("method_not_allowed");
     await input.claimPendingShares(actorUserId);
-    const authorized = namedEditGrant(route.shareId, actorUserId);
+    const authorized = namedCollectionEditGrant(storage, route.shareId, actorUserId);
     const { share, grant } = authorized;
     // Every admitted request spends a token before its body is read, so a
     // refused request costs its sender the same as a written one.
@@ -123,8 +92,39 @@ export function createCollectionWriteRoutes(input: {
   };
 }
 
+/**
+ * `GET /sync/:workspaceId/collection-writes/:grantId`: the owner reads one
+ * grant's direct writes, a revoked grant's too, to restore what the person
+ * changed. The server checked that the caller owns the workspace.
+ */
+export function readOwnerCollectionWrites(
+  request: Request,
+  route: OwnerCollectionWriteRoute,
+  ownerUserId: string,
+  storage: SyncRelayStorage,
+): Response {
+  if (request.method !== "GET") throw relayError("method_not_allowed");
+  const query = new URL(request.url).searchParams;
+  for (const key of query.keys()) {
+    if (!["afterOriginSeq", "limit"].includes(key) || query.getAll(key).length !== 1) {
+      throw badRequest("Invalid collection write selection.");
+    }
+  }
+  const after = query.get("afterOriginSeq");
+  const page = storage.readOwnerCollectionWrites({
+    workspaceId: route.workspaceId,
+    ownerUserId,
+    grantId: route.grantId,
+    ...(after === null ? {} : { afterOriginSeq: Number(after) }),
+    limit: Number(query.get("limit") ?? 100),
+  });
+  return new Response(JSON.stringify(page), {
+    headers: { "content-type": "application/json", "cache-control": "private, no-store" },
+  });
+}
+
 async function readBody(request: Request): Promise<Record<string, unknown>> {
-  const bytes = await readBytes(request, MAX_COLLECTION_WRITE_BODY_BYTES);
+  const bytes = await readStreamedBytes(request, MAX_COLLECTION_WRITE_BODY_BYTES, COLLECTION_WRITE_BODY_TIMEOUT_MS);
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder().decode(bytes));

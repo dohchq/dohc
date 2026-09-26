@@ -858,6 +858,10 @@ impl EngineService {
                 self.automations_claim_schedule(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.runNow" => {
+                self.automations_run_now(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.scheduleMarks" => {
                 self.automations_schedule_marks(&ctx, request.workspace)
                     .await?
@@ -1150,6 +1154,7 @@ mod tests {
             "automations.press",
             "automations.release",
             "automations.retry",
+            "automations.runNow",
             "automations.scheduleMarks",
             "automations.settle",
             "automations.subscribe",

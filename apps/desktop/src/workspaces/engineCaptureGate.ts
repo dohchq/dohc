@@ -50,7 +50,7 @@ export function captureForWorkspace(
 export type EngineFeature =
   | "Versions"
   | "Chats"
-  | "Plugins"
+  | "Collections"
   | "Engine history"
   | "Chat mentions"
   | "Automations";

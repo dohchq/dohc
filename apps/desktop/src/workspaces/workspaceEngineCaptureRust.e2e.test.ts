@@ -1030,18 +1030,13 @@ it.skipIf(engine.missing)(
 
 // The engine's Markdown settlement rewrote unedited files on close —
 // mangling CRLF and trailing newlines, churning mtimes, and feeding the
-// watcher a settled write for content nobody changed. For a plugin README
-// that settled write is exactly what `PluginPipeline.handleWatcherEvents`
-// holds for approval on (main.ts wires the watcher's settled batch straight
-// into it), so merely opening and closing a plugin README disabled the
-// plugin. The engine now proves the session held nothing beyond the declared
-// seed and skips the write. This drives the full desktop feed — real daemon,
-// real capture, real fs watcher — and pins both halves: no edit means no
-// event for the pipeline to hold on; a real edit still produces one.
-// PluginPipeline.test.ts owns the other link (a README watcher event ->
-// disabled-pending-approval), so the two suites together pin the chain.
+// watcher a settled write for content nobody changed. The engine now proves
+// the session held nothing beyond the declared seed and skips the write. This
+// drives the full desktop feed — real daemon, real capture, real fs watcher —
+// and pins both halves: no edit means no watcher event; a real edit still
+// produces one.
 it.skipIf(engine.missing)(
-  "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
+  "a no-edit open and close of a README feeds the watcher nothing; a real edit still does",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-815-");
     const lifecycle = createRealDaemonLifecycle({
@@ -1061,15 +1056,15 @@ it.skipIf(engine.missing)(
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
-    const readmePath = "plugins/sample/README.md";
+    const readmePath = "notes/sample/README.md";
     // Both normalization victims at once: CRLF line endings and no trailing
     // newline. Any settle write would change these bytes.
-    const readme = "# Sample plugin\r\n\r\nOpened, never edited";
+    const readme = "# Sample\r\n\r\nOpened, never edited";
     const batches: WatcherEvent[][] = [];
     const readmeEvents = () =>
       batches.flat().filter((event) => event.path === readmePath);
     try {
-      await mkdir(join(root, "plugins", "sample"), { recursive: true });
+      await mkdir(join(root, "notes", "sample"), { recursive: true });
       await writeFile(join(root, readmePath), readme, "utf8");
       await waitForPathMoments(capture, readmePath, 1);
       const watch = startWorkspaceWatch(workspace, {

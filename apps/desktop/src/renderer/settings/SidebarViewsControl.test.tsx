@@ -13,14 +13,14 @@ describe("SidebarViewsControl", () => {
     render(<SidebarViewsControl sidebar={sidebar} onChange={onChange} />);
 
     expect(screen.getAllByTestId("sidebar-view").map((row) => row.dataset.view))
-      .toEqual(["explorer", "search", "graph", "sites", "history", "plugins"]);
+      .toEqual(["explorer", "search", "graph", "sites", "history"]);
     expect(screen.getByRole("button", { name: "Move Explorer up" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Move Plugins down" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Move History down" }).hasAttribute("disabled")).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "Move Apps up" }));
     expect(onChange).toHaveBeenLastCalledWith({
       ...sidebar,
-      order: ["explorer", "search", "sites", "graph", "history", "plugins"],
+      order: ["explorer", "search", "sites", "graph", "history"],
     });
 
     const graph = screen.getByRole("switch", { name: "Show Graph" });

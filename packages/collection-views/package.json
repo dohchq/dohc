@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./tooltip": "./src/tooltip.tsx"
+    "./tooltip": "./src/tooltip.tsx",
+    "./record-label": "./src/recordLabel.ts"
   },
   "scripts": {
     "test": "vitest run",

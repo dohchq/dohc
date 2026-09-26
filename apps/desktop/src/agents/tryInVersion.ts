@@ -6,12 +6,12 @@
 //   2. capture.createVersion(name) — the 0M-4 create-and-switch: latest disk
 //      edits are captured into the version being left and the fork becomes
 //      active, all serialized on the engine capture chain,
-//   3. start a dohc-tracked agent run (AgentIntegration / AgentSessionManager)
-//      so 0N-1 attribution applies to everything the agent writes.
+//   3. start a dohc-tracked agent run (AgentIntegration) so 0N-1
+//      attribution applies to everything the agent writes.
 //
 // When the run ends — every terminal path funnels through
-// AgentIntegration.endAgentRun (driver turn-completed, a Settings stop,
-// the endAgentRun IPC) — the session becomes a REVIEW state carrying the
+// AgentIntegration.endAgentRun (a Settings stop or the endAgentRun IPC) — the
+// session becomes a REVIEW state carrying the
 // changed-file count vs Main (0M-4 compare, also on the capture chain).
 // Sessions are in-memory: runs cannot outlive the app (quit ends them), and
 // the versions themselves are durable engine state either way — nothing a
@@ -70,11 +70,7 @@ interface TryInVersionSessionsOptions {
   operationsFor(workspaceId: string): Promise<TryVersionOperations>;
   // Starts the dohc-tracked run that owns the try. Resolves to the run id the
   // end-of-run signal will carry.
-  startRun(
-    workspaceId: string,
-    task: string,
-    driverId?: string,
-  ): Promise<{ id: string }>;
+  startRun(workspaceId: string, task: string): Promise<{ id: string }>;
   // Fired on every state transition so main can ping the renderer's single
   // workspace-activity channel.
   onStateChanged?: (workspaceId: string) => void;
@@ -84,8 +80,7 @@ interface TryInVersionSessionsOptions {
 const TRY_VERSION_NAME_PREFIX = "Try: ";
 const TASK_SNIPPET_MAX_CHARS = 40;
 // Remember the last few ended runs per workspace so an end signal that races
-// start() (a driver session can fail and finalize before its run id is
-// returned) is never lost.
+// start() (a run can end before its id is returned) is never lost.
 const ENDED_RUNS_REMEMBERED = 8;
 
 export function tryVersionName(
@@ -176,7 +171,6 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
   async function start(
     workspaceId: string,
     task: string,
-    driverId?: string,
   ): Promise<{ versionId: string; versionName: string; runId: string }> {
     const trimmed = task.replace(/\s+/g, " ").trim();
     if (trimmed.length === 0) {
@@ -203,7 +197,7 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
       record?.kind === "named" && record.forkPoint?.versionId === "main";
     let run: { id: string };
     try {
-      run = await options.startRun(workspaceId, trimmed, driverId);
+      run = await options.startRun(workspaceId, trimmed);
     } catch (error) {
       // The fork exists (visible in the version menu, nothing to clean up —
       // no-silent-loss) but no run owns it; say both things plainly.
@@ -227,8 +221,8 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
     };
     sessions.set(workspaceId, session);
     options.onStateChanged?.(workspaceId);
-    // The run may have ended while start() was still awaiting its id (a
-    // driver session that fails finalizes immediately) — catch up now.
+    // The run may have ended while start() was still awaiting its id — catch
+    // up now.
     const alreadyEnded = endedRuns.get(workspaceId)?.get(run.id);
     if (alreadyEnded) beginReview(workspaceId, session, alreadyEnded);
     return { versionId, versionName: name, runId: run.id };
