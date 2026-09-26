@@ -150,6 +150,12 @@ export type MomentAuthor =
   | PublicMomentAuthor
   | NamedMomentAuthor
   | AutomationMomentAuthor;
+
+// Local file writes require a principal even when historical attribution has none.
+export type MomentWriteAuthor = (AgentMomentAuthor | AutomationMomentAuthor) & {
+  onBehalfOf: string;
+};
+
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
@@ -461,7 +467,7 @@ export interface VersionedTextStore {
     text: string;
     restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   writeBinaryFile(input: {
@@ -470,7 +476,7 @@ export interface VersionedTextStore {
     path: string;
     bytes: Uint8Array;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   readBinaryFile(input: {
@@ -544,7 +550,7 @@ export interface VersionedTextStore {
     expectedObjectId?: WorkspaceObjectId;
     requestId?: string;
     metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
+    author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer
