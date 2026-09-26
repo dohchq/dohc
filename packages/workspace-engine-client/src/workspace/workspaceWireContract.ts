@@ -73,6 +73,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
         agentId: string;
         onBehalfOf: string;
         agentRunId?: string;
+        depth?: number;
       })
     | null;
   captureMode?: "none";
@@ -320,6 +321,7 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
         agentId: string;
         onBehalfOf: string;
         agentRunId?: string;
+        depth?: number;
       })
     | null;
 };

@@ -21,6 +21,7 @@ const AGENT = {
   kind: "agent",
   agentId: "notes-agent",
   onBehalfOf: "local",
+  depth: 0,
 } as const;
 
 const AUTOMATION = {

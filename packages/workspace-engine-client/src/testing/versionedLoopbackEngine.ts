@@ -2978,14 +2978,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
-    const { kind, agentId, onBehalfOf, agentRunId } = value;
+    const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
     if (
       kind !== "agent" ||
       typeof agentId !== "string" ||
       agentId.length === 0 ||
       typeof onBehalfOf !== "string" ||
       onBehalfOf.length === 0 ||
-      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0))
+      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0)) ||
+      (depth !== undefined && (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 64))
     ) {
       throw new Error("invalid-metadata");
     }
@@ -2994,6 +2995,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       agentId,
       onBehalfOf,
       ...(agentRunId === undefined ? {} : { agentRunId }),
+      ...(depth === undefined ? {} : { depth }),
     };
   }
 

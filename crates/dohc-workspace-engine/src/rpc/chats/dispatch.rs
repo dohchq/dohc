@@ -138,7 +138,11 @@ struct ChatDispatchFailParams {
 }
 
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
-    json!({ "dispatch": dispatch_json(&claim.dispatch), "run": run_json(&claim.run) })
+    json!({
+        "dispatch": dispatch_json(&claim.dispatch),
+        "run": run_json(&claim.run),
+        "chainDepth": claim.chain_depth,
+    })
 }
 
 fn dispatch_json(dispatch: &DispatchRecord) -> Value {

@@ -1019,20 +1019,6 @@ export function formulaPeople(request: EvaluationRequest, results: readonly Auto
   return [...people];
 }
 
-export const AGENT_WAKES_AGENT =
-  "Only a person's change can wake an agent for now. An agent or another automation made this change, so this automation did not wake an agent. That keeps agents and automations from starting each other forever.";
-
-/**
- * Whether a person started this claim: a change that declared no actor, as a
- * person's write does, or one a person made. A change whose actor is not
- * known, such as a dataset commit, did not. An agent's writes do not carry
- * their chain depth yet, so an agent's change, or an automation's change
- * that an agent's started, could wake the agent again without end.
- */
-function startedByPerson(claim: RunClaim): boolean {
-  return claim.change.actorKind === null || claim.change.actorKind === "human";
-}
-
 /** The seed of every id and idempotency key a step's effects use. */
 export function stepKey(claimId: string, hash: string, ordinal: number): string {
   return `${claimId}/${hash}/${ordinal}`;
@@ -1128,9 +1114,9 @@ export function planRun(
         continue;
       }
       if (step.kind === "wake-agent") {
-        // Only a person's change wakes an agent until agents' writes carry
-        // their chain depth (see startedByPerson).
-        if (!startedByPerson(claim)) return AGENT_WAKES_AGENT;
+        // Any change can wake the agent. The wake message carries the
+        // claim's depth plus one, and the agent's writes one more, so the
+        // chain stops at the cap like any other.
         const body = messageBody(answers.get(`text:${ordinal}`) ?? null);
         if (typeof body !== "string") return `The message in step ${ordinal + 1} ${body.problem}`;
         const effectId = `${stepKey(key.claimId, key.hash, ordinal)}/wake`;

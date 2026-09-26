@@ -58,6 +58,12 @@ export interface DatasetAuthority {
    * administration refuses it.
    */
   automation?: { automationId: string; depth: number };
+  /**
+   * Set only when the owner's agent writes in a run an automation started,
+   * with the chain depth the run's writes declare. Attribution that grants
+   * nothing, like `automation`.
+   */
+  agent?: { depth: number };
 }
 export interface DatasetDataGrant { operationIds: string[]; discover: boolean; revision: number; revisionSha256: string }
 export interface DatasetHostOptions<Context> {
@@ -139,9 +145,17 @@ function automation(value: DatasetAuthority["automation"], caller: AppBackendCal
   if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > DATASET_AUTOMATION_CHAIN_DEPTH) denied();
   return { automationId: text(value.automationId, 1024), depth: value.depth };
 }
+/** The engine's bound on any declared chain depth. The chain stops well before it. */
+const MAX_DECLARED_DEPTH = 64;
+function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): DatasetAuthority["agent"] {
+  if (value === undefined) return undefined;
+  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > MAX_DECLARED_DEPTH) denied();
+  return { depth: value.depth };
+}
 /** Who made a commit, from the authority the host derived. */
 function actor(authority: DatasetAuthority): DatasetActor {
   if (authority.automation) return { kind: "automation", ...authority.automation };
+  if (authority.agent) return { kind: "agent", depth: authority.agent.depth };
   const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
   if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
   return caller.kind === "owner" ? { kind: "owner", ...app } : { kind: "link", ...app };
@@ -211,13 +225,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
       authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
-      automation: automation(result.automation, caller) };
+      automation: automation(result.automation, caller), agent: agent(result.agent, caller) };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     return verified;
   }
   function owner(context: Context, key: { workspaceId: string; datasetId?: string }): DatasetAuthority {
     const result = authority(context, key, { kind: "data" });
-    if (result.caller.kind !== "owner" || result.automation) denied();
+    if (result.caller.kind !== "owner" || result.automation || result.agent) denied();
     return result;
   }
   function revision(key: DatasetScope): DatasetRevision {

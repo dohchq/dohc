@@ -142,6 +142,80 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
     }
 }
 
+/// An agent run an automation started names its chain depth on the moments
+/// it writes, and a peer keeps it in history.
+#[test]
+fn a_peer_keeps_the_depth_an_agent_moment_names() {
+    let author = json!({
+        "kind": "agent",
+        "agentId": "dohc-chat-runner",
+        "onBehalfOf": "owner",
+        "agentRunId": "run-woken",
+        "depth": 3,
+    });
+    let (_scratch, mut peer) = test_store();
+    let mut payload = absent_text_payload("woken", "object", "doc.md", "content");
+    payload["author"] = author.clone();
+    hydrate_texts(&mut peer, &["content"]);
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &envelope("source", 0, "ws", payload), &NoFaults)
+            .expect("peer apply"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0)),
+    );
+    let history = VersionedTextStore::new(&mut peer)
+        .get_moment("ws", "woken")
+        .expect("peer history")
+        .expect("replicated moment");
+    assert_eq!(
+        serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
+        author,
+    );
+}
+
+/// An older computer stored an agent author with any depth it was given, 0
+/// included. A newer peer applies the moment, reads such a depth as none in
+/// its history, and keeps the replicated payload exactly as it arrived.
+#[test]
+fn a_peer_imports_an_older_computers_agent_moment_with_an_unchecked_depth() {
+    for depth in [json!(0), json!(65), json!("3")] {
+        let (_scratch, mut peer) = test_store();
+        let mut payload = absent_text_payload("older", "object", "doc.md", "content");
+        payload["author"] = json!({
+            "kind": "agent",
+            "agentId": "claude-code",
+            "onBehalfOf": "owner",
+            "depth": depth,
+        });
+        let op = envelope("older-peer", 0, "ws", payload);
+        hydrate_texts(&mut peer, &["content"]);
+        assert_eq!(
+            apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "depth {depth}",
+        );
+        let history = VersionedTextStore::new(&mut peer)
+            .get_moment("ws", "older")
+            .expect("peer history")
+            .expect("replicated moment");
+        assert_eq!(
+            serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
+            json!({"kind": "agent", "agentId": "claude-code", "onBehalfOf": "owner"}),
+            "depth {depth}",
+        );
+        let kept: String = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = 'ws' AND origin_id = 'older-peer'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("replicated payload");
+        assert_eq!(serde_json::from_str::<Value>(&kept).unwrap(), op.payload);
+    }
+}
+
 #[test]
 fn declared_moment_authors_refuse_a_null_empty_or_non_string_principal() {
     for author in [

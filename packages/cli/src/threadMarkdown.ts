@@ -40,6 +40,9 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
   for (const message of messages) {
     const metadata = [
       `**${renderAuthorDisplayName(message.author)}**`,
+      // An automation's message says so, so an agent it woke knows no
+      // person wrote the request.
+      ...(message.author.kind === "automation" ? ["automation"] : []),
       new Date(message.createdAtMs).toISOString(),
       formatMessageHandle(message.id),
     ];

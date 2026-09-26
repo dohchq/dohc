@@ -28,6 +28,9 @@ export interface ActiveAgentRun {
   agentId: string;
   onBehalfOf: string;
   agentRunId: string;
+  // The chain depth the run's writes declare: 0 unless an automation woke
+  // the agent, then one more than the automation's message.
+  depth: number;
 }
 
 async function sha256OrUndefined(absolute: string): Promise<string | undefined> {

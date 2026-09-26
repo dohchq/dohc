@@ -491,6 +491,19 @@ describe("local dataset owner adapter", () => {
     expect(host.history({datasetId: id(1)}).entries).toHaveLength(2);
   });
 
+  it("claims an agent's change at its run's depth and a person's at 0, with the owner's authority", async () => {
+    const {host} = await open(), approved = await activate(host);
+    const watcher = "collection:items#tally";
+    host.automations.subscribe(id(1), {automationId: watcher, tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: digest(watcher)});
+    // An agent run woken by an automation's message at depth 2 writes at depth 3.
+    expect(await host.action({...call(approved, id(6), "agent", {name: "Pens"}), agentDepth: 3})).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 3, actor: {kind: "agent", depth: 3}});
+    expect(await host.action(call(approved, id(6), "person", {name: "Ink"}))).toMatchObject({replayed: false});
+    expect(host.automations.next()).toMatchObject({automationId: watcher, depth: 0, actor: {kind: "owner"}});
+    // The agent retries under the owner's identity, so its retry replays.
+    expect(await host.action({...call(approved, id(6), "person", {name: "Ink"}), agentDepth: 3})).toMatchObject({replayed: true});
+  });
+
   it("tells the executor after each change to a dataset's approved rules or lifecycle", async () => {
     let changes = 0;
     const {host} = await open({onDatasetsChanged: () => { changes += 1; }}), approved = await activate(host);

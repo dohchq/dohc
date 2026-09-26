@@ -76,7 +76,9 @@ export type DatasetActor =
   | { kind: "owner"; userId?: string; appId?: string }
   | { kind: "named"; userId: string; appId?: string }
   | { kind: "link"; appId?: string }
-  | { kind: "automation"; automationId: string; depth: number };
+  | { kind: "automation"; automationId: string; depth: number }
+  // The owner's agent, in a run an automation started, at the run's chain depth.
+  | { kind: "agent"; depth: number };
 /** The person who pressed a button: the owner or a named person, by account. */
 export type DatasetPresser = { kind: "owner" | "named"; userId: string };
 export interface DatasetAutomationSubscription {
@@ -386,7 +388,8 @@ export function createDatasetAutomationClaims(options: {
      */
     recordCommit(input: DatasetCommit & { approved: DatasetRevision; actor: DatasetActor }): number {
       const { cursor, actor } = input, scope = { workspaceId: cursor.workspaceId, datasetId: cursor.datasetId };
-      const self = actor.kind === "automation" ? actor.automationId : undefined, depth = actor.kind === "automation" ? actor.depth : 0;
+      const self = actor.kind === "automation" ? actor.automationId : undefined;
+      const depth = actor.kind === "automation" || actor.kind === "agent" ? actor.depth : 0;
       const subscriptions = db.prepare("SELECT automation_id,table_id,kinds,field_ids FROM dohc_dataset_automation_subscriptions WHERE workspace_id=? AND dataset_id=? ORDER BY automation_id")
         .all(cursor.workspaceId, cursor.datasetId).filter(row => row.automation_id !== self).map(row => ({ automationId: String(row.automation_id),
           tableId: String(row.table_id), kinds: JSON.parse(String(row.kinds)) as DatasetChangeKind[], fieldIds: row.field_ids === null ? null : JSON.parse(String(row.field_ids)) as string[] }));

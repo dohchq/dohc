@@ -118,6 +118,10 @@ interface AgentMomentAuthor {
   agentId: string;
   onBehalfOf?: string;
   agentRunId?: string;
+  // An agent run an automation started writes at its chain depth, so the
+  // claims its writes cause carry the chain on. Named only past 0: a run a
+  // person started names none, and absent means 0.
+  depth?: number;
 }
 
 interface PublicMomentAuthor {
@@ -1233,6 +1237,10 @@ export interface AgentRunRecord {
 export interface AgentDispatchClaim {
   dispatch: AgentDispatchRecord;
   run: AgentRunRecord;
+  // The chain depth the run's writes declare: one more than the deepest
+  // automation message among its triggers, or 0 when only people's
+  // messages started it.
+  chainDepth: number;
 }
 
 export interface ThreadDispatchPauseState {
@@ -1517,7 +1525,9 @@ export type NonEmptyLocalAuthorLabel = string & {
 
 export type ChangeAuthor =
   | { kind: "user"; userId: string }
-  | { kind: "agent"; agentId: string; onBehalfOf: string }
+  // depth is the chain depth of the agent's run: 0 unless an automation
+  // started it.
+  | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
   // id ("collection:<collection path>#<automation id>"), and depth is the

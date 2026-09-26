@@ -13,14 +13,14 @@ use dohc_engine_domain::{
     AutomationGroupSubscription, AutomationRetry, AutomationSettle, AutomationSubscription,
     AutomationTrigger, ChangeActorKind, ChangeAttribution, ChatActorKind, ChatChannelKind,
     ChatMessageAutomation, ChatThreadLane, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
+    DispatchClaim, DomainError, LinkedChatStore, MAX_AUTOMATION_FIELD_FACTS_BYTES,
     MAX_AUTOMATION_SUBSCRIPTION_FIELDS, MAX_FIELD_FACT_VALUE_BYTES, MAX_MESSAGE_BODY_BYTES,
     NoFaults, SendMessage, StartChannelThread, TxnOutcome, claim_automation_triggers_in_tx,
     claim_group_message_in_tx, claim_next_pending_automation, list_automation_claims,
-    list_automation_failures, reclaim_running_automations, release_automation_claim,
-    retry_automation_claim, settle_automation_claim, subscribe_automation,
-    subscribe_automation_group, unsubscribe_automation, unsubscribe_automation_group,
-    unsubscribe_automation_groups,
+    list_automation_failures, moment_author_attribution, moment_author_json,
+    reclaim_running_automations, release_automation_claim, retry_automation_claim,
+    settle_automation_claim, subscribe_automation, subscribe_automation_group,
+    unsubscribe_automation, unsubscribe_automation_group, unsubscribe_automation_groups,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1682,4 +1682,359 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
             .len(),
         AUTOMATION_CLAIM_HISTORY_LIMIT as usize
     );
+}
+
+// ------------------------------------------------- automations and agent runs
+
+const STAMP: &str = "collection:tasks#stamp";
+const ASK: &str = "collection:tasks#ask";
+const MY_AGENT: &str = "agent-1";
+
+/// A change to `field` on the task, made by `actor` at its depth, or by a
+/// person when there is none.
+fn changed_by(
+    origin_seq: i64,
+    field: &str,
+    actor: Option<(&str, ChangeActorKind, u32)>,
+) -> CollectionRecordApplyFacts {
+    let mut applied = field_change(origin_seq, &[field]);
+    if let Some((actor, actor_kind, depth)) = actor {
+        applied.author_origin_id = Some(actor.to_owned());
+        applied.attribution = Some(ChangeAttribution {
+            actor_kind,
+            on_behalf_of: Some("local".to_owned()),
+            depth,
+        });
+    }
+    applied
+}
+
+/// A message in My agent that the dispatch runs the agent for: a person's
+/// request, or an automation's wake at its chain depth.
+fn ask_agent(
+    store: &mut EngineStore,
+    message_id: &str,
+    wake_depth: Option<u32>,
+    now_ms: i64,
+) -> DispatchClaim {
+    let mut request = StartChannelThread {
+        channel_id: MY_AGENT.to_owned(),
+        author_user_id: None,
+        ..post(message_id, "Plan the trip", now_ms)
+    };
+    if let Some(chain_depth) = wake_depth {
+        request.author_kind = ChatActorKind::Automation;
+        request.author_display_name = "Ask my agent".to_owned();
+        request.author_owner_display_name = Some("Ice".to_owned());
+        request.automation = Some(ChatMessageAutomation {
+            automation_id: ASK.to_owned(),
+            chain_depth,
+        });
+    }
+    let mut chats = LinkedChatStore::new(store);
+    chats
+        .start_channel_thread(&request, &NO_FAULTS)
+        .expect("message");
+    chats
+        .enqueue_dispatch(WS, message_id, &request.thread_id, now_ms, &NO_FAULTS)
+        .expect("queue the agent");
+    chats
+        .claim_next_pending(
+            WS,
+            &format!("run-{message_id}"),
+            "agent",
+            None,
+            now_ms,
+            &NO_FAULTS,
+        )
+        .expect("claim the run")
+        .expect("a run")
+}
+
+/// An automation that wakes the agent, and one that answers the agent's
+/// change, share one depth counter with the agent's run. Each hop goes one
+/// deeper, and the chain stops at the cap with a failed claim the owner sees
+/// in Notices, instead of the three waking each other forever.
+#[test]
+fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    for (automation_id, field) in [(STAMP, "Status"), (ASK, "Stamped")] {
+        subscribe_automation(
+            &mut store,
+            WS,
+            &subscription(
+                automation_id,
+                "tasks",
+                &[AutomationChangeKind::Changed],
+                Some(&[field]),
+            ),
+            10,
+            &NO_FAULTS,
+        )
+        .expect("subscribe");
+    }
+    LinkedChatStore::new(&mut store)
+        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .expect("My agent");
+
+    // A person asks the agent directly: its writes start a chain at 0.
+    let asked = ask_agent(&mut store, "m-person", None, 10);
+    assert_eq!(asked.chain_depth, 0);
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, &asked.run.run_id, 0, 11, &NO_FAULTS)
+        .expect("the person's run ends");
+
+    // A person changes Status; Stamp stamps the task one level deeper.
+    let stamp = claim_for(&mut store, WS, &changed_by(1, "Status", None), 20);
+    assert_eq!((claimed_ids(&stamp), stamp[0].depth), (vec![STAMP], 0));
+    let ask = claim_for(
+        &mut store,
+        WS,
+        &changed_by(2, "Stamped", Some((STAMP, ChangeActorKind::Automation, 1))),
+        21,
+    );
+    assert_eq!((claimed_ids(&ask), ask[0].depth), (vec![ASK], 1));
+
+    // Ask wakes the agent with a message one deeper; the run is one deeper still.
+    let woken = ask_agent(&mut store, "m-wake", Some(2), 22);
+    assert_eq!(woken.chain_depth, 3);
+
+    // The agent changes Status during the run; Stamp answers at the run's depth.
+    let stamp = claim_for(
+        &mut store,
+        WS,
+        &changed_by(
+            3,
+            "Status",
+            Some((
+                "dohc-chat-runner",
+                ChangeActorKind::Agent,
+                woken.chain_depth,
+            )),
+        ),
+        23,
+    );
+    assert_eq!((claimed_ids(&stamp), stamp[0].depth), (vec![STAMP], 3));
+    assert!(!stamp[0].chain_stopped());
+
+    // Stamp's write reaches the cap: Ask's claim records the stop instead of a run.
+    let stopped = claim_for(
+        &mut store,
+        WS,
+        &changed_by(
+            4,
+            "Stamped",
+            Some((
+                STAMP,
+                ChangeActorKind::Automation,
+                AUTOMATION_CHAIN_DEPTH_CAP,
+            )),
+        ),
+        24,
+    );
+    assert_eq!(claimed_ids(&stopped), vec![ASK]);
+    assert!(stopped[0].chain_stopped());
+    let failures = list_automation_failures(&store, WS).expect("failures");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].automation_id, ASK);
+    assert!(failures[0].chain_stopped);
+    assert_eq!(failures[0].error, AUTOMATION_CHAIN_STOPPED);
+}
+
+/// A run that covers several wakes writes one deeper than the deepest.
+#[test]
+fn a_run_covering_several_wakes_takes_the_deepest() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .expect("My agent");
+    let thread = StartChannelThread {
+        channel_id: MY_AGENT.to_owned(),
+        author_user_id: None,
+        ..post("m-first", "Plan the trip", 10)
+    };
+    chats
+        .start_channel_thread(&thread, &NO_FAULTS)
+        .expect("a person's request");
+    for (message_id, chain_depth) in [("m-deep", 3), ("m-shallow", 1)] {
+        chats
+            .send_message(
+                &SendMessage {
+                    workspace_id: WS.to_owned(),
+                    thread_id: thread.thread_id.clone(),
+                    message_id: message_id.to_owned(),
+                    author_kind: ChatActorKind::Automation,
+                    author_display_name: "Ask my agent".to_owned(),
+                    author_owner_display_name: Some("Ice".to_owned()),
+                    author_user_id: None,
+                    parent_message_id: None,
+                    origin: None,
+                    body: "Plan the trip".to_owned(),
+                    needs_decision: false,
+                    options: Vec::new(),
+                    attachments: Vec::new(),
+                    automation: Some(ChatMessageAutomation {
+                        automation_id: ASK.to_owned(),
+                        chain_depth,
+                    }),
+                    now_ms: 11,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect("a wake");
+    }
+    for (message_id, now_ms) in [("m-first", 12), ("m-deep", 13), ("m-shallow", 14)] {
+        chats
+            .enqueue_dispatch(WS, message_id, &thread.thread_id, now_ms, &NO_FAULTS)
+            .expect("queue");
+    }
+    let claim = chats
+        .claim_next_pending(WS, "run-1", "agent", None, 15, &NO_FAULTS)
+        .expect("claim")
+        .expect("a run");
+    assert_eq!(claim.run.trigger_message_id, "m-first");
+    assert_eq!(claim.chain_depth, 4);
+    let open = chats
+        .list_open_dispatch_runs(WS, None, 10)
+        .expect("open runs");
+    assert_eq!(
+        open.iter()
+            .map(|claim| claim.chain_depth)
+            .collect::<Vec<_>>(),
+        vec![4]
+    );
+
+    // A restart interrupts the run, and every trigger it covered goes back to
+    // the queue. A person's later request that sorts first starts the next
+    // run, which still counts the wakes the interrupted run covered.
+    chats
+        .reclaim_running_dispatches(WS, 2, 16, &NO_FAULTS)
+        .expect("reclaim");
+    let pending = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending");
+    assert_eq!(pending.len(), 3, "{pending:?}");
+    chats
+        .send_message(
+            &SendMessage {
+                workspace_id: WS.to_owned(),
+                thread_id: thread.thread_id.clone(),
+                message_id: "m-early".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "And book the train".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                automation: None,
+                now_ms: 17,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("a person's request");
+    chats
+        .enqueue_dispatch(WS, "m-early", &thread.thread_id, 11, &NO_FAULTS)
+        .expect("queue");
+    let again = chats
+        .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
+        .expect("claim again")
+        .expect("the requeued run");
+    assert_eq!(again.run.trigger_message_id, "m-early");
+    assert_eq!(again.chain_depth, 4);
+
+    // A second restart gives back only what has attempts left.
+    chats
+        .reclaim_running_dispatches(WS, 2, 19, &NO_FAULTS)
+        .expect("reclaim again");
+    let pending: Vec<String> = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending")
+        .into_iter()
+        .map(|row| row.trigger_message_id)
+        .collect();
+    assert_eq!(pending, vec!["m-early".to_owned()]);
+}
+
+/// An agent's post in a Group during a run claims at the run's depth, so the
+/// agent cannot start a chain over by posting. After the run, an agent's post
+/// claims at 0, as a person's does.
+#[test]
+fn an_agents_post_during_a_run_claims_at_the_runs_depth() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_group(&scratch);
+    subscribe_group(&mut store, ALL, GROUP, None).expect("all");
+    LinkedChatStore::new(&mut store)
+        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .expect("My agent");
+    let woken = ask_agent(&mut store, "m-wake", Some(2), 10);
+    let by_agent = |message_id: &str, now_ms: i64| StartChannelThread {
+        author_kind: ChatActorKind::Agent,
+        author_display_name: "Claude".to_owned(),
+        author_owner_display_name: Some("Ice".to_owned()),
+        origin: Some("cli".to_owned()),
+        ..post(message_id, "Booked the train", now_ms)
+    };
+
+    let claims = posted(&mut store, &by_agent("m-agent", 11));
+    assert_eq!(claimed_ids(&claims), vec![ALL]);
+    assert_eq!(claims[0].depth, woken.chain_depth);
+    assert_eq!(claims[0].change.actor_kind, Some(ChangeActorKind::Agent));
+    // The depth travels with the post, so another computer's Group
+    // automation counts it too.
+    fn exported(store: &EngineStore, message_id: &str) -> serde_json::Value {
+        let payload: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' \
+                       AND json_extract(payload_json, '$.messageId') = ?2",
+                    [WS, message_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("exported post");
+        serde_json::from_str(&payload).expect("payload JSON")
+    }
+    assert_eq!(
+        exported(&store, "m-agent")["chainDepth"],
+        json!(woken.chain_depth)
+    );
+
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, &woken.run.run_id, 0, 12, &NO_FAULTS)
+        .expect("the run ends");
+    let after = posted(&mut store, &by_agent("m-later", 13));
+    assert_eq!(after[0].depth, 0);
+    assert_eq!(exported(&store, "m-later").get("chainDepth"), None);
+}
+
+/// An agent run's file writes name its chain depth, so the claims they cause
+/// carry it. A run a person started names none, so its history reads as
+/// before.
+#[test]
+fn an_agents_moment_author_carries_its_runs_depth() {
+    for depth in [0, 3] {
+        let attribution = ChangeAttribution {
+            actor_kind: ChangeActorKind::Agent,
+            on_behalf_of: Some("local".to_owned()),
+            depth,
+        };
+        let author =
+            moment_author_json(Some("dohc-chat-runner"), Some(&attribution)).expect("author");
+        let named: serde_json::Value = serde_json::from_str(&author).expect("author JSON");
+        assert_eq!(named.get("depth").is_some(), depth > 0, "{author}");
+        assert_eq!(
+            moment_author_attribution(Some(&author)),
+            (Some("dohc-chat-runner".to_owned()), Some(attribution))
+        );
+    }
 }

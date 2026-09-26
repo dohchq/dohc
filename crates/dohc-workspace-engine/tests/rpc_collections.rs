@@ -583,6 +583,52 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
     assert_eq!(authored_edit["actorKind"], json!("agent"));
     assert_eq!(authored_edit["onBehalfOf"], json!("local"));
     assert_eq!(authored_edit["depth"], json!(0));
+
+    // A run an automation started names its chain depth, and capture records
+    // the agent's edit at that depth.
+    call(
+        &transport,
+        &handle,
+        71,
+        "capture.setAuthor",
+        json!({
+            "author": {
+                "kind": "agent",
+                "agentId": agent_id,
+                "onBehalfOf": "local",
+                "agentRunId": "run-woken",
+                "depth": 3,
+            }
+        }),
+    )
+    .await;
+    let edited = std::fs::read_to_string(&record_path)
+        .expect("read edited record")
+        .replace("status: done", "status: shipped");
+    std::fs::write(&record_path, edited).expect("woken agent edits record file");
+    reconcile_capture(&transport, &handle, 72).await;
+    let record = call(
+        &transport,
+        &handle,
+        101,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": record_id,
+            "historyLimit": 20,
+        }),
+    )
+    .await;
+    let woken_edit = record["history"]
+        .as_array()
+        .expect("field history")
+        .iter()
+        .find(|entry| {
+            entry["field"] == json!("status") && entry["next"]["value"] == json!("shipped")
+        })
+        .expect("the woken agent's edit in history");
+    assert_eq!(woken_edit["actorKind"], json!("agent"));
+    assert_eq!(woken_edit["depth"], json!(3));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

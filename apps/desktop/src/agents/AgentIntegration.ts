@@ -167,10 +167,12 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       });
       try {
         authority.assertCurrent();
+        // A person starts this run, so its writes begin a chain at depth 0.
         await authority.setAgentRun({
           agentId: record.agentId,
           onBehalfOf: record.onBehalfOf,
           agentRunId: record.id,
+          depth: 0,
         });
         authority.assertCurrent();
         state.activeRun = record;
