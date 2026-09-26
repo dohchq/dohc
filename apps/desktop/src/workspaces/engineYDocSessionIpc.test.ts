@@ -225,35 +225,81 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
-  // An editor sat idle while sync turned on. The engine claimed its history
-  // and told the session to resync, which is how the provider learns the
-  // claim. Owner registration then matches the published binding.
-  it("registers an idle editor as owner once it learns the claim sync made", async () => {
-    const nativeOwner = {onDurableLocalChange: () => () => {},
-      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined)};
-    let providerClaim: string | null = null;
+  // Turning sync on claimed an open editor's history and told its session to
+  // resync, which is how the provider learns the claim. A registration that
+  // arrives before that resync lands waits for it instead of refusing.
+  function claimHarness(initialClaim: string | null) {
+    let providerClaim = initialClaim;
+    const resync = deferred<void>();
+    const nativeOwner = {onDurableLocalChange: () => () => {}, sessionId: "native-existing",
+      flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(() => resync.promise)};
     const provider = providerSession({nativeOwner, objectId: "object", versionId: "main"});
     Object.defineProperty(provider, "lineageClaimId", {get: () => providerClaim});
-    const h = harness(provider);
-    await h.ipc.open(new FakeSender(7), openPayload);
-    const binding = {workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
-      lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1};
-    expect(() => h.ipc.existingOwner(binding)).toThrow("Existing owner changed.");
+    return {h: harness(provider), nativeOwner, resync, learn(claim: string) { providerClaim = claim; }};
+  }
+  const claimBinding = {workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+    lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1};
 
-    providerClaim = "a".repeat(64);
+  it("registers an idle editor as owner once its pending resync learns the claim sync made", async () => {
+    const c = claimHarness(null);
+    await c.h.ipc.open(new FakeSender(7), openPayload);
+    let settled = false;
+    const registering = c.h.ipc.existingOwner(claimBinding).finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(c.nativeOwner.resyncIfNeeded).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
 
-    const owner = h.ipc.existingOwner(binding);
+    c.learn("a".repeat(64));
+    c.resync.resolve();
+
+    const owner = await registering;
     expect(owner.nativeSessionId).toBe("native-existing");
     expect(() => owner.assertCurrent()).not.toThrow();
+  });
+
+  it("refuses an editor whose resync did not bring the registered claim, after one wait", async () => {
+    const c = claimHarness(null);
+    await c.h.ipc.open(new FakeSender(7), openPayload);
+    c.resync.resolve();
+    await expect(c.h.ipc.existingOwner(claimBinding)).rejects.toThrow("The open document has not learned its sync claim yet.");
+    expect(c.nativeOwner.resyncIfNeeded).toHaveBeenCalledOnce();
+  });
+
+  // The resync replaced the lineage and kept the native session, and the
+  // renderer adopted the replacement before the wait ended. The new lineage
+  // happens to carry the registered claim; the owner captured before the
+  // wait is gone, so the registration refuses.
+  it("refuses when the resync replaced the lineage, even once the renderer adopts it", async () => {
+    const c = claimHarness(null);
+    const sender = new FakeSender(7);
+    await c.h.ipc.open(sender, openPayload);
+    const registering = c.h.ipc.existingOwner(claimBinding);
+    await Promise.resolve();
+
+    c.learn("a".repeat(64));
+    c.h.capturedOpen()?.onLineageReplaced?.(new Uint8Array([9]), []);
+    expect(c.h.ipc.acknowledgeLineageReplacement(sender, {sessionId: openPayload.sessionId, lineageGeneration: 2}))
+      .toMatchObject({accepted: true});
+    c.resync.resolve();
+
+    await expect(registering).rejects.toThrow("Owner session changed.");
+    await expect(c.h.ipc.existingOwner(claimBinding)).resolves.toMatchObject({nativeSessionId: "native-existing"});
+  });
+
+  it("refuses at once when the editor holds a different claim", async () => {
+    const c = claimHarness("b".repeat(64));
+    await c.h.ipc.open(new FakeSender(7), openPayload);
+    await expect(c.h.ipc.existingOwner(claimBinding)).rejects.toThrow("Existing owner changed.");
+    expect(c.nativeOwner.resyncIfNeeded).not.toHaveBeenCalled();
   });
 
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
     const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
-      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined)};
+      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
     await h.ipc.open(new FakeSender(7), openPayload);
-    const owner = h.ipc.existingOwner({workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+    const owner = await h.ipc.existingOwner({workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
       lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1});
     const stop = vi.fn();
     owner.onDurableLocalChange(() => {try {owner.assertCurrent();} catch {stop();}});
@@ -264,11 +310,11 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
-    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const owner = await h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
     const payload = {sessionId: openPayload.sessionId,lineageGeneration: 1};
     const prepared = owner.prepareHandoff(new AbortController().signal);
     expect(sender.sent.at(-1)?.payload).toEqual(payload);
@@ -293,10 +339,10 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined)};
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
-    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const owner = await h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
     const signal = new AbortController();
     const prepared = owner.prepareHandoff(signal.signal);
     const holding = h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1});

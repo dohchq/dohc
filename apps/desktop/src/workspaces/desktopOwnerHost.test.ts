@@ -18,7 +18,7 @@ it.each(["lookup", "owner", "registered"])("reconnects after a binding retires d
     return {stop,closed:closed.promise};
   });
   const owner = {nativeSessionId:"session", onDurableLocalChange: () => () => undefined, assertCurrent:vi.fn(), prepareHandoff:vi.fn(), finishHandoff:vi.fn(), remoteApplied:vi.fn()};
-  const ownerFor = vi.fn(() => owner);
+  const ownerFor = vi.fn(async () => owner);
   const bindings = vi.fn(async () => {
     const captured = generation;
     return {client:{} as Awaited<ReturnType<Options["bindings"]>>["client"],workspaces:[{workspaceId:"workspace",workspaceHandle:`handle-${captured}`}],
@@ -32,17 +32,17 @@ it.each(["lookup", "owner", "registered"])("reconnects after a binding retires d
     await vi.advanceTimersByTimeAsync(0);
     const first = calls[0]!;
     const binding = {} as Parameters<Options["ownerFor"]>[0];
-    const retained = phase === "owner" ? first.options.existingOwner!.ownerFor(binding) : undefined;
+    const retained = phase === "owner" ? await first.options.existingOwner!.ownerFor(binding) : undefined;
     generation++;
     const check = phase === "lookup" ? () => first.options.existingOwner!.ownerFor(binding)
-      : phase === "owner" ? () => retained!.assertCurrent() : () => first.options.onRegistered!({} as never);
-    expect(check).toThrow("binding retired");
+      : phase === "owner" ? async () => retained!.assertCurrent() : async () => first.options.onRegistered!({} as never);
+    await expect(check()).rejects.toThrow("binding retired");
     expect(first.stop).toHaveBeenCalledOnce();
     if (phase === "lookup") expect(ownerFor).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(10);
     expect(bindings).toHaveBeenCalledTimes(2);
     expect(calls[1]!.options.existingOwner!.workspaces[0]!.workspaceHandle).toBe("handle-1");
-    expect(check).toThrow("binding retired");
+    await expect(check()).rejects.toThrow("binding retired");
     expect(calls[1]!.stop).not.toHaveBeenCalled();
   } finally {host.stop(); await vi.advanceTimersByTimeAsync(100);}
 });
@@ -54,7 +54,7 @@ it("keeps a current connection when the requested editor is unavailable", async 
   transport.connect.mockImplementation(options => {connected.resolve(options);return {stop,closed:closed.promise};});
   const host = startDesktopOwnerHost({config:{url:"wss://owner.test",credential:{},control:{},transport:{},reconnectDelayMs:10} as Options["config"],
     bindings:async () => ({client:{} as Awaited<ReturnType<Options["bindings"]>>["client"],workspaces:[],assertCurrent(){}}),
-    ownerFor(){throw new Error("Existing owner is unavailable.");},onError:vi.fn()});
-  try {const options = await connected.promise;expect(() => options.existingOwner!.ownerFor({} as never)).toThrow("Existing owner is unavailable");expect(stop).not.toHaveBeenCalled();}
+    async ownerFor(){throw new Error("Existing owner is unavailable.");},onError:vi.fn()});
+  try {const options = await connected.promise;await expect(options.existingOwner!.ownerFor({} as never)).rejects.toThrow("Existing owner is unavailable");expect(stop).not.toHaveBeenCalled();}
   finally {host.stop();await closed.promise;}
 });
