@@ -4640,13 +4640,27 @@ export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactP
 export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
 
 // The fields in one Collection that switched-on automations set, for the
-// ⚡ marks on the table and the record's properties.
-export const ListCollectionFieldMarksPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  collectionPath: PATH_STRING,
-});
+// ⚡ marks on the table and the record's properties. A document Collection
+// is named by its folder, and a dataset Collection by its id and table.
+export const ListCollectionFieldMarksPayload = z.union([
+  z.strictObject({ workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING }),
+  z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+]);
 export type ListCollectionFieldMarksPayload = z.infer<typeof ListCollectionFieldMarksPayload>;
 export type ListCollectionFieldMarksResult = { marks: CollectionFieldMark[] };
+
+// The folder that holds a dataset Collection's automations.yaml, which the
+// ⚡ panel reads and saves, or why dohc cannot run its automations. A
+// shared view holds no executor: its automations run on the owner's computer.
+export const FindDatasetCollectionPayload = z.strictObject({
+  workspaceId: WORKSPACE_ID,
+  datasetId: z.uuid(),
+});
+export type FindDatasetCollectionPayload = z.infer<typeof FindDatasetCollectionPayload>;
+export type FindDatasetCollectionResult =
+  | { status: "found"; collectionPath: string }
+  | { status: "cannot-run"; reason: string }
+  | { status: "unavailable" };
 
 // Replaces the file's automations with these, over the content the panel
 // read (null when the file did not exist). `reformat` is the person's
@@ -5972,6 +5986,7 @@ export interface DohcDesktopBridge
   dismissAutomationStops(payload: DismissAutomationStopsPayload): Promise<void>;
   automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
+  findDatasetCollection(payload: FindDatasetCollectionPayload): Promise<FindDatasetCollectionResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
   listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;

@@ -104,13 +104,14 @@ function candidates(definition: DatasetDefinition, tables: readonly DatasetTable
 /**
  * Resolves every step's operation against the approved rules. With `pin`,
  * a step whose operation is missing or does not fit gets the best one that
- * does, and the result says which name each step now pins. Without it, a
- * step must already name an operation that fits.
+ * does, unless `pin` says to keep it as it is, and the result says which
+ * name each step now pins. Without it, a step must already name an
+ * operation that fits.
  */
 function resolve(
   automation: Automation,
   definition: DatasetDefinition,
-  pin: boolean,
+  pin: false | ((step: RecordStep) => boolean),
 ): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
   const trigger = automation.when;
   if (!("table" in trigger)) return { problem: "Automations on dataset Collections start only from a record change or a button." };
@@ -165,7 +166,11 @@ function resolve(
     const fitting = candidates(definition, tables, kind, names);
     const named = step.operation === null ? undefined : definition.operations.find((operation) => operation.name === step.operation);
     let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
-    if (chosen === undefined && pin) chosen = fitting[0];
+    // Pinning never moves an Add record to another table: it stays in its
+    // operation's table, or the trigger's when it names none, which is the
+    // table the ⚡ panel built it in. With no fit there, a person names one.
+    const home = step.kind === "add-record" ? (named?.tableId ?? table.tableId) : null;
+    if (chosen === undefined && pin && pin(step)) chosen = fitting.find((operation) => home === null || operation.tableId === home);
     if (chosen === undefined) {
       if (tables.length === 1) {
         const missing = fieldIds(tables[0]!, names);
@@ -263,6 +268,22 @@ export function datasetOperationsOf(automation: Automation, definition: DatasetD
   return [...new Set([...operationsOf(automation), ...reads])].filter((name) => approved.has(name));
 }
 
+/**
+ * The fields each Set and Add record step writes, with the name of the
+ * table its approved operation writes to. An automation whose operations do
+ * not resolve writes nothing.
+ */
+export function datasetFieldWritesOf(automation: Automation, definition: DatasetDefinition): Array<{ table: string; field: string }> {
+  const resolved = resolve(automation, definition, false);
+  if ("problem" in resolved) return [];
+  return stepsInOrder(automation).flatMap(({ ordinal, step }) => {
+    const own = resolved.steps.steps.get(ordinal);
+    return own !== undefined && (step.kind === "set" || step.kind === "add-record")
+      ? step.values.map(({ field }) => ({ table: own.table.name, field }))
+      : [];
+  });
+}
+
 /** The table and Button field a button automation's trigger names in the rules, or null. */
 export function datasetButtonOf(automation: Automation, definition: DatasetDefinition): { tableId: string; fieldId: string } | null {
   const trigger = automation.when;
@@ -310,10 +331,15 @@ export function datasetReachSteps(
 /**
  * The automation with each step pinned to the operation the panel prefers,
  * where the step names none or one that no longer fits. A step no operation
- * fits keeps what it names, and the automation says why it cannot run.
+ * fits keeps what it names, and the automation says why it cannot run. So
+ * does a step `kept` answers true for, such as one the file already holds.
  */
-export function pinDatasetOperations(automation: Automation, definition: DatasetDefinition): Automation {
-  const resolved = resolve(automation, definition, true);
+export function pinDatasetOperations(
+  automation: Automation,
+  definition: DatasetDefinition,
+  kept: (step: RecordStep) => boolean = () => false,
+): Automation {
+  const resolved = resolve(automation, definition, (step) => !kept(step));
   if ("problem" in resolved || resolved.pinned.size === 0) return automation;
   let counter = 0;
   const pin = (steps: readonly AutomationStep[]): AutomationStep[] => steps.map((step): AutomationStep => {

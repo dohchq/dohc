@@ -243,6 +243,7 @@ export const CHANNELS = {
   automationShareImpact: "desktop:automation-share-impact",
   automationHoldsChanged: "desktop:automation-holds-changed",
   listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  findDatasetCollection: "desktop:find-dataset-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.

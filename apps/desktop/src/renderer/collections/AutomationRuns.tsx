@@ -159,6 +159,8 @@ export function AutomationRuns(props: {
   onRetry: (target: { automationId: string; claimId: string }) => void;
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onNotice: (message: string) => void;
+  /** An Undo changed records. */
+  onUndone?: () => void;
 }) {
   const { workspaceId, automationId, onError, onNotice } = props;
   // "unavailable" in a shared view: its automations run on the owner's computer.
@@ -194,8 +196,12 @@ export function AutomationRuns(props: {
       .undoCollectionAutomationRun({ workspaceId, automationId, claimId })
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
-        if (result.status === "refused") onError(result.reason, new Error(result.reason));
-        else onNotice(undoSentence(result));
+        if (result.status === "refused") {
+          onError(result.reason, new Error(result.reason));
+        } else {
+          onNotice(undoSentence(result));
+          props.onUndone?.();
+        }
       })
       .catch((error: unknown) => {
         if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId));

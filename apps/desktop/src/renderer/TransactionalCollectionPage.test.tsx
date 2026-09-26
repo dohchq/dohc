@@ -409,3 +409,23 @@ it("keeps an open record's details, and the focus in them, when the records are 
   rerender(<TransactionalCollectionPage {...props} recordsVersion={2} />);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull());
 });
+
+it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {
+  setup({
+    automationsButton: <button type="button">Automations</button>,
+    fieldMarks: new Map([["Amount", ["Round the amount"]], ["Status", ["Review new people", "Stamp"]]]),
+  });
+  await screen.findByText("Alice");
+  const header = screen.getByRole("heading", { name: "People" }).closest("header")!;
+  expect(within(header).getAllByRole("button").map(button => button.textContent)).toEqual(["Automations", "New record"]);
+  const marks = screen.getAllByRole("img", { name: "Automation" });
+  expect(marks.map(mark => mark.closest("th")?.querySelector("button")?.textContent)).toEqual(["Amount", "Status"]);
+  // Hovering or focusing a mark names the automations.
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.focus(marks[1]!);
+  expect(screen.getByRole("tooltip").textContent).toBe('"Review new people" and "Stamp" set this field');
+  fireEvent.blur(marks[1]!);
+  fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+  const details = screen.getByRole("dialog", { name: "Record details" });
+  expect(within(details).getAllByRole("img", { name: "Automation" })).toHaveLength(2);
+});

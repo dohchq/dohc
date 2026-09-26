@@ -8,6 +8,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import type { ListCollectionFieldMarksPayload } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 
@@ -17,12 +18,15 @@ import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 // Collection shares one read, and a Collection is read again only after
 // main says the automations it read changed. Nothing here runs per cell.
 
-type FieldMarks = ReadonlyMap<string, readonly string[]>;
+export type FieldMarks = ReadonlyMap<string, readonly string[]>;
+/** A document Collection by its folder, or one table of a dataset Collection. */
+type MarksTarget = { collectionPath: string } | { datasetId: string; table: string };
 
 const NO_MARKS: FieldMarks = new Map();
 const AND = new Intl.ListFormat("en", { type: "conjunction" });
 
 interface Entry {
+  target: MarksTarget;
   marks: FieldMarks;
   /** The store revision the marks were read at, or -1 before the first read. */
   revision: number;
@@ -43,12 +47,13 @@ function createFieldMarksStore(workspaceId: string) {
   let revision = 0;
   const entries = new Map<string, Entry>();
 
-  async function read(collectionPath: string, entry: Entry): Promise<void> {
+  async function read(target: MarksTarget, entry: Entry): Promise<void> {
     if (entry.reading || entry.revision === revision) return;
     entry.reading = true;
     const asked = revision;
     try {
-      const result = await bridge().listCollectionFieldMarks({ workspaceId, collectionPath });
+      const payload: ListCollectionFieldMarksPayload = { workspaceId, ...target };
+      const result = await bridge().listCollectionFieldMarks(payload);
       const marks: FieldMarks = new Map(result.marks.map((mark) => [mark.field, mark.automations]));
       // Unchanged marks keep their identity, so the table does not render again.
       if (!sameMarks(entry.marks, marks)) {
@@ -62,25 +67,25 @@ function createFieldMarksStore(workspaceId: string) {
       entry.reading = false;
     }
     // A change arrived during the read: read once more for those still showing it.
-    if (entry.revision !== revision && entry.listeners.size > 0) void read(collectionPath, entry);
+    if (entry.revision !== revision && entry.listeners.size > 0) void read(target, entry);
   }
 
   return {
-    marks(collectionPath: string): FieldMarks {
-      return entries.get(collectionPath)?.marks ?? NO_MARKS;
+    marks(key: string): FieldMarks {
+      return entries.get(key)?.marks ?? NO_MARKS;
     },
-    subscribe(collectionPath: string, listener: () => void): () => void {
-      const entry: Entry = entries.get(collectionPath) ?? { marks: NO_MARKS, revision: -1, reading: false, listeners: new Set() };
-      entries.set(collectionPath, entry);
+    subscribe(key: string, target: MarksTarget, listener: () => void): () => void {
+      const entry: Entry = entries.get(key) ?? { target, marks: NO_MARKS, revision: -1, reading: false, listeners: new Set() };
+      entries.set(key, entry);
       entry.listeners.add(listener);
-      void read(collectionPath, entry);
+      void read(target, entry);
       return () => entry.listeners.delete(listener);
     },
     /** Main's automations changed: Collections on screen read again, the rest when they next show. */
     invalidate(): void {
       revision += 1;
-      for (const [collectionPath, entry] of entries) {
-        if (entry.listeners.size > 0) void read(collectionPath, entry);
+      for (const entry of entries.values()) {
+        if (entry.listeners.size > 0) void read(entry.target, entry);
       }
     },
   };
@@ -99,17 +104,28 @@ export function CollectionFieldMarksProvider(props: { workspaceId: string; child
   return <FieldMarksStore.Provider value={store}>{props.children}</FieldMarksStore.Provider>;
 }
 
+function useFieldMarks(target: MarksTarget | null): FieldMarks {
+  const store = useContext(FieldMarksStore);
+  // The key names the target, so a new object for the same one subscribes nothing new.
+  const key = target === null ? null : JSON.stringify(target);
+  const subscribe = useCallback(
+    (listener: () => void) => (store && key !== null && target !== null ? store.subscribe(key, target, listener) : () => undefined),
+    [store, key],
+  );
+  return useSyncExternalStore(subscribe, () => (store && key !== null ? store.marks(key) : NO_MARKS));
+}
+
 /**
  * Each marked field in one Collection, with the names of the automations
  * that set it. Null asks for nothing.
  */
 export function useCollectionFieldMarks(collectionPath: string | null): FieldMarks {
-  const store = useContext(FieldMarksStore);
-  const subscribe = useCallback(
-    (listener: () => void) => (store && collectionPath !== null ? store.subscribe(collectionPath, listener) : () => undefined),
-    [store, collectionPath],
-  );
-  return useSyncExternalStore(subscribe, () => (store && collectionPath !== null ? store.marks(collectionPath) : NO_MARKS));
+  return useFieldMarks(collectionPath === null ? null : { collectionPath });
+}
+
+/** Each marked field in one table of a dataset Collection. Null asks for nothing. */
+export function useDatasetFieldMarks(datasetId: string, table: string | null): FieldMarks {
+  return useFieldMarks(table === null ? null : { datasetId, table });
 }
 
 /** What a field's ⚡ says: the automations that set it. */

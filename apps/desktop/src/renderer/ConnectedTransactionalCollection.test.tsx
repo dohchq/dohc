@@ -3,17 +3,22 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
-import type { AutomationRunSettledEvent } from "../ipc/bridgeContract";
+import type { ReactNode } from "react";
+import type { AutomationRunSettledEvent, FindDatasetCollectionResult, ListCollectionAutomationsResult } from "../ipc/bridgeContract";
 import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollection";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import type { TransactionalButtons } from "./TransactionalCollectionPage";
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
   listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+  findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
+  listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
+  onAutomationFailuresChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined) }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+  {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
@@ -39,7 +44,7 @@ describe("a dataset table's buttons", () => {
     ] });
     backend.pressAutomationButton.mockResolvedValue({ busy: false, claimId: "claim-1", settled: null });
     const onNotice = vi.fn();
-    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
     const button = await screen.findByRole("button", { name: "Confirm for record 12" });
     expect(backend.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) });
     // The state of this table's button, not another table's button of the same name.
@@ -60,7 +65,7 @@ describe("a dataset table's buttons", () => {
 
   it("asks main nothing about buttons for a table that has none", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset });
-    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
     await screen.findByLabelText("Collection view state");
     expect(backend.listAutomationButtons).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /for record/ })).toBeNull();
@@ -78,7 +83,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
     throw Error("Unexpected request");
   });
   const onError = vi.fn(), onNotice = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: "History" }));
   const history = within(screen.getByRole("dialog", { name: "Collection history" }));
   fireEvent.click(await history.findByText("edit", { exact: true }));
@@ -93,7 +98,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
 it("keeps the page mounted through successful and failed metadata refreshes", async () => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset });
   const onError = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   const input = await screen.findByLabelText("Collection view state");
   fireEvent.change(input, { target: { value: "pending edit and current search" } });
   fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
@@ -109,7 +114,7 @@ it("keeps the page mounted through successful and failed metadata refreshes", as
 async function setup() {
   backend.listCollections.mockResolvedValue({ collections: [] }); backend.listWorkspaceFiles.mockResolvedValue({ files: [] });
   backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset } : { kind: "invoked", result: { id: "created", version: 1 } });
-  const props = { workspaceId: "workspace-a", datasetId: id(1), tableId: id(2), onError: vi.fn(), onFormCreated: vi.fn() };
+  const props = { workspaceId: "workspace-a", datasetId: id(1), tableId: id(2), onError: vi.fn(), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn() };
   const rendered = render(<ConnectedTransactionalCollection {...props} />);
   fireEvent.click(await screen.findByRole("button", { name: "Import or export CSV" }));
   await waitFor(() => expect((screen.getByRole("button", { name: "CSV or saved import report" }) as HTMLButtonElement).disabled).toBe(false));
@@ -146,7 +151,7 @@ describe("connected CSV transfers", () => {
 it("opens archived metadata without running records and offers owner restore", async () => {
   backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset: { ...dataset, archived: true, operations: [] } } : { kind: "lifecycle-updated", archived: false, generation: 2 });
   const onLifecycleChanged = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onLifecycleChanged={onLifecycleChanged} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} onLifecycleChanged={onLifecycleChanged} />);
   fireEvent.click(await screen.findByRole("button", { name: "Restore Collection" }));
   await waitFor(() => expect(onLifecycleChanged).toHaveBeenCalledOnce());
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "invoke")).toBe(false);
@@ -161,7 +166,7 @@ it("loads owner pending responses and requires confirmation before clearing a sa
     cleared = true; return { kind: "attempt-reconciled", cleared: true };
   });
   const onNotice = vi.fn(), onError = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: "Pending responses" }));
   fireEvent.click(await screen.findByRole("button", { name: "Clear retry" }));
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "reconcileAttempt")).toBe(false);
@@ -174,7 +179,7 @@ it("loads owner pending responses and requires confirmation before clearing a sa
 
 it.each([{ owner: false, offline: false }, { owner: true, offline: true }])("hides pending review and recovery export for $owner owner and $offline offline", async ({ owner, offline }) => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline } });
-  render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText("Opening collection…")).toBeNull());
   expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
@@ -183,7 +188,7 @@ it.each([{ owner: false, offline: false }, { owner: true, offline: true }])("hid
 it("reports the saved recovery file through the shell notice callback", async () => {
   backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset } : { kind: "exported", savedPath: "C:/private/fundraiser.dohc-recovery" });
   const onNotice = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: "Export recovery" }));
   fireEvent.click(screen.getByRole("button", { name: "Save recovery file" }));
   await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Saved recovery file: C:/private/fundraiser.dohc-recovery"));
@@ -192,7 +197,7 @@ it("reports the saved recovery file through the shell notice callback", async ()
 it("keeps archived offline Collections read-only until refresh reaches the host", async () => {
   backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true } })
     .mockResolvedValue({ kind: "description", dataset: { ...dataset, archived: true } });
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   const restore = await screen.findByRole("button", { name: "Restore Collection" });
   expect(restore.hasAttribute("disabled")).toBe(true);
   fireEvent.click(restore); expect(backend.dataset.mock.calls.some(([input]) => input.action === "restore")).toBe(false);
@@ -209,7 +214,7 @@ it("cancels an unconfirmed response only after owner acknowledgement and reports
     cancelled = true; return { kind: "attempt-cancelled", cancelled: true };
   });
   const onNotice = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: "Pending responses" }));
   fireEvent.click(await screen.findByRole("button", { name: "Cancel response" }));
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "cancelAttempt")).toBe(false);
@@ -227,7 +232,7 @@ it("deletes an archived Collection with its reviewed cursor and updates the shel
     return { kind: "deleted", deleted: true, datasetId: id(1) };
   });
   const onNotice = vi.fn(), onLifecycleChanged = vi.fn(), onError = vi.fn();
-  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onNotice={onNotice} onLifecycleChanged={onLifecycleChanged} />);
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} onNotice={onNotice} onLifecycleChanged={onLifecycleChanged} />);
   fireEvent.click(await screen.findByRole("button", { name: "Delete permanently…" }));
   await screen.findByText("form");
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "delete")).toBe(false);
@@ -239,7 +244,7 @@ it("deletes an archived Collection with its reviewed cursor and updates the shel
 });
 it.each([{ owner: false, offline: false }, { owner: true, offline: true }])("hides permanent delete for $owner owner and $offline offline", async ({ owner, offline }) => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline } });
-  render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+  render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   await screen.findByText("Fundraiser is archived");
   expect(screen.queryByRole("button", { name: "Delete permanently…" })).toBeNull();
 });
@@ -250,7 +255,7 @@ it("does not report permanent deletion in a different workspace", async () => {
     if (input.action === "deletePreview") return deletionPreview();
     return pending.promise;
   });
-  const props = { workspaceId: "workspace-a", datasetId: id(1), tableId: id(2), onError: vi.fn(), onFormCreated: vi.fn(), onNotice: vi.fn(), onLifecycleChanged: vi.fn() };
+  const props = { workspaceId: "workspace-a", datasetId: id(1), tableId: id(2), onError: vi.fn(), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn(), onNotice: vi.fn(), onLifecycleChanged: vi.fn() };
   const view = render(<ConnectedTransactionalCollection {...props} />);
   fireEvent.click(await screen.findByRole("button", { name: "Delete permanently…" })); await screen.findByText("form");
   fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Delete Collection permanently" }));
@@ -258,4 +263,60 @@ it("does not report permanent deletion in a different workspace", async () => {
   await act(async () => pending.resolve({ kind: "deleted", deleted: true, datasetId: id(1) }));
   expect(props.onNotice).not.toHaveBeenCalled(); expect(props.onLifecycleChanged).not.toHaveBeenCalled(); expect(props.onError).not.toHaveBeenCalled();
   expect(screen.queryByText("Collection deleted")).toBeNull();
+});
+
+describe("a dataset table's ⚡ panel", () => {
+  const onTable = (automationId: string, table: string): Extract<ListCollectionAutomationsResult, { status: "read" }>["automations"][number] => ({
+    valid: true, automationId: `collection:Fundraiser#${automationId}`, definitionHash: "0123456789abcdef", cannotRun: null,
+    reach: { kind: "checked", steps: [] }, lastRun: null,
+    automation: { id: automationId, name: automationId, enabled: true, when: { kind: "record-added", table }, if: null,
+      do: [{ kind: "set", values: [{ field: "Name", value: { kind: "literal", value: "Welcome" } }], records: null, operation: null }] },
+  });
+  const renderPage = () => render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+
+  it("finds the dataset's folder, counts this table's automations, and lists them in the panel", async () => {
+    const donors = { tableId: id(9), name: "Donors", fields: dataset.tables[0]!.fields };
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: { ...dataset, tables: [...dataset.tables, donors] } });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [onTable("welcome", "Registrations"), onTable("thank", "Donors")] });
+    renderPage();
+    const button = await screen.findByTestId("collection-automations-button");
+    await waitFor(() => expect(button.textContent).toBe("Automations1"));
+    expect(backend.findDatasetCollection).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) });
+    expect(backend.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "workspace-a", collectionPath: "Fundraiser" });
+    fireEvent.click(button);
+    await screen.findByTestId("automation-welcome");
+    expect(screen.queryByTestId("automation-thank")).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
+  });
+
+  it.each([
+    [{ status: "cannot-run", reason: "This Collection's rules are not approved yet, so its automations cannot run." }, "This Collection's rules are not approved yet, so its automations cannot run."],
+    [{ status: "unavailable" }, "This Collection's automations run on its owner's computer."],
+  ] as Array<[FindDatasetCollectionResult, string]>)("says why the panel has no automations to show when main answers %o", async (found, sentence) => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    backend.findDatasetCollection.mockResolvedValue(found);
+    renderPage();
+    fireEvent.click(await screen.findByTestId("collection-automations-button"));
+    expect((await screen.findByTestId("collection-automations-panel")).textContent).toContain(sentence);
+    expect(backend.listCollectionAutomations).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close automations" }));
+    expect(screen.queryByTestId("collection-automations-panel")).toBeNull();
+  });
+
+  it("says when dohc could not find the automations, through the error hook and in the panel, and tries again", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset });
+    backend.findDatasetCollection.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "missing" });
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId("collection-automations-button"));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    await waitFor(() => expect(panel.getAttribute("aria-busy")).toBe("false"));
+    expect(panel.textContent).toContain("dohc could not read this Collection's automations.");
+    expect(onError).toHaveBeenCalledWith("dohc could not read this Collection's automations.", expect.any(Error), expect.any(Function));
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No automations in this Collection yet.")).toBeTruthy();
+  });
 });

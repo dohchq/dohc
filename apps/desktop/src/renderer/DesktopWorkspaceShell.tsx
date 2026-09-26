@@ -5273,11 +5273,12 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
-                  onOpenSource={openFile}
+                  onOpenFile={(path) => openFile(path)}
+                  onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!isShareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
-                  onError={reportShellError}
-                  onNotice={showSuccessNotice}
+                  onError={collectionReports.onError}
+                  onNotice={collectionReports.onNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));

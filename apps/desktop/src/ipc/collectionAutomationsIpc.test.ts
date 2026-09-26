@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { Automation } from "@dohc/workspace-contracts/automations";
+import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
+const DATASET_ID = "22222222-2222-4222-8222-222222222222";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const stamp = {
   id: "stamp", name: "Stamp", enabled: true,
@@ -20,6 +21,9 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
   const reindexed: unknown[] = [];
   const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
+  const datasetFieldMarks = vi.fn(async (datasetId: string, table: string) => [{ field: "Status", automations: [`Close in ${datasetId} ${table}`] }]);
+  const datasetCollection = vi.fn(async () => ({ status: "found" as const, collectionPath: "Budget" }));
+  const pinOperations = vi.fn(async (_path: string, automations: readonly Automation[], _saved: readonly Automation[]) => [...automations]);
   const stop = {
     automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: "0", seq: 3,
     collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
@@ -28,7 +32,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
   const executor = {
-    pinOperations: async (_path: string, automations: readonly Automation[]) => [...automations], handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    pinOperations, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -54,7 +58,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { write, call, marks, stop, shareStop, fieldMarks, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { write, call, marks, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -93,6 +97,30 @@ describe("field marks", () => {
     expect(shared.fieldMarks).not.toHaveBeenCalled();
     await expect(fixture().marks("shared-with-me/Trip")).rejects.toThrow(/not a Collection/);
   });
+
+  it("answers one dataset table's marks by the dataset's id and the table's name, and none in a shared view", async () => {
+    const input = { datasetId: DATASET_ID, table: "Invoices" };
+    const f = fixture();
+    await expect(f.call(CHANNELS.listCollectionFieldMarks, input)).resolves.toEqual({ marks: [{ field: "Status", automations: [`Close in ${DATASET_ID} Invoices`] }] });
+    expect(f.fieldMarks).not.toHaveBeenCalled();
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.listCollectionFieldMarks, input)).resolves.toEqual({ marks: [] });
+    expect(shared.datasetFieldMarks).not.toHaveBeenCalled();
+    // A payload that names both, or a dataset by something other than its id, is refused.
+    await expect(f.call(CHANNELS.listCollectionFieldMarks, { ...input, collectionPath: "Budget" })).rejects.toThrow();
+    await expect(f.call(CHANNELS.listCollectionFieldMarks, { datasetId: "Budget", table: "Invoices" })).rejects.toThrow();
+  });
+});
+
+describe("finding a dataset Collection's automations", () => {
+  it("names the folder that holds its automations.yaml, and in a shared view says they run on the owner's computer", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.findDatasetCollection, { datasetId: DATASET_ID })).resolves.toEqual({ status: "found", collectionPath: "Budget" });
+    expect(f.datasetCollection).toHaveBeenCalledWith(DATASET_ID);
+    const shared = fixture({ sharedView: true });
+    await expect(shared.call(CHANNELS.findDatasetCollection, { datasetId: DATASET_ID })).resolves.toEqual({ status: "unavailable" });
+    expect(shared.datasetCollection).not.toHaveBeenCalled();
+  });
 });
 
 describe("writing automations.yaml from the panel", () => {
@@ -124,6 +152,18 @@ describe("writing automations.yaml from the panel", () => {
     expect(f.writeText).toHaveBeenCalledWith({ sender: "window" }, expect.objectContaining({
       relativePath: "Tasks/automations.yaml", expectedContentHash: sha256(file),
     }));
+  });
+
+  it("tells pinning what the file holds now, so it pins only what the save changed", async () => {
+    const saved = writeAutomationsFile([{ status: "valid", automation: stamp as Automation }]);
+    if (saved.status !== "ok") throw new Error("The fixture should write.");
+    const f = fixture({ file: saved.text });
+    const switchedOff = { ...stamp, enabled: false };
+    await expect(f.write({ expectedContentHash: sha256(saved.text), automations: [switchedOff] })).resolves.toMatchObject({ status: "written" });
+    expect(f.pinOperations).toHaveBeenCalledWith("Tasks", [switchedOff], [stamp]);
+    const fresh = fixture();
+    await fresh.write({ expectedContentHash: null, automations: [stamp] });
+    expect(fresh.pinOperations).toHaveBeenCalledWith("Tasks", [stamp], []);
   });
 
   it("refuses to write over entries dohc cannot read, and anything the file contract would turn off", async () => {
