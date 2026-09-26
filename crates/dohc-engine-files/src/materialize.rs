@@ -937,7 +937,7 @@ fn materialize_secret_one_with_remover(
     let current = read_current_no_follow(&target)?;
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == desired_sha
-        && target_has_requested_name(&target)
+        && target_has_requested_name(&canonical_root, &target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1119,7 +1119,7 @@ fn materialize_secret_write(
     }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
-        && target_has_requested_name(target)
+        && target_has_requested_name(root, target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1252,7 +1252,7 @@ fn materialize_ordinary_write(
     // Step 1 (idempotent replay): the target already equals the desired content.
     if let CurrentTarget::Present(bytes) = read_current_no_follow(target)?
         && hex_sha256(&bytes) == job.content_sha256
-        && target_has_requested_name(target)
+        && target_has_requested_name(root, target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -2323,21 +2323,88 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
         return Ok(false);
     }
     // `remove_dir` refuses a directory that is not empty.
-    Ok(std::fs::remove_dir(&target).is_ok())
+    if std::fs::remove_dir(&target).is_ok() {
+        sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
-/// Content equality does not complete a Windows case-only file rename.
+/// Content equality does not complete a case-only file or directory rename.
 /// Call after validating the target and its ancestors against links.
-pub fn target_has_requested_name(target: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        std::fs::canonicalize(target).is_ok_and(|actual| actual.file_name() == target.file_name())
+pub fn target_has_requested_name(root: &Path, target: &Path) -> bool {
+    walk_target_components(root, target, |component| {
+        if actual_component_path(component)? == component {
+            Ok(())
+        } else {
+            Err(MaterializeError::UnsafeTargetPath)
+        }
+    })
+    .is_ok()
+}
+
+#[cfg(windows)]
+fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
+    let actual = std::fs::canonicalize(path).map_err(|err| MaterializeError::io(path, &err))?;
+    let name = actual
+        .file_name()
+        .ok_or(MaterializeError::UnsafeTargetPath)?;
+    Ok(path.with_file_name(name))
+}
+
+#[cfg(not(windows))]
+fn actual_component_path(path: &Path) -> Result<PathBuf, MaterializeError> {
+    let parent = path.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    let entries = std::fs::read_dir(parent).map_err(|err| MaterializeError::io(parent, &err))?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| MaterializeError::io(parent, &err))?;
+        if Some(entry.file_name().as_os_str()) == path.file_name() {
+            return Ok(path.to_path_buf());
+        }
+        if !entry
+            .file_type()
+            .map_err(|err| MaterializeError::io(&entry.path(), &err))?
+            .is_symlink()
+        {
+            candidates.push(entry.path());
+        }
     }
-    #[cfg(not(windows))]
-    {
-        let _ = target;
-        true
-    }
+    // Identity, not folded spelling, proves an alias on this filesystem.
+    candidates
+        .into_iter()
+        .find(|candidate| same_file::is_same_file(path, candidate).unwrap_or(false))
+        .ok_or(MaterializeError::UnsafeTargetPath)
+}
+
+/// Restore directory spelling for a relay case replacement, preserving its contents.
+pub fn restore_parent_spelling(root: &Path, rel: &str) -> Result<(), MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&root, rel)?;
+    ensure_target_symlink_free(&root, &target)?;
+    let parent = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    walk_target_components(&root, parent, |requested| {
+        reject_link_or_reparse(requested)?;
+        if !requested.exists() {
+            return Ok(());
+        }
+        let actual = actual_component_path(requested)?;
+        if actual != requested {
+            reject_link_or_reparse(&actual)?;
+            if actual
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| crate::floor::RESERVED_SEGMENTS.contains(&name))
+            {
+                return Err(MaterializeError::UnsafeTargetPath);
+            }
+            std::fs::rename(&actual, requested)
+                .map_err(|err| MaterializeError::io(requested, &err))?;
+            sync_parent_dir(requested.parent(), DurabilityPolicy::per_os())?;
+        }
+        Ok(())
+    })
 }
 
 /// Resolve every displacement a crash left unresolved under `root`,
@@ -3749,6 +3816,56 @@ fn replace_secret_with_bounded_retry(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parent_spelling_never_renames_reserved_directories() {
+        let scratch =
+            dohc_test_scratch::ScratchDir::new_named("reserved-directory-spelling").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/keep"), "keep").unwrap();
+        if same_file::is_same_file(root.join(".git"), root.join(".GIT")).unwrap_or(false) {
+            assert!(super::restore_parent_spelling(root, ".GIT/new.md").is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/keep")).unwrap(),
+            "keep"
+        );
+        assert!(
+            std::fs::read_dir(root)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == ".git")
+        );
+    }
+
+    #[test]
+    fn directory_replacement_removes_only_empty_real_directories() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("empty-directory-target").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/keep.md"), "keep").unwrap();
+        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
+        assert!(super::remove_empty_directory_target(root, "d/sub").unwrap());
+        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("d/keep.md")).unwrap(),
+            "keep"
+        );
+        assert!(!super::remove_empty_directory_target(root, "d/sub").unwrap());
+        assert!(super::remove_empty_directory_target(root, "../d").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_replacement_refuses_links_in_the_parent_chain() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("linked-directory-target").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        assert!(super::remove_empty_directory_target(root, "alias/sub").is_err());
+        assert!(super::remove_empty_directory_target(root, "alias").is_err());
+        assert!(root.join("real/sub").is_dir());
+    }
+
     #[test]
     fn authored_create_preparation_retains_only_private_identity() {
         let root =

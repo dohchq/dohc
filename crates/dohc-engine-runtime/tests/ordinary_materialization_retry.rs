@@ -216,7 +216,7 @@ async fn one_page_turns_a_file_into_a_directory() {
                 .unwrap();
         },
         |root| std::fs::write(root.join("notes"), "old").unwrap(),
-        vec![change("notes", "delete"), change("notes/work.md", "write")],
+        vec![change("notes/work.md", "write"), change("notes", "delete")],
     )
     .await;
     assert_eq!(
@@ -232,20 +232,20 @@ async fn one_page_turns_a_directory_into_a_file() {
     let scratch = materialize_page(
         |domain| {
             domain
-                .write_text(&write_at("d/a.md", "o-a", "a", "m1", 1), &NoFaults)
+                .write_text(&write_at("d/sub/a.md", "o-a", "a", "m1", 1), &NoFaults)
                 .unwrap();
             domain
-                .delete_text_file(&delete_at("d/a.md", "m2", 2), &NoFaults)
+                .delete_text_file(&delete_at("d/sub/a.md", "m2", 2), &NoFaults)
                 .unwrap();
             domain
                 .write_text(&write_at("d", "o-d", "file d", "m3", 3), &NoFaults)
                 .unwrap();
         },
         |root| {
-            std::fs::create_dir(root.join("d")).unwrap();
-            std::fs::write(root.join("d").join("a.md"), "a").unwrap();
+            std::fs::create_dir_all(root.join("d/sub")).unwrap();
+            std::fs::write(root.join("d/sub/a.md"), "a").unwrap();
         },
-        vec![change("d", "write"), change("d/a.md", "delete")],
+        vec![change("d", "write"), change("d/sub/a.md", "delete")],
     )
     .await;
     assert_eq!(
@@ -259,26 +259,26 @@ async fn directory_replacement_retries_after_the_delete_batch() {
     let scratch = materialize_page(
         |domain| {
             domain
-                .write_text(&write_at("d/a.md", "o-a", "a", "m1", 1), &NoFaults)
+                .write_text(&write_at("d/sub/a.md", "o-a", "a", "m1", 1), &NoFaults)
                 .unwrap();
             domain
-                .delete_text_file(&delete_at("d/a.md", "m2", 2), &NoFaults)
+                .delete_text_file(&delete_at("d/sub/a.md", "m2", 2), &NoFaults)
                 .unwrap();
             domain
                 .write_text(&write_at("d", "o-d", "file d", "m3", 3), &NoFaults)
                 .unwrap();
         },
         |root| {
-            std::fs::create_dir(root.join("d")).unwrap();
-            std::fs::write(root.join("d/a.md"), "a").unwrap();
+            std::fs::create_dir_all(root.join("d/sub")).unwrap();
+            std::fs::write(root.join("d/sub/a.md"), "a").unwrap();
         },
         // Stop at the crash boundary: the delete batch has committed, but
         // the next batch has not removed the directory or written its file.
-        vec![change("d/a.md", "delete")],
+        vec![change("d/sub/a.md", "delete")],
     )
     .await;
-    assert!(scratch.path().join("d").is_dir());
-    assert!(!scratch.path().join("d/a.md").exists());
+    assert!(scratch.path().join("d/sub").is_dir());
+    assert!(!scratch.path().join("d/sub/a.md").exists());
 
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();
@@ -287,7 +287,7 @@ async fn directory_replacement_retries_after_the_delete_batch() {
         .materialize_relay_page(
             "workspace".into(),
             scratch.path().to_path_buf(),
-            vec![change("d", "write"), change("d/a.md", "delete")],
+            vec![change("d", "write"), change("d/sub/a.md", "delete")],
             Arc::new(()),
             13,
             CancellationToken::new(),
@@ -300,20 +300,88 @@ async fn directory_replacement_retries_after_the_delete_batch() {
     );
 }
 
-#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn case_only_replacement_keeps_the_file_and_changes_its_spelling() {
-    check_case_replacement("file.md", "FILE.md").await;
+    check_case_replacement("file.md", "FILE.md", false).await;
+    check_case_replacement("FILE.md", "file.md", false).await;
 }
 
-#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_only_directory_replacement_preserves_siblings() {
+    let aliases = std::cell::Cell::new(false);
+    let scratch = materialize_page(
+        |domain| {
+            domain.write_text(&write_at("Dir/Sub/a.md", "o-a", "old", "m1", 1), &NoFaults).unwrap();
+            domain.delete_text_file(&delete_at("Dir/Sub/a.md", "m2", 2), &NoFaults).unwrap();
+            domain.write_text(&write_at("dir/sub/a.md", "o-b", "old", "m3", 3), &NoFaults).unwrap();
+        },
+        |root| {
+            std::fs::create_dir_all(root.join("Dir/Sub")).unwrap();
+            std::fs::write(root.join("Dir/Sub/a.md"), "old").unwrap();
+            std::fs::write(root.join("Dir/keep.md"), "keep").unwrap();
+            aliases.set(matches!((file_id::get_file_id(root.join("Dir")), file_id::get_file_id(root.join("dir"))),
+                (Ok(a), Ok(b)) if a == b));
+        },
+        vec![change("dir/sub/a.md", "write"), change("Dir/Sub/a.md", "delete")],
+    ).await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("dir/sub/a.md")).unwrap(),
+        "old"
+    );
+    assert!(dohc_engine_files::target_has_requested_name(
+        scratch.path(),
+        &scratch.path().join("dir/sub/a.md")
+    ));
+    let sibling = if aliases.get() {
+        "dir/keep.md"
+    } else {
+        "Dir/keep.md"
+    };
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(sibling)).unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn differently_cased_directory_can_become_a_file() {
+    let scratch = materialize_page(
+        |domain| {
+            domain
+                .write_text(&write_at("D/sub/a.md", "o-a", "old", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .delete_text_file(&delete_at("D/sub/a.md", "m2", 2), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d", "o-b", "new", "m3", 3), &NoFaults)
+                .unwrap();
+        },
+        |root| {
+            std::fs::create_dir_all(root.join("D/sub")).unwrap();
+            std::fs::write(root.join("D/sub/a.md"), "old").unwrap();
+        },
+        vec![change("d", "write"), change("D/sub/a.md", "delete")],
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("d")).unwrap(),
+        "new"
+    );
+    assert!(!scratch.path().join("D/sub/a.md").exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collision_key_match_does_not_skip_deleting_a_distinct_windows_file() {
-    check_case_replacement("\u{1e9e}.md", "ss.md").await;
+    check_case_replacement("\u{1e9e}.md", "ss.md", false).await;
 }
 
-#[cfg(windows)]
-async fn check_case_replacement(old_path: &str, new_path: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collision_key_hard_links_still_delete_the_old_name() {
+    check_case_replacement("\u{1e9e}.md", "ss.md", true).await;
+}
+
+async fn check_case_replacement(old_path: &str, new_path: &str, hard_link: bool) {
     for new_text in ["old", "new"] {
         for delete_first in [false, true] {
             let mut page = vec![change(new_path, "write"), change(old_path, "delete")];
@@ -332,7 +400,12 @@ async fn check_case_replacement(old_path: &str, new_path: &str) {
                         .write_text(&write_at(new_path, "o-b", new_text, "m3", 3), &NoFaults)
                         .unwrap();
                 },
-                |root| std::fs::write(root.join(old_path), "old").unwrap(),
+                |root| {
+                    std::fs::write(root.join(old_path), "old").unwrap();
+                    if hard_link {
+                        std::fs::hard_link(root.join(old_path), root.join(new_path)).unwrap();
+                    }
+                },
                 page,
             )
             .await;
