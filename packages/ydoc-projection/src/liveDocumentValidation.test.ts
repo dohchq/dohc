@@ -965,6 +965,18 @@ it('journal refuses keyed body topology that the generic cut accepts', () => {
   expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
 })
 
+it('refuses an update that binds a source the document does not import as, and drops one in a baseline', () => {
+  const digest = (text: string) => hash(new TextEncoder().encode(text))
+  const forge = (doc: Y.Doc) => {
+    const meta = doc.getMap('meta')
+    meta.set('dohcMarkdownSource', '- # Title\n')
+    meta.set('dohcMarkdownSourceSha256', digest('- # Title\n'))
+    meta.set('dohcMarkdownSourceProjectionSha256', digest(projection.yDocToMarkdown(doc)))
+  }
+  expect(journal(journalFixture([forge]))).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
+  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text')
+})
+
 it('never projects a preserved source that holds text the document lacks', () => {
   const table = '| a | b |\n|---|---|\n| c | d |\n'
   const codeTable = '| `a|b` | c |\n|---|---|---|\n| x | `y|z` |\n'

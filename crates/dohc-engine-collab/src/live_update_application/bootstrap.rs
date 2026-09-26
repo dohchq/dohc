@@ -1015,26 +1015,69 @@ mod tests {
             assert_eq!(receipt.local_head_sequence, 0);
         }
     }
+    /// The relay projects each baseline it admits, and the host writes the
+    /// bytes it bootstraps. For an exact, stale, or forged source witness the
+    /// two must be the same bytes, and a forged source is never among them.
+    #[test]
+    fn bootstrap_writes_the_bytes_the_relay_projected_for_each_source_witness() {
+        let rows: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-public.json"
+        ))
+        .unwrap();
+        for row in rows.into_iter().filter(|row| row["accepted"] == true) {
+            let vector = Vector {
+                name: row["name"].as_str().unwrap().into(),
+                bytes: serde_json::from_value(row["bytes"].clone()).unwrap(),
+                markdown: row["markdown"].as_str().unwrap().into(),
+                registration_accepted: true,
+            };
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            assert!(
+                matches!(result, Ok(BootstrapResult::Bootstrapped(_))),
+                "{}: {result:?}",
+                vector.name
+            );
+            let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+            assert_eq!(text, vector.markdown, "{}", vector.name);
+            assert!(!text.contains("Foreign"), "{}", vector.name);
+        }
+    }
     #[test]
     fn owner_source_bootstrap_preserves_valid_lexical_markdown() {
-        let source: Value = serde_json::from_str(include_str!(
+        let original: Value = serde_json::from_str(include_str!(
             "../../tests/owner-source/owner-source-seed.json"
         ))
         .unwrap();
-        let vector = Vector {
-            name: "original-owner-source".into(),
-            bytes: serde_json::from_value(source["bytes"].clone()).unwrap(),
-            markdown: source["markdown"].as_str().unwrap().into(),
-            registration_accepted: true,
-        };
-        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
-        assert!(matches!(
-            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
-            BootstrapResult::Bootstrapped(_)
-        ));
-        let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
-        assert_eq!(text, vector.markdown);
-        assert_ne!(text, source["canonical"].as_str().unwrap());
+        let lexical: serde_json::Map<String, Value> = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-lexical.json"
+        ))
+        .unwrap();
+        let seeds = std::iter::once(("original-owner-source".to_owned(), original)).chain(lexical);
+        let mut failures = Vec::new();
+        for (name, source) in seeds {
+            let vector = Vector {
+                name,
+                bytes: serde_json::from_value(source["bytes"].clone()).unwrap(),
+                markdown: source["markdown"].as_str().unwrap().into(),
+                registration_accepted: true,
+            };
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            if !matches!(result, Ok(BootstrapResult::Bootstrapped(_))) {
+                failures.push(format!("{}: {result:?}", vector.name));
+                continue;
+            }
+            let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+            assert_eq!(text, vector.markdown, "{}", vector.name);
+            assert_ne!(
+                text,
+                source["canonical"].as_str().unwrap(),
+                "{}",
+                vector.name
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
     fn shared_projections_preserve_tagged_prefix_and_change_fallback() {

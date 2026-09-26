@@ -48,3 +48,84 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
     adapter.dispose();
   }
 });
+
+const lexicalFixture = new URL(
+  "../../../../crates/dohc-engine-collab/tests/owner-source/owner-source-lexical.json",
+  import.meta.url,
+);
+
+// Ordinary files that differ from their projection only in spelling. The seed
+// keeps each file's bytes, and the engine must start a live session from that
+// seed without rewriting the file.
+const LEXICAL: Record<string, string> = {
+  "star-bullets": "* one\n* two\n",
+  "plus-bullets": "+ one\n+ two\n",
+  "star-tasks": "* [ ] open\n* [X] done\n",
+  "repeated-ordinals": "1. one\n1. two\n1. three\n",
+  "paren-ordinals": "1) one\n2) two\n",
+  "loose-list": "- one\n\n- two\n",
+  "compact-table": "Left | Right\n--- | ---\na | b\n",
+  "table-after-paragraph": "Scores:\n\n| Name | Score |\n|---|--:|\n| Ada | 3 |\n",
+  "table-row-without-pipes": "| Name |\n|---|\nAda\n",
+  "table-then-heading": "| Name |\n|---|\n| Ada |\n# Next\n",
+  "plain-ampersands": "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
+  "bracket-line": "[WIP] fix\n",
+  "angle-words": "Vec<T> and cmd <file>\n",
+  "skipped-ordinals": "1. a\n3. b\n",
+  "cell-break": "| Name |\n|---|\n| Ada&lt;br&gt;Lovelace |\n",
+  "lists-then-table": "* a\n\n- b\n\n| x |\n|---|\n| y |\n",
+};
+
+it("the lexical source fixtures come from the real captured Markdown seeder", async () => {
+  const engine = new YdocLoopbackEngine();
+  const adapter = new YdocLiveAdapter(engine);
+  const actual: Record<string, { markdown: string; canonical: string; bytes: number[] }> = {};
+  try {
+    for (const [name, markdown] of Object.entries(LEXICAL)) {
+      const path = `${name}.md`;
+      engine.seedFile({ workspace: "workspace", versionId: "main", path, content: markdown, contentKind: "richdoc" });
+      const before = engine.requests.length;
+      const session = await adapter.openSession({ workspace: "workspace", versionId: "main", path, contentKind: "richdoc" });
+      try {
+        const records = engine.requests.slice(before).filter((request) => request.method === YDOC_METHOD.recordUpdate);
+        expect(records).toHaveLength(1);
+        const seed = records[0]!.params as { seed: boolean; updateBase64: string };
+        expect(seed.seed).toBe(true);
+        const bytes = Array.from(Buffer.from(seed.updateBase64, "base64"));
+        const doc = new Y.Doc();
+        try {
+          Y.applyUpdate(doc, Uint8Array.from(bytes));
+          actual[name] = { markdown, canonical: yDocToMarkdown(doc), bytes };
+        } finally {
+          doc.destroy();
+        }
+      } finally {
+        await session.close();
+      }
+    }
+  } finally {
+    adapter.dispose();
+  }
+  if (process.env.UPDATE_OWNER_SOURCE_LEXICAL_FIXTURE === "1") {
+    writeFileSync(lexicalFixture, `${JSON.stringify(actual, null, 1)}\n`);
+  }
+  const retained = JSON.parse(readFileSync(lexicalFixture, "utf8")) as typeof actual;
+  expect(Object.keys(retained)).toEqual(Object.keys(LEXICAL));
+  for (const [name, markdown] of Object.entries(LEXICAL)) {
+    for (const seed of [actual[name]!, retained[name]!]) {
+      expect(seed.markdown).toBe(markdown);
+      expect(seed.canonical).not.toBe(markdown);
+      const doc = new Y.Doc();
+      try {
+        Y.applyUpdate(doc, Uint8Array.from(seed.bytes));
+        expect(yDocToMarkdown(doc)).toBe(seed.canonical);
+        const meta = doc.getMap("meta");
+        expect(meta.get("dohcMarkdownSource")).toBe(markdown);
+        expect(meta.get("dohcMarkdownSourceSha256")).toBe(createHash("sha256").update(markdown).digest("hex"));
+        expect(meta.get("dohcMarkdownSourceProjectionSha256")).toBe(createHash("sha256").update(seed.canonical).digest("hex"));
+      } finally {
+        doc.destroy();
+      }
+    }
+  }
+});
