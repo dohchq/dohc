@@ -272,6 +272,160 @@ async fn one_page_turns_a_directory_into_a_file() {
     );
 }
 
+async fn descendant_aliases_precede_directory_replacement(same_case: bool, reverse: bool) {
+    let mut page = vec![
+        change(if same_case { "d/a.md" } else { "d/A.md" }, "write"),
+        change("d/a.md", "delete"),
+        change("d", "write"),
+    ];
+    if reverse {
+        page.reverse();
+    }
+    let scratch = materialize_page(
+        |domain| {
+            domain
+                .write_text(&write_at("d/a.md", "o-a", "a", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .delete_text_file(&delete_at("d/a.md", "m2", 2), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d", "o-d", "file d", "m3", 3), &NoFaults)
+                .unwrap();
+        },
+        |root| {
+            std::fs::create_dir(root.join("d")).unwrap();
+            std::fs::write(root.join("d/a.md"), "a").unwrap();
+        },
+        page,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("d")).unwrap(),
+        "file d"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descendant_alias_write_then_delete_precedes_directory_replacement() {
+    descendant_aliases_precede_directory_replacement(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descendant_alias_delete_then_write_precedes_directory_replacement() {
+    descendant_aliases_precede_directory_replacement(false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descendant_same_case_write_then_delete_precedes_directory_replacement() {
+    descendant_aliases_precede_directory_replacement(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descendant_same_case_delete_then_write_precedes_directory_replacement() {
+    descendant_aliases_precede_directory_replacement(true, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn differently_cased_ancestor_waits_for_descendant_write() {
+    for sequential in [true, false] {
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::create_dir(scratch.path().join("d")).unwrap();
+        std::fs::write(scratch.path().join("d/a.md"), "old").unwrap();
+        if !scratch.path().join("D/a.md").exists() {
+            return; // This dependency exists only on a case-insensitive filesystem.
+        }
+        let db = engine_db_path(&scratch).unwrap();
+        {
+            let mut store = EngineStore::open(&db, 1).unwrap();
+            let mut domain = VersionedTextStore::new(&mut store);
+            domain
+                .ensure_main_version("workspace", "main", 0, &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d/a.md", "o-a", "old", "m1", 1), &NoFaults)
+                .unwrap();
+            domain
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        from_path: "d/a.md".into(),
+                        to_path: "D/a.md".into(),
+                        moment_id: "m2".into(),
+                        request_id: None,
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            domain
+                .write_text(&write_at("D/a.md", "o-a", "new", "m3", 3), &NoFaults)
+                .unwrap();
+            domain
+                .write_text(&write_at("d", "o-d", "parent", "m4", 4), &NoFaults)
+                .unwrap();
+            domain
+                .set_active_version("workspace", "main", &NoFaults)
+                .unwrap();
+        }
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 10).unwrap().actor;
+        let page = vec![
+            change("d/a.md", "delete"),
+            change("D/a.md", "write"),
+            change("d", "write"),
+        ];
+        // Single-entry pages reproduce main's sequential probe and replay.
+        let pages = if sequential {
+            page.into_iter().map(|entry| vec![entry]).collect()
+        } else {
+            vec![page]
+        };
+        for now in [11, 12] {
+            let mut outcome = Ok(());
+            for page in &pages {
+                outcome = actor
+                    .materialize_relay_page(
+                        "workspace".into(),
+                        scratch.path().to_path_buf(),
+                        page.clone(),
+                        Arc::new(()),
+                        now,
+                        CancellationToken::new(),
+                    )
+                    .await;
+                if outcome.is_err() {
+                    break;
+                }
+            }
+            assert!(matches!(
+                outcome,
+                Err(dohc_engine_runtime::RuntimeError::Domain(
+                    dohc_engine_domain::DomainError::InvalidPath { .. }
+                ))
+            ));
+            assert!(scratch.path().join("d").is_dir());
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("D/a.md")).unwrap(),
+                "new"
+            );
+        }
+        supervisor.close(&db).unwrap();
+        assert!(
+            EngineStore::open(&db, 13)
+                .unwrap()
+                .list_pending_materialization_jobs()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn directory_replacement_retries_after_the_delete_batch() {
     let scratch = materialize_page(

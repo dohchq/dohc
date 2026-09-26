@@ -960,14 +960,18 @@ impl ActorHandle {
             let mut alias_order = HashMap::new();
             let mut keyed: Vec<_> = first.into_iter().zip(changes).map(|(first, change)| {
                 let key: Vec<String> = change.path.split('/').map(dohc_engine_sync::collision_key).collect();
-                // Give every alias the first occurrence's sort position. The
-                // stable sort then retains their original relative order.
                 let order = alias_order.entry(key.clone()).or_insert_with(|| {
                     (first, change.path.split('/').count(), change.path.clone())
-                }).clone();
-                (order, key, change)
+                });
+                // Every alias inherits the group's strongest dependency.
+                // The stable sort retains page order within the group.
+                order.0 |= first;
+                order.1 = order.1.max(change.path.split('/').count());
+                (key, change)
             }).collect();
-            keyed.sort_by(|(a, _, _), (b, _, _)| {
+            keyed.sort_by(|(a, _), (b, _)| {
+                let a = &alias_order[a];
+                let b = &alias_order[b];
                 b.0.cmp(&a.0).then_with(|| {
                     if a.0 { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }
                 }).then_with(|| a.2.cmp(&b.2))
@@ -975,11 +979,10 @@ impl ActorHandle {
             let mut projections: Vec<SwitchProjection> = Vec::new();
             let mut batch_aliases = HashSet::new();
             let mut deleted: Vec<String> = Vec::new();
-            for (_, key, change) in keyed {
+            for (key, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                if batch_aliases.contains(&key) || projections.iter().any(|planned| {
-                    is_inside(&planned.spec.target_path, &change.path)
-                        || is_inside(&change.path, &planned.spec.target_path)
+                if batch_aliases.iter().any(|planned: &Vec<String>| {
+                    planned.starts_with(&key) || key.starts_with(planned)
                 }) {
                     run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
                     batch_aliases.clear();
