@@ -636,3 +636,52 @@ export interface RelayAutomationHostState {
   host: RelayAutomationHost | null;
   computers: RelayAutomationComputer[];
 }
+
+// A Button press from a shared view (ADR 0012). A recipient's computer cannot
+// check an automation's reach, which needs the owner's list of who can edit,
+// so the press runs on the automation host, as a Group message does. The
+// relay records the press for the recipient's named Edit grant on the
+// Collection's folder, and the host takes it as the verified user's press.
+export const AUTOMATION_PRESS_MAX_BODY_BYTES = 4 * 1024;
+export const AUTOMATION_PRESS_ID_MAX_CHARS = 128;
+export const AUTOMATION_PRESS_ERROR_MAX_CHARS = 1000;
+// A press the host has not run by then is dropped.
+export const AUTOMATION_PRESS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export const AUTOMATION_DEFINITION_HASH_PATTERN = /^[0-9a-f]{16}$/u;
+
+export type AutomationPressState = "pending" | "accepted" | "settled";
+// How a relayed press ended, as the host reported it. `busy` means the button
+// was already running on the record for someone else, so nothing ran.
+export type AutomationPressOutcome = "done" | "skipped" | "failed" | "ended" | "busy";
+
+// The recipient's answer: the press as the relay holds it.
+export interface RelayAutomationPressReceipt {
+  pressId: string;
+  state: AutomationPressState;
+  outcome: AutomationPressOutcome | null;
+  createdAtMs: number;
+}
+
+// One press waiting for the host. `hostPressId` is the relay's id, which the
+// host passes to the engine as the press id, so no recipient's choice can
+// collide with another press. `pressedBy` is the relay-verified user.
+export interface RelayAutomationPress {
+  hostPressId: string;
+  definitionHash: string;
+  // "accepted" once the host took it. The host presses an accepted press
+  // again after a restart; its engine answers the same claim.
+  state: "pending" | "accepted";
+  automationId: string;
+  recordId: string;
+  pressedBy: string;
+  createdAtMs: number;
+}
+
+// GET /sync/<workspaceId>/automation-presses?installId=...&waitMs=...
+// Only the running host gets presses it has not settled, oldest first; any
+// other computer gets none. With `waitMs`, the relay holds the answer up to
+// that long while no press waits to be accepted.
+export interface RelayAutomationPressList {
+  presses: RelayAutomationPress[];
+}

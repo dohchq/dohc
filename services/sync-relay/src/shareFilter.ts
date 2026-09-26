@@ -1459,6 +1459,29 @@ function baseName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+/**
+ * The file selector a recipient may change a Collection through: Edit on
+ * main, from a file share or a Group share whose channel is ordinary. A
+ * chat share, a version share, or a lower level has none. The direct write
+ * and the relayed Button press both start here.
+ */
+export function collectionEditSelector(
+  selector: AnyShareSelector,
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): ShareSelector | null {
+  if (isChatChannelSelector(selector)) return null;
+  if (isGroupSelector(selector)) {
+    return groupChannelIsOrdinary(selector, chat) ? collectionEditSelector(fileHalfOfGroup(selector), chat) : null;
+  }
+  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) return null;
+  return selector;
+}
+
+/** Edit on the Collection folder itself or a folder above it, not only on its files. */
+export function coversCollectionFolder(selector: ShareSelector, folder: string): boolean {
+  return folder !== "" && visibleSharePath(selector, folder) === folder;
+}
+
 // The single decision point for what a recipient may WRITE DIRECTLY. It is a
 // fourth question beside reading, appending, and proposing, and it has its
 // own function for the reason those do: the direct lane must never widen by
@@ -1475,14 +1498,8 @@ export function filterCollectionWriteForShare(
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): CollectionWriteDecision {
   const refused: CollectionWriteDecision = { allowed: false };
-  if (isChatChannelSelector(selector)) return refused;
-  if (isGroupSelector(selector)) {
-    if (!groupChannelIsOrdinary(selector, chat)) return refused;
-    return filterCollectionWriteForShare(fileHalfOfGroup(selector), raw, chat);
-  }
-  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) {
-    return refused;
-  }
+  const files = collectionEditSelector(selector, chat);
+  if (files === null) return refused;
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
     return refused;
   }
@@ -1491,7 +1508,7 @@ export function filterCollectionWriteForShare(
   const paths = new Set<string>();
   let bytes = 0;
   for (const entry of raw) {
-    const decision = filterProposedChangeForShare(selector, entry, chat);
+    const decision = filterProposedChangeForShare(files, entry, chat);
     if (!decision.allowed) return refused;
     const change = decision.change;
     if (
@@ -1510,8 +1527,7 @@ export function filterCollectionWriteForShare(
     if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
     changes.push(change);
   }
-  // Edit on the Collection folder itself, not only on its files.
-  const coversFolder = (folder: string) => folder !== "" && visibleSharePath(selector, folder) === folder;
+  const coversFolder = (folder: string) => coversCollectionFolder(files, folder);
 
   const schemaCreates = changes.filter(
     (change) => change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
