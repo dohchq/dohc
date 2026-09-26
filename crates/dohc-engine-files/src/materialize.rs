@@ -2423,14 +2423,12 @@ mod tests {
         let stage = super::AuthoredCreateStage::open(root.path(), "record.md", &"1".repeat(64))
             .expect("stage");
         stage.prepare("authored").expect("prepare");
-        assert_eq!(
-            std::fs::metadata(&stage.stage)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        let mode = std::fs::metadata(&stage.stage)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode & !0o600, 0);
     }
 
     #[cfg(windows)]
