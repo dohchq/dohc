@@ -3648,7 +3648,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-rival", 1).await;
 
     let (path, opened) =
@@ -3728,6 +3728,66 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     )
     .await;
     assert_eq!(captured["metadataOrigin"], json!("capture"));
+
+    // The client lost that session and now reopens it: the retained draft
+    // lineage, not a fresh seed. Capture folded that lineage to the ingested
+    // bytes and recorded them as its settled file, so the next keystroke
+    // settles on top of them and never writes the draft back over them.
+    let (reopened, reopened_state) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(reopened["seedContent"], Value::Null);
+    // The keystroke is typed into the reopened document, at its end.
+    let client = Ydoc::wire();
+    client.apply(&reopened_state).expect("reopened state");
+    let before_key = client
+        .project(ContentKind::Plaintext)
+        .expect("reopened projection")
+        .content;
+    assert_eq!(before_key, "written by something else\n");
+    let end = u32::try_from(before_key.encode_utf16().count()).expect("small text");
+    let keystroke = base64::engine::general_purpose::STANDARD
+        .encode(client.plaintext_insert(end, " and one more key"));
+    let reopened_id = reopened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": reopened_id,
+            "updateBase64": keystroke
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.settle",
+        json!({ "sessionId": reopened_id, "summary": "type" }),
+    )
+    .await;
+    let on_disk = std::fs::read_to_string(scratch.path().join(&path)).expect("file");
+    assert_eq!(
+        on_disk, "written by something else\n and one more key",
+        "the keystroke lands on the ingested bytes, and the refused draft is not written"
+    );
+    assert_eq!(settled["content"], json!(on_disk));
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.close",
+        json!({ "sessionId": reopened_id, "settle": false }),
+    )
+    .await;
 
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }

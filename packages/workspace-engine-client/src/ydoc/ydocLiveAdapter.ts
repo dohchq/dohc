@@ -9,6 +9,7 @@ import {
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isIdempotencyKeyReuseRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -599,6 +600,9 @@ export class YdocAdapterSession {
   // crash between an edit and its settle, or a remote update drained at open.
   unsettled = false;
   lineageClaimId: string | null;
+  // Whether this device claimed the lineage from its own unclaimed history,
+  // as of the last open or resync.
+  lineageOriginatedHere: boolean;
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
@@ -644,6 +648,7 @@ export class YdocAdapterSession {
       initialUpdate: Uint8Array;
       artifactAssets?: readonly ArtifactAssetDescriptor[];
       lineageClaimId: string | null;
+      lineageOriginatedHere: boolean;
       ownerDraft?: YdocOwnerDraft;
     },
   ) {
@@ -656,6 +661,7 @@ export class YdocAdapterSession {
     this.activeArtifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.lineageClaimId = input.lineageClaimId;
+    this.lineageOriginatedHere = input.lineageOriginatedHere;
     this.ownerDraft = input.ownerDraft;
     this.activeDoc = new Y.Doc();
     declareDohcRootSchema(this.activeDoc, this.contentKind);
@@ -744,9 +750,17 @@ export class YdocAdapterSession {
       try {
         return await this.requestRecordUpdate(update, options, seedUpdate);
       } catch (refusal) {
+        // Recovery would resend this content under the same key, which the
+        // engine refuses again. The caller must hear the refusal itself.
+        if (isIdempotencyKeyReuseRefusal(refusal)) throw refusal;
         try {
           return await this.recoverCanonicalState(update, options);
         } catch (recoveryFailure) {
+          // Recovery resent under the caller's key and the engine found the
+          // key already used. That answer outranks whatever sent us here.
+          if (isIdempotencyKeyReuseRefusal(recoveryFailure)) {
+            throw recoveryFailure;
+          }
           if (
             recoveryFailure instanceof YdocAdapterError &&
             recoveryFailure.code === "lineage-changed"
@@ -779,7 +793,11 @@ export class YdocAdapterSession {
         }
       }
     });
-    return this.trackRecordOperation(operation);
+    return this.trackRecordOperation(
+      operation,
+      false,
+      options?.idempotencyKey !== undefined,
+    );
   }
 
   /**
@@ -803,6 +821,10 @@ export class YdocAdapterSession {
     // one transaction observed, so its success says nothing about an earlier
     // update the engine still has not seen.
     levelsTheEngine = false,
+    // A resend carries no idempotency key, so it may never carry a keyed
+    // update: the engine would record it even when the key refuses it. A
+    // keyed failure quarantines the session instead of owing a resend.
+    keyed = false,
   ): Promise<T> {
     const guarded = operation.then(
       (value) => {
@@ -817,8 +839,9 @@ export class YdocAdapterSession {
         // this doc holds. Recorded here because this is the one place that
         // sees both halves — the refusal and the resend that repairs it — and
         // a caller tracking it separately can only ever be a stale copy.
-        if (isTransientEngineRefusal(error)) this.engineMissingLocalState = true;
-        else this.quarantine(error);
+        if (isTransientEngineRefusal(error) && !keyed) {
+          this.engineMissingLocalState = true;
+        } else this.quarantine(error);
         this.surfaceSessionError(error);
         throw error;
       },
@@ -863,7 +886,7 @@ export class YdocAdapterSession {
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
       const durableState = await this.requestResyncState();
-      if (durableState.lineageClaimId !== this.lineageClaimId) {
+      if (!this.continuesLineage(durableState)) {
         throw new YdocAdapterError(
           "lineage-changed",
           "The document lineage changed before missing local state could be resent. The edit remains in this editor and was not applied to the winning lineage.",
@@ -935,7 +958,7 @@ export class YdocAdapterSession {
     YdocRecordUpdateResult | undefined
   > {
     const durableState = await this.requestResyncState();
-    if (durableState.lineageClaimId !== this.lineageClaimId) {
+    if (!this.continuesLineage(durableState)) {
       throw new YdocAdapterError(
         "lineage-changed",
         "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
@@ -1115,7 +1138,7 @@ export class YdocAdapterSession {
         const result = await this.requestResyncState();
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
-        if (result.lineageClaimId !== this.lineageClaimId) {
+        if (!this.continuesLineage(result)) {
           const replacement = new Y.Doc();
           declareDohcRootSchema(replacement);
           Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
@@ -1124,6 +1147,7 @@ export class YdocAdapterSession {
           this.retiredDocs.add(this.activeDoc);
           this.activeDoc = replacement;
           this.lineageClaimId = result.lineageClaimId;
+          this.lineageOriginatedHere = result.lineageOriginatedHere;
           this.initialUpdate = update;
           this.activeArtifactAssets = result.artifactAssets;
           for (const listener of this.lineageReplacementListeners) {
@@ -1158,9 +1182,35 @@ export class YdocAdapterSession {
     }
   }
 
+  /**
+   * Whether durable state read back from the engine continues this session's
+   * lineage. The engine claims an unclaimed lineage in the transaction of a
+   * record, so a record whose response was lost leaves this session unclaimed
+   * while the engine holds the claim it made from this very history. The
+   * session takes that claim and keeps its document. Any other change of
+   * claim is a different lineage.
+   */
+  private continuesLineage(durable: {
+    lineageClaimId: string | null;
+    lineageOriginatedHere: boolean;
+  }): boolean {
+    if (durable.lineageClaimId === this.lineageClaimId) return true;
+    if (
+      this.lineageClaimId !== null ||
+      durable.lineageClaimId === null ||
+      !durable.lineageOriginatedHere
+    ) {
+      return false;
+    }
+    this.lineageClaimId = durable.lineageClaimId;
+    this.lineageOriginatedHere = true;
+    return true;
+  }
+
   private async requestResyncState(): Promise<{
     update: Uint8Array;
     lineageClaimId: string | null;
+    lineageOriginatedHere: boolean;
     recoveredPaths: string[];
     artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
@@ -1175,6 +1225,7 @@ export class YdocAdapterSession {
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
+      lineageOriginatedHere: result.lineageOriginatedHere,
       recoveredPaths: result.recoveredPaths,
       artifactAssets: result.artifactAssets,
     };
@@ -1395,6 +1446,7 @@ export class YdocLiveAdapter {
       ownerDraft: result.ownerDraft,
       artifactAssets: result.artifactAssets,
       lineageClaimId: result.lineageClaimId,
+      lineageOriginatedHere: result.lineageOriginatedHere,
     });
     this.sessions.set(result.sessionId, session);
     session.head = result.head;

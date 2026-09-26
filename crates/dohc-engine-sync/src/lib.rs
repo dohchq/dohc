@@ -53,6 +53,7 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
+pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{
@@ -63,7 +64,7 @@ pub use journal::{
     adopt_join_identity, journal_local_op_in_tx, journal_local_replication_op,
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
     record_share_view_identity, workspace_journals_file_moments_in_tx,
-    workspace_replicates_with_relay_in_tx,
+    workspace_replicates_with_relay, workspace_replicates_with_relay_in_tx,
 };
 pub use live_audit::{
     journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
@@ -117,7 +118,8 @@ pub use ydoc_apply::{
     validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
-    BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
+    BaseOrigination, SharingDeclined, lineage_originated_here, originate_ydoc_base_in_tx,
+    ydoc_update_payload,
 };
 pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
 

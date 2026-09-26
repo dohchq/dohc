@@ -138,6 +138,8 @@ export const ENGINE_YDOC_SAVE_STATES = [
   "read-only",
   "changed-on-disk",
   "deleted",
+  // A reopen found another object at this document's path.
+  "object-changed",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 

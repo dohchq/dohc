@@ -813,6 +813,408 @@ it("keeps a locally promoted lineage after later updates change its full state",
   await capture.stop();
 });
 
+// A claim can reach the engine while this session's generation is gone. The
+// next keystroke finds the generation gone, and the reopened generation
+// carries the claim. `claimedState` is the lineage the claim names.
+async function typeIntoLostGeneration(input: {
+  base: string;
+  claimedState: (base: Uint8Array) => Uint8Array;
+  originatedHere: boolean;
+  // The object the path names after the generation is lost.
+  claimedObjectId?: string;
+  edit: (text: Y.Text) => void;
+}) {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-claim-typing-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "claim-typing" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const base = new Y.Doc();
+  base.getText("plainText").insert(0, input.base);
+  const baseUpdate = Y.encodeStateAsUpdate(base);
+  const claimedUpdate = input.claimedState(baseUpdate);
+  const claimId = createHash("sha256").update(claimedUpdate).digest("hex");
+  const claimedRecords: Uint8Array[] = [];
+  const claimedDocs: Y.Doc[] = [];
+  const reopenObjectIds: Array<string | undefined> = [];
+  const claimedObjectId = input.claimedObjectId ?? "original-object";
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    if (!unclaimed) {
+      reopenObjectIds.push(options.expectedObjectId);
+      if (
+        options.expectedObjectId !== undefined &&
+        options.expectedObjectId !== claimedObjectId
+      ) {
+        throw new DaemonRefusalError(
+          { code: "INVALID_PARAMS", message: "ydoc-object-changed", retry: "no" },
+          new Error("daemon response"),
+        );
+      }
+    }
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, unclaimed ? baseUpdate : claimedUpdate);
+    if (!unclaimed) claimedDocs.push(doc);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: unclaimed ? "original-object" : claimedObjectId,
+      lineageClaimId: unclaimed ? null : claimId,
+      lineageOriginatedHere: !unclaimed && input.originatedHere,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      unsettled: false,
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        if (unclaimed) {
+          currentClient = claimedClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        Y.applyUpdate(doc, update);
+        claimedRecords.push(update);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: "claimed-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "claim-typing",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: string[] = [];
+  let objectChanges = 0;
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement.getText("plainText").toString());
+    },
+    onObjectChanged: () => {
+      objectChanges += 1;
+    },
+  });
+  const openedDoc = session.doc;
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  input.edit(rendererDoc.getText("plainText"));
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const settled = await session.settleNow().then(
+    (value) => value,
+    (error: unknown) => ({ refused: error }),
+  );
+  return {
+    settled,
+    reopenObjectIds,
+    objectChanges: () => objectChanges,
+    rendererDoc,
+    session,
+    openedDoc,
+    claimId,
+    replacements,
+    claimedRecords,
+    claimedTexts: () => claimedDocs.map((doc) => doc.getText("plainText").toString()),
+    close: async () => {
+      await session.close({ settle: false });
+      await capture.stop();
+    },
+  };
+}
+
+// Enabling sync dropped the generation, and the sync pass claimed the
+// lineage from what it had recorded, which lacks the word the lost
+// generation could not record. The full-state hash cannot match, so the
+// engine's report that it made this claim from this history is what keeps
+// the word.
+it("keeps typing the lost generation could not record when the engine claimed its history", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "recorded",
+    claimedState: (base) => base,
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.settled).toMatchObject({ content: "recorded typed" });
+  expect(typed.replacements).toEqual([]);
+  expect(typed.session.doc).toBe(typed.openedDoc);
+  expect(typed.session.lineageClaimId).toBe(typed.claimId);
+  expect(typed.claimedRecords).toHaveLength(1);
+  expect(typed.claimedTexts()).toEqual(["recorded typed"]);
+  await typed.close();
+});
+
+// Another machine forked the same base and its claim reached this engine
+// first. The claim's deletion of "a" is inside the local deletion of "ab",
+// so containment would call it the same document. It is not, and the local
+// word must not be replayed into it.
+it("replaces the document when a foreign fork claims it while the generation is lost", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "abcdef",
+    claimedState: (base) => {
+      const fork = new Y.Doc();
+      Y.applyUpdate(fork, base);
+      fork.getText("plainText").delete(0, 1);
+      return Y.encodeStateAsUpdate(fork);
+    },
+    originatedHere: false,
+    edit: (text) => {
+      text.delete(0, 2);
+      text.insert(text.length, " local");
+    },
+  });
+
+  expect(typed.settled).toMatchObject({ content: "bcdef" });
+  expect(typed.replacements).toEqual(["bcdef"]);
+  expect(typed.session.doc).not.toBe(typed.openedDoc);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.claimedTexts()).toEqual(["bcdef"]);
+  await typed.close();
+});
+
+// The unclaimed lineage was pruned while the generation was gone, and another
+// open re-seeded the file as a fresh history with new client ids and claimed
+// it here. The engine made that claim, but it does not hold this session's
+// history, so replaying into it would double the text.
+it("replaces the document when this device claimed a re-seeded history", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "recorded",
+    claimedState: () => {
+      const reseeded = new Y.Doc();
+      reseeded.getText("plainText").insert(0, "recorded");
+      return Y.encodeStateAsUpdate(reseeded);
+    },
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.settled).toMatchObject({ content: "recorded" });
+  expect(typed.replacements).toEqual(["recorded"]);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.claimedTexts()).toEqual(["recorded"]);
+  await typed.close();
+});
+
+// The object was renamed away while the generation was gone, and another
+// document this device claimed moved onto the path. The reopen names the
+// object this session opened, so it is refused rather than merged.
+it("refuses to reopen onto another object that moved onto the path", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "old document",
+    claimedObjectId: "other-object",
+    claimedState: () => {
+      const other = new Y.Doc();
+      other.getText("plainText").insert(0, "different document");
+      return Y.encodeStateAsUpdate(other);
+    },
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.reopenObjectIds[0]).toBe("original-object");
+  expect(typed.settled).toMatchObject({ refused: expect.any(Error) });
+  expect(typed.replacements).toEqual([]);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.session.doc.getText("plainText").toString()).toBe("old document typed");
+  // Reported once, and the session stops reopening: later typing and saves
+  // meet the same refusal, so they are not tried at all.
+  expect(typed.objectChanges()).toBe(1);
+  const before = Y.encodeStateVector(typed.rendererDoc);
+  typed.rendererDoc.getText("plainText").insert(0, "more ");
+  typed.session.applyLocalUpdate(Y.encodeStateAsUpdate(typed.rendererDoc, before));
+  await expect(typed.session.settleNow()).rejects.toThrow();
+  expect(typed.reopenObjectIds).toHaveLength(1);
+  expect(typed.objectChanges()).toBe(1);
+  await typed.close();
+});
+
+// The session recorded a word, and sync turned on before its settle ran. The
+// generation is gone, its settle fails, and the sync pass claims exactly what
+// was recorded. The replacement needs no replay, so the settle the lost
+// generation owed must still run, or the file stays behind the document.
+// The lost generation can report its failed settle before the drop, or only
+// after adoption has already run: its settle waits out a delay, and the drop
+// can arrive first through a session event. Both orders must settle.
+for (const order of ["settle failure first", "drop first"] as const) {
+it(`settles a recorded word whose settle was lost with its generation (${order})`, async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-owed-settle-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "owed-settle" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  // What the engine holds for this lineage.
+  const engineDoc = new Y.Doc();
+  engineDoc.getText("plainText").insert(0, "recorded");
+  let recorded!: () => void;
+  const wordRecorded = new Promise<void>((resolve) => {
+    recorded = resolve;
+  });
+  let settledOnClaim!: (content: string) => void;
+  const claimSettled = new Promise<string>((resolve) => {
+    settledOnClaim = resolve;
+  });
+  let lostOptions: EngineYdocProviderSessionOptions | undefined;
+  let claimedOpens = 0;
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(engineDoc));
+    const claimId = createHash("sha256")
+      .update(Y.encodeStateAsUpdate(engineDoc))
+      .digest("hex");
+    if (unclaimed) lostOptions = options;
+    else claimedOpens += 1;
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: "original-object",
+      lineageClaimId: unclaimed ? null : claimId,
+      lineageOriginatedHere: !unclaimed,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      unsettled: false,
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+        Y.applyUpdate(engineDoc, update);
+        recorded();
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        if (!unclaimed) settledOnClaim(markdown);
+        return {
+          momentId: "owed-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "owed-settle",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert("recorded".length, " typed");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await wordRecorded;
+
+  // Sync turns on: the binding closes and the generation's own settle fails.
+  currentClient = claimedClient;
+  const lost = Object.assign(new Error("workspace handle is unavailable"), {
+    code: "transport-error",
+  });
+  if (order === "settle failure first") {
+    lostOptions?.onSettleError?.(lost, 1);
+    lostOptions?.onSessionError?.(lost);
+  } else {
+    lostOptions?.onSessionError?.(lost);
+    // The lost generation's delayed settle fails only once the rebind has
+    // already adopted the replacement.
+    await expect.poll(() => claimedOpens, { timeout: 5_000 }).toBe(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    lostOptions?.onSettleStart?.(1);
+    lostOptions?.onSettleError?.(lost, 1);
+  }
+
+  await expect(claimSettled).resolves.toBe("recorded typed");
+  expect(replacements).toEqual([]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+}
+
 it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-fork-");
   const loopback = new VersionedLoopbackEngine();
@@ -1727,6 +2129,8 @@ async function daemonDeathCapture(
     generation: number;
     lineage: "present" | "absent";
     durableUpdates: Uint8Array[];
+    journalKeys: Array<string | null>;
+    applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die">;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1747,6 +2151,13 @@ async function daemonDeathCapture(
     generation: 0,
     lineage: "present" as "present" | "absent",
     durableUpdates: [] as Uint8Array[],
+    // The idempotency key each journal write carried, null for none.
+    journalKeys: [] as Array<string | null>,
+    // What the next journal writes meet, one fault per write. "drop": the
+    // daemon died before recording, and is already back for the rebind.
+    // "commit-then-drop": it recorded, then the response was lost the same
+    // way. "commit-then-die": it recorded, then died and stays down.
+    applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die">,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1761,6 +2172,9 @@ async function daemonDeathCapture(
     releasedGenerations: [] as number[],
   };
   const generations: Y.Doc[] = [];
+  // The daemon's request ledger: a key refuses bytes it was not first used
+  // with, and outlives any one generation.
+  const keyLedger = new Map<string, string>();
   const transportDeath = () =>
     Object.assign(new Error("The engine client is closed: transport closed."), {
       code: "transport-error",
@@ -1861,11 +2275,31 @@ async function daemonDeathCapture(
       lineage: reportLineage(),
       unsettled: false,
       evict: async () => undefined,
-      async applyLocalUpdate(update) {
+      async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
+        const fault = state.applyFaults.shift();
+        if (fault === "drop") throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
+        const key = applyOptions?.idempotencyKey;
+        const bytes = Buffer.from(update).toString("base64");
+        if (key !== undefined && keyLedger.has(key)) {
+          if (keyLedger.get(key) !== bytes) {
+            throw Object.assign(new Error("idempotency-key-reuse-mismatch"), {
+              wireError: {
+                code: "INVALID_PARAMS",
+                message: "idempotency-key-reuse-mismatch",
+                retry: "no",
+              },
+            });
+          }
+          return;
+        }
+        if (key !== undefined) keyLedger.set(key, bytes);
         Y.applyUpdate(doc, update);
         state.durableUpdates.push(update);
+        state.journalKeys.push(key ?? null);
+        if (fault === "commit-then-die") state.daemonAlive = false;
+        if (fault !== undefined) throw transportDeath();
       },
       async settleNow() {
         if (!state.daemonAlive) throw transportDeath();
@@ -1976,6 +2410,235 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   // And the session is honestly live again, not still reported dead.
   expect(outcomes.at(-1)).toBe(true);
 
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("journals a keyed write on a dead session under its own key once the daemon is back", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-keyed-",
+    "ydoc-death-keyed",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-keyed",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(rendererDoc.getText("plainText").length, "KEYED");
+  const keyedBytes = Y.encodeStateAsUpdate(rendererDoc, before);
+  await session.applyDecidedLocalUpdate(
+    () => keyedBytes,
+    undefined,
+    { idempotencyKey: "claim/1/0" },
+  );
+
+  // The revive replays the outage text without a key; the keyed write
+  // follows as its own journal write, under its own key.
+  expect(state.generation).toBe(2);
+  expect(state.journalKeys).toEqual([null, "claim/1/0"]);
+  expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, Y.encodeStateAsUpdate(rendererDoc));
+  const before = Y.encodeStateVector(scratch);
+  const body = scratch.getText("plainText");
+  body.insert(body.length, text);
+  return Y.encodeStateAsUpdate(scratch, before);
+}
+
+it("sends a keyed write again under its key after its daemon died, so the key still refuses changed content", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-key-reuse-",
+    "ydoc-death-key-reuse",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-key-reuse",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "FIRST "), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  state.applyFaults.push("drop");
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "CHANGED "), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("idempotency-key-reuse-mismatch");
+  expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
+
+  // A fresh key that meets a dead daemon lands once, under that key.
+  state.applyFaults.push("drop");
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "NEXT"), undefined, {
+    idempotencyKey: "claim/1/1",
+  });
+  expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
+  expect((await session.settleNow()).content).toBe("FIRST NEXT");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+async function keyedFaultCapture(prefix: string) {
+  const fixture = await daemonDeathCapture(prefix, prefix.replace(/-+$/, ""));
+  const errors: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: prefix.replace(/-+$/, ""),
+    rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions,
+    openRustYDocProviderSession: fixture.openProvider,
+    onError: (context) => errors.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  return { ...fixture, capture, session, errors };
+}
+
+it("answers success when a keyed write's answer was lost and its resend finds the key recorded", async () => {
+  const { capture, session, state } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-lost-response-",
+  );
+  // The send records, and its answer is lost. The resend under the same key
+  // meets the key's own record. This fake consults its ledger even for an
+  // update its doc holds; the real client sends nothing then, which
+  // workspaceEngineYDocSession.test.ts covers.
+  state.applyFaults.push("commit-then-drop");
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect(session.doc.getText("plainText").toString()).toBe("KEYED");
+  expect((await session.settleNow()).content).toBe("KEYED");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("says a keyed write may have been recorded when its retry's answer is lost with the daemon", async () => {
+  const { capture, session, state, errors } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-uncertain-",
+  );
+  state.applyFaults.push("drop", "commit-then-die");
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("may have been recorded");
+  expect(errors).toContain("Y.Doc rebind of note.md");
+
+  // It was: the daemon's lineage holds it once the daemon is back.
+  state.daemonAlive = true;
+  expect((await session.settleNow()).content).toBe("KEYED");
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("says a keyed write may have been recorded after two sends went unanswered", async () => {
+  const { capture, session, state } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-two-drops-",
+  );
+  // Neither send is answered. A rebuilt session that lacks the write does
+  // not prove the engine never recorded it, so the caller is not told so.
+  state.applyFaults.push("drop", "drop");
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("may have been recorded");
+  expect(session.doc.getText("plainText").toString()).toBe("");
+
+  // The caller's retry under the key lands the write once.
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect((await session.settleNow()).content).toBe("KEYED");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("keeps the key's refusal as the answer when the session then fails to release", async () => {
+  const { capture, session, state, errors } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-refusal-release-",
+  );
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "FIRST "), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  state.failRelease = true;
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "CHANGED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("idempotency-key-reuse-mismatch");
+  expect(errors).toContain("Y.Doc rebind of note.md");
+  expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
+  state.failRelease = false;
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("rejects a keyed write on a dead session while the daemon is still down, and keeps none of it", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-keyed-down-",
+    "ydoc-death-keyed-down",
+  );
+  const errors: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-keyed-down",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => errors.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "TYPED ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("The engine did not record this write");
+  expect(session.doc.getText("plainText").toString()).toBe("TYPED ");
+  expect(errors.filter((context) => context.startsWith("Y.Doc local update"))).toHaveLength(1);
+
+  state.daemonAlive = true;
+  expect((await session.settleNow()).content).toBe("TYPED ");
+  expect(state.journalKeys).toEqual([null]);
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3327,6 +3990,153 @@ it("a rebind with no pending locked settle settles nothing on its own", async ()
   await capture.stop();
 });
 
+it("replays no deletion history and settles nothing after the file changed outside dohc", async () => {
+  // A deletion the lost generation already recorded still appears in any
+  // diff, because a diff against a state vector carries the whole delete set.
+  // The replacement lacks nothing, so nothing may be journaled into it, and
+  // after a stale-target refusal nothing may settle over the outside change.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-stale-delete-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  let before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "abc");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").delete(1, 1);
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  state.settleFailure = null;
+  const journaled = state.journal.length;
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.journal).toHaveLength(journaled);
+  expect(state.settleCalls).toEqual([1]);
+  expect(state.settledContents).toEqual([]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("pays a locked settle of a remote change on the generation that replaces it", async () => {
+  // A remote change arms a settle like a local one. When that settle meets a
+  // lock and the generation is lost, the replacement must settle it, though
+  // no local edit ever happened.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-remote-locked-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const peer = new Y.Doc();
+  peer.getText("plainText").insert(0, "from a peer");
+  const update = Y.encodeStateAsUpdate(peer);
+  // The engine holds the peer's change, and this generation delivers it.
+  state.journal.push(update);
+  state.generationOptions[0]!.onRemoteUpdate(update);
+
+  state.locked = true;
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+  state.locked = false;
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+
+  await expect.poll(() => state.settleCalls, { timeout: 5_000 }).toEqual([1, 2]);
+  await expect.poll(() => state.settledContents, { timeout: 5_000 }).toEqual([
+    "from a peer",
+  ]);
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("owes no settle for a file that changed outside dohc when the generation is lost", async () => {
+  // A settle refused because the file changed outside dohc must not be paid
+  // by the replacement. The reopened session has no settled sha, so it
+  // expects the current head, and an owed settle would write the lineage over
+  // the outside change with no new edit.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-stale-rebind-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "edit before the outside change");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  state.settleFailure = null;
+  expect(state.settleCalls).toEqual([1]);
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  // Give the adoption a beat: nothing may settle.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.settleCalls).toEqual([1]);
+  expect(state.settledContents).toEqual([]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("drops a retry owed for a lock once the file changes outside dohc", async () => {
+  // #1226 review: a lock set the owed flag, then the retry was refused
+  // because the file changed outside dohc, and the flag stayed set, so the
+  // reopened session wrote the lineage over the outside change.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-lock-then-stale-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "edit before the lock");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  state.settleFailure = null;
+  const callsBeforeLoss = [...state.settleCalls];
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  // Give the adoption a beat: nothing may settle.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.settleCalls).toEqual(callsBeforeLoss);
+  expect(state.settledContents).toEqual([]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
 it("pays a locked close debt by itself once the lock releases", async () => {
   // The locked retry died with the DOCUMENT close — the
   // renderer forgets the session on a failed close and main swallows the
@@ -4263,9 +5073,13 @@ it("a delete landing after a settle's write but before its late onSettled callba
   const settleGate = new Promise<void>((resolve) => {
     releaseSettled = resolve;
   });
+  // A clock that moves on every read, so the delete below lands strictly
+  // after the session opened even when both fall in one real millisecond.
+  let clockMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-settle-clear-race-",
     {
+      now: () => ++clockMs,
       wrapProvider: (base) => async (openOptions) => {
         const inner = await base(openOptions);
         let token = 0;

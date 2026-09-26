@@ -1435,7 +1435,14 @@ fn run_relay_operation(
             now_ms,
             max_read_bytes,
         } => client
-            .push_workspace(store, &workspace_id, &NoFaults, now_ms, max_read_bytes)
+            .push_workspace(
+                store,
+                &workspace_id,
+                &NoFaults,
+                leases,
+                now_ms,
+                max_read_bytes,
+            )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::Pull {
@@ -1449,7 +1456,14 @@ fn run_relay_operation(
             workspace_id,
             cursor,
             now_ms,
-        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults, now_ms)? {
+        } => match client.commit_pull_cursor(
+            store,
+            &workspace_id,
+            &cursor,
+            &NoFaults,
+            leases,
+            now_ms,
+        )? {
             TxnOutcome::Committed(sharing_declined) => {
                 Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
             }
