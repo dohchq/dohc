@@ -238,7 +238,8 @@ export function registerCollectionAutomationsIpc<
       try {
         // The writer reads its own text back, so a shape the file contract
         // would not produce is refused rather than written.
-        written = writeAutomationsFile(input.automations.map((automation) => ({ status: "valid", automation })));
+        const pinned = await operation.state.collectionAutomations.pinOperations(input.collectionPath, input.automations);
+        written = writeAutomationsFile(pinned.map((automation) => ({ status: "valid", automation })));
       } catch {
         return { status: "refused", diagnostics: [{ code: "changed-on-reread", path: "/automations" }] };
       }

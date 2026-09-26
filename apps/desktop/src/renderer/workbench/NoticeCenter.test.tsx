@@ -141,7 +141,7 @@ describe("automation failure notices", () => {
   it("names a Collection automation's failure, offers Try again and Open automation, and no Try again for a chain stop", async () => {
     const failed = {
       automationId: "collection:Projects/Tasks#finished-date", claimId: "atc_1", chainStopped: false,
-      name: "Stamp the finish date", error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1,
+      name: "Stamp the finish date", error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     };
     const onRetryAutomationFailure = vi.fn();
     const onOpenAutomation = vi.fn();
@@ -149,7 +149,7 @@ describe("automation failure notices", () => {
       automationFailures: [
         failed,
         { automationId: "collection:Projects/Tasks#nudge", claimId: "atc_2", chainStopped: true, name: null,
-          error: "chain-stopped", updatedAtMs: 6_000, generation: 2 },
+          error: "chain-stopped", updatedAtMs: 6_000, generation: 2, datasetInstance: null },
       ],
       onRetryAutomationFailure,
       onOpenAutomation,
@@ -191,7 +191,7 @@ describe("automation failure notices", () => {
   it("toasts a failure that just arrived with Try again, Open automation, and copy, and keeps its row", async () => {
     const failure = {
       automationId: "collection:Tasks#stamp", claimId: "atc_1", chainStopped: false,
-      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
     };
     const user = userEvent.setup();
     const onRetryAutomationFailure = vi.fn();

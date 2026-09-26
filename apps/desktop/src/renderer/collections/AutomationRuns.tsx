@@ -50,14 +50,19 @@ function valueText(value: unknown): string {
 }
 
 function writeText(write: RunWrite): string {
-  const record = recordName(write.path);
+  const record = "path" in write ? recordName(write.path) : String(write.recordId);
   switch (write.kind) {
     case "field":
       return `${record} · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`;
+    case "dataset-edit":
+      return write.fields.map((field) => `${record} · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`).join("; ");
+    case "dataset-created":
     case "created":
       return `Added ${record}`;
+    case "dataset-kept":
     case "kept":
       return `${record} · ${write.field}: kept ${valueText(write.current)}, which someone set after the run began`;
+    case "dataset-skipped":
     case "skipped":
       return `${record} · ${sentence(write.reason)}`;
   }
@@ -66,8 +71,8 @@ function writeText(write: RunWrite): string {
 function runSummary(run: Run): string {
   if (run.state === "pending" || run.state === "running") return "Running";
   if (run.state === "failed") return sentence(run.chainStopped ? "The automation chain stopped before this run" : run.error ?? "The run failed");
-  const fields = run.writes.filter((write) => write.kind === "field").length;
-  const added = run.writes.filter((write) => write.kind === "created").length;
+  const fields = run.writes.reduce((total, write) => total + (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0), 0);
+  const added = run.writes.filter((write) => write.kind === "created" || write.kind === "dataset-created").length;
   const parts = [
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
     ...(added > 0 ? [`added ${count(added, "record", "records")}`] : []),

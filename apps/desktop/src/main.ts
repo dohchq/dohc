@@ -3415,11 +3415,14 @@ function createCollectionAutomationsFor(
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
-    withDatasetLedger: async (work) => {
+    withDatasetHost: async (work, open) => {
       // An open host serves the executor until disposal closes it, so a
-      // closing executor can still hand its claims back.
+      // closing executor can still hand its claims back. The executor opens
+      // one only for what a person asked about; otherwise it waits for the
+      // Collections list or a dataset action to open it.
       const opened = datasetHost.pending;
       if (opened) return await work((await opened).automations);
+      if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
         // A workspace that never approved a dataset has no dataset store to open.
@@ -3503,6 +3506,8 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
       slot.pending = pending;
       activeDatasetHosts.add(pending);
       const ownedPending = pending;
+      // The executor indexes dataset automations once the host is open.
+      void pending.then(() => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(), () => undefined);
       void pending.catch(() => { if (slot.pending === ownedPending) slot.pending = null; activeDatasetHosts.delete(ownedPending); });
     }
     const host = await pending;
@@ -4881,6 +4886,8 @@ function registerIpcHandlers(): void {
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
+    datasetAutomationFailures: async (workspaceId) =>
+      ((await collectionAutomationsOf(workspaceId)?.datasetFailures()) ?? []).map(({ neverStarted, ...failure }) => ({ ...failure, chainStopped: neverStarted })),
     detectAgentTools,
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,

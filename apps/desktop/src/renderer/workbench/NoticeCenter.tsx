@@ -397,10 +397,7 @@ export function NoticeCenter(props: {
   // error and a count. Durable — they come back after a restart until
   // dismissed, and a newer failure re-raises a dismissed one.
   automationFailures?: readonly AutomationFailureNotice[];
-  onDismissAutomationFailure?: (
-    automationId: string,
-    generation: number,
-  ) => void;
+  onDismissAutomationFailure?: (failure: AutomationFailureNotice) => void;
   // A crash report waiting on this computer. Send report is absent when this
   // build has no report server; main owns the dialog it opens.
   crashReport?: CrashReportNotice | null;
@@ -825,10 +822,7 @@ export function NoticeCenter(props: {
         ...(props.onDismissAutomationFailure
           ? {
               onDismiss: () =>
-                props.onDismissAutomationFailure?.(
-                  failure.automationId,
-                  failure.generation,
-                ),
+                props.onDismissAutomationFailure?.(failure),
             }
           : {}),
       });

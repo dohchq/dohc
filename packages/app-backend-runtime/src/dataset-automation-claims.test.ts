@@ -52,7 +52,7 @@ function transactions(db: DatabaseSync) {
 const tasks = (count: number) => Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",");
 // Everything the ledger retains for the dataset, as it charged it.
 function retained(db: DatabaseSync): number {
-  return ["claims", "revisions"].reduce((sum, table) =>
+  return ["claims", "revisions", "failure_generations"].reduce((sum, table) =>
     sum + Number(db.prepare(`SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_automation_${table}`).get()!.bytes), 0);
 }
 
@@ -349,8 +349,33 @@ it("lists an automation's runs newest first, and offers the failure it settled l
   f.tick(1);
   f.claims.settle(first!, { state: "failed", error: "First." });
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#a").map(claim => claim.claimId)).toEqual([second!.claimId, first!.claimId]);
-  expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId }]);
+  expect(f.claims.failures(scope.workspaceId)).toEqual([{ automationId: "collection:tasks#a", claimId: first!.claimId,
+    datasetInstance: JSON.stringify([scope.datasetId, "host-1"]), neverStarted: false, error: "First.", updatedAtMs: 1_001, generation: 2 }]);
   expect(f.claims.claims(scope.workspaceId, "collection:tasks#b")).toEqual([]);
+});
+
+it("counts each automation's failures in a generation that trimming and Try again never lower, charged until the dataset goes", () => {
+  const f = ledger();
+  const automationId = "collection:tasks#a";
+  f.claims.subscribe(scope, subscription(automationId, ["added"]));
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  const [first] = drain(f.claims);
+  f.claims.settle(first!, { state: "failed", error: "No." });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 1 }]);
+  // Try again and fail again: one more.
+  f.claims.retry({ workspaceId: scope.workspaceId, claimId: first!.claimId });
+  f.claims.settle(f.claims.next(scope.workspaceId)!, { state: "failed", error: "Still no." });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 2, error: "Still no." }]);
+  // A chain stop fails before it starts, and counts too.
+  f.commit("INSERT INTO tasks VALUES('b','Open','')", { kind: "automation", automationId: "collection:tasks#other", depth: 4 });
+  expect(f.claims.failures(scope.workspaceId)).toMatchObject([{ generation: 3, neverStarted: true }]);
+  // The count's row is charged to the dataset like its claims.
+  expect(f.charged).toBe(retained(f.db));
+  expect(Number(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_failure_generations").get()!.count)).toBe(1);
+  // Deleting the dataset forgets its counts with its claims.
+  f.claims.forget(scope);
+  expect(f.claims.failures(scope.workspaceId)).toEqual([]);
+  expect(retained(f.db)).toBe(0);
 });
 
 it("carries small values whole and names fields whose values are too large", () => {

@@ -324,6 +324,7 @@ async function world(options: {
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); },
+    withDatasetHost: async () => null,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
   });
   const executor = makeExecutor();

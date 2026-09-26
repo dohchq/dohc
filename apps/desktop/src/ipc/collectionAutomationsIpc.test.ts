@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionAutomations } from "../automations/collectionAutomations";
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
@@ -26,7 +27,8 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const dismissStops = vi.fn(async () => undefined);
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
-  const executor = { handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+  const executor = {
+    pinOperations: async (_path: string, automations: readonly Automation[]) => [...automations], handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };

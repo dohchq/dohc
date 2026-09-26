@@ -33,7 +33,7 @@ import {
   type RunRecord,
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster } from "./automationReach";
-import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
+import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
 
 // One run of one claim: check reach, read, evaluate, save the plan, then
 // apply the plan's effects in order, saving each one as it lands. The
@@ -142,30 +142,66 @@ export async function runsForClaim(
   };
 }
 
+/**
+ * What this claim's saved runs leave to do: an outcome that needs no run, or
+ * the run this definition continues, if any.
+ */
+export async function savedRunOf(
+  store: AutomationRunStore,
+  claim: Pick<AutomationClaim, "automationId" | "claimId" | "run">,
+  automation: Automation,
+): Promise<{ outcome: CollectionAutomationRunOutcome } | { current: StoredRun | null }> {
+  const runs = await runsForClaim(store, claim, automation);
+  // Never start over as if nothing had run.
+  if (runs.unreadable) return { outcome: failed(UNREADABLE_RUN_ERROR) };
+  const { done, current, changedSince } = runs;
+  // It finished before this computer could settle the claim, whatever the
+  // automation says now.
+  if (done !== null) return { outcome: { kind: "done" } };
+  if (runs.undo) return { outcome: failed(UNDONE_RUN_ERROR) };
+  // Running another definition from the start could repeat the changes the
+  // earlier one made. A person has to choose that with Try again.
+  if (current === null && changedSince !== null) return { outcome: failed(DEFINITION_CHANGED_ERROR) };
+  if (current?.compacted) return { outcome: failed(COMPACTED_RUN_ERROR) };
+  // The ledger handed the claim out again without a Try again, as after a
+  // crash before the failure reached it: the run stays failed.
+  if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
+    return { outcome: { kind: "failed-before", error: current.outcome.error } };
+  }
+  return { current };
+}
+
+/** A new run's record, before its plan is saved. */
+export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, plan: StoredStep[], nowMs: number): StoredRun {
+  return {
+    version: 2,
+    claimId: claim.claimId,
+    automationId: claim.automationId,
+    definitionHash: definitionHash(automation),
+    keySeed,
+    startedAtMs: nowMs,
+    updatedAtMs: nowMs,
+    plan,
+    applied: [],
+    created: [],
+    replans: [],
+    superseded: false,
+    undo: null,
+    settled: false,
+    compacted: false,
+    outcome: null,
+  };
+}
+
 export async function runCollectionAutomation(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
 ): Promise<CollectionAutomationRunOutcome> {
   const { claim, automation, collection, roster } = input;
   const { store } = dependencies;
-  const runs = await runsForClaim(store, claim, automation);
-  // Never start over as if nothing had run.
-  if (runs.unreadable) return failed(UNREADABLE_RUN_ERROR);
-  const { done, current, changedSince } = runs;
-  // It finished before this computer could settle the claim, whatever the
-  // automation says now.
-  if (done !== null) return { kind: "done" };
-  // Undo spent its keys and record ids, whoever asks to run it again.
-  if (runs.undo) return failed(UNDONE_RUN_ERROR);
-  // Running another definition from the start could repeat the changes the
-  // earlier one made. A person has to choose that with Try again.
-  if (current === null && changedSince !== null) return failed(DEFINITION_CHANGED_ERROR);
-  if (current?.compacted) return failed(COMPACTED_RUN_ERROR);
-  // The engine handed the claim out again without a Try again, as after a
-  // crash before the failure reached it: the run stays failed.
-  if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
-    return { kind: "failed-before", error: current.outcome.error };
-  }
+  const saved = await savedRunOf(store, claim, automation);
+  if ("outcome" in saved) return saved.outcome;
+  const { current } = saved;
 
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
@@ -201,27 +237,10 @@ export async function runCollectionAutomation(
     }
     if (input.stopped.aborted) return stopped;
     if (planned.kind === "stop") return planned.outcome;
-    const now = dependencies.nowMs();
-    run = {
-      version: 2,
-      claimId: claim.claimId,
-      automationId: claim.automationId,
-      definitionHash: definitionHash(automation),
-      keySeed,
-      startedAtMs: now,
-      updatedAtMs: now,
-      plan: planned.steps,
-      applied: [],
-      created: [],
-      superseded: false,
-      undo: null,
-      settled: false,
-      compacted: false,
-      outcome: null,
-    };
+    run = newRun(claim, automation, keySeed, planned.steps, dependencies.nowMs());
     // The plan with every effect recorded must fit what the store reads
     // back, and one that does not is refused before anything is written.
-    if (Buffer.byteLength(JSON.stringify({ ...run, applied: projectedProgress(run.plan ?? []) })) > RUN_PLAN_BUDGET_BYTES) {
+    if (Buffer.byteLength(JSON.stringify({ ...run, applied: projectedProgress(planned.steps) })) > RUN_PLAN_BUDGET_BYTES) {
       return failed("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
     }
     // The plan is on disk before the first write, so a run that stops part
@@ -345,6 +364,8 @@ async function applyPlan(
     if (input.stopped.aborted) return stopped;
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
+    // Only a dataset Collection's run plans dataset effects.
+    if (effect.kind !== "set" && effect.kind !== "add") return failed(UNREADABLE_RUN_ERROR);
     // After a stop, records may have changed while the run waited, so every
     // effect checks each field before it writes. Only the first effect the
     // run had not recorded may have landed before the stop.

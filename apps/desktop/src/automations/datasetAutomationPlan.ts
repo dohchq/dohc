@@ -1,0 +1,279 @@
+import { createHash } from "node:crypto";
+import type { JsonValue } from "@dohc/app-backend-runtime/automation";
+import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
+import type { Automation } from "@dohc/workspace-contracts/automations";
+import { datasetFindOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+
+// How a dataset Collection's automation maps onto the dataset's approved
+// operations. A dataset changes only through them, so each step names one:
+// Set fields uses an edit whose fields cover the step's, Add record a create,
+// and Find a read with equality filters. At launch only operations dohc
+// generated can be steps, and each is called with the owner caller.
+//
+// The ⚡ panel pins the operation each step uses when it saves. It prefers a
+// reversible edit, then the operation with the fewest fields beyond the
+// step's. The executor runs only the operation a step pins, and refuses the
+// whole run when that operation does not fit.
+
+type AutomationStep = Automation["do"][number];
+type RecordStep = Extract<AutomationStep, { kind: "set" | "add-record" | "find" }>;
+type Kind = "edit" | "create" | "read";
+
+/** A dataset record's primary key value, as its operations take it. */
+export type DatasetRecordId = string | number;
+
+/**
+ * A dataset record's identity within a run: its dataset, its table, and its
+ * id with its type. Two tables can hold the same id.
+ */
+export function datasetRecordKey(datasetId: string, tableId: string, recordId: DatasetRecordId): string {
+  return JSON.stringify([datasetId, tableId, recordId]);
+}
+
+/** Each step's operation and table, and the read that finds the trigger record. */
+export interface DatasetSteps {
+  table: DatasetTable;
+  /** The read the trigger record comes from; null for a record-removed trigger. */
+  triggerRead: DatasetOperation | null;
+  steps: ReadonlyMap<number, { operation: DatasetOperation; table: DatasetTable }>;
+  finds: ReadonlyMap<number, DatasetFindFilter[]>;
+  /** For each Set step, the read that shows its record again after someone changed it. */
+  rereads: ReadonlyMap<number, DatasetOperation>;
+}
+
+const KIND_OF: Record<RecordStep["kind"], Kind> = { set: "edit", "add-record": "create", find: "read" };
+
+const listFormat = new Intl.ListFormat("en", { type: "conjunction" });
+
+function fits(kind: Kind, fields: readonly string[]): string {
+  const named = listFormat.format(fields);
+  switch (kind) {
+    case "edit":
+      return `edit that changes ${named}`;
+    case "create":
+      return fields.length === 0 ? "way to add records" : `way to add records with ${named}`;
+    case "read":
+      return fields.length === 0 ? "read" : `read that shows ${named}`;
+  }
+}
+
+/** The step's field names as the table's field ids, or the first name the table lacks. */
+function fieldIds(table: DatasetTable, names: readonly string[]): string[] | { missing: string } {
+  const ids: string[] = [];
+  for (const name of names) {
+    const field = table.fields.find((candidate) => candidate.name === name);
+    if (field === undefined) return { missing: name };
+    ids.push(field.fieldId);
+  }
+  return ids;
+}
+
+/**
+ * The operations that can run a step, best first: a reversible edit, then
+ * the fewest fields beyond the step's, then by name. `tables` are the tables
+ * the step may use: its one table, or every table for a step that names its
+ * table only through its operation.
+ */
+function candidates(definition: DatasetDefinition, tables: readonly DatasetTable[], kind: Kind, names: readonly string[]): DatasetOperation[] {
+  const found: Array<{ operation: DatasetOperation; extra: number }> = [];
+  for (const operation of definition.operations) {
+    const table = tables.find((candidate) => candidate.tableId === operation.tableId);
+    if (operation.kind !== kind || table === undefined) continue;
+    const ids = fieldIds(table, names);
+    if ("missing" in ids || !ids.every((id) => operation.fieldIds.includes(id))) continue;
+    found.push({ operation, extra: operation.fieldIds.length - new Set(ids).size });
+  }
+  return found
+    .sort((left, right) =>
+      Number(right.operation.reversible === true) - Number(left.operation.reversible === true) ||
+      left.extra - right.extra ||
+      left.operation.name.localeCompare(right.operation.name))
+    .map(({ operation }) => operation);
+}
+
+/**
+ * Resolves every step's operation against the approved rules. With `pin`,
+ * a step whose operation is missing or does not fit gets the best one that
+ * does, and the result says which name each step now pins. Without it, a
+ * step must already name an operation that fits.
+ */
+function resolve(
+  automation: Automation,
+  definition: DatasetDefinition,
+  pin: boolean,
+): { steps: DatasetSteps; pinned: Map<number, string> } | { problem: string } {
+  const trigger = automation.when;
+  if (!("table" in trigger)) return { problem: "dohc can run automations that start from a record change. Other triggers come later." };
+  const table = trigger.table === null
+    ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
+    : definition.tables.find((candidate) => candidate.name === trigger.table);
+  if (table === undefined) {
+    return { problem: trigger.table === null
+      ? `${definition.name} has several tables. Name the one this automation watches.`
+      : `${definition.name} has no table named ${trigger.table}.` };
+  }
+  const ordered = stepsInOrder(automation);
+  const bindings = new Map<string, number>();
+  for (const { ordinal, step } of ordered) {
+    if ((step.kind === "find" || step.kind === "add-record") && step.as !== null) bindings.set(step.as, ordinal);
+  }
+  // Fields a Set step changes on the records it names, which the records'
+  // read must also show, so a changed record can be compared again.
+  const setOn = new Map<number | "trigger", string[]>();
+  for (const { step } of ordered) {
+    if (step.kind !== "set") continue;
+    const target = step.records === null ? "trigger" : bindings.get(step.records);
+    if (target === undefined) continue;
+    setOn.set(target, [...(setOn.get(target) ?? []), ...step.values.map((entry) => entry.field)]);
+  }
+
+  const steps = new Map<number, { operation: DatasetOperation; table: DatasetTable }>();
+  const finds = new Map<number, DatasetFindFilter[]>();
+  const pinned = new Map<number, string>();
+  // One step's operation, or why it has none. A step no operation fits keeps what it names.
+  const resolveStep = (ordinal: number, step: RecordStep): string | null => {
+    if (step.kind !== "set" && step.collection !== null) {
+      return `Automations on ${definition.name} can use only its own records for now.`;
+    }
+    const kind = KIND_OF[step.kind];
+    let names: string[];
+    let tables: readonly DatasetTable[];
+    if (step.kind === "find") {
+      const filters = datasetFindOf(step.condition);
+      if ("problem" in filters) return filters.problem;
+      finds.set(ordinal, filters);
+      names = [...new Set([...filters.map((filter) => filter.field), ...(setOn.get(ordinal) ?? [])])];
+      tables = definition.tables;
+    } else if (step.kind === "add-record") {
+      names = step.values.map((entry) => entry.field);
+      tables = definition.tables;
+    } else {
+      names = step.values.map((entry) => entry.field);
+      const bound = step.records === null ? null : bindings.get(step.records);
+      const target = bound === undefined || bound === null ? table : steps.get(bound)?.table;
+      if (target === undefined) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
+      tables = [target];
+    }
+    const fitting = candidates(definition, tables, kind, names);
+    const named = step.operation === null ? undefined : definition.operations.find((operation) => operation.name === step.operation);
+    let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
+    if (chosen === undefined && pin) chosen = fitting[0];
+    if (chosen === undefined) {
+      if (tables.length === 1) {
+        const missing = fieldIds(tables[0]!, names);
+        if ("missing" in missing) return `${tables[0]!.name} has no field named ${missing.missing}.`;
+      }
+      if (fitting.length === 0) return `${definition.name} has no approved ${fits(kind, names)}.`;
+      if (step.operation === null) return `Name the approved operation step ${ordinal + 1} uses, such as ${fitting[0]!.name}.`;
+      if (named === undefined) return `${definition.name} has no approved operation named ${step.operation}.`;
+      return `${named.name} is not an approved ${fits(kind, names)}.`;
+    }
+    if (chosen.name !== step.operation) pinned.set(ordinal, chosen.name);
+    steps.set(ordinal, { operation: chosen, table: definition.tables.find((candidate) => candidate.tableId === chosen.tableId)! });
+    return null;
+  };
+  for (const { ordinal, step } of ordered) {
+    if (step.kind !== "set" && step.kind !== "add-record" && step.kind !== "find") continue;
+    const problem = resolveStep(ordinal, step);
+    // Pinning goes on past a step no operation fits, so the others still get theirs.
+    if (problem !== null && !pin) return { problem };
+  }
+
+  // The trigger record is read through the widest read that shows the
+  // fields its Set steps change, so formulas see as much of it as they can.
+  let triggerRead: DatasetOperation | null = null;
+  if (trigger.kind !== "record-removed") {
+    const names = setOn.get("trigger") ?? [];
+    const reads = candidates(definition, [table], "read", names);
+    triggerRead = reads.sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0] ?? null;
+    if (triggerRead === null && !pin) return { problem: `${definition.name} has no approved ${fits("read", names)} in ${table.name}.` };
+  }
+  const rereads = new Map<number, DatasetOperation>();
+  for (const { ordinal, step } of ordered) {
+    const own = steps.get(ordinal);
+    if (step.kind !== "set" || own === undefined) continue;
+    const bound = step.records === null ? null : bindings.get(step.records) ?? null;
+    const source = bound === null ? triggerRead : steps.get(bound)?.operation.kind === "read" ? steps.get(bound)!.operation : undefined;
+    const reader = source ?? candidates(definition, [own.table], "read", step.values.map((entry) => entry.field))[0];
+    if (reader) rereads.set(ordinal, reader);
+  }
+  return { steps: { table, triggerRead, steps, finds, rereads }, pinned };
+}
+
+const GENERATED_ONLY = (name: string) =>
+  `${name}'s operations were written or changed outside dohc, so automations cannot use them yet.`;
+
+/** Why dohc cannot run an automation on this dataset, or null. */
+export function datasetAutomationProblem(automation: Automation, dataset: { definition: DatasetDefinition; generated: boolean }): string | null {
+  const shape = shapeProblem(automation, (condition) => {
+    const filters = datasetFindOf(condition);
+    return "problem" in filters ? filters.problem : null;
+  });
+  if (shape !== null) return shape;
+  const resolved = resolve(automation, dataset.definition, false);
+  if ("problem" in resolved) return resolved.problem;
+  return dataset.generated ? null : GENERATED_ONLY(dataset.definition.name);
+}
+
+/** Each step's operation, for a run. The executor has checked the automation first. */
+export function datasetStepsOf(automation: Automation, definition: DatasetDefinition): DatasetSteps {
+  const resolved = resolve(automation, definition, false);
+  if ("problem" in resolved) throw new Error(resolved.problem);
+  return resolved.steps;
+}
+
+/**
+ * The automation with each step pinned to the operation the panel prefers,
+ * where the step names none or one that no longer fits. A step no operation
+ * fits keeps what it names, and the automation says why it cannot run.
+ */
+export function pinDatasetOperations(automation: Automation, definition: DatasetDefinition): Automation {
+  const resolved = resolve(automation, definition, true);
+  if ("problem" in resolved || resolved.pinned.size === 0) return automation;
+  let counter = 0;
+  const pin = (steps: readonly AutomationStep[]): AutomationStep[] => steps.map((step): AutomationStep => {
+    const ordinal = counter++;
+    if (step.kind === "if") {
+      const then = pin(step.do);
+      return { ...step, do: then, otherwise: pin(step.otherwise) };
+    }
+    const name = resolved.pinned.get(ordinal);
+    return name !== undefined && (step.kind === "set" || step.kind === "add-record" || step.kind === "find") ? { ...step, operation: name } : step;
+  });
+  return { ...automation, do: pin(automation.do) };
+}
+
+/**
+ * A dataset claim as planning reads a change: fields named as the approved
+ * rules name them, each side wrapped as the engine wraps a fact.
+ */
+export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable): RunClaim {
+  const fact = claim.fact;
+  if (fact === null) throw new Error(claim.error ?? "This change cannot be read.");
+  const side = (present: boolean, value: JsonValue, truncated: boolean) =>
+    !present ? null : truncated ? { truncated: true as const, bytes: 0 } : { value };
+  const fields: RunClaim["change"]["fields"][number][] = [];
+  for (const change of fact.fields) {
+    const field = table.fields.find((candidate) => candidate.fieldId === change.fieldId);
+    if (field === undefined) continue;
+    const truncated = change.truncated === true;
+    fields.push({
+      field: field.name,
+      previous: side(fact.kind !== "added", change.previous as JsonValue, truncated),
+      next: side(fact.kind !== "removed", change.next as JsonValue, truncated),
+    });
+  }
+  return { collectionPath, change: { kind: fact.kind, fields, fieldsOmitted: 0 } };
+}
+
+/**
+ * The idempotency key of one dataset effect: "a." and the hex SHA-256 of its
+ * identity, 66 characters. A replan after a stale record sends different
+ * content, so it raises `replan` and never reuses a key. An added record has
+ * no id yet, so its identity ends with an empty one.
+ */
+export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, recordId: DatasetRecordId | null, replan: number): string {
+  const identity = `${claimId}/${keySeed}/${ordinal}/${recordId ?? ""}/${replan}`;
+  return `a.${createHash("sha256").update(identity).digest("hex")}`;
+}
