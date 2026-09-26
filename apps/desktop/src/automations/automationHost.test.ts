@@ -278,6 +278,27 @@ describe("automation hosts", () => {
     expect(w.hosts.hold("ws")).not.toBeNull();
   });
 
+  it("ignores an answer older than the host it already acted on", async () => {
+    const w = world({ stored: host(ME, 2, null, null) });
+    w.setRelay(host(ME, 2, null, null));
+    w.hosts.open("ws");
+    await w.settle();
+    // Settings chose another computer and this one released.
+    w.hosts.learned("ws", host(OTHER, 4, null, 3_000));
+    expect(w.hosts.stillRuns("ws")).toBe(false);
+    // A check-in that was still out answers with the older host, then a
+    // stale answer says no host at all: neither turns running back on.
+    expect(w.hosts.learned("ws", host(ME, 2, null, null)), "the host it holds, not the stale answer")
+      .toEqual(host(OTHER, 4, null, 3_000));
+    expect(w.hosts.stillRuns("ws")).toBe(false);
+    expect(w.hosts.learned("ws", null)).toEqual(host(OTHER, 4, null, 3_000));
+    expect(w.hosts.stillRuns("ws")).toBe(false);
+    expect(w.hosts.learned("closed-workspace", host(ME, 1, null, null)), "nothing held: the answer").toEqual(host(ME, 1, null, null));
+    expect(w.started, "never started here again").toEqual([]);
+    w.hosts.learned("ws", host(ME, 5, null, 4_000));
+    expect(w.hosts.stillRuns("ws")).toBe(true);
+  });
+
   it("does not read for a workspace that does not sync, and answers false once closed", async () => {
     const w = world({ synced: false });
     w.hosts.open("ws");

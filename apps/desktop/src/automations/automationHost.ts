@@ -2,6 +2,7 @@ import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
   isNoticeLine,
+  type RelayAutomationComputer,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
 
@@ -63,6 +64,12 @@ interface HostState {
   /** Work this computer admitted as host that has not finished yet. */
   held: Set<Promise<void>>;
   /**
+   * The newest host generation this computer acted on. An answer that
+   * names an older one, such as a check-in that was still out when
+   * settings chose another computer, is stale and changes nothing.
+   */
+  generation: number;
+  /**
    * The workspace is open. A closed one keeps its state while admitted
    * work still runs, so a reopen finds the same holds and a handover still
    * waits for them; the state goes when the last hold ends.
@@ -93,6 +100,22 @@ export function hostOfAnswer(answer: { status: number; body: unknown }): RelayAu
   return host === null ? null : isHost(host) ? host : undefined;
 }
 
+/** The owner's computers from a relay answer, or undefined when the answer is not one. */
+export function computersOfAnswer(answer: { status: number; body: unknown }): RelayAutomationComputer[] | undefined {
+  const computers = answer.status === 200 && answer.body && typeof answer.body === "object"
+    ? (answer.body as { computers?: unknown }).computers
+    : undefined;
+  if (!Array.isArray(computers)) return undefined;
+  const valid = computers.every((computer: unknown) => {
+    if (!computer || typeof computer !== "object") return false;
+    const { installId, label, lastSeenMs } = computer as Record<string, unknown>;
+    return isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
+      isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS) &&
+      typeof lastSeenMs === "number" && Number.isSafeInteger(lastSeenMs) && lastSeenMs >= 0;
+  });
+  return valid ? (computers as RelayAutomationComputer[]).map(({ installId, label, lastSeenMs }) => ({ installId, label, lastSeenMs })) : undefined;
+}
+
 /** A computer name the relay takes: printable, trimmed, and bounded. */
 export function computerLabel(hostName: string): string {
   const printable = hostName.replace(/[\u0000-\u001f\u007f]/gu, "").trim();
@@ -108,6 +131,10 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     host?.installId === dependencies.installId() && host.handoverFrom === null;
 
   function apply(workspaceId: string, state: HostState, host: RelayAutomationHost | null): void {
+    // No host is generation 0; the relay never records one again after that.
+    const generation = host?.generation ?? 0;
+    if (generation < state.generation) return;
+    state.generation = generation;
     const before = state.host;
     state.host = host;
     state.readAtMs = monotonicMs();
@@ -223,6 +250,7 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         claims: false,
         handingOver: false,
         held: new Set(),
+        generation: stored !== null && isHost(stored) ? stored.generation : 0,
         open: true,
         gone: Promise.resolve(),
         forget: () => undefined,
@@ -283,6 +311,19 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         // A closed workspace's state goes with its last hold.
         if (!state.open && state.held.size === 0) state.forget();
       };
+    },
+
+    /**
+     * The relay answered a read, choose, or take-over from settings: act on
+     * the host it names. Answers the host this computer holds after, which
+     * stays the newer one when the answer is stale.
+     */
+    learned(workspaceId: string, host: RelayAutomationHost | null): RelayAutomationHost | null {
+      const state = states.get(workspaceId);
+      if (!state) return host;
+      apply(workspaceId, state, host);
+      // An older answer changes nothing: the host already acted on stands.
+      return state.host === undefined ? host : state.host;
     },
 
     /** A sync pass reached the relay: read again if the last read or handover did not. */

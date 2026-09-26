@@ -49,6 +49,7 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
     cannotRun: null,
     reach: { kind: "checked", steps: automation.do.map(() => ({ verdict: "allowed" as const })) },
     lastRun: null,
+    nextRunMs: null,
     ...overrides,
   };
 }

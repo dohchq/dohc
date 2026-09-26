@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import {
   parseAutomationsFile,
   writeAutomationsFile,
@@ -226,6 +227,17 @@ export interface CollectionAutomationsOptions {
   deadline?: (abort: () => void) => () => void;
 }
 
+// A switched-on schedule's next due time after now. A time zone this
+// computer cannot follow gives none; the parser already reported it.
+function nextRunOf(automation: Automation, nowMs: number): number | null {
+  if (!automation.enabled || automation.when.kind !== "schedule") return null;
+  try {
+    return nextDue(automation.when, nowMs);
+  } catch {
+    return null;
+  }
+}
+
 type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
 /**
  * A dataset Collection's approved rules, whether dohc generated its
@@ -255,6 +267,8 @@ export type CollectionAutomationSummary =
        * run yet, or a field its Collection does not have.
        */
       cannotRun: string | null;
+      /** A switched-on schedule's next due time, or null for any other automation. */
+      nextRunMs: number | null;
       /** Each step's reach in step order, or why dohc cannot check who can edit yet. */
       reach: { kind: "checked"; steps: CollectionAutomationStepReach[] } | { kind: "waiting"; reason: string };
       /** Its newest run on this computer, or null when it has not run here. */
@@ -820,9 +834,11 @@ export class CollectionAutomations {
       const { automation } = entry;
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
+      const cannotRun = unsupported(automation) ?? this.groupTriggerProblem(automation) ??
+        (automation.when.kind === "schedule" && !runsSchedules ? SCHEDULES_NEED_SYNC : null);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: unsupported(automation) ?? this.groupTriggerProblem(automation) ??
-          (automation.when.kind === "schedule" && !runsSchedules ? SCHEDULES_NEED_SYNC : null),
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun,
+        nextRunMs: cannotRun === null ? nextRunOf(automation, this.nowMs()) : null,
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };

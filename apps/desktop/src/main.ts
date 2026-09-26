@@ -110,6 +110,8 @@ import {
   ShareHandoffStatus,
   crashReportOperations,
   noticeOperations,
+  scheduleHostOperations,
+  type ScheduleHostResult,
   type NoticeRef,
   workspaceSearchOperations,
   workspaceVersionOperations,
@@ -196,7 +198,7 @@ import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./autom
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { AutomationScheduler } from "./automations/automationScheduler";
-import { computerLabel, createAutomationHosts } from "./automations/automationHost";
+import { computerLabel, computersOfAnswer, createAutomationHosts, hostOfAnswer } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "./automations/skippedRunsNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
@@ -3608,11 +3610,76 @@ const automationHosts = createAutomationHosts({
     return { status: response.status, body: await response.json().catch(() => undefined) };
   },
   stored: (workspaceId) => findWorkspace(workspaceId)?.automationHost,
-  store: setWorkspaceAutomationHost,
+  store: (workspaceId, host) => {
+    setWorkspaceAutomationHost(workspaceId, host);
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send(CHANNELS.scheduleHostChanged, workspaceId);
+    }
+  },
   startedHere: (workspaceId, startAfterMs) => automationScheduler.startedHere(workspaceId, startAfterMs),
   finishHere: (workspaceId) => automationScheduler.finishHere(workspaceId),
   logError: (workspaceId, error) => console.warn(`[desktop] Schedules in ${workspaceId}: automation host:`, error),
 });
+
+// Which of the owner's computers runs a workspace's schedules, for settings
+// and the ⚡ panel, after a choose or take-over when one is given. This
+// computer acts on the answer at once.
+async function scheduleHostState(
+  workspaceId: string,
+  change?: { action: "choose" | "take-over"; body: Record<string, string | number> },
+): Promise<ScheduleHostResult> {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || entry.shareView !== undefined) return { kind: "none" };
+  if (entry.remote === undefined) {
+    return (await readSyncHistory(entry.rootPath)) === "never-synced"
+      ? { kind: "this-computer" }
+      : { kind: "note", message: "Turn on sync to run this workspace's schedules." };
+  }
+  let credentials: CloudSessionCredentials;
+  let credentialGeneration: number;
+  try {
+    ({ credentials, credentialGeneration } = await remoteForWorkspace(entry));
+  } catch (error) {
+    return { kind: "note", message: error instanceof Error ? error.message : "Sign in to your server first." };
+  }
+  const path = `/sync/${encodeURIComponent(workspaceId)}/automation-host`;
+  const request = async (init: RequestInit & { action?: string }) => {
+    const response = await relayShareResponseWithCredentials(
+      credentials,
+      init.action ? `${path}/${init.action}` : path,
+      { ...init, signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
+    );
+    return { status: response.status, body: await response.json().catch(() => undefined) };
+  };
+  let answer = change
+    ? await request({
+      action: change.action,
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(change.body),
+    })
+    : await request({ method: "GET" });
+  // Another computer changed the host first: show it as it is now.
+  if (change && answer.status === 409) answer = await request({ method: "GET" });
+  // An answer for an account that signed out meanwhile belongs to no one here.
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc asked. Open this setting again.");
+  }
+  const answered = hostOfAnswer(answer);
+  const computers = computersOfAnswer(answer);
+  if (answered === undefined || computers === undefined) {
+    throw new Error("dohc could not read which computer runs this workspace's schedules.");
+  }
+  const host = automationHosts.learned(workspaceId, answered);
+  const installId = localReactorFallbackId();
+  return {
+    kind: "relay",
+    generation: host?.generation ?? 0,
+    hostInstallId: host?.installId ?? null,
+    handoverFrom: host?.handoverFrom ?? null,
+    computers: computers.map((computer) => ({ ...computer, thisComputer: computer.installId === installId })),
+  };
+}
 
 // Whether this computer runs a workspace's schedules. A synced workspace
 // runs them on the computer its relay names. One that does not sync runs
@@ -5539,6 +5606,18 @@ function registerIpcHandlers(): void {
       console.error("[desktop] workspace search activity:", error);
     },
   }));
+
+  registerOperations(operationBoundary, scheduleHostOperations, {
+    readScheduleHost: (input) => scheduleHostState(input.workspaceId),
+    chooseScheduleHost: (input) => scheduleHostState(input.workspaceId, {
+      action: "choose",
+      body: { installId: input.installId, generation: input.generation },
+    }),
+    takeOverScheduleHost: (input) => scheduleHostState(input.workspaceId, {
+      action: "take-over",
+      body: { generation: input.generation },
+    }),
+  });
 
   registerOperations(operationBoundary, noticeOperations, {
     listNotices: () => noticeStore().list(),

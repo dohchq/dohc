@@ -40,16 +40,19 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
   },
 );
 
-/** Quiet bordered action — the default button. */
-export function SecondaryButton({ className, type, size, ...rest }: ActionButtonProps) {
-  return (
-    <button
-      type={type ?? "button"}
-      className={cx(size === "compact" ? compactSecondaryButtonClass : secondaryButtonClass, className)}
-      {...rest}
-    />
-  );
-}
+/** Quiet bordered action — the default button. Forwards its ref so a caller can return focus to it. */
+export const SecondaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
+  function SecondaryButton({ className, type, size, ...rest }, ref) {
+    return (
+      <button
+        ref={ref}
+        type={type ?? "button"}
+        className={cx(size === "compact" ? compactSecondaryButtonClass : secondaryButtonClass, className)}
+        {...rest}
+      />
+    );
+  },
+);
 
 /** Ghost icon affordance for toolbars and row actions. Pass the icon as
  * children; size stays 24px unless a `size-*` class overrides it. Forwards its
