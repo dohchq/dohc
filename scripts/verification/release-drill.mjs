@@ -101,12 +101,23 @@ export function readDrillLog(path) {
 }
 
 // The scratch app links these to the real app. They are removed as links
-// first, so deleting the scratch directory never reaches the real app.
+// first, so deleting the scratch app never reaches the real app.
 const LINKED = ["node_modules", "resources", "build"];
 
-/** Builds the scratch app: a copy of dist with the fault, linked to the real dependencies. */
-export function buildDrillApp({ scenario, scratch, feedUrl, source = desktopRoot }) {
-  const app = join(scratch, "app");
+// Where scratch apps go: in the checkout, git-ignored, two levels below the
+// repository root like apps/desktop.
+export const DRILL_APPS_ROOT = join(repoRoot, ".dohc-dev");
+
+/**
+ * Builds the scratch app in `app`: a copy of dist with the fault, linked to
+ * the real dependencies. pnpm's links inside node_modules are relative and
+ * climb to the workspace root, so they resolve from the scratch app only when
+ * it sits under the same grandparent as the real app.
+ */
+export function buildDrillApp({ scenario, app, feedUrl, source = desktopRoot }) {
+  if (resolve(app, "../..") !== resolve(source, "../..")) {
+    throw new Error(`The scratch app ${app} must share its grandparent with ${source}, or pnpm's relative links in node_modules resolve elsewhere.`);
+  }
   const main = join(app, "dist", "main");
   const entry = join(source, "dist", "main", "main.js");
   const appModule = join(source, "dist", "main", "app.js");
@@ -131,16 +142,24 @@ export function buildDrillApp({ scenario, scratch, feedUrl, source = desktopRoot
   return { app, entry: join(main, "main.js") };
 }
 
-function removeScratch(scratch) {
+function removeApp(app) {
   for (const name of LINKED) {
-    const link = join(scratch, "app", name);
+    const link = join(app, name);
     try {
       if (lstatSync(link).isSymbolicLink()) rmdirSync(link);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
   }
-  remove(scratch);
+  remove(app);
+}
+
+function readCrashReport(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 function remove(path) {
@@ -259,6 +278,7 @@ export async function runDrill({
   source = desktopRoot,
   engine = join(desktopRoot, "target", "debug", ENGINE),
   tempRoot = tmpdir(),
+  appsRoot = DRILL_APPS_ROOT,
   onFeed,
 }) {
   assert(SCENARIOS.includes(scenario), `Choose --scenario ${SCENARIOS.join(" or ")}.`);
@@ -273,6 +293,7 @@ export async function runDrill({
     assert(condition, `${name} failed${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
   };
   let scratch = null;
+  let app = null;
   let feed = null;
 
   const launch = (number, { entry, profile, until }) => {
@@ -302,9 +323,11 @@ export async function runDrill({
     writeFileSync(join(feedDir, "latest.yml"), feedManifest(installer));
     feed = await startFeed(feedDir, join(evidence, "feed.jsonl"));
     onFeed?.(feed);
-    const { entry } = buildDrillApp({ scenario, scratch, feedUrl: feed.url, source });
-    mkdirSync(join(scratch, "app", "target", "debug"), { recursive: true });
-    copyFileSync(engine, join(scratch, "app", "target", "debug", ENGINE));
+    mkdirSync(appsRoot, { recursive: true });
+    app = mkdtempSync(join(appsRoot, "release-drill-"));
+    const { entry } = buildDrillApp({ scenario, app, feedUrl: feed.url, source });
+    mkdirSync(join(app, "target", "debug"), { recursive: true });
+    copyFileSync(engine, join(app, "target", "debug", ENGINE));
     const profile = join(scratch, "profile");
     const markerPath = join(profile, "dohc-launch.json");
     const offered = (entries) => entries.find((logged) => logged.kind === "dialog");
@@ -316,6 +339,11 @@ export async function runDrill({
       check("reports that dohc failed to start", entries.some((logged) => logged.kind === "error-box" && logged.title === "dohc failed to start"));
       check("offers the restart into the newer build", dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
+      // DOHC_TEST_HOME is main's state directory in a test run, so the report
+      // lands where the next dohc's store reads it.
+      const report = readCrashReport(join(scratch, "home", "crash-report.json"));
+      check("keeps the failure in the crash report", report?.problems?.some((problem) => problem.source === "main" &&
+        problem.text.includes("What happened: The main module failed to load")), report);
     } else {
       for (const number of [1, 2]) {
         await launch(number, { entry, profile });
@@ -345,9 +373,10 @@ export async function runDrill({
     // Each launch has already ended and awaited its app before this runs.
     await feed?.close();
     result.dialogs = readDrillLog(logPath);
-    if (keep && result.passed) result.scratch = scratch;
+    if (keep && result.passed) Object.assign(result, { scratch, app });
     writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-    if (scratch && !result.scratch) removeScratch(scratch);
+    if (app && !result.app) removeApp(app);
+    if (scratch && !result.scratch) remove(scratch);
     if (result.passed && !keep) remove(evidence);
   }
   return result;
@@ -362,7 +391,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
     : Promise.reject(new Error("The release drill runs on Windows only."));
   drill.then((result) => {
     console.log(`[release-drill] ${scenario}: passed. ${result.checks.map((check) => check.name).join("; ")}.`);
-    if (keep) console.log(`[release-drill] Evidence: ${result.evidence}. Scratch app: ${result.scratch}.`);
+    if (keep) console.log(`[release-drill] Evidence: ${result.evidence}. Scratch app: ${result.app}. Scratch data: ${result.scratch}.`);
   }, (error) => {
     console.error(`[release-drill] ${scenario ?? "(no scenario)"}: failed. ${error.message}`);
     process.exitCode = 1;

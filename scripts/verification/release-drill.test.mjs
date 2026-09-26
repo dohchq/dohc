@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,14 +13,16 @@ function scratchDir(t) {
   return directory;
 }
 
+// The fake app sits at <root>/ws/desktop, so a scratch app under
+// <root>/apps shares its grandparent, as .dohc-dev and apps/desktop do.
 function fakeDesktop(root, entrySource = 'import "./shared.js";\nawait import("./app.js");\n') {
-  const main = join(root, "desktop", "dist", "main");
+  const main = join(root, "ws", "desktop", "dist", "main");
   mkdirSync(main, { recursive: true });
   writeFileSync(join(main, "main.js"), entrySource);
   writeFileSync(join(main, "app.js"), 'import "./shared.js";\nexport const loaded = true;\n');
   writeFileSync(join(main, "shared.js"), "export {};\n");
-  writeFileSync(join(root, "desktop", "package.json"), '{"type":"module"}\n');
-  return join(root, "desktop");
+  writeFileSync(join(root, "ws", "desktop", "package.json"), '{"type":"module"}\n');
+  return join(root, "ws", "desktop");
 }
 
 test("injects each fault into the app module only", () => {
@@ -45,9 +47,9 @@ test("builds a scratch copy and leaves the real build unchanged", (t) => {
   const source = fakeDesktop(root);
   const before = readFileSync(join(source, "dist", "main", "app.js"), "utf8");
   const { entry } = buildDrillApp({
-    scenario: "main-fails-to-load", scratch: join(root, "scratch"), feedUrl: "http://127.0.0.1:1/", source,
+    scenario: "main-fails-to-load", app: join(root, "apps", "drill"), feedUrl: "http://127.0.0.1:1/", source,
   });
-  const main = join(root, "scratch", "app", "dist", "main");
+  const main = join(root, "apps", "drill", "dist", "main");
   assert.equal(entry, join(main, "main.js"));
   assert.match(readFileSync(entry, "utf8"), /^import "\.\/drill-dialogs\.mjs";\n/);
   assert.match(readFileSync(join(main, "app.js"), "utf8"), /release drill: main fails to load/);
@@ -57,11 +59,36 @@ test("builds a scratch copy and leaves the real build unchanged", (t) => {
   assert.ok(!existsSync(join(source, "dist", "main", "drill-dialogs.mjs")));
 });
 
+test("refuses a scratch app whose pnpm links would resolve elsewhere", (t) => {
+  const root = scratchDir(t);
+  const source = fakeDesktop(root);
+  assert.throws(() => buildDrillApp({
+    scenario: "main-fails-to-load", app: join(root, "apps", "deeper", "drill"), feedUrl: "http://127.0.0.1:1/", source,
+  }), /grandparent/);
+});
+
+test("resolves pnpm's relative links from the scratch app", (t) => {
+  const root = scratchDir(t);
+  const source = fakeDesktop(root);
+  mkdirSync(join(root, "node_modules", ".pnpm", "zod"), { recursive: true });
+  writeFileSync(join(root, "node_modules", ".pnpm", "zod", "index.js"), "zod\n");
+  mkdirSync(join(source, "node_modules"));
+  try {
+    symlinkSync(join("..", "..", "..", "node_modules", ".pnpm", "zod"), join(source, "node_modules", "zod"), "dir");
+  } catch (error) {
+    if (error.code === "EPERM") { t.skip("this account cannot create symbolic links"); return; }
+    throw error;
+  }
+  const app = join(root, "apps", "drill");
+  buildDrillApp({ scenario: "main-fails-to-load", app, feedUrl: "http://127.0.0.1:1/", source });
+  assert.equal(readFileSync(join(app, "node_modules", "zod", "index.js"), "utf8"), "zod\n");
+});
+
 test("refuses an entry that loads the app module statically", (t) => {
   const root = scratchDir(t);
   const source = fakeDesktop(root, 'import "./app.js";\n');
   assert.throws(() => buildDrillApp({
-    scenario: "main-fails-to-load", scratch: join(root, "scratch"), feedUrl: "http://127.0.0.1:1/", source,
+    scenario: "main-fails-to-load", app: join(root, "apps", "drill"), feedUrl: "http://127.0.0.1:1/", source,
   }), /dynamic import/);
 });
 
@@ -99,14 +126,14 @@ test("records dialogs, holds the restart question, and closes the notice with it
 
 test("a failed setup closes the feed and deletes the scratch app, keeping only evidence", async (t) => {
   const root = scratchDir(t);
-  const source = join(root, "desktop");
+  const source = join(root, "ws", "desktop");
   mkdirSync(source, { recursive: true });
   writeFileSync(join(source, "package.json"), '{"type":"module"}\n');
   const engine = join(root, "engine.exe");
   writeFileSync(engine, "engine");
   let feedUrl = null;
   await assert.rejects(
-    runDrill({ scenario: "main-fails-to-load", source, engine, tempRoot: root, onFeed: (feed) => { feedUrl = feed.url; } }),
+    runDrill({ scenario: "main-fails-to-load", source, engine, tempRoot: root, appsRoot: join(root, "apps"), onFeed: (feed) => { feedUrl = feed.url; } }),
     /pnpm qa:prepare/,
   );
   assert.ok(feedUrl, "the feed started before the failure");
@@ -119,6 +146,7 @@ test("a failed setup closes the feed and deletes the scratch app, keeping only e
   const result = JSON.parse(readFileSync(join(evidence, "result.json"), "utf8"));
   assert.equal(result.passed, false);
   assert.match(result.error, /pnpm qa:prepare/);
+  assert.deepEqual(readdirSync(join(root, "apps")), []);
 });
 
 test("a failure after linking the real app deletes the links, not what they point at", async (t) => {
@@ -129,7 +157,8 @@ test("a failure after linking the real app deletes the links, not what they poin
   // A directory passes the existence check and then fails to copy.
   const engine = join(root, "engine-directory");
   mkdirSync(engine);
-  await assert.rejects(runDrill({ scenario: "main-crashes-every-launch", source, engine, tempRoot: root }));
+  await assert.rejects(runDrill({ scenario: "main-crashes-every-launch", source, engine, tempRoot: root, appsRoot: join(root, "apps") }));
+  assert.deepEqual(readdirSync(join(root, "apps")), []);
   assert.deepEqual(readdirSync(root).filter((name) => /^dohc-release-drill-(?!evidence)/.test(name)), []);
   assert.equal(readFileSync(join(source, "node_modules", "kept", "index.js"), "utf8"), "kept\n");
 });
