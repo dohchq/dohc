@@ -485,6 +485,44 @@ function directMessageReach(chat: ChatDirectory | null, userId: string): ReachSt
   };
 }
 
+/** The Group whose messages start the automation, as the reach check reads it. */
+function groupTriggerReach(automation: Automation, chat: ChatDirectory | null): ReachStep[] {
+  if (automation.when.kind !== "group-message") return [];
+  const group = chat?.group(automation.when.group);
+  return [{
+    kind: "read-group",
+    group: group && !("problem" in group)
+      ? { channelWireId: group.wireId, name: group.name }
+      : { channelWireId: null, name: automation.when.group },
+  }];
+}
+
+/** The Group, people, or person's own reach one chat step reaches. Any other step reaches no chat. */
+function chatReachOf(step: AutomationStep, chat: ChatDirectory | null): ReachStep[] {
+  switch (step.kind) {
+    case "post": {
+      const group = chat?.group(step.group);
+      return [{
+        kind: "post",
+        group: group && !("problem" in group)
+          ? { channelWireId: group.wireId, name: group.name }
+          : { channelWireId: null, name: step.group },
+      }];
+    }
+    case "direct-message":
+      return step.to.flatMap((person) => !isFormula(person) && typeof person.value === "string" ? [directMessageReach(chat, person.value)] : []);
+    case "wake-agent":
+      // A personal step: it acts as its person, so it reaches only what they do alone.
+      return [{ kind: "personal", person: { userId: step.person, name: chat?.person(step.person) ?? "that person" } }];
+    case "notify":
+      return step.to.flatMap((person): ReachStep[] => isFormula(person) || typeof person.value !== "string"
+        ? []
+        : [{ kind: "notify", person: { userId: person.value, name: chat?.person(person.value) ?? "that person" } }]);
+    default:
+      return [];
+  }
+}
+
 /**
  * The Collections and chats each step reaches, for the reach check (ADR
  * 0012). A direct message to a person a formula names is checked once the
@@ -499,16 +537,7 @@ export function reachStepsOf(
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   const target = (path: string | null) => (path === null ? collection : collectionNamed(path));
-  const reach: ReachStep[] = [];
-  if (automation.when.kind === "group-message") {
-    const group = chat?.group(automation.when.group);
-    reach.push({
-      kind: "read-group",
-      group: group && !("problem" in group)
-        ? { channelWireId: group.wireId, name: group.name }
-        : { channelWireId: null, name: automation.when.group },
-    });
-  }
+  const reach = groupTriggerReach(automation, chat);
   for (const { step } of everyStep(steps)) {
     if (step.kind === "set") {
       const bound = step.records === null ? null : bindings.get(step.records);
@@ -517,29 +546,20 @@ export function reachStepsOf(
       reach.push({ kind: "change-records", collection: target(step.collection) });
     } else if (step.kind === "find") {
       reach.push({ kind: "find-records", collection: target(step.collection) });
-    } else if (step.kind === "post") {
-      const group = chat?.group(step.group);
-      reach.push({
-        kind: "post",
-        group: group && !("problem" in group)
-          ? { channelWireId: group.wireId, name: group.name }
-          : { channelWireId: null, name: step.group },
-      });
-    } else if (step.kind === "direct-message") {
-      for (const person of step.to) {
-        if (!isFormula(person) && typeof person.value === "string") reach.push(directMessageReach(chat, person.value));
-      }
-    } else if (step.kind === "wake-agent") {
-      // A personal step: it acts as its person, so it reaches only what they do alone.
-      reach.push({ kind: "personal", person: { userId: step.person, name: chat?.person(step.person) ?? "that person" } });
-    } else if (step.kind === "notify") {
-      for (const person of step.to) {
-        if (isFormula(person) || typeof person.value !== "string") continue;
-        reach.push({ kind: "notify", person: { userId: person.value, name: chat?.person(person.value) ?? "that person" } });
-      }
+    } else {
+      reach.push(...chatReachOf(step, chat));
     }
   }
   return reach;
+}
+
+/**
+ * Only the chats an automation reaches, as reachStepsOf reads them: the
+ * Group whose messages start it, then each step's Group, people, or person,
+ * in step order.
+ */
+export function chatReachStepsOf(automation: Automation, chat: ChatDirectory | null): ReachStep[] {
+  return [...groupTriggerReach(automation, chat), ...[...everyStep(orderSteps(automation.do))].flatMap(({ step }) => chatReachOf(step, chat))];
 }
 
 /**
@@ -643,6 +663,8 @@ export interface RunClaim {
     kind: AutomationClaim["change"]["kind"];
     fields: ReadonlyArray<Pick<Fact, "field" | "previous" | "next">>;
     fieldsOmitted: number;
+    /** Who made the change, when that is known; left out when it is not. */
+    actorKind?: AutomationClaim["change"]["actorKind"];
   };
 }
 
@@ -1002,12 +1024,13 @@ export const AGENT_WAKES_AGENT =
 
 /**
  * Whether a person started this claim: a change that declared no actor, as a
- * person's write does, or one a person made. An agent's writes do not carry
+ * person's write does, or one a person made. A change whose actor is not
+ * known, such as a dataset commit, did not. An agent's writes do not carry
  * their chain depth yet, so an agent's change, or an automation's change
  * that an agent's started, could wake the agent again without end.
  */
 function startedByPerson(claim: RunClaim): boolean {
-  return "actorKind" in claim.change && (claim.change.actorKind === null || claim.change.actorKind === "human");
+  return claim.change.actorKind === null || claim.change.actorKind === "human";
 }
 
 /** The seed of every id and idempotency key a step's effects use. */

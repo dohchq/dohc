@@ -3,7 +3,8 @@ import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
-import { datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+import { chatReachStepsOf, datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+import type { ChatDirectory } from "./automationChat";
 import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automationReach";
 
 // How a dataset Collection's automation maps onto the dataset's approved
@@ -210,11 +211,16 @@ function resolve(
 const GENERATED_ONLY = (name: string) =>
   `${name}'s operations were written or changed outside dohc, so automations cannot use them yet.`;
 
+export const DATASET_WAKE_NEEDS_BUTTON =
+  "In this Collection, only a button can wake your agent, because dohc cannot tell a person's change from an agent's. Choose a button as the trigger.";
+
 /** Why dohc cannot run an automation on this dataset, or null. */
 export function datasetAutomationProblem(automation: Automation, dataset: { definition: DatasetDefinition; generated: boolean }): string | null {
-  if (stepsInOrder(automation).some(({ step }) =>
-    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent")) {
-    return "This Collection's automations cannot post in chat, notify people, or wake agents. Remove those steps from the automation.";
+  // Only a person's change wakes an agent. A dataset commit does not say
+  // whether a person or an agent made it, and an agent's writes through the
+  // CLI commit as the owner, so only a press, which a person makes, can.
+  if (automation.when.kind !== "button" && stepsInOrder(automation).some(({ step }) => step.kind === "wake-agent")) {
+    return DATASET_WAKE_NEEDS_BUTTON;
   }
   const shape = shapeProblem(automation, (condition) => {
     const filters = datasetFindOf(condition);
@@ -267,20 +273,23 @@ export function datasetButtonOf(automation: Automation, definition: DatasetDefin
 }
 
 /**
- * The reach check's view of a dataset automation. First each operation it
- * can call, once each: the trigger record's read, each step's operation, and
- * each read that checks a record again after someone changed it. Then each
- * field of the tables it uses, which its formulas see only while every editor
- * can read it; a field that becomes readable because an editor left waits
- * for a current editor's confirmation, like a step. A button holds no value,
- * so formulas never see one. An automation whose operations do not resolve
- * runs nothing, so it has no steps to check.
+ * The reach check's view of a dataset automation. First the chats it
+ * reaches, as a document Collection's automation reaches them. Then each
+ * operation it can call, once each: the trigger record's read, each step's
+ * operation, and each read that checks a record again after someone changed
+ * it. Then each field of the tables it uses, which its formulas see only
+ * while every editor can read it; a field that becomes readable because an
+ * editor left waits for a current editor's confirmation, like a step. A
+ * button holds no value, so formulas never see one. The chats come first so
+ * a schema change cannot move their places. An automation whose operations
+ * do not resolve runs nothing, so it has no steps to check.
  */
 export function datasetReachSteps(
   automation: Automation,
   collection: ReachCollection,
   definition: DatasetDefinition,
   grants: ReachDatasetGrants,
+  chat: ChatDirectory | null,
 ): ReachStep[] {
   const resolved = resolve(automation, definition, false);
   if ("problem" in resolved) return [];
@@ -289,6 +298,7 @@ export function datasetReachSteps(
   const tables = new Map([[table.tableId, table], ...[...steps.values()].map((step) => [step.table.tableId, step.table] as const)]);
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   return [
+    ...chatReachStepsOf(automation, chat),
     ...invokedOperations(resolved.steps).map((operation): ReachStep => ({ kind: "dataset-operation", collection, grants, operation: reach(operation) })),
     ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ? [] : [{
       kind: "dataset-field", collection, grants, field: { fieldId: field.fieldId, name: field.name },
@@ -321,7 +331,8 @@ export function pinDatasetOperations(automation: Automation, definition: Dataset
 /**
  * A dataset claim as planning reads a change: fields named as the approved
  * rules name them, each side wrapped as the engine wraps a fact. A press
- * changed no field.
+ * changed no field, and a person made it. A commit does not say whether a
+ * person or an agent made it, so its actor is left unknown.
  */
 export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable, readable: ReadonlySet<string>): RunClaim {
   const fact = claim.fact;
@@ -340,7 +351,10 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
       next: side(fact.kind !== "removed", change.next as JsonValue, truncated),
     });
   }
-  return { automationId: claim.automationId, claimId: claim.claimId, createdAtMs: claim.createdAtMs, collectionPath, change: { kind: fact.kind, fields, fieldsOmitted: 0 } };
+  return {
+    automationId: claim.automationId, claimId: claim.claimId, createdAtMs: claim.createdAtMs, collectionPath,
+    change: { kind: fact.kind, fields, fieldsOmitted: 0, ...(fact.kind === "button" ? { actorKind: "human" as const } : {}) },
+  };
 }
 
 /**
