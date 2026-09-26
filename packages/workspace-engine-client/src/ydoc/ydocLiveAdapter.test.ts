@@ -1393,6 +1393,54 @@ describe("YdocLiveAdapter", () => {
   // The engine claims an unclaimed lineage inside the record that turns sync
   // on for it. When that record's response is lost, the session is still
   // unclaimed and the engine holds a claim it made from this very history.
+  // Sync turned on while this editor sat idle. The engine claimed the
+  // lineage from its own history and asks the session to resync. The
+  // session learns the claim without a record and keeps its document.
+  it("learns a claim the engine made while it was idle", async () => {
+    const engine = seedPlaintextEngine("idle");
+    let claimed = false;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync || !claimed) return response;
+        return {
+          ...response,
+          result: {
+            ...(response.result as Record<string, JsonValue>),
+            lineageClaimId: "own-claim",
+            lineageOriginatedHere: true,
+          },
+        };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const openedDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+
+    claimed = true;
+    engine.emitEvent({
+      name: YDOC_EVENT.remoteUpdate,
+      seq: 100,
+      sessionGeneration: 1,
+      payload: { sessionId: session.sessionId, resyncRequired: true },
+    });
+
+    await vi.waitFor(() => expect(session.lineageClaimId).toBe("own-claim"));
+    expect(session.doc).toBe(openedDoc);
+    expect(replacements).toEqual([]);
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("takes the claim its own lost record made and keeps its document", async () => {
     const engine = seedPlaintextEngine("local");
     let claimed = false;

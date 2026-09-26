@@ -633,21 +633,25 @@ impl EngineService {
 
     /// Claim the unclaimed lineage of every live editor session in `open`
     /// for the relay, once enrollment is ready, and hand each session its
-    /// claim. Holds the session lock, so no write of these sessions is in
-    /// flight and none can expect the old claim afterwards. Returns how many
-    /// lineages it claimed, and any it declined to share.
+    /// claim. The session lock is held from before the claims are read until
+    /// every claim is handed over, so no write of these sessions can expect
+    /// the old claim. The work runs in its own task: a caller dropped on
+    /// cancellation or deadline cannot release the lock between a committed
+    /// claim and its handover. Each editor is then told to resync, which is
+    /// how its client learns the claim. Returns how many lineages were
+    /// claimed, and any declined as too large to share.
     async fn originate_live_sessions(
         &self,
         ctx: &RequestContext,
         open: &Arc<OpenWorkspace>,
     ) -> Result<(usize, Vec<dohc_engine_sync::SharingDeclined>), WireError> {
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("sync live origination (queued)"));
             }
-            serial = open.session_ops.lock() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()
@@ -664,23 +668,44 @@ impl EngineService {
             })
             .map(|(session_id, session)| (session_id.clone(), session.key.clone()))
             .collect();
-        let mut claimed = 0;
-        let mut declined = Vec::new();
-        for (session_id, key) in unclaimed {
-            let (claim, decline) = open
-                .actor
-                .ydoc_originate_live_lineage(key, now_ms()?, cancellation.token())
-                .await
-                .map_err(map_runtime)?;
-            declined.extend(decline);
-            if let Some(claim) = claim
-                && let Some(session) = lock(&self.sessions).get_mut(&session_id)
-            {
-                session.lineage_claim_id = Some(claim);
-                claimed += 1;
-            }
+        if unclaimed.is_empty() {
+            return Ok((0, Vec::new()));
         }
-        Ok((claimed, declined))
+        let sessions = Arc::clone(&self.sessions);
+        let events = self.events.clone();
+        let actor = open.actor.clone();
+        let now = now_ms()?;
+        let token = cancellation.token();
+        let task = tokio::spawn(async move {
+            let _serial = serial;
+            let mut claimed = 0;
+            let mut declined = Vec::new();
+            for (session_id, key) in unclaimed {
+                let (claim, decline) = actor
+                    .ydoc_originate_live_lineage(key, now, token.clone())
+                    .await?;
+                declined.extend(decline);
+                let Some(claim) = claim else { continue };
+                let handed = match lock(&sessions).get_mut(&session_id) {
+                    Some(session) => {
+                        session.lineage_claim_id = Some(claim);
+                        true
+                    }
+                    None => false,
+                };
+                if handed {
+                    claimed += 1;
+                    events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({ "sessionId": session_id, "resyncRequired": true }),
+                    );
+                }
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>((claimed, declined))
+        });
+        task.await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live origination task failed"))?
+            .map_err(map_runtime)
     }
 
     pub(super) async fn sync_pull(
