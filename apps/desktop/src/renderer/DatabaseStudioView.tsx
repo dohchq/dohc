@@ -591,7 +591,7 @@ function DatabaseGrid(props: {
               <tr
                 key={String(row.__dohc_rowid ?? `${rowLabel}-${sourceIndex}`)}
                 data-testid="db-row"
-                className="bg-bg transition-colors hover:bg-hover"
+                className="bg-bg transition-colors hover:bg-panel-2"
               >
                 <td className="sticky left-0 z-10 border-b border-r border-line/60 bg-inherit px-2.5 py-1.5 text-right text-[11px] tabular-nums text-subtle">
                   {visibleIndex + 1}
