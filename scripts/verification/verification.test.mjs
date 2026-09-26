@@ -330,12 +330,13 @@ test("verification prepares the engine after Rust without changing gate scope", 
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
       put("apps/desktop/package.json", "{}");
+      put("packages/fixture/package.json", '{"scripts":{"test":"vitest run"}}');
       for (const name of ["dohc", "dohc-mcp"]) {
         put(`apps/desktop/resources/cli-bin/${name}`, "fixture launcher");
         chmodSync(join(root, "apps/desktop/resources/cli-bin", name), 0o755);
@@ -384,7 +385,16 @@ test("verification prepares the engine after Rust without changing gate scope", 
             writeFileSync(join(repoRoot,'.dohc-dev/database-stopped'),'yes');return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='run') {
-            assert.ok(['typecheck','test'].includes(args[1]));
+            assert.ok(['typecheck','test:repo'].includes(args[1]));
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
+            return {stdout:''};
+          }
+          if(command==='pnpm' && args.includes('list')) {
+            return {stdout:JSON.stringify([{name:'@dohc/fixture',path:join(repoRoot,'packages/fixture')}])};
+          }
+          if(command==='pnpm' && args[1]==='@dohc/fixture') {
+            assert.deepEqual(args,['--filter','@dohc/fixture','run','test','--maxWorkers=4']);
+            assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
@@ -844,7 +854,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
     ]) {

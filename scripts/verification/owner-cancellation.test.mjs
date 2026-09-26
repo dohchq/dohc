@@ -4,6 +4,34 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { runOwnerCancellationFixture } from "./owner-cancellation-fixture.mjs";
+import { runCanonicalCancellationFixture } from "./workspace-cancellation-fixture.mjs";
+
+test("Linux verification stops stubborn package groups before removing Postgres", {
+  skip: process.platform !== "linux" ? "Linux process groups and /proc liveness" : false,
+  timeout: 30_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-package-cancel-"));
+  try {
+    const result = await runCanonicalCancellationFixture(root, resolve(import.meta.dirname, "../.."));
+    assert.equal(result.error, undefined, result.stderr);
+    assert.equal(result.owner.signal, null);
+    assert.equal(result.owner.code, 143, result.stderr);
+    assert.equal(result.workers.length, 2);
+    assert.equal(result.terms.length, 2);
+    assert.deepEqual(result.cleanup.alive, [], "package groups must close before database cleanup");
+    assert.equal(result.verification.verdict, "FAIL");
+    assert.equal(result.scheduler.verdict, "FAIL");
+    const packages = result.scheduler.steps.filter(step => step.name.startsWith("@dohc/"));
+    assert.equal(packages.length, 2);
+    assert.ok(packages.every(step => step.verdict === "FAIL" && step.finishedAt && step.seconds >= 0));
+    assert.ok(result.scheduler.finishedAt && result.verification.finishedAt);
+    assert.equal(result.queuedStarted, false);
+    for (const worker of result.workers) assert.deepEqual(worker.env, {
+      POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1234/dohc",
+      DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1",
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const kind of ["prepare", "verify"]) for (const signal of ["SIGINT", "SIGTERM"]) {
   for (const cleanupFails of kind === "verify" ? [false, true] : [false]) {

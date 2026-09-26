@@ -45,7 +45,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")) } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env } = {}) {
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
@@ -55,7 +55,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     await cancellation.checkpoint();
     const row = { name, args, log: join(output, name.replaceAll(/[^\w.-]/gu, "_") + ".log") };
     report.steps.push(row);
-    return timed(row, () => run(...pnpm(args), { log: row.log }), save);
+    return timed(row, () => run(...pnpm(args), { env, log: row.log }), save);
   }
   try {
     if (!prepared) {

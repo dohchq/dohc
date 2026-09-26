@@ -8,6 +8,7 @@ import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
+import { testWorkspace } from "./js-tests.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
@@ -158,13 +159,16 @@ export async function verify(args) {
   }
   let database;
   let desktopEnvironment = process.env;
-  async function step(name, command, commandArgs, env = process.env) {
+  async function checkedStep(row, action) {
     await cancellation.checkpoint();
-    const row = { name, command, args: commandArgs, verdict: "RUNNING", log: join(output, `${name}.log`) };
     report.steps.push(row); save();
-    const result = await timed(row, () => run(command, commandArgs, { env, log: row.log }), save);
-    await checkTree(name);
+    const result = await timed(row, action, save);
+    await checkTree(row.name);
     return result;
+  }
+  function step(name, command, commandArgs, env = process.env) {
+    const row = { name, command, args: commandArgs, log: join(output, `${name}.log`) };
+    return checkedStep(row, () => run(command, commandArgs, { env, log: row.log }));
   }
   save();
   const cancellation = cancellationScope("Verification");
@@ -211,7 +215,10 @@ export async function verify(args) {
       desktopEnvironment = env;
       await step("typecheck", ...pnpm(["run", "typecheck"]), env);
       report.jsTests = join(output, "js-tests", "result.json");
-      await step("tests", ...pnpm(["run", "test", "--prepared", "--output", join(output, "js-tests")]), env);
+      // Keep package groups under this owner so cancellation finishes their
+      // escalation before database cleanup, without a competing parent timer.
+      await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
+        () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env }));
       const nativeOutput = join(output, "self-host-native");
       mkdirSync(nativeOutput, {recursive: true});
       const nativeHash = hashFile(enginePath);
