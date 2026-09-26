@@ -39,6 +39,7 @@ import type {
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   RetryCollectionAutomationResult,
@@ -356,6 +357,7 @@ function makeBaseBridge(
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
+  const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -754,6 +756,21 @@ function makeBaseBridge(
         return () => automationFailuresCallbacks.delete(listener);
       },
     ),
+    readCrashReport: vi.fn(
+      async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
+        report: null,
+        sendTo: null,
+      }),
+    ),
+    dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
+    sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    emitCrashReportChanged: () => {
+      for (const callback of [...crashReportCallbacks]) callback();
+    },
+    onCrashReportChanged: vi.fn((listener: () => void) => {
+      crashReportCallbacks.add(listener);
+      return () => crashReportCallbacks.delete(listener);
+    }),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -9639,6 +9656,96 @@ describe("automation failure notices", () => {
       bridge.listAutomationFailures.mock.calls.length,
       "another workspace's failures repainting this one",
     ).toBe(reads);
+  });
+});
+
+describe("crash report notice", () => {
+  const REPORT = {
+    revision: 3,
+    through: 3,
+    source: "engine" as const,
+    problems: 1,
+    atMs: 5_000,
+    text: "dohc crash report\n\nTime: 1970-01-01T00:00:05.000Z\nProcess: workspace engine",
+  };
+
+  it("offers Copy report and no Send report when this build has no report server", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("crash-report-toast");
+    expect(toast.textContent).toContain("The workspace engine failed");
+    expect(screen.queryByTestId("crash-report-toast-send")).toBeNull();
+    expect(screen.getByTestId("crash-report-toast-copy").getAttribute("aria-label")).toBe("Copy report");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).not.toContain("Send report");
+    expect(screen.getByTestId("notice-crash-report-copy").getAttribute("aria-label")).toBe("Copy report");
+    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
+  });
+
+  it("hands Send report to main, which asks, and says Report sent only when it went", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    // The person cancelled main's dialog.
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: false });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
+    // No dialog of the renderer's own: main asks.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("crash-report-toast-send")).toBeTruthy());
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: true });
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: "reports.example.test" });
+    await user.click(screen.getByTestId("crash-report-toast-send"));
+    await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
+  });
+
+  it("keeps the report and offers Try again when the send fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    bridge.sendCrashReport.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'desktop:send-crash-report': Error: The connection to the report server failed."),
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("crash-report-toast-send"));
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not send the crash report. The connection to the report server failed.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledTimes(2));
+  });
+
+  it("dismisses up to the problem on screen and shows a newer report on the poke", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
+    await user.click(await screen.findByTestId("notice-crash-report-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("notice-crash-report")).toBeNull());
+    expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ through: 3 });
+
+    bridge.readCrashReport.mockResolvedValue({
+      report: { ...REPORT, revision: 5, through: 4, source: "window", problems: 2 },
+      sendTo: null,
+    });
+    act(() => bridge.emitCrashReportChanged());
+    const row = await screen.findByTestId("notice-crash-report");
+    expect(row.textContent).toContain("A dohc window stopped unexpectedly");
+    expect(row.textContent).toContain("This report holds 2 problems.");
   });
 });
 

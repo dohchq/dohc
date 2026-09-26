@@ -11,6 +11,7 @@ import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspac
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
+import { useCrashReport } from "./shell/useCrashReport";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
@@ -299,6 +300,7 @@ export function WorkspaceManager(props: {
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
+  const crashReportNotice = useCrashReport(connectionNotices);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");
@@ -525,6 +527,7 @@ export function WorkspaceManager(props: {
         onRetry={connectionNotices.retryNotice}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
+        {...crashReportNotice}
       />
     </div>
   );
