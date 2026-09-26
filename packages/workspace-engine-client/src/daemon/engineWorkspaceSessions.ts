@@ -461,7 +461,13 @@ export class EngineWorkspaceSessions {
           // Subscribe before the operation: settlement can occur while the
           // daemon's refusal is travelling back to this client.
           initialCaptureWake = new Promise<void | "rebind">((resolve) => {
-            unsubscribeClientChanged = this.source.onClientChanged?.(() => resolve("rebind"));
+            unsubscribeClientChanged = this.source.onClientChanged?.(() => {
+              try {
+                if (this.source.currentClient()) resolve("rebind");
+              } catch {
+                // Keep the capture deadline while the replacement launches.
+              }
+            });
             unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
               if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
               let current = false;

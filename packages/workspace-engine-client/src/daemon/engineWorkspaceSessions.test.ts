@@ -111,17 +111,22 @@ describe("EngineWorkspaceSessions", () => {
   it.each([
     ["binding close", "deadline"],
     ["client replacement", "deadline"],
+    ["delayed client replacement", "deadline"],
     ["binding close", "event"],
     ["client replacement", "event"],
+    ["delayed client replacement", "event"],
   ] as const)(
     "rebinds during initial capture after %s and finishes on the original %s",
     async (change, finish) => {
       const workspace = await tempWorkspace();
       const first = new MockClient("first"), replacement = new MockClient("replacement");
-      let current = first;
+      let current: MockClient | null = first;
       const changed = new Set<() => void>();
       const source = {
-        currentClient: () => current,
+        currentClient: () => {
+          if (!current) throw new EngineDaemonUnavailableError("Daemon is relaunching.");
+          return current;
+        },
         onClientChanged: (handler: () => void) => {
           changed.add(handler);
           return () => { changed.delete(handler); };
@@ -142,12 +147,21 @@ describe("EngineWorkspaceSessions", () => {
       const finished = finish === "deadline"
         ? expect(run).rejects.toBe(refusal)
         : expect(run).resolves.toBe("ready");
+      void finished.catch(() => undefined);
       let closing: Promise<void> | undefined;
       try {
         await vi.advanceTimersByTimeAsync(40_000);
         if (change === "binding close") {
           closing = sessions.closeWorkspaceBinding(workspace);
         } else {
+          if (change === "delayed client replacement") {
+            current = null;
+            for (const handler of changed) handler();
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(bindings).toHaveLength(1);
+            expect(changed.size).toBe(1);
+            expect(vi.getTimerCount()).toBe(1);
+          }
           current = replacement;
           for (const handler of changed) handler();
         }
@@ -156,7 +170,7 @@ describe("EngineWorkspaceSessions", () => {
         await closing;
         expect(bindings[1]).toBe(current);
         expect(current.eventSubscriberCount).toBe(1);
-        if (change === "client replacement") expect(first.eventSubscriberCount).toBe(0);
+        if (change !== "binding close") expect(first.eventSubscriberCount).toBe(0);
         if (change === "binding close") {
           expect(first.requests.map(request => request.method)).toEqual([
             "workspace.open", "workspace.close", "workspace.open",
@@ -172,6 +186,7 @@ describe("EngineWorkspaceSessions", () => {
           current.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
         }
         await finished;
+        expect(performance.now() - started).toBeLessThanOrEqual(120_000);
         expect(bindings).toHaveLength(3);
         expect(vi.getTimerCount()).toBe(0);
         expect(current.eventSubscriberCount).toBe(0);
