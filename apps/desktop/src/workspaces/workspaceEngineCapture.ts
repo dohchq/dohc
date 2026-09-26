@@ -378,12 +378,13 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
-  // write dedupes engine-side. A keyed update's promise rejects with the
-  // engine's refusal when the key already recorded other content, and
-  // otherwise when the engine never answered; the error then says whether
-  // the update may have been recorded. A rejected update does not stay in
-  // the document unless the engine recorded it. An update without a key
-  // never rejects.
+  // write dedupes engine-side. A keyed update must insert content: one that
+  // only deletes is refused before it is sent. A keyed update's promise
+  // rejects with the engine's refusal when the key already recorded other
+  // content, and otherwise when the engine never answered; the error then
+  // says whether the update may have been recorded. A rejected update does
+  // not stay in the document unless the engine recorded it. An update
+  // without a key never rejects.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -715,6 +716,16 @@ function isFileLockedCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+// Whether the update carries any new item, rather than only deletions: some
+// client's struct range in it is not empty.
+function insertsContent(update: Uint8Array): boolean {
+  const { from, to } = Y.parseUpdateMeta(update);
+  for (const [client, end] of to) {
+    if (end > (from.get(client) ?? 0)) return true;
+  }
+  return false;
 }
 
 function isLineageChangedCause(error: unknown): boolean {
@@ -2139,11 +2150,15 @@ export function createWorkspaceEngineCapture(
     // A recovery replay carries no idempotency key, so it must never carry a
     // keyed update. A failed send therefore restores the canonical doc to
     // its state before the update, when the generation shares that doc,
-    // rebuilds the generation, and resends the update under its key, so the
-    // engine's key ledger answers: the same content already recorded is a
-    // success, other content is the key's refusal. Once a send has gone out,
-    // a failure the ledger did not answer may have recorded the update, and
-    // the caller hears exactly that.
+    // rebuilds the generation, and resends the update under its key. The
+    // key ledger answers that resend: other content is the key's refusal,
+    // and a fresh record is a success. One resend gets no ledger answer:
+    // when the rebuilt generation already holds the update, applying it
+    // changes nothing and the client sends nothing. That is a success too,
+    // because only the engine recording this write can have put its
+    // inserted items there, which is why a keyed update must insert. Once a
+    // send has gone out, a failure nobody answered may have recorded the
+    // update, and the caller hears exactly that.
     const applyKeyedUpdate = async (
       update: Uint8Array,
       applyOptions: Parameters<
@@ -2339,6 +2354,13 @@ export function createWorkspaceEngineCapture(
         // another settle). #514, and its two review rounds.
         const armed = announceOnce(onArmed);
         const keyed = applyOptions?.idempotencyKey !== undefined;
+        if (keyed && !insertsContent(update)) {
+          return Promise.reject(
+            new Error(
+              `A write with an idempotency key must insert content; this update to ${input.path} only deletes.`,
+            ),
+          );
+        }
         const applied = append(async () => {
           if (keyed) {
             await applyKeyedUpdate(update, applyOptions, armed);

@@ -2102,7 +2102,9 @@ it("answers success when a keyed write's answer was lost and its resend finds th
     "dohc-ydoc-keyed-lost-response-",
   );
   // The send records, and its answer is lost. The resend under the same key
-  // meets the key's own record.
+  // meets the key's own record. This fake consults its ledger even for an
+  // update its doc holds; the real client sends nothing then, which
+  // workspaceEngineYDocSession.test.ts covers.
   state.applyFaults.push("commit-then-drop");
   await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
     idempotencyKey: "claim/1/0",

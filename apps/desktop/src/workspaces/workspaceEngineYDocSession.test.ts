@@ -69,6 +69,15 @@ let closeRefusal: unknown = null;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
 let nextRecordRefusal: unknown = null;
+// Records the next journal write, then loses its answer with the connection;
+// the resync that recovery sends next is lost the same way.
+let loseNextRecordAnswer = false;
+let loseNextResync = false;
+function transportLost(): Error {
+  return Object.assign(new Error("The engine client is closed: transport closed."), {
+    code: "transport-error",
+  });
+}
 let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
@@ -115,6 +124,15 @@ function daemonSessions(): EngineWorkspaceSessions {
         const refusal = nextRecordRefusal;
         nextRecordRefusal = null;
         throw refusal;
+      }
+      if (request.method === YDOC_METHOD.resync && loseNextResync) {
+        loseNextResync = false;
+        throw transportLost();
+      }
+      if (request.method === YDOC_METHOD.recordUpdate && loseNextRecordAnswer) {
+        loseNextRecordAnswer = false;
+        await ydoc.sendRequest(request);
+        throw transportLost();
       }
       if (
         recordUpdateDelayMs > 0 &&
@@ -200,6 +218,8 @@ beforeEach(async () => {
   settleRefusal = null;
   closeRefusal = null;
   nextRecordRefusal = null;
+  loseNextRecordAnswer = false;
+  loseNextResync = false;
   captureErrors = [];
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
@@ -1082,4 +1102,52 @@ it("refuses a reused key that a busy store first turned away, and never resends 
   expect(journalMarkdown()).toContain("First attempt.");
   expect(journalMarkdown()).not.toContain("Changed retry.");
   expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
+});
+
+it("answers success when a recorded keyed write's answer is lost, without resending what the engine holds", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const opensBefore = methodCount(YDOC_METHOD.open);
+  loseNextRecordAnswer = true;
+  loseNextResync = true;
+  await keyedWrite(session, "Recorded once.");
+
+  // Recovery lost its resync too, so the session was rebuilt. The rebuilt
+  // session already holds the write, so the client's resend changes nothing
+  // and sends nothing: the one keyed request is the first.
+  expect(methodCount(YDOC_METHOD.open)).toBe(opensBefore + 1);
+  const keyed = requests.filter(
+    (request) =>
+      request.method === YDOC_METHOD.recordUpdate &&
+      request.idempotencyKey === "claim/1/0",
+  );
+  expect(keyed).toHaveLength(1);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Recorded once.");
+  await session.settleNow();
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Recorded once.");
+  await session.close({ settle: false });
+});
+
+it("refuses a keyed update that only deletes, before sending it", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(scratch);
+  const body = scratch.getXmlFragment("body");
+  body.delete(body.length - 1, 1);
+  const recordsBefore = methodCount(YDOC_METHOD.recordUpdate);
+
+  await expect(
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(scratch, before), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("must insert content");
+  expect(methodCount(YDOC_METHOD.recordUpdate)).toBe(recordsBefore);
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Start here.");
+  await session.close({ settle: false });
 });
