@@ -1,15 +1,28 @@
-# Cloud CI is out of budget. PR verification uses pnpm verify:pr locally.
-# Keep dispatch-only; a manual run requires a registered local Linux x64 runner.
+# Blacksmith is off unless the repository variable BLACKSMITH_ENABLED is true.
+# While off, only manual runs allocate runners, using local Linux x64 hosts.
 # The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
+    inputs:
+      gate:
+        description: Full gate to run
+        type: choice
+        options: [all, js, rust]
+        default: all
+      runner_size:
+        description: Blacksmith vCPUs, ignored while Blacksmith is off
+        type: choice
+        options: ["4", "8"]
+        default: "4"
 
 concurrency:
-  group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  group: pr-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -20,21 +33,36 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # Manual dispatch runs both jobs. The local verifier selects from these filters.
+  # Evaluate this condition before allocating any runner. Forks stay local-only.
   changes:
     name: what changed
-    runs-on: [self-hosted, linux, x64]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.BLACKSMITH_ENABLED == 'true' && !github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 5
     permissions:
-      pull-requests: read
+      contents: read
     outputs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         if: github.event_name == 'pull_request'
         id: filter
         with:
+          # Use the checked-out merge commit, just like the canonical verifier.
+          # Local Git also avoids the PR files API's 3,000-file limit.
+          token: ""
+          base: ${{ github.event.pull_request.base.sha }}
           filters: |
             # .cargo/ holds audit.toml, where advisory ignores would hide;
             # .gitignore decides what the gate's own tree-provenance readings
@@ -121,12 +149,14 @@ jobs:
   javascript:
     name: typecheck + tests
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
-    runs-on: [self-hosted, linux, x64]
+    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
@@ -155,19 +185,42 @@ jobs:
         run: pnpm exec playwright install-deps chromium
 
       # The runner owns Postgres, native preparation, and every mandatory proof,
-      # including accounts and self-host onboarding. Dispatch always runs this job.
-      - name: Canonical JavaScript gate
+      # including accounts and self-host onboarding when selected.
+      - name: Selected JavaScript gate
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: xvfb-run -a pnpm verify:pr --base "$PR_BASE_SHA" --job js
+
+      - name: Full JavaScript gate
+        if: github.event_name == 'workflow_dispatch'
         run: xvfb-run -a pnpm verify:pr --base HEAD --job js --full
+
+      - name: Verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-js-${{ github.run_attempt }}
+          path: |
+            .agent-artifacts/verification/*/result.json
+            .agent-artifacts/verification/*/*.log
+            .agent-artifacts/verification/*/js-tests/result.json
+            .agent-artifacts/verification/*/js-tests/**/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
 
   rust:
     name: engine gate
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-    runs-on: [self-hosted, linux, x64]
+    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
@@ -198,5 +251,52 @@ jobs:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
 
       # Linux also exercises cfg(unix) code absent from Windows verification.
-      - name: Canonical engine gate
+      - name: Selected engine gate
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: pnpm verify:pr --base "$PR_BASE_SHA" --job rust
+
+      - name: Full engine gate
+        if: github.event_name == 'workflow_dispatch'
         run: pnpm verify:pr --base HEAD --job rust --full
+
+      - name: Verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-rust-${{ github.run_attempt }}
+          path: |
+            .agent-artifacts/verification/*/result.json
+            .agent-artifacts/verification/*/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  verification:
+    name: PR verification
+    needs: [changes, javascript, rust]
+    if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
+    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected gate
+        env:
+          JOBS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_GATE: ${{ inputs.gate || 'all' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const jobs = JSON.parse(process.env.JOBS);
+          assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
+          for (const [gate, job] of [['js', 'javascript'], ['rust', 'rust']]) {
+            if (process.env.EVENT_NAME === 'pull_request') {
+              assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
+            }
+            const selected = process.env.EVENT_NAME === 'workflow_dispatch'
+              ? process.env.REQUESTED_GATE === 'all' || process.env.REQUESTED_GATE === gate
+              : jobs.changes.outputs[gate] === 'true';
+            assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
+          }
+          NODE

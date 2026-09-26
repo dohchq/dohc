@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The Rust gate. CI is dispatch-only, so this runs locally: it runs the Rust
+// The Rust gate, shared by local verification and CI. It runs the Rust
 // policy checks and prints a timestamped evidence line the integrator pastes
 // into the pull request.
 //

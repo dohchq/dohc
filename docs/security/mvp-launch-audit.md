@@ -129,7 +129,7 @@ Follow-up: the shared static server rejects Host values other than its bound `12
 - No install-time lifecycle scripts anywhere in 27 workspace packages; pnpm's build allowlist covers only electron, electron-winstaller, and esbuild. No lockfile deps from git or URLs.
 - The three pnpm patches cover list rendering, file watching, and editor behavior. The vendored crates (`file-guard`, `yrs`) are verified by SHA-256 with documented upstream commits and change notes.
 - No backdoor patterns: no remote-code eval, no `curl`-to-shell, no magic auth tokens, no time or date triggers, no origin-based bypasses.
-- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`, PR checks dispatch-only on self-hosted runners.
+- Workflows: action SHAs pinned, `persist-credentials: false`, no `pull_request_target`. Blacksmith PR checks stay off behind `BLACKSMITH_ENABLED`; manual checks use self-hosted runners while off.
 - No secrets in the tree or in the scanned history beyond the test PEM in finding 4. `.gitignore` covers `.env*`; the example env file holds placeholders and honest disclosures.
 - `deny.toml` restricts sources to crates.io and has an empty advisory ignore list. Separately, `.cargo/audit.toml` ignores `RUSTSEC-2026-0009` and documents the claimed unreachable dependency path.
 - Electron fuses hardened with a smoke gate; no source maps ship in production; the mock update server is unreachable from app code.
