@@ -82,6 +82,11 @@ describe("dataset automation steps", () => {
     expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), generated)).toBeNull();
   });
 
+  it("says it cannot run an action step yet", () => {
+    expect(datasetAutomationProblem(automation("      - invoke: invoices.status\n"), generated))
+      .toBe("dohc cannot run Collection actions from automations yet.");
+  });
+
   it("pins a reversible edit first, then the one with the fewest fields beyond the step's", () => {
     const pinned = pinDatasetOperations(automation(`      - set:
           Status: Done
@@ -97,6 +102,38 @@ describe("dataset automation steps", () => {
       step.kind === "if" ? names(step.do) : "operation" in step ? [step.operation] : []);
     // invoices.edit is reversible and wins over the narrower invoices.status.
     expect(names(pinned.do)).toEqual(["invoices.edit", "invoices.edit", null]);
+  });
+
+  it("pins an Add record only to a create in its own table, and names another table's that fits", () => {
+    const REFUNDS = id(20), REFUND_STATUS = id(21);
+    const twoTables: DatasetDefinition = {
+      ...definition,
+      tables: [...definition.tables, { tableId: REFUNDS, name: "Refunds", sqlName: "refunds", primaryKey: "id", fields: [
+        { fieldId: id(22), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        { fieldId: REFUND_STATUS, name: "Status", sqlColumn: "status", type: "text", required: true, unique: false },
+      ] }],
+      // refunds.create fits Status with no extra field; invoices.create has Notes too.
+      operations: [...definition.operations, { ...operation(23, "refunds.create", "create", [REFUND_STATUS]), tableId: REFUNDS }],
+    };
+    const add = (table: string, step = "Status: New", operationName = "") =>
+      automation(`      - add-record:\n          ${step}\n${operationName ? `        operation: ${operationName}\n` : ""}`, `field-changed: Status\n      table: ${table}`);
+    const pinnedOf = (built: Automation) => pinDatasetOperations(built, twoTables).do[0];
+    const problemOf = (built: Automation) => datasetAutomationProblem(built, { definition: twoTables, generated: true });
+    expect(pinnedOf(add("Invoices"))).toMatchObject({ kind: "add-record", operation: "invoices.create" });
+    expect(pinnedOf(add("Refunds"))).toMatchObject({ kind: "add-record", operation: "refunds.create" });
+    // Refunds has no Notes: a save does not move the step to Invoices, and
+    // the step names the create that would fit, for a person to choose.
+    const notes = add("Refunds", "Notes: seen");
+    expect(pinnedOf(notes)).toMatchObject({ kind: "add-record", operation: null });
+    expect(problemOf(pinDatasetOperations(notes, twoTables))).toBe("Name the approved operation step 1 uses, such as invoices.create.");
+    // A step that names another table's create adds records there, and keeps it.
+    const named = add("Invoices", "Status: New", "refunds.create");
+    expect(pinnedOf(named)).toMatchObject({ operation: "refunds.create" });
+    expect(problemOf(named)).toBeNull();
+    // One whose create stopped fitting is pinned only within that create's table.
+    const stale = add("Invoices", "Notes: seen", "refunds.create");
+    expect(pinnedOf(stale)).toMatchObject({ operation: "refunds.create" });
+    expect(problemOf(stale)).toBe("refunds.create is not an approved way to add records with Notes.");
   });
 
   it("reads a Find as equality filters joined by &&, and offers no contains", () => {

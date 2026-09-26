@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
   isNoticeLine,
@@ -63,14 +64,6 @@ export interface PostNoticeInput {
   recipientUserId?: string;
   // Ends the post before it sends or queues, as when an automation run stops.
   signal?: AbortSignal;
-}
-
-// A notice for another person that did not reach them. The message says why.
-export class NoticeNotSentError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NoticeNotSentError";
-  }
 }
 
 export interface NoticeStore {

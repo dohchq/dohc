@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RecordButton } from "./collections/RecordButton";
 import { useAutomationButtons } from "./collections/useAutomationButtons";
+import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
@@ -32,14 +33,18 @@ export interface ConnectedTransactionalCollectionProps {
   tableId: string;
   onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
   onFormCreated(appRoot: string): void;
-  onOpenSource?(path: string): void;
+  /** Opens a workspace file in a tab, such as automations.yaml or an operation source. */
+  onOpenFile(path: string): void;
+  /** Opens the setting where the owner chooses which computer runs schedules. */
+  onOpenScheduleSettings(): void;
   onLifecycleChanged?(): void;
-  onNotice?(message: string): void;
+  /** A success notice; the ⚡ panel's can carry an Undo. */
+  onNotice?(message: string, undo?: () => void): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenSource, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
@@ -113,6 +118,9 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     // A dataset record's id goes to main as JSON, since the table's key can be a number.
     render: (field, row) => <RecordButton buttons={buttons} field={field} recordId={JSON.stringify(row.id)} recordLabel={`record ${String(row.id)}`} />,
   }, [buttons, buttonFields]);
+  const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, refreshKey: recordsVersion, onError,
+    onRecordsChanged: () => setRecordsVersion(value => value + 1),
+    onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
@@ -159,8 +167,11 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
       return result;
     }} />}</>;
-  return <><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+  // The ⚡ panel docks at the right of the table.
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="min-h-0 min-w-0 flex-1"><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
     buttons={buttonColumns}
+    automationsButton={automations.button}
+    fieldMarks={automations.fieldMarks}
     activeView={owner ? activeView : null}
     viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
     copy={copy}
@@ -212,7 +223,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         return { value, label: display(label ? row.values[label.fieldId] : value) || String(value) };
       }), hasMore: page.nextCursor !== null };
     }}
-    invoke={invoke} />
+    invoke={invoke} /></div>{automations.panel}</div>
     {viewingPending && owner && !copy?.offline && <CollectionPendingResponsesDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setViewingPending(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
@@ -239,7 +250,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
-      onOpenSource={onOpenSource ? path => { setViewingHistory(false); onOpenSource(path); } : undefined}
+      onOpenSource={path => { setViewingHistory(false); onOpenFile(path); }}
       onEditFields={() => { setViewingHistory(false); setEditingFields(true); }}
       onReviewSource={() => { setViewingHistory(false); setHistoryRestore(undefined); setReviewingSchema(true); }}
       onLoadRevision={async (revisionSha256, signal) => {

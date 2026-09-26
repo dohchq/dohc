@@ -13,7 +13,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "./recordIds";
 import type { ReachCollection, ReachStep } from "./automationReach";
 import {
   automationMessageId,
@@ -296,6 +296,7 @@ export function operationsOf(automation: Automation): string[] {
   const names = new Set<string>();
   for (const { step } of everyStep(orderSteps(automation.do))) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) names.add(step.operation);
+    if (step.kind === "invoke") names.add(step.operation);
   }
   return [...names];
 }
@@ -313,6 +314,7 @@ export function unsupportedReason(automation: Automation): string | null {
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   for (const { step } of stepsInOrder(automation)) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) return DATASET;
+    if (step.kind === "invoke") return DATASET;
   }
   return shapeProblem(automation, (condition) => {
     const query = findQueryOf(condition);
@@ -346,6 +348,8 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
       case "run":
       case "run-file":
         return "dohc cannot run code steps yet.";
+      case "invoke":
+        return "dohc cannot run Collection actions from automations yet.";
       case "find": {
         finds += 1;
         formulas += 1;

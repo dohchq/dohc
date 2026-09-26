@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "./recordIds";
 import {
   collectionAutomationId,
   definitionHash,
@@ -121,8 +121,9 @@ describe("what the executor can run", () => {
       "  - set: {Paid: true}", "    operation: invoices.markPaid",
       "  - if: record.Total > 100", "    do: [{add-record: {Note: large}, collection: Log, operation: log.add}]",
       "  - set: {Paid: true}", "    operation: invoices.markPaid",
+      "  - invoke: invoices.send",
     ].join("\n"));
-    expect(operationsOf(steps)).toEqual(["invoices.markPaid", "log.add"]);
+    expect(operationsOf(steps)).toEqual(["invoices.markPaid", "log.add", "invoices.send"]);
   });
 
   it("names why it cannot run code or a Find the query cannot express", () => {
@@ -138,6 +139,7 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
     expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/Collection action/);
+    expect(unsupportedReason(withStep("{invoke: tasks.archive}"))).toMatch(/Collection action/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
     const scheduled = (step: string) => automation(`id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [${step}]`);
     expect(unsupportedReason(scheduled("{find: 'true', as: all}"))).toBeNull();

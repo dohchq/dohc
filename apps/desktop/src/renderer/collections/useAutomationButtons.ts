@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import type { AutomationButtonState } from "../../automations/automationButtons";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import type { AutomationRunSettledEvent, AutomationRunWaitingEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 

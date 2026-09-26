@@ -44,6 +44,7 @@ import {
   parseCollectionAutomationId,
   reachStepsOf,
   scheduleHash,
+  stepsInOrder,
   subscriptionFor,
   unsupportedReason,
 } from "./automationPlan";
@@ -73,6 +74,7 @@ import {
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
 import {
   datasetAutomationProblem,
+  datasetFieldWritesOf,
   datasetOperationsOf,
   datasetReachSteps,
   datasetTableNamed,
@@ -764,6 +766,8 @@ export class CollectionAutomations {
         this.rosterChanged();
         this.notifyClaimed();
         this.options.onFailuresChanged();
+        // An approval can make a dataset's panel and field marks answer at last.
+        this.options.onAutomationsChanged();
       })
       .catch((error: unknown) => this.options.onError("reload dataset automations", error));
   }
@@ -1004,7 +1008,7 @@ export class CollectionAutomations {
     const lastRuns = new Map(await Promise.all(indexed.file.entries.flatMap((entry) => entry.status === "valid"
       ? [collectionAutomationId(collectionPath, entry.automation.id)]
       : []).map(async (automationId) => {
-      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      const listed = await this.claimHistory(automationId, false);
       const [newest] = listed?.claims ?? [];
       return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
     })));
@@ -1061,13 +1065,18 @@ export class CollectionAutomations {
 
   /**
    * The automations the ⚡ panel saves, with each dataset step pinned to the
-   * approved operation it prefers (datasetAutomationPlan.ts).
+   * approved operation it prefers (datasetAutomationPlan.ts). Only a step
+   * the file does not already hold is pinned: one a person built or changed
+   * in the builder. A switch, a rename, a copy, or an edit elsewhere leaves
+   * what each existing step does alone.
    */
-  async pinOperations(collectionPath: string, automations: readonly Automation[]): Promise<Automation[]> {
+  async pinOperations(collectionPath: string, automations: readonly Automation[], saved: readonly Automation[]): Promise<Automation[]> {
     await this.ready();
     await this.openDataset(collectionPath);
     const dataset = this.datasets.get(collectionPath);
-    return dataset === undefined ? [...automations] : automations.map((automation) => pinDatasetOperations(automation, dataset.definition));
+    if (dataset === undefined) return [...automations];
+    const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
+    return automations.map((automation) => pinDatasetOperations(automation, dataset.definition, (step) => held.has(JSON.stringify(step))));
   }
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
@@ -1248,15 +1257,40 @@ export class CollectionAutomations {
     // makes before it writes.
     const writable = this.writableCollections();
     if (!(await writable(collectionPath))) return [];
+    return await this.marksOf(writable, ({ collectionPath: home, automation }) =>
+      fieldWritesOf(automation).flatMap((write) => ((write.collection ?? home) === collectionPath ? [write.field] : [])));
+  }
+
+  /**
+   * The fields in one table of a dataset Collection that its switched-on
+   * automations set. A dataset's automations change only its own records,
+   * so only its own automations.yaml marks them.
+   */
+  async datasetFieldMarks(datasetId: string, table: string): Promise<CollectionFieldMark[]> {
+    if (this.opened === null) return [];
+    await this.opened;
+    const home = await this.datasetFolder(datasetId);
+    const definition = home === null ? undefined : this.datasets.get(home)?.definition;
+    if (definition === undefined) return [];
+    return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
+      datasetFieldWritesOf(automation, definition).flatMap((write) => (write.table === table ? [write.field] : [])));
+  }
+
+  /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
+  private async marksOf(
+    writable: (path: string) => Promise<boolean>,
+    fieldsOf: (owned: OwnedAutomation) => string[],
+  ): Promise<CollectionFieldMark[]> {
     const marks = new Map<string, Map<string, string>>();
-    for (const { automationId, collectionPath: home, automation } of this.everyAutomation()) {
+    for (const owned of this.everyAutomation()) {
+      const { automationId, collectionPath, automation } = owned;
       if (!automation.enabled) continue;
-      const writes = fieldWritesOf(automation).filter((write) => (write.collection ?? home) === collectionPath);
-      if (writes.length === 0 || !(await this.canRun(automationId, home, automation, writable))) continue;
-      for (const write of writes) {
-        const names = marks.get(write.field) ?? new Map<string, string>();
+      const fields = fieldsOf(owned);
+      if (fields.length === 0 || !(await this.canRun(automationId, collectionPath, automation, writable))) continue;
+      for (const field of fields) {
+        const names = marks.get(field) ?? new Map<string, string>();
         names.set(automationId, automation.name);
-        marks.set(write.field, names);
+        marks.set(field, names);
       }
     }
     return [...marks].map(([field, names]) => ({ field, automations: [...names.values()] }));
@@ -1617,6 +1651,16 @@ export class CollectionAutomations {
   }
 
   /**
+   * The folder of the dataset Collection with this id, which holds its
+   * automations.yaml, for the ⚡ panel. Or why dohc cannot run its automations.
+   */
+  async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
+    await this.ready();
+    const collectionPath = await this.datasetFolder(datasetId);
+    return collectionPath === null ? { status: "cannot-run", reason: DATASET_NOT_APPROVED } : { status: "found", collectionPath };
+  }
+
+  /**
    * The folder of the dataset Collection with this id, or null when no
    * approved dataset has it. A person is asking about it, so a dataset the
    * index lacks opens its host to be indexed.
@@ -1854,7 +1898,10 @@ export class CollectionAutomations {
     }
     const result = { undone: 0, left: 0 };
     for (const [automationId, wanted] of hashes) {
-      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      // A dataset's runs are in its host's ledger, which may not be open yet.
+      const parsed = parseCollectionAutomationId(automationId);
+      if (parsed !== null) await this.openDataset(parsed.collectionPath);
+      const listed = await this.claimHistory(automationId, false);
       if (listed === null) throw new Error("The workspace engine is not running.");
       for (const claim of listed.claims) {
         const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs

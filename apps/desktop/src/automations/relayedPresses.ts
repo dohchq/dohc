@@ -5,7 +5,7 @@ import type {
   SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { relayRequest } from "../workspaces/relayRequest";
-import type { CollectionAutomationPress, PressSettled } from "./collectionAutomations";
+import type { CollectionAutomationPress, PressSettled } from "@dohc/automation-executor/collection-automations";
 
 // Button presses from shared views (ADR 0012). A recipient's computer sends
 // the press to the relay; the computer that runs this workspace's schedules

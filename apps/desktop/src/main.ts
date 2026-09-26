@@ -23,7 +23,7 @@ import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection"
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
-import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
+import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -127,7 +127,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -199,9 +199,9 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
-import { CollectionAutomations } from "./automations/collectionAutomations";
-import { parseCollectionAutomationId } from "./automations/automationPlan";
-import { AutomationScheduler } from "./automations/automationScheduler";
+import { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import {
   computerLabel,
   computersOfAnswer,
@@ -212,15 +212,16 @@ import {
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
-import { skippedRunsNotice } from "./automations/skippedRunsNotice";
-import { groupMessagesNotice } from "./automations/groupMessagesNotice";
+import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
+import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
-import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
-import { createAutomationRunStore } from "./automations/automationRunStore";
-import { readChatDirectory } from "./automations/automationChat";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
+import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -3535,7 +3536,7 @@ function createCollectionAutomationsFor(
         }
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture) throw new Error(captureRefusal("Automations"));
-        return work(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal])));
+        return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
       }),
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: (path, text, expectedContentHash) =>
@@ -3544,7 +3545,7 @@ function createCollectionAutomationsFor(
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath),
+    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir),
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),

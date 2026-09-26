@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
   AutomationShareImpactPayload,
   DismissAutomationStopsPayload,
+  FindDatasetCollectionPayload,
   CheckCollectionAutomationPayload,
   ConfirmCollectionAutomationStepPayload,
   ListAutomationTargetsPayload,
@@ -19,6 +20,7 @@ import {
   WriteCollectionAutomationsPayload,
   type AutomationShareImpactResult,
   type CheckCollectionAutomationResult,
+  type FindDatasetCollectionResult,
   type ConfirmCollectionAutomationStepResult,
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
@@ -34,8 +36,8 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import { expressionProblem } from "../automations/automationPlan";
-import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "../automations/collectionAutomations";
+import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
 // and writes automations.yaml, so the renderer never loads the file contract
@@ -201,9 +203,25 @@ export function registerCollectionAutomationsIpc<
   registerHandler(CHANNELS.listCollectionFieldMarks, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListCollectionFieldMarksPayload.parse(payload);
-    assertCollectionPath(input.collectionPath);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionFieldMarksResult> =>
-      ({ marks: dependencies.sharedViewOf(input.workspaceId) ? [] : await operation.state.collectionAutomations.fieldMarks(input.collectionPath) }));
+    if ("collectionPath" in input) assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionFieldMarksResult> => {
+      if (dependencies.sharedViewOf(input.workspaceId)) return { marks: [] };
+      const automations = operation.state.collectionAutomations;
+      return {
+        marks: "datasetId" in input
+          ? await automations.datasetFieldMarks(input.datasetId, input.table)
+          : await automations.fieldMarks(input.collectionPath),
+      };
+    });
+  });
+
+  registerHandler(CHANNELS.findDatasetCollection, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = FindDatasetCollectionPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<FindDatasetCollectionResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : await operation.state.collectionAutomations.datasetCollection(input.datasetId));
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {
@@ -227,6 +245,8 @@ export function registerCollectionAutomationsIpc<
       const relativePath = `${input.collectionPath}/${AUTOMATIONS_FILE_NAME}`;
       const current = await dependencies.readText(operation.workspace.rootPath, relativePath);
       if ((current?.contentHash ?? null) !== input.expectedContentHash) return { status: "conflict" };
+      // What the file holds now, so a save pins only what the person changed.
+      let saved: Automation[] = [];
       if (current) {
         const parsed = parseAutomationsFile(current.text);
         // The writer cannot keep what it could not read, so editing waits
@@ -236,12 +256,13 @@ export function registerCollectionAutomationsIpc<
         }
         const laidOut = writeAutomationsFile(parsed.entries);
         if (!input.reformat && (laidOut.status !== "ok" || laidOut.text !== current.text)) return { status: "reformats" };
+        saved = parsed.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : []));
       }
       let written: ReturnType<typeof writeAutomationsFile>;
       try {
         // The writer reads its own text back, so a shape the file contract
         // would not produce is refused rather than written.
-        const pinned = await operation.state.collectionAutomations.pinOperations(input.collectionPath, input.automations);
+        const pinned = await operation.state.collectionAutomations.pinOperations(input.collectionPath, input.automations, saved);
         written = writeAutomationsFile(pinned.map((automation) => ({ status: "valid", automation })));
       } catch {
         return { status: "refused", diagnostics: [{ code: "changed-on-reread", path: "/automations" }] };

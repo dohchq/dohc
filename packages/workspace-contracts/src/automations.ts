@@ -90,6 +90,18 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //           Status: Closed
 //         operation: invoices.edit
 //
+// An invoke step runs one of the dataset's actions, the operations its
+// author wrote for work a field edit cannot express. `input` maps each key
+// of the action's input to a value or a formula, so the action learns which
+// record to work on:
+//
+//       - invoke: invoices.markPaid
+//         input:
+//           id: '=record.id'
+//
+// An action runs in one transaction and can read its record there, so its
+// input usually needs only the record's id.
+//
 // An invalid automation turns off only itself and keeps its own diagnostics.
 // That includes a key written twice inside it. A problem with the whole file,
 // such as broken YAML, an unknown version, or a repeated top-level key, turns
@@ -130,6 +142,18 @@ export const MAX_EXPRESSION_LENGTH = 2_000;
 export const MAX_AUTOMATION_TEXT_LENGTH = 4_000;
 // About 100 lines. Longer code reads and diffs better in its own file.
 export const MAX_INLINE_CODE_LENGTH = 8_000;
+// An action's input names what it works on, such as a record id and a date.
+// More keys than this belong in the action's own reads.
+export const MAX_ACTION_INPUT_KEYS = 32;
+// Input keys are names in the action's code, like field names in a form.
+// Like every length bound in this file, it counts UTF-16 code units.
+export const MAX_ACTION_INPUT_KEY_LENGTH = 64;
+// Keys that JSON objects reserve. The dataset host refuses an input key or
+// an operation name part that is one, so the file refuses it first.
+const RESERVED_KEYS: ReadonlySet<string> = new Set(["__proto__", "prototype", "constructor"]);
+// A dataset operation's name, as the dataset host accepts it: a letter, then
+// up to 63 letters, digits, "_", ".", or "-", with no reserved part.
+const OPERATION_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 // 50 automations of 25 typical steps take about 170 KB. Every computer that
 // runs the Collection's automations parses the whole file whenever it
 // changes, and at this bound a parse takes about 10 ms.
@@ -199,6 +223,12 @@ interface AutomationFieldValue {
   value: AutomationValue;
 }
 
+/** One key of an action's input, and the value it gets. */
+interface AutomationInputValue {
+  key: string;
+  value: AutomationValue;
+}
+
 const AUTOMATION_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 export type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
 
@@ -252,6 +282,8 @@ type AutomationStep =
       operation: string | null;
     }
   | { kind: "find"; condition: string; collection: string | null; as: string; operation: string | null }
+  /** Runs the dataset action named `operation` with `input` as its input. */
+  | { kind: "invoke"; operation: string; input: AutomationInputValue[] }
   | { kind: "if"; if: string; do: AutomationStep[]; otherwise: AutomationStep[] }
   | { kind: "notify"; text: string; to: AutomationValue[] }
   | { kind: "post"; text: string; group: string }
@@ -316,6 +348,11 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "too-many-automations",
   "too-many-steps",
   "if-too-deep",
+  "too-many-inputs",
+  // An input key that JSON objects reserve, such as __proto__.
+  "reserved-input-key",
+  // An operation or action name the dataset host would refuse.
+  "invalid-operation-name",
   // A write that would not read back as the same automation.
   "changed-on-reread",
 ] as const;
@@ -401,6 +438,7 @@ const STEP_OPTIONS = {
   set: ["records", "operation"],
   "add-record": ["collection", "as", "operation"],
   find: ["collection", "as", "operation"],
+  invoke: ["input"],
   if: ["do", "otherwise"],
   notify: ["to"],
   post: ["group"],
@@ -549,6 +587,15 @@ function readText(value: unknown, path: string, max: number, issues: Issues): st
 
 function readReference(value: unknown, path: string, issues: Issues): string | null {
   return readText(value, path, MAX_REFERENCE_LENGTH, issues);
+}
+
+function readOperationName(value: unknown, path: string, issues: Issues): string | null {
+  const text = readReference(value, path, issues);
+  if (text !== null && (!OPERATION_NAME_PATTERN.test(text) || text.split(".").some((part) => RESERVED_KEYS.has(part)))) {
+    issues.push({ code: "invalid-operation-name", path });
+    return null;
+  }
+  return text;
 }
 
 function readPath(value: unknown, path: string, issues: Issues): string | null {
@@ -710,6 +757,51 @@ function readFieldValues(
     }
   }
   return values;
+}
+
+// An action's input. An absent `input` is an empty one.
+function readInput(value: unknown, path: string, issues: Issues): AutomationInputValue[] | null {
+  if (value === undefined) return [];
+  if (value === null || (value instanceof Map && value.size === 0)) {
+    issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (!(value instanceof Map)) {
+    issues.push({ code: "expected-mapping", path });
+    return null;
+  }
+  if (value.size > MAX_ACTION_INPUT_KEYS) {
+    issues.push({ code: "too-many-inputs", path });
+    return null;
+  }
+  const input: AutomationInputValue[] = [];
+  let valid = true;
+  for (const [key, entry] of value) {
+    const keyText = yamlKeyText(key);
+    const keyPath = keyPointer(path, key);
+    if (keyText === null) {
+      issues.push({ code: "expected-text", path: keyPath });
+      valid = false;
+      continue;
+    }
+    // A key that starts with "=" is refused as a formula marker: only a
+    // value can be a formula.
+    const name = readText(keyText, keyPath, MAX_ACTION_INPUT_KEY_LENGTH, issues);
+    const keyValue = readValue(entry, keyPath, issues);
+    if (name !== null && RESERVED_KEYS.has(name)) {
+      issues.push({ code: "reserved-input-key", path: keyPath });
+      valid = false;
+    } else if (input.some((existing) => existing.key === name)) {
+      // Keys such as 2024 and "2024" differ in YAML but name one key.
+      issues.push({ code: "duplicate-key", path: keyPath });
+      valid = false;
+    } else if (name !== null && keyValue !== null) {
+      input.push({ key: name, value: keyValue });
+    } else {
+      valid = false;
+    }
+  }
+  return valid ? input : null;
 }
 
 // A name or alias Intl knows, in any letter case. Intl resolves every fixed
@@ -905,7 +997,7 @@ function readStep(
   const argument = entries.get(kind);
   const argumentPath = pointer(path, kind);
   const option = (key: string) => pointer(path, key);
-  const operation = () => readReference(entries.get("operation"), option("operation"), issues);
+  const operation = () => readOperationName(entries.get("operation"), option("operation"), issues);
   switch (kind) {
     case "set": {
       const values = readFieldValues(argument, argumentPath, issues);
@@ -934,6 +1026,11 @@ function readStep(
       const as = bindName(required(entries, "as", path, issues), option("as"), "records", scope, context);
       const operationName = operation();
       return condition === null || as === null ? null : { kind, condition, collection, as, operation: operationName };
+    }
+    case "invoke": {
+      const name = readOperationName(argument, argumentPath, issues);
+      const input = readInput(entries.get("input"), option("input"), issues);
+      return name === null || input === null ? null : { kind, operation: name, input };
     }
     case "if": {
       if (ifDepth >= MAX_IF_DEPTH) {
@@ -1197,6 +1294,10 @@ function fieldValuesYaml(values: readonly AutomationFieldValue[]): Map<string, u
   return new Map(values.map(({ field, value }) => [field, valueYaml(value)]));
 }
 
+function inputYaml(input: readonly AutomationInputValue[]): Map<string, unknown> | null {
+  return input.length === 0 ? null : new Map(input.map(({ key, value }) => [key, valueYaml(value)]));
+}
+
 // A kind key and its argument, then the options that are not null.
 function withOptions(
   kind: string,
@@ -1261,6 +1362,8 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
         ["as", step.as],
         ["operation", step.operation],
       ]);
+    case "invoke":
+      return withOptions(step.kind, step.operation, [["input", inputYaml(step.input)]]);
     case "if":
       return withOptions(step.kind, step.if, [
         ["do", step.do.map(stepYaml)],

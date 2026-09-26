@@ -7,18 +7,21 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { DATASET_AUTOMATION_HISTORY } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import type { Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { createTestScratch } from "../workspaces/testTemp";
-import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "./automationChat";
-import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import type { ReachRoster } from "./automationReach";
-import { createAutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, type CollectionAutomationEngine, type PressSettled, type PressWaitReason } from "./collectionAutomations";
-import { UNDONE_RUN_ERROR } from "./collectionAutomationRun";
-import { DATASET_WAKE_NEEDS_BUTTON } from "./datasetAutomationPlan";
-import { DATASET_UNDO_RULES_CHANGED } from "./datasetAutomationUndo";
+import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
+import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "@dohc/automation-executor/automation-chat";
+import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { CollectionAutomations, type CollectionAutomationEngine, type PressSettled, type PressWaitReason } from "@dohc/automation-executor/collection-automations";
+import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
+import { DATASET_WAKE_NEEDS_BUTTON } from "@dohc/automation-executor/dataset-automation-plan";
+import { definitionHash } from "@dohc/automation-executor/automation-plan";
+import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
 // dohc's generated operations in its worker, its commits claim through its
@@ -148,6 +151,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let unpressable: string | null = null;
   const opened: boolean[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
+  let automationsChanged = 0;
   // What the pressing window hears.
   const settled: PressSettled[] = [];
   const waiting: Array<{ claimId: string; reason: PressWaitReason }> = [];
@@ -184,10 +188,10 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     roster: async () => roster,
     cachedRoster: async () => roster,
     evaluator: options.evaluator ?? sharedEvaluator.forWorkspace("workspace"),
-    store: createAutomationRunStore(root),
+    store: createAutomationRunStore(root, resolveWorkspaceMetadataDir),
     onFailuresChanged: wake,
     onHoldsChanged: () => undefined,
-    onAutomationsChanged: () => undefined,
+    onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); wake(); },
     withDatasetHost: async (work, open) => {
       opened.push(open);
@@ -209,6 +213,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
+    automationsChanged: () => automationsChanged,
     setRoster: (next: ReachRoster) => { roster = next; },
     openHost: () => { hostOpen = true; executor!.datasetsChanged(); },
     changeRules: (next: DatasetDefinition) => { indexed = next; executor!.datasetsChanged(); },
@@ -229,7 +234,7 @@ describe("Collection automations on a dataset", () => {
     expect(f.claims()).toHaveLength(1);
     // The automation's own write claims nothing more for it.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: AUTOMATION, depth: 1 } });
-    const [run] = (await createAutomationRunStore(f.root).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.applied).toEqual([{ ordinal: 0, writes: [expect.objectContaining({
       kind: "dataset-edit", operationId: STATUS_ONLY, recordId: invoice, fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }],
     })] }]);
@@ -300,7 +305,7 @@ describe("Collection automations on a dataset", () => {
     await f.until(() => f.claims()[0]?.state === "done");
     // Status was still as the run read it, so it was sent again; Notes keeps their change.
     expect((await f.record(invoice))?.values).toMatchObject({ [STATUS]: "Open and paid", [NOTES]: "someone else" });
-    const [run] = (await createAutomationRunStore(f.root).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
+    const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
     expect(run!.replans).toEqual([expect.objectContaining({ effect: 0, replan: 1, fields: [expect.objectContaining({ fieldId: STATUS })] })]);
     expect(run!.applied[0]!.writes).toEqual([
       { kind: "dataset-kept", recordId: invoice, fieldId: NOTES, field: "Notes", planned: "Closed by automation", current: "someone else" },
@@ -331,15 +336,26 @@ describe("Collection automations on a dataset", () => {
   it("pins each step to a reversible operation with the fewest extra fields when the panel saves", async () => {
     const f = await world();
     await f.executor.open();
-    const [pinned] = await f.executor.pinOperations("Budget", [{
+    const built: Automation = {
       id: "close-paid", name: "Close", enabled: true, when: { kind: "field-changed", field: "Paid", to: null, table: null }, if: null,
       do: [
         { kind: "set", values: [{ field: "Status", value: { kind: "literal", value: "Closed" } }], records: null, operation: null },
         { kind: "set", values: [{ field: "Notes", value: { kind: "literal", value: "x" } }], records: null, operation: "invoices.status" },
         { kind: "set", values: [{ field: "Finished on", value: { kind: "literal", value: "2026-09-25" } }], records: null, operation: null },
       ],
-    }]);
+    };
+    const [pinned] = await f.executor.pinOperations("Budget", [built], []);
     expect(pinned!.do.map((step) => "operation" in step ? step.operation : null)).toEqual(["invoices.status", "invoices.edit", null]);
+    // Switching off or renaming one the file already holds changes no step.
+    const [switched] = await f.executor.pinOperations("Budget", [{ ...built, enabled: false, name: "Closer" }], [built]);
+    expect(switched!.do).toEqual(built.do);
+    // A copy of it keeps its steps too.
+    const [, copy] = await f.executor.pinOperations("Budget", [built, { ...built, id: "close-paid-copy" }], [built]);
+    expect(copy!.do).toEqual(built.do);
+    // Editing its condition and adding a step pins only the new step.
+    const added = { kind: "set" as const, values: [{ field: "Notes", value: { kind: "literal" as const, value: "y" } }], records: null, operation: null };
+    const [edited] = await f.executor.pinOperations("Budget", [{ ...built, if: "record.Paid == true", do: [...built.do, added] }], [built]);
+    expect(edited!.do.map((step) => "operation" in step ? step.operation : null)).toEqual([null, "invoices.status", null, "invoices.edit"]);
     await f.executor.dispose();
   });
 
@@ -640,6 +656,59 @@ describe("Collection automations on a dataset", () => {
     await f.executor.dispose();
   });
 
+  it("says the automations changed when a dataset's approved rules change, so its panel finds the folder again", async () => {
+    // With no roster to check, no reach verdict changes to say it instead.
+    const f = await world({ roster: UNKNOWN });
+    await f.executor.open();
+    f.host.archive({ datasetId: definition.datasetId });
+    await f.until(async () => (await f.executor.datasetCollection(definition.datasetId)).status === "cannot-run");
+    const before = f.automationsChanged();
+    f.host.restore({ datasetId: definition.datasetId });
+    await f.until(() => f.automationsChanged() > before);
+    expect(await f.executor.datasetCollection(definition.datasetId)).toEqual({ status: "found", collectionPath: "Budget" });
+    await f.executor.dispose();
+  });
+
+  it("names its folder for the ⚡ panel, marks each field its switched-on automations set in a table, and shows its last run", async () => {
+    const f = await world();
+    await f.executor.open();
+    expect(await f.executor.datasetCollection(definition.datasetId)).toEqual({ status: "found", collectionPath: "Budget" });
+    expect(await f.executor.datasetCollection(id(99))).toEqual({ status: "cannot-run", reason: "This Collection's rules are not approved yet, so its automations cannot run." });
+    expect(await f.executor.datasetFieldMarks(definition.datasetId, "Invoices")).toEqual([{ field: "Status", automations: ["Close paid invoices"] }]);
+    expect(await f.executor.datasetFieldMarks(definition.datasetId, "Refunds")).toEqual([]);
+    expect(await f.executor.datasetFieldMarks(id(99), "Invoices")).toEqual([]);
+    // A document Collection's marks never come from a dataset's automations.
+    expect(await f.executor.fieldMarks("Budget")).toEqual([]);
+
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ lastRun: null }] });
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect(await f.executor.automationsIn("Budget")).toMatchObject({ automations: [{ lastRun: { state: "done" } }] });
+
+    // A switched-off automation marks nothing.
+    await f.writeAutomations(closePaid(undefined, false));
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    await f.until(async () => (await f.executor.datasetFieldMarks(definition.datasetId, "Invoices")).length === 0);
+    await f.executor.dispose();
+  });
+
+  it("undoes the runs of a person's automations on a dataset when the owner stops and restores them", async () => {
+    const f = await world();
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    const summary = await f.executor.automationsIn("Budget");
+    if (summary.status !== "read" || !summary.automations[0]?.valid) throw new Error("The automation should read.");
+    const hash = definitionHash(summary.automations[0].automation);
+    const trash = async () => { throw new Error("A dataset's added records stay."); };
+    await expect(f.executor.undoRunsOf([{ automationId: AUTOMATION, definitionHash: hash }], trash)).resolves.toEqual({ undone: 1, left: 0 });
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+    expect(await f.executor.runs(AUTOMATION)).toEqual([expect.objectContaining({ undone: true })]);
+    await f.executor.dispose();
+  });
+
   it("refuses to undo a run whose rules no longer resolve, before it saves or sends anything", async () => {
     const f = await world();
     await f.executor.open();
@@ -652,7 +721,7 @@ describe("Collection automations on a dataset", () => {
       .toEqual({ status: "refused", reason: DATASET_UNDO_RULES_CHANGED });
     expect((await f.record(invoice))?.values[STATUS]).toBe("Closed");
     // Nothing marks the run undone, so it still reads as a run that can be undone later.
-    const { runs } = await createAutomationRunStore(f.root).runsOf(AUTOMATION, claimId);
+    const { runs } = await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, claimId);
     expect(runs.map((run) => run.undo)).toEqual([null]);
     await f.executor.dispose();
   });

@@ -2,9 +2,8 @@ import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import { setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { StoredRun } from "./automationRunStore";
-import type { CollectionAutomationReads } from "./collectionAutomationRun";
+import type { CollectionAutomationReads, CollectionRecordWrites } from "./collectionAutomationRun";
 
 // Undo for one run of a Collection automation (AGENTS.md: every reversible
 // change gets a way back). A field goes back to what it held before the run
@@ -35,7 +34,7 @@ export interface CollectionAutomationUndone {
 export interface CollectionAutomationUndoDependencies {
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
-  withRecordWrites<T>(signal: AbortSignal, work: (context: CollectionRecordEditContext) => Promise<T>): Promise<T>;
+  withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
   /** Moves a file to the trash the way a person's delete does. */
   trash(path: string): Promise<void>;
 }
@@ -114,7 +113,7 @@ export async function undoCollectionAutomationRuns(
       continue;
     }
     const result = await dependencies.withRecordWrites(signal, (edit) =>
-      setCollectionRecordFields(edit, {
+      edit.setFields({
         recordPath: path,
         fields: Object.fromEntries(fields.map(([field, { before }]) => [field, before])),
         // Only a field that still holds what the run wrote goes back.

@@ -101,6 +101,8 @@ export function stepParts(step: AutomationStep): SentencePart[] {
         text(step.collection === null ? "find records where " : `find records in ${collectionName(step.collection)} where `),
         code(step.condition),
       ];
+    case "invoke":
+      return [text(`run ${step.operation}`)];
     case "if":
       return [
         text("if "),

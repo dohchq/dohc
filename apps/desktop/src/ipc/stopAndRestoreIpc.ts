@@ -2,7 +2,7 @@ import { rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
-import type { CollectionAutomations } from "../automations/collectionAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import {
   LiveDocumentMutationError,
   RestoreFolderInUseError,

@@ -15,9 +15,10 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { expressionProblem } from "../../automations/automationPlan";
-import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
+import { expressionProblem } from "@dohc/automation-executor/automation-plan";
+import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
+import type { AutomationTable } from "./automationDraft";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
 
 const HASH = "a".repeat(64);
@@ -148,6 +149,8 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
 
 function Panel(props: {
   workspaceId?: string;
+  table?: AutomationTable;
+  onRunUndone?: () => void;
   fields?: FieldDefinition[];
   focus?: { automationId: string; seq: number } | null;
   onNotice?: (message: string, undo?: () => void) => void;
@@ -164,6 +167,8 @@ function Panel(props: {
     <AutomationsPanel
       workspaceId={workspaceId}
       collectionPath="Tasks"
+      table={props.table}
+      onRunUndone={props.onRunUndone}
       automations={automations}
       fields={props.fields ?? FIELDS}
       focus={props.focus ?? null}
@@ -359,6 +364,88 @@ describe("the ⚡ panel", () => {
     expect(bridge.confirmCollectionAutomationStep).toHaveBeenCalledWith({
       workspaceId: "ws-1", automationId: "collection:Tasks#nudge", definitionHash: "0123456789abcdef", step: "operation:invoices.edit", seq: 7,
     });
+  });
+});
+
+describe("a dataset table's ⚡ panel", () => {
+  const onInvoices: Automation = { ...stamp, when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: "Invoices" } };
+  const onRefunds: Automation = { ...nudge, id: "refund", name: "Log refunds", when: { kind: "record-added", table: "Refunds" } };
+  const anyTable: Automation = { ...nudge, id: "any", name: "Any table" };
+  const file = read([summary(onInvoices), summary(onRefunds), summary(anyTable)]);
+  const INVOICES: AutomationTable = { name: "Invoices", operations: new Set(["invoices.create", "invoices.edit"]), tables: new Set(["Invoices", "Refunds"]) };
+  const REFUNDS: AutomationTable = { ...INVOICES, name: "Refunds" };
+
+  it("lists and counts the automations that watch this table or name none, and saves the whole file", async () => {
+    const { written } = makeBridge(file);
+    render(<Panel table={INVOICES} />);
+    await screen.findByTestId("automation-stamp");
+    expect(screen.getByTestId("automation-any")).toBeTruthy();
+    expect(screen.queryByTestId("automation-refund")).toBeNull();
+    expect(automationCount(file, INVOICES)).toBe(2);
+    expect(automationCount(file, REFUNDS)).toBe(2);
+    expect(automationCount(file)).toBe(3);
+
+    await userEvent.click(within(screen.getByTestId("automation-stamp")).getByRole("switch"));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations).toEqual([{ ...onInvoices, enabled: false }, onRefunds, anyTable]);
+  });
+
+  it("shows an automation whose table the dataset no longer has in every table, with why it does not run", async () => {
+    const renamed: Automation = { ...nudge, id: "old", name: "Old table", when: { kind: "record-added", table: "Bills" } };
+    const orphan = read([summary(renamed, { cannotRun: "Budget has no table named Bills." })]);
+    makeBridge(orphan);
+    render(<Panel table={REFUNDS} />);
+    expect((await screen.findByTestId("automation-old")).textContent).toContain("Budget has no table named Bills.");
+    expect(automationCount(orphan, INVOICES)).toBe(1);
+    expect(automationCount(orphan, REFUNDS)).toBe(1);
+  });
+
+  it("starts a new automation on this table, adds records only here, and asks for no other Collection", async () => {
+    const { bridge, written } = makeBridge(read([summary(onRefunds)]));
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "record-added");
+    await user.click(screen.getByRole("button", { name: "Add a record" }));
+    const picker = screen.getByRole("combobox", { name: "Step 2, Collection" });
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Invoices"]);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Title");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, Title" }), "Log");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations).toEqual([onRefunds, expect.objectContaining({ when: { kind: "record-added", table: "Invoices" } })]);
+    expect(bridge.listAutomationTargets).not.toHaveBeenCalled();
+  });
+
+  it("leaves an Add record that adds to another table as the file wrote it", async () => {
+    const addsRefund: Automation = { ...onInvoices, do: [{ kind: "add-record", values: [{ field: "Title", value: { kind: "literal", value: "Refund" } }], collection: null, as: null, operation: "refunds.create" }] };
+    makeBridge(read([summary(addsRefund)]));
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    const step = screen.getByTestId("builder-step-0");
+    expect(within(step).queryByRole("combobox")).toBeNull();
+    expect(step.textContent).toContain("Step 1");
+  });
+
+  it("moves focus after a delete to the next row on screen, not one another table hides", async () => {
+    const later: Automation = { ...onInvoices, id: "later", name: "Later" };
+    makeBridge(read([summary(onInvoices), summary(onRefunds), summary(later)]));
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(within(await screen.findByTestId("automation-stamp")).getByRole("button", { name: "Stamp the finish date actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(screen.getByTestId("automation-later")).getByRole("switch")));
+  });
+
+  it("tells the page after an Undo, so it reads the records the run changed again", async () => {
+    const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
+    makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", version: 2,
+      fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] })]);
+    const onRunUndone = vi.fn();
+    render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    await userEvent.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(onRunUndone).toHaveBeenCalledOnce());
   });
 });
 

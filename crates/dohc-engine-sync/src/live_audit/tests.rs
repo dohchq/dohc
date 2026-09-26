@@ -10,8 +10,9 @@ use dohc_engine_storage::{NoFaults, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, open_store};
 use serde_json::json;
 
+// Fields drop in order, so the scratch directory comes last: its guard
+// removes the directory only after the store has closed the database.
 struct Fixture {
-    _scratch: ScratchDir,
     path: std::path::PathBuf,
     store: EngineStore,
     _owner: ApplicationOwner,
@@ -19,6 +20,7 @@ struct Fixture {
     binding: LiveObjectBinding,
     input: LiveApplicationBootstrap,
     bytes: Vec<u8>,
+    _scratch: ScratchDir,
 }
 
 fn fixture(replicates: bool) -> Fixture {
