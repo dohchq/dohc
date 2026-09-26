@@ -21,7 +21,7 @@ async function child(code:string):Promise<{child:ChildProcess;message:any}> {
 const moduleUrl=new URL("./worker-ownership.ts",import.meta.url).href;
 it("prevents two supervisors from owning the same canonical root",async()=>{
   const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root));
-  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("busy or unavailable");
+  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("Another copy of dohc is using this Collection folder");
   owner.close();owned(await acquireSupervisorOwnership(root));
 });
 it("recovers and removes a dead host's validated worker directory after a real process kill",async()=>{
@@ -37,29 +37,29 @@ it("refuses startup while an orphan worker still owns its local lock",async()=>{
   await writeFile(join(path,"app.sqlite"),"must survive");
   const run=await child(`import {acquireWorkerLease} from ${JSON.stringify(moduleUrl)};const lease=acquireWorkerLease(${JSON.stringify(path)},${JSON.stringify({root:owner.root,session:owner.session})});process.send('locked');process.on('message',()=>lease.close());`);
   owner.close();
-  await expect(acquireSupervisorOwnership(root).then(owned)).rejects.toThrow("busy or unavailable");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("must survive");
+  await expect(acquireSupervisorOwnership(root).then(owned)).rejects.toThrow("Another copy of dohc is using this Collection folder");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("must survive");
   const exit=once(run.child,"exit");run.child.kill("SIGKILL");await exit;
   owned(await acquireSupervisorOwnership(root));expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toEqual([]);
 });
 it("rejects a delayed child from an expired host session before it can use data",async()=>{
   const root=await fixture(),old=owned(await acquireSupervisorOwnership(root)),oldPath=await old.createDirectory(),stale={root:old.root,session:old.session};old.close();
   const next=owned(await acquireSupervisorOwnership(root)),path=await next.createDirectory();
-  expect(()=>acquireWorkerLease(path,stale)).toThrow("expired host session");
+  expect(()=>acquireWorkerLease(path,stale)).toThrow("earlier dohc session");
   expect(()=>acquireWorkerLease(oldPath,stale)).toThrow();
   const lease=acquireWorkerLease(path,next);lease.close();await next.removeDirectory(path);
 });
 it("never deletes a directory whose ownership manifest is unknown",async()=>{
   const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory();await writeFile(join(path,"app.sqlite"),"keep");owner.close();
   await writeFile(join(path,".dohc-worker.json"),'{}');
-  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("inspect it before cleanup");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("keep");
+  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("Check it before you remove anything");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("keep");
 });
 it("refuses unexpected worker folders and preserves unrelated host files",async()=>{
   const root=await fixture();await writeFile(join(root,"owner-notes.txt"),"keep");await mkdir(join(root,"worker-unknown"));
-  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("outside its owned root");expect(await readFile(join(root,"owner-notes.txt"),"utf8")).toBe("keep");
+  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("outside the folder dohc keeps Collections in");expect(await readFile(join(root,"owner-notes.txt"),"utf8")).toBe("keep");
 });
 it("holds child ownership until explicit close and supports Windows cleanup afterward",async()=>{
   const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory(),lease=acquireWorkerLease(path,owner);
-  await expect(owner.removeDirectory(path)).rejects.toThrow("busy or unavailable");lease.close();await owner.removeDirectory(path);
+  await expect(owner.removeDirectory(path)).rejects.toThrow("Another copy of dohc is using this Collection folder");lease.close();await owner.removeDirectory(path);
   expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toEqual([]);
 });
 it("reclaims actual supervisor materialization after host death and IPC worker exit",async()=>{

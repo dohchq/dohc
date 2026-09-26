@@ -314,6 +314,6 @@ it("keeps a published form and its original capability alive after a field renam
   const widened = describeDatasetRevision({definition:next,revision:3,schemaSql,operationSource});
   const widenPreview = await f.host.prepareMigration(owner,{workspaceId:"w",revision:widened,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
   await f.host.approveMigration(owner,{...scope,candidateId:widenPreview.candidateId,checkpointSha256:widenPreview.checkpointSha256});
-  expect(()=>f.host.publication(link,publicationId)).toThrow("needs approval");
+  expect(()=>f.host.publication(link,publicationId)).toThrow("Approve this access again");
   await expect(f.invoke(link,id(5),{name:"Forbidden"},publicationId,"forbidden")).rejects.toThrow();
 });

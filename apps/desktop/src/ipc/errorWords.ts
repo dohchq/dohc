@@ -101,7 +101,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     cancelled: "Building the app stopped before it finished. Try again.",
     "*": null,
   },
-  // The Collection worker, whose messages speak of datasets and journals.
+  // The process that holds a Collection's records. A failed action's message
+  // can carry SQLite's own text, so only these codes reach a person.
   PersistentRuntimeError: {
     worker_deadline: "It took too long to finish. Try again.",
     worker_stopped: STOPPED,

@@ -482,8 +482,8 @@ it("takes an automation's identity from its context, and grants it no owner admi
   expect(drain(f.claims).map(claim => [claim.automationId, claim.depth, claim.actor])).toEqual([
     ["collection:signups#b", 2, { kind: "automation", automationId: "collection:signups#a", depth: 2 }],
   ]);
-  await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("not permitted");
-  await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("not permitted");
-  expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("not permitted");
+  await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("You do not have access to this Collection.");
+  await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("You do not have access to this Collection.");
+  expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("You do not have access to this Collection.");
   expect(f.storage.bytes).toBe(retained(f.db));
 });

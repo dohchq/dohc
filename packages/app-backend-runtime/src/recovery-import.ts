@@ -144,9 +144,9 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
   async function addJournal(raw: unknown, blob: RecoveryBlob) {
     authorize(); const record = parseRecoveryJournalRecord(raw, maxEvent), c = record.cursor;
     if (++count > maxRecords || c.workspaceId !== staged.manifest.cursor.workspaceId || c.datasetId !== staged.manifest.cursor.datasetId ||
-        c.revision !== (previous ? previous.revision + 1 : 0)) fail("journal scope, count, or revision differs.");
+        c.revision !== (previous ? previous.revision + 1 : 0)) fail("history scope, count, or revision differs.");
     const approval = getCatalog(c.approvedRevisionHash);
-    if (record.byteLength !== blob.byteLength || await blobHash(blob, authorize) !== (record.kind === "checkpoint" ? record.sha256 : record.changesetSha256)) fail("journal blob hash differs.");
+    if (record.byteLength !== blob.byteLength || await blobHash(blob, authorize) !== (record.kind === "checkpoint" ? record.sha256 : record.changesetSha256)) fail("history data hash differs.");
     if (record.kind === "checkpoint") {
       index.prepare("INSERT OR IGNORE INTO used_catalogs VALUES(?)").run(c.approvedRevisionHash);
       if (record.previous ? !previous || !equalRecoveryCursor(record.previous, previous) : previous !== null) fail("checkpoint previous cursor differs.");
@@ -173,7 +173,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           journals = true; const record = parseRecoveryJournalRecord(raw, maxEvent);
           await addJournal(raw, { path, offset, byteLength: record.byteLength }); offset += record.byteLength; continue;
         }
-        if (!history || journals) fail("metadata appears after journal records.");
+        if (!history || journals) fail("metadata appears after history records.");
         if (raw?.kind === "catalog") { if (catalog) fail("duplicate catalog."); await addCatalog(raw, true); continue; }
         if (!catalog) fail("catalog must appear first.");
         if (raw.kind === "current-checkpoint") {
@@ -191,7 +191,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           rawMetadata(binding ? { kind: "binding", appId: id, bindingJson: encoded, token } : { kind: "grant", principalKey: id, grantJson: encoded, token });
         } else if (raw.kind === "lifecycle") {
           recoveryObject(raw, ["kind", "archived", "generation", "reason", "archivedAtMs"]);
-          if (typeof raw.archived !== "boolean" || typeof raw.reason !== "string" || Buffer.byteLength(raw.reason) > 1024 || raw.reason.includes("\0")) fail("invalid dataset lifecycle.");
+          if (typeof raw.archived !== "boolean" || typeof raw.reason !== "string" || Buffer.byteLength(raw.reason) > 1024 || raw.reason.includes("\0")) fail("invalid Collection archive state.");
           const generation = recoveryInteger(raw.generation), archivedAtMs = raw.archivedAtMs === null ? null : recoveryInteger(raw.archivedAtMs);
           index.prepare("INSERT INTO permissions VALUES('lifecycle','lifecycle')").run();
           rawMetadata({ kind: "lifecycle", archived: raw.archived, generation, reason: raw.reason, archivedAtMs });
@@ -287,7 +287,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           changeset: await readRange(item.blob, maxEvent) });
       }
     }
-    if (!worker || currentCheckpoint.kind !== "checkpoint") fail("recovered head has no materialized checkpoint.");
+    if (!worker || currentCheckpoint.kind !== "checkpoint") fail("the latest change has no saved records.");
     const headPath = join(work, "head.sqlite");
     await worker.migrateCheckpoint({ path: headPath, schemaSql: currentCheckpoint.schemaSql,
       tables: original.revision.definition.tables.map(t => t.sqlName), migrationSql: "SELECT 1;" });

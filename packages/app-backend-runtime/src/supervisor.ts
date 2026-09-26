@@ -115,7 +115,7 @@ const REOPEN_WAIT_MS = 5_000;
 export class DatasetReopenWaitError extends Error {
   readonly code = "dataset_reopen_wait";
   constructor(readonly retryAfterMs: number) {
-    super(`The dataset stopped before its work finished. Try again in ${Math.ceil(retryAfterMs / 1000)} s.`);
+    super(`dohc's work on this Collection stopped before it finished. Try again in ${Math.ceil(retryAfterMs / 1000)} s.`);
     this.name = "DatasetReopenWaitError";
   }
 }
@@ -173,7 +173,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const failures = previous && at - previous.untilMs < reopenWaitCapMs ? previous.failures + 1 : 1;
     // A storage or validation error can name host paths, so callers get a plain one.
     const failure = error instanceof PersistentRuntimeError && WORKER_FAILURES.has(error.code) ? error
-      : Object.assign(new PersistentRuntimeError("reopen_failed", "The dataset could not be reopened. Try again."), { cause: error });
+      : Object.assign(new PersistentRuntimeError("reopen_failed", "dohc could not reopen this Collection. Try again."), { cause: error });
     failure.retryAfterMs = Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs);
     reopenWaits.set(key, { failures, untilMs: at + failure.retryAfterMs });
     return failure;
@@ -192,7 +192,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const storage=options.maintenanceStorage,worker=lane.worker;
     const key=JSON.stringify(lane.scope);
     if(!storage||!worker||closed)return;
-    const notSaved=(cause?:unknown)=>Object.assign(new PersistentRuntimeError("replay_not_saved","The dataset could not save its replay. Try again."),{cause});
+    const notSaved=(cause?:unknown)=>Object.assign(new PersistentRuntimeError("replay_not_saved","dohc could not save this Collection's records. Try again."),{cause});
     if(afterCostlyReplay)await maintenance.get(key)?.done;
     if(maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key)){if(afterCostlyReplay)throw notSaved();return;}
     const expected={...worker.cursor},cancel=new AbortController();
@@ -201,7 +201,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     let releaseCapture!:()=>void;
     const captureReady=new Promise<void>(resolve=>releaseCapture=resolve);
     const authorize=()=>{
-      if(closed)throw new Error("Dataset host is closed.");
+      if(closed)throw new Error("dohc closed this workspace's Collections. Open the workspace again.");
       cancel.signal.throwIfAborted();lane.lifecycle.signal.throwIfAborted();
       storage.authorize();
     };
@@ -209,7 +209,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try {
       authorize();
       const current=options.journal.head(lane.scope,storage.authorize);
-      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed during materialization maintenance.");
+      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("The Collection changed while dohc saved its records.");
       const cached=options.journal.materialization({scope:lane.scope,authorize});
       const previous=cached&&cached.checkpointId!==lane.rejectedCacheId?cached:null;
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
@@ -221,16 +221,16 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       directory=await ownership.createDirectory();authorize();
       path=join(directory,"materialization.sqlite");
       const snapshot=await worker.runtime.snapshot(path);
-      if(snapshot.path!==path||snapshot.cursor.revision!==expected.revision||snapshot.cursor.digest!==expected.digest)throw new Error("Materialization cursor differs from its committed worker.");
+      if(snapshot.path!==path||snapshot.cursor.revision!==expected.revision||snapshot.cursor.digest!==expected.digest)throw new Error("The Collection changed while dohc saved its records.");
       const info=await lstat(path);
-      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>current.capacityBytes)throw new Error("Materialization exceeds its reserved capacity.");
+      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>current.capacityBytes)throw new Error("This Collection's records are larger than the space reserved for them.");
       // The immutable snapshot owns its cursor and directory. Later operations can use the worker.
       captured=true;releaseCapture();
       const file=await open(path,"r"),buffer=Buffer.alloc(1024*1024),hash=createHash("sha256");
       try {
         for(let offset=0;offset<info.size;) {
           authorize();const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);
-          if(!result.bytesRead)throw new Error("Materialization is truncated.");
+          if(!result.bytesRead)throw new Error("dohc did not finish saving this Collection's records.");
           hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;
         }
         let stage=options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:info.size,sha256:hash.digest("hex"),authorize,account:storage.account});
@@ -239,7 +239,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           const length=Math.min(buffer.length,info.size-offset);let bytesRead=0;
           while(bytesRead<length) {
             authorize();const result=await file.read(buffer,bytesRead,length-bytesRead,offset+bytesRead);
-            if(!result.bytesRead)throw new Error("Materialization is truncated.");bytesRead+=result.bytesRead;
+            if(!result.bytesRead)throw new Error("dohc did not finish saving this Collection's records.");bytesRead+=result.bytesRead;
           }
           options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize});offset+=length;
         }
@@ -275,7 +275,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function cancelMaintenance(scope:DatasetScope):Promise<void> {
     const task=maintenance.get(JSON.stringify(scope));
-    if(task){task.cancel.abort(new Error("Dataset maintenance was cancelled."));await task.done;}
+    if(task){task.cancel.abort(new Error("dohc stopped saving this Collection's records."));await task.done;}
   }
 
   async function dropCandidate(candidate: Candidate) {
@@ -299,11 +299,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   function findCandidate(input:DatasetMigrationCandidateAccess,checkHead=true):Candidate {
     standing(input);
     const candidate=candidates.get(input.candidateId);
-    if(!candidate||candidate.authorityKey!==input.authorityKey||candidate.result.expected.workspaceId!==input.scope.workspaceId||candidate.result.expected.datasetId!==input.scope.datasetId)throw new Error("Migration preview is unavailable. Preview it again.");
-    if(checkHead&&candidate.result.expiresAtMs<=now())throw new Error("Migration preview expired. Preview it again.");
+    if(!candidate||candidate.authorityKey!==input.authorityKey||candidate.result.expected.workspaceId!==input.scope.workspaceId||candidate.result.expected.datasetId!==input.scope.datasetId)throw new Error("This preview is no longer available. Preview the change again.");
+    if(checkHead&&candidate.result.expiresAtMs<=now())throw new Error("This preview expired. Preview the change again.");
     if(checkHead) {
       const current=head(input),expected=candidate.committed??candidate.result.expected;
-      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed after this preview. Preview it again.");
+      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("The Collection changed after this preview. Preview the change again.");
     }
     return candidate;
   }
@@ -323,7 +323,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try { await lane.stopping; } finally { lane.stopping = undefined; }
   }
   function standing(input: DatasetAccess): void {
-    if (closed) throw new Error("Dataset host is closed.");
+    if (closed) throw new Error("dohc closed this workspace's Collections. Open the workspace again.");
     input.signal?.throwIfAborted();
     const result: unknown = input.authorize();
     if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Dataset authority checks must be synchronous.");
@@ -334,7 +334,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function waitForCapacity(lane:Lane,input:DatasetAccess,pending:Promise<void>[]):Promise<void> {
     standing(input);lane.lifecycle.signal.throwIfAborted();
     const remaining=lane.admission!.deadline-performance.now();
-    if(remaining<=0)throw new Error("Dataset operation expired while waiting for a worker.");
+    if(remaining<=0)throw new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again.");
     let timer:ReturnType<typeof setTimeout>|undefined;
     let abort:()=>void=()=>{};
     try {
@@ -343,7 +343,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         input.signal?.addEventListener("abort",abort,{once:true});
         lane.lifecycle.signal.addEventListener("abort",abort,{once:true});
         if(input.signal?.aborted||lane.lifecycle.signal.aborted)abort();
-        timer=setTimeout(()=>reject(new Error("Dataset operation expired while waiting for a worker.")),remaining);
+        timer=setTimeout(()=>reject(new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again.")),remaining);
         // A different dataset's cleanup error does not determine this request's authority.
         Promise.race(pending.map(promise=>promise.catch(()=>{}))).then(resolve);
       });
@@ -353,8 +353,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       lane.lifecycle.signal.removeEventListener("abort",abort);
     }
     standing(input);lane.lifecycle.signal.throwIfAborted();
-    if(performance.now()>=lane.admission!.deadline)throw new Error("Dataset operation expired while waiting for a worker.");
-    if(!head(input).active)throw new Error("Dataset authority was transferred.");
+    if(performance.now()>=lane.admission!.deadline)throw new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again.");
+    if(!head(input).active)throw new Error("This Collection moved to another host.");
   }
   async function openWorker(lane: Lane, input: DatasetAccess, reopen: { admitted: boolean }): Promise<Worker> {
     const wait=reopenWaits.get(JSON.stringify(lane.scope));
@@ -363,7 +363,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const admitWait=()=>{
       if(waiting)return;
       const bytes=lane.admission!.bytes;
-      if(queuedCount+capacityWaiters>=128||queuedBytes+capacityWaitBytes+bytes>16*1024*1024)throw new Error("Dataset host queue is full. Retry this operation.");
+      if(queuedCount+capacityWaiters>=128||queuedBytes+capacityWaitBytes+bytes>16*1024*1024)throw new Error("dohc has too much Collection work waiting. Try again in a moment.");
       waiting=true;capacityWaiters++;capacityWaitBytes+=bytes;
     };
     try {
@@ -377,12 +377,12 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         } else {
           const pending=[...lanes.values()].filter(candidate=>candidate!==lane)
             .flatMap(candidate=>candidate.idleWork?[candidate.idleWork]:candidate.stopping?[candidate.stopping]:[]);
-          if(!pending.length)throw new Error("Dataset workers are busy. Retry this operation.");
+          if(!pending.length)throw new Error("dohc is busy with other Collections. Try again in a moment.");
           admitWait();await waitForCapacity(lane,input,pending);
         }
       }
       standing(input);lane.lifecycle.signal.throwIfAborted();
-      if(!head(input).active)throw new Error("Dataset authority was transferred.");
+      if(!head(input).active)throw new Error("This Collection moved to another host.");
       // Reserve before asynchronous opening so different datasets cannot exceed the pool.
       workerCount++;reopen.admitted=true;
     } finally {
@@ -393,9 +393,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const signal=input.signal ? AbortSignal.any([input.signal,lane.lifecycle.signal]) : lane.lifecycle.signal;
     try {
       const current = head(input);
-      if (!current.active) throw new Error("Dataset authority was transferred.");
+      if (!current.active) throw new Error("This Collection moved to another host.");
       const canonical = options.journal.captureExport({ scope: input.scope, authorize: () => standing(input), capture: () => null }).checkpoint;
-      if (!sameAuthority(canonical.cursor, current.cursor)) throw new Error("Dataset checkpoint is invalid.");
+      if (!sameAuthority(canonical.cursor, current.cursor)) throw new Error("This Collection's saved records are damaged.");
       const cache = options.journal.materialization({scope: input.scope, authorize: () => standing(input)});
       async function restore(useCache: boolean): Promise<Worker> {
         const checkpoint = useCache ? cache! : canonical;
@@ -406,16 +406,16 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           for(let offset=0;offset<checkpoint.byteLength;) {
             const range={scope:input.scope,offset,length:Math.min(1024*1024,checkpoint.byteLength-offset),authorize:()=>standing(input)};
             const bytes=useCache ? options.journal.materializationBlob({...range,cache:cache!}) : options.journal.exportBlob({...range,record:canonical});
-            if(!bytes?.byteLength||bytes.byteLength>range.length)throw new Error("Dataset checkpoint range is invalid.");
+            if(!bytes?.byteLength||bytes.byteLength>range.length)throw new Error("Invalid range in the Collection's saved records.");
             hash.update(bytes);
             for(let written=0;written<bytes.byteLength;) {
               const result=await file.write(bytes,written,bytes.byteLength-written,offset+written);
-              if(!result.bytesWritten)throw new Error("Dataset checkpoint write made no progress.");
+              if(!result.bytesWritten)throw new Error("dohc could not write this Collection's saved records. Try again.");
               written+=result.bytesWritten;
             }
             offset+=bytes.byteLength;
           }
-          if(hash.digest("hex")!==checkpoint.sha256)throw new Error("Dataset checkpoint is invalid.");
+          if(hash.digest("hex")!==checkpoint.sha256)throw new Error("This Collection's saved records are damaged.");
         }finally{await file.close();}
         standing(input);
         const runtime = await openPersistentAppBackend({ directory, checkpointPath, requireCheckpointCursor:useCache, schemaSql: current.schemaSql, tables: input.tables,
@@ -449,7 +449,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function recover(lane: Lane, input: DatasetAccess): Promise<Worker> {
     const current = head(input);
-    if (!current.active) throw new Error("Dataset authority was transferred.");
+    if (!current.active) throw new Error("This Collection moved to another host.");
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
     // Waiting for a worker slot is admission, not reopening, so it earns no wait.
     const reopen = { admitted: Boolean(lane.worker) };
@@ -472,14 +472,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor, reopen: { admitted: boolean }): Promise<Worker> {
     const worker = lane.worker ?? await openWorker(lane, input, reopen);
-    if (worker.cursor.revision > target.revision) throw new Error("Dataset materialization is ahead of its journal.");
+    if (worker.cursor.revision > target.revision) throw new Error("This Collection's saved records are newer than its history.");
     const replayStart = performance.now();
     let replayed = false;
     while (!sameCursor(worker.cursor, target)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
-      if (!page.events.length) throw new Error("Dataset recovery history is incomplete.");
+      if (!page.events.length) throw new Error("This Collection's history is incomplete.");
       for (const event of page.events) {
-        if (event.cursor.revision > target.revision) throw new Error("Dataset head changed during recovery.");
+        if (event.cursor.revision > target.revision) throw new Error("The Collection changed while dohc reopened it. Try again.");
       }
       await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})));
       worker.cursor=page.events.at(-1)!.cursor;
@@ -496,12 +496,12 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function execute(lane: Lane, input: DatasetInvocation): Promise<DatasetInvocationResult> {
     const captured = head(input);
-    if (!captured.active) throw new Error("Dataset authority was transferred.");
+    if (!captured.active) throw new Error("This Collection moved to another host.");
     let worker: Worker | undefined;
-    const abort = () => { void worker?.runtime.abort("Dataset operation was cancelled.").catch(() => {}); };
+    const abort = () => { void worker?.runtime.abort("The Collection action stopped before it finished.").catch(() => {}); };
     const currentAuthority = () => {
       const current = head(input);
-      if (!current.active || !sameAuthority(captured.cursor, current.cursor)) throw new Error("Dataset approval changed. Reload it before retrying.");
+      if (!current.active || !sameAuthority(captured.cursor, current.cursor)) throw new Error("The Collection's rules changed. Reload the Collection, then try again.");
     };
     try {
       worker = await recover(lane, input);
@@ -517,7 +517,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       currentAuthority();
       if (input.readOnly) {
         const after = head(input);
-        if (!sameCursor(after.cursor, worker.cursor)) throw new Error("Dataset changed during the read. Retry it.");
+        if (!sameCursor(after.cursor, worker.cursor)) throw new Error("The Collection changed while dohc read it. Try again.");
         return { result: prepared.result, revision: worker.cursor.revision, replayed: false };
       }
       const resultJson = boundedText(JSON.stringify(prepared.result), DEFAULT_LIMITS.resultBytes, "Operation result");
@@ -552,14 +552,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
 
   async function prepareMigration(lane:Lane,input:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
     for(const previous of candidates.values())if(previous.result.expected.workspaceId===input.scope.workspaceId&&previous.result.expected.datasetId===input.scope.datasetId)await dropCandidate(previous);
-    if(candidates.size+preparingCandidates>=4)throw new Error("Too many migration previews. Discard a preview before continuing.");
-    if([...candidates.values()].some(candidate=>candidate.result.expected.workspaceId===input.scope.workspaceId&&candidate.result.expected.datasetId===input.scope.datasetId))throw new Error("This dataset already has a migration preview. Discard it first.");
+    if(candidates.size+preparingCandidates>=4)throw new Error("Too many Collection changes are waiting for review. Discard one, then try again.");
+    if([...candidates.values()].some(candidate=>candidate.result.expected.workspaceId===input.scope.workspaceId&&candidate.result.expected.datasetId===input.scope.datasetId))throw new Error("This Collection already has a change waiting for review. Discard it first.");
     const captured=head(input);
-    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed before preview. Preview it again.");
+    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("The Collection changed before this preview. Preview the change again.");
     preparingCandidates++;
     let worker:Worker|undefined,directory:string|undefined;
     const reservations:CheckpointStage[]=[];
-    const abort=()=>{void worker?.runtime.abort("Dataset migration preview was cancelled.").catch(()=>{});};
+    const abort=()=>{void worker?.runtime.abort("This preview stopped before it finished.").catch(()=>{});};
     try {
       if(input.accountStage&&!options.maintenanceStorage)throw new Error("Migration previews require host-lifetime storage accounting.");
       if(options.maintenanceStorage)for(let index=0;index<2;index++)reservations.push(options.journal.stageCheckpoint({scope:input.scope,expectedBytes:captured.capacityBytes,
@@ -569,12 +569,12 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       directory=await ownership.createDirectory();
       const path=join(directory,"candidate.sqlite"),reportPath=join(directory,"report.jsonl");
       const migrated=await worker.runtime.migrateCheckpoint({path,reportPath,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
-      if(migrated.path!==path||!migrated.report||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration preview differs from its source dataset.");
+      if(migrated.path!==path||!migrated.report||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("This preview does not match the Collection. Preview the change again.");
       const info=await lstat(path),reportInfo=await lstat(reportPath);
-      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>captured.capacityBytes||!reportInfo.isFile()||reportInfo.isSymbolicLink()||reportInfo.size!==migrated.report.bytes||reportInfo.size>captured.capacityBytes)throw new Error("Migration preview exceeds its storage reservation.");
+      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>captured.capacityBytes||!reportInfo.isFile()||reportInfo.isSymbolicLink()||reportInfo.size!==migrated.report.bytes||reportInfo.size>captured.capacityBytes)throw new Error("This preview needs more space than the Collection has reserved.");
       const hash=createHash("sha256"),file=await open(path,"r"),buffer=Buffer.alloc(1024*1024);
-      try {for(let offset=0;offset<info.size;) {standing(input);const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);if(!result.bytesRead)throw new Error("Migration preview is truncated.");hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;}}finally{await file.close();}
-      standing(input);if(!sameCursor(head(input).cursor,captured.cursor))throw new Error("Dataset changed during preview. Preview it again.");
+      try {for(let offset=0;offset<info.size;) {standing(input);const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);if(!result.bytesRead)throw new Error("dohc did not finish this preview. Preview the change again.");hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;}}finally{await file.close();}
+      standing(input);if(!sameCursor(head(input).cursor,captured.cursor))throw new Error("The Collection changed during this preview. Preview the change again.");
       const result:DatasetMigrationCandidate={candidateId:randomUUID(),expected:{...captured.cursor},approvedRevisionHash:input.approvedRevisionHash,
         checkpointSha256:hash.digest("hex"),expiresAtMs:now()+10*60_000,preview:{tables:migrated.report.tables,firstPage:readMigrationPreviewReportPage({path:reportPath,limit:100})}};
       const candidate:Candidate={result,authorityKey:input.authorityKey,directory,path,reportPath,capacityBytes:captured.capacityBytes,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,timer:undefined!,reservations:[...reservations]};
@@ -589,7 +589,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
 
   async function approveMigration(lane:Lane,input:DatasetMigrationApproval):Promise<DatasetCursor> {
     const candidate=findCandidate(input);
-    if(candidate.result.checkpointSha256!==input.checkpointSha256)throw new Error("Migration preview changed. Preview it again.");
+    if(candidate.result.checkpointSha256!==input.checkpointSha256)throw new Error("This preview changed. Preview the change again.");
     if(candidate.committed)return {...candidate.committed};
     candidate.busy=true;
     try {
@@ -603,9 +603,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     await cancelMaintenance(lane.scope);
     if(input.account&&!input.accountStage)throw new Error("Dataset migration requires checkpoint staging quota accounting.");
     const captured=head(input);
-    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed after the migration was approved. Preview it again.");
+    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("The Collection changed after you approved this change. Preview it again.");
     let worker:Worker|undefined,stage:CheckpointStage|undefined;
-    const abort=()=>{void worker?.runtime.abort("Dataset migration was cancelled.").catch(()=>{});};
+    const abort=()=>{void worker?.runtime.abort("This Collection change stopped before it finished.").catch(()=>{});};
     try {
       let path=candidatePath;
       if(!path) {
@@ -613,26 +613,26 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         input.signal?.addEventListener("abort",abort,{once:true});
         path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
         const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
-        if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration checkpoint differs from its source dataset.");
+        if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("The changed records do not match the Collection. Preview the change again.");
       }
       const info=await lstat(path);
-      if(!info.isFile()||info.size<100||info.size>captured.capacityBytes)throw new Error("Migration checkpoint exceeds its storage reservation.");
+      if(!info.isFile()||info.size<100||info.size>captured.capacityBytes)throw new Error("This change needs more space than the Collection has reserved.");
       const file=await open(path,"r");
       try {
         const hash=createHash("sha256"),buffer=Buffer.alloc(1024*1024);
         for(let offset=0;offset<info.size;) {
           standing(input);const read=await file.read(buffer,0,Math.min(buffer.byteLength,info.size-offset),offset);
-          if(!read.bytesRead)throw new Error("Migration checkpoint is truncated.");
+          if(!read.bytesRead)throw new Error("dohc did not finish saving the changed records. Preview the change again.");
           hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;
         }
         const sha256=hash.digest("hex");
-        if(checkpointSha256&&sha256!==checkpointSha256)throw new Error("Migration preview checkpoint changed.");
+        if(checkpointSha256&&sha256!==checkpointSha256)throw new Error("This preview changed. Preview the change again.");
         stage=options.journal.stageCheckpoint({scope:input.scope,expectedBytes:info.size,sha256,authorize:()=>standing(input),account:input.accountStage});
         for(let index=0,offset=0;offset<info.size;index++) {
           const length=Math.min(buffer.byteLength,info.size-offset);let readBytes=0;
           while(readBytes<length) {
             standing(input);const read=await file.read(buffer,readBytes,length-readBytes,offset+readBytes);
-            if(!read.bytesRead)throw new Error("Migration checkpoint is truncated.");readBytes+=read.bytesRead;
+            if(!read.bytesRead)throw new Error("dohc did not finish saving the changed records. Preview the change again.");readBytes+=read.bytesRead;
           }
           options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize:()=>standing(input)});offset+=length;
         }
@@ -640,14 +640,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }finally{await file.close();}
       standing(input);
       const current=head(input);
-      if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("Dataset changed during migration. Preview it again.");
+      if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("The Collection changed while dohc applied this change. Preview it again.");
       const committed=options.journal.transitionCheckpoint({expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
         approvedRevisionHash:input.approvedRevisionHash,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,
         checkpoint:stage,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
       stage=undefined;
       await stopWorker(lane);
       const after=head(input);
-      if(!after.active||!sameCursor(after.cursor,committed))throw new Error("Dataset approval changed after migration. Reload it.");
+      if(!after.active||!sameCursor(after.cursor,committed))throw new Error("The Collection's rules changed after this change. Reload the Collection.");
       return committed;
     } catch(error) {
       // An uncertain journal commit is resolved on the next recovery, never rerun here.
@@ -661,11 +661,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
 
   function enqueue<T>(input:DatasetAccess,bytes:number,work:(lane:Lane)=>Promise<T>):Promise<T> {
     standing(input);head(input);
-    if (queuedCount + capacityWaiters >= 128 || queuedBytes + capacityWaitBytes + bytes > 16 * 1024 * 1024) throw new Error("Dataset host queue is full. Retry this operation.");
+    if (queuedCount + capacityWaiters >= 128 || queuedBytes + capacityWaitBytes + bytes > 16 * 1024 * 1024) throw new Error("dohc has too much Collection work waiting. Try again in a moment.");
     const key=JSON.stringify(input.scope);
     let lane=lanes.get(key);
     if(!lane){lane={scope:input.scope,lifecycle:new AbortController(),queue:[],active:false};lanes.set(key,lane);}
-    if(lane.queue.length+Number(lane.active)>=64)throw new Error("Dataset operation queue is full. Retry this operation.");
+    if(lane.queue.length+Number(lane.active)>=64)throw new Error("This Collection has too much work waiting. Try again in a moment.");
     if(lane.idle){clearTimeout(lane.idle);lane.idle=undefined;}
     const target=lane;
     return new Promise<T>((resolve,reject)=>{
@@ -673,7 +673,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         const index=target.queue.indexOf(job);if(index<0)return;
         target.queue.splice(index,1);queuedCount--;queuedBytes-=job.bytes;
         clearTimeout(job.timeout);input.signal?.removeEventListener("abort",job.abort);
-        reject(new Error("Dataset operation expired before execution."));
+        reject(new Error("This Collection stayed busy too long, so dohc stopped waiting. Try again."));
       };
       const job:Job={bytes,deadline:performance.now()+queueMs,signal:input.signal,abort:expire,timeout:setTimeout(expire,queueMs),resolve:result=>resolve(result as T),reject,
         work:async()=>{standing(input);return work(target);}};
@@ -727,8 +727,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   function migrationInput(raw:DatasetMigration):DatasetMigration {
     const input:DatasetMigration={...raw,scope:copyScope(raw.scope),expected:{...copyScope(raw.expected),hostEpoch:raw.expected.hostEpoch,
       approvedRevisionHash:raw.expected.approvedRevisionHash,revision:raw.expected.revision,digest:raw.expected.digest},tables:approvedTables(raw.tables),newTables:approvedTables(raw.newTables),
-      source:boundedText(raw.source,DEFAULT_LIMITS.sourceBytes,"Dataset source"),schemaSql:boundedText(raw.schemaSql,DEFAULT_LIMITS.sourceBytes,"Dataset schema"),
-      definitionJson:boundedText(raw.definitionJson,256*1024,"Dataset definition"),migrationSql:boundedText(raw.migrationSql,DEFAULT_LIMITS.sourceBytes,"Dataset migration")};
+      source:boundedText(raw.source,DEFAULT_LIMITS.sourceBytes,"Collection source"),schemaSql:boundedText(raw.schemaSql,DEFAULT_LIMITS.sourceBytes,"Collection schema"),
+      definitionJson:boundedText(raw.definitionJson,256*1024,"Collection definition"),migrationSql:boundedText(raw.migrationSql,DEFAULT_LIMITS.sourceBytes,"Migration SQL")};
     if(!/^[a-f0-9]{64}$/.test(input.approvedRevisionHash)||input.expected.workspaceId!==input.scope.workspaceId||input.expected.datasetId!==input.scope.datasetId)throw new Error("Invalid migration authority.");
     JSON.parse(input.definitionJson);return input;
   }
@@ -764,7 +764,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     },
     invoke(raw: DatasetInvocation): Promise<DatasetInvocationResult> {
       try {
-        if (raw.files && (!Array.isArray(raw.files) || raw.files.length > APP_BACKEND_OPERATION_FILES)) throw new Error("Too many files in dataset operation.");
+        if (raw.files && (!Array.isArray(raw.files) || raw.files.length > APP_BACKEND_OPERATION_FILES)) throw new Error("This Collection action uses too many files.");
         const filesJson = boundedText(JSON.stringify(raw.files ?? []), 32 * 1024, "Operation files");
         const callerJson = boundedText(JSON.stringify(raw.caller), DEFAULT_LIMITS.inputBytes, "Caller");
         const inputJson = boundedText(JSON.stringify(raw.input), DEFAULT_LIMITS.inputBytes, "Operation input");
@@ -789,15 +789,15 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     async retire(raw: DatasetScope): Promise<void> {
       const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
       reopenWaits.delete(key);
-      if(lane)lane.lifecycle.abort(new Error("Dataset was permanently deleted."));
+      if(lane)lane.lifecycle.abort(new Error("This Collection was permanently deleted."));
       await cancelMaintenance(scope);
       if (!lane) {await retireMigrationCandidates(scope);return;}
       if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
       for (const job of lane.queue.splice(0)) {
         queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout);
-        job.signal?.removeEventListener("abort",job.abort); job.reject(new Error("Dataset was permanently deleted."));
+        job.signal?.removeEventListener("abort",job.abort); job.reject(new Error("This Collection was permanently deleted."));
       }
-      if (lane.active && lane.worker) await lane.worker.runtime.abort("Dataset was permanently deleted.").catch(() => {});
+      if (lane.active && lane.worker) await lane.worker.runtime.abort("This Collection was permanently deleted.").catch(() => {});
       await lane.done;
       if (lane.idle) clearTimeout(lane.idle);
       await stopWorker(lane);
@@ -807,13 +807,13 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     async close(): Promise<void> {
       closed = true;
       for (const lane of lanes.values()) {
-        lane.lifecycle.abort(new Error("Dataset host closed."));
+        lane.lifecycle.abort(new Error("dohc closed this workspace's Collections. Open the workspace again."));
         if (lane.idle) clearTimeout(lane.idle);
-        if (lane.active && lane.worker) void lane.worker.runtime.abort("Dataset host closed.").catch(() => {});
-        for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("Dataset host closed.")); }
+        if (lane.active && lane.worker) void lane.worker.runtime.abort("dohc closed this workspace's Collections. Open the workspace again.").catch(() => {});
+        for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("dohc closed this workspace's Collections. Open the workspace again.")); }
       }
       const results=await Promise.allSettled([...lanes.values()].map(async lane => { await lane.done; await stopWorker(lane); }));
-      for(const task of maintenance.values())task.cancel.abort(new Error("Dataset host closed."));
+      for(const task of maintenance.values())task.cancel.abort(new Error("dohc closed this workspace's Collections. Open the workspace again."));
       await Promise.all([...maintenance.values()].map(task=>task.done));
       const candidateResults=await Promise.allSettled([...candidates.values()].map(dropCandidate));
       const cleanupResults=await Promise.allSettled([...candidateCleanup]);

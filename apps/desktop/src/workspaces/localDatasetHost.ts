@@ -161,7 +161,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerDirectory = join(directory, "workers");
     await mkdir(workerDirectory).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
     const workerStat = await lstat(workerDirectory);
-    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
+    if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("dohc cannot use the folder that holds this workspace's Collections. It must be a folder, not a link.");
     let resources:Resources|undefined;
     // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
     supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,

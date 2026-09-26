@@ -111,11 +111,11 @@ describe("persistent dataset worker",()=>{
       try {
         const directory=await owner.createDirectory();
         const worker=await open({directory,ownership:{root:owner.root,session:owner.session}});
-        await expect(owner.removeDirectory(directory)).rejects.toThrow("ownership is busy");
+        await expect(owner.removeDirectory(directory)).rejects.toThrow("Another copy of dohc is using this Collection folder");
         await worker.close();
         await owner.removeDirectory(directory);
         const next=await owner.createDirectory();
-        await expect(open({directory:next,ownership:{root:owner.root,session:"00000000-0000-0000-0000-000000000000"}})).rejects.toThrow("expired host session");
+        await expect(open({directory:next,ownership:{root:owner.root,session:"00000000-0000-0000-0000-000000000000"}})).rejects.toThrow("earlier dohc session");
         await owner.removeDirectory(next);
       }finally{owner.close();}
     });
@@ -477,7 +477,7 @@ describe("persistent dataset worker",()=>{
       const worker=await open({limits:{cpuBudgetMs:1000,evaluationMs:100}});
       const expensive={...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`};
       await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 s of CPU time while running the app operation. Try again."});
+        message:"The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again."});
       await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const recovered=await open();
@@ -508,7 +508,7 @@ describe("persistent dataset worker",()=>{
       const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
       const committed=event(prepared);
       await expect((await open({schemaSql:cpuBudgetSchema,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Try again."});
+        message:"The app's code ran too long: it used more than 1 ms of CPU time while reapplying a saved change. Try again."});
       await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
     });
   },60_000);
@@ -525,7 +525,7 @@ describe("persistent dataset worker",()=>{
       const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
       // The integrity check at open computes the index for every row.
       await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
-        message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Try again\.$/)});
+        message:expect.stringMatching(/^dohc's checks of this Collection ran too long: they used more than \d+ ms of CPU time while checking the tables\. Try again\.$/)});
       await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor})).resolves.toBeDefined();
     });
   },60_000);
@@ -596,7 +596,7 @@ describe("persistent dataset worker",()=>{
           child.on("message",message=>{
             const reply=message as {progress?:string;ok?:boolean};
             // The app code section starts right after this report: stop the worker inside it.
-            if(reply.progress==="running the app operation" && !stall) stall=(async()=>{
+            if(reply.progress==="running the Collection action" && !stall) stall=(async()=>{
               await signal("Suspend");suspendedAt=performance.now();
               await new Promise(resolve=>setTimeout(resolve,6_000));
               resumedAt=performance.now();await signal("Resume");

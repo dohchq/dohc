@@ -111,8 +111,8 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toMatch(/messages/);
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
-    expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
-    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/dataset/);
+    expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/Collection action/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/table/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [{find: 'true', as: all}]")))
       .toMatch(/record change/);
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");

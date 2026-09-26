@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { DatasetCursor, JournalExportRecord } from "./journal.js";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-export function invalidRecovery(reason: string): never { throw new Error(`Invalid dataset recovery: ${reason}`); }
+export function invalidRecovery(reason: string): never { throw new Error(`dohc could not read this recovery file: ${reason}`); }
 export function recoveryObject(value: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalidRecovery("expected object.");
   const row = value as Record<string, unknown>;

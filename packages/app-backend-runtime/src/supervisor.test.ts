@@ -76,7 +76,7 @@ it("previews actual changed values and approves the exact candidate without runn
   await f.supervisor.approveMigration({...access,checkpointSha256:candidate.checkpointSha256});
   expect(executions).toBe(1);expect(reserved).toBe(0);
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([change.after]);
-  expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("unavailable");
+  expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("no longer available");
 });
 
 it("rejects changed owner and stale data and replaces a discarded candidate without leaks",async()=>{
@@ -85,9 +85,9 @@ it("rejects changed owner and stale data and replaces a discarded candidate with
   await f.invoke({id:"one",value:"original"});
   const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner-v1"});
   const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner-v1",authorize:f.authorize};
-  expect(()=>f.supervisor.migrationPreviewPage({...access,authorityKey:"other"})).toThrow("unavailable");
+  expect(()=>f.supervisor.migrationPreviewPage({...access,authorityKey:"other"})).toThrow("no longer available");
   await f.invoke({id:"two",value:"changed"},{idempotencyKey:"second"});
-  await expect(f.supervisor.approveMigration({...access,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("Dataset changed");
+  await expect(f.supervisor.approveMigration({...access,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("The Collection changed");
   const replacement=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner-v1"});
   expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(2);
   await f.supervisor.discardMigration({...access,candidateId:replacement.candidateId});expect(balance).toBe(0);
@@ -123,7 +123,7 @@ it("deletes migration candidates and reservations with their dataset without a s
   expect(account).toHaveBeenCalledTimes(2);
   expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toEqual([]);
   expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
-  expect(()=>f.supervisor.migrationPreviewPage({scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize})).toThrow("unavailable");
+  expect(()=>f.supervisor.migrationPreviewPage({scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize})).toThrow("no longer available");
 });
 
 it("retires active and queued operations after permanent deletion without reviving their worker", async () => {
@@ -190,7 +190,7 @@ it("rejects corrupted checkpoint ranges before starting a worker",async()=>{
   const f=await fixture({launch:launcher((_command,controls)=>{launches++;controls.deliver();}),
     transform:journal=>({...journal,exportBlob(input){const bytes=journal.exportBlob(input);bytes[bytes.length-1]^=1;return bytes;}}),
   });
-  await expect(f.invoke({}, {readOnly:true})).rejects.toMatchObject({code:"reopen_failed",retryAfterMs:5_000,cause:{message:"Dataset checkpoint is invalid."}});
+  await expect(f.invoke({}, {readOnly:true})).rejects.toMatchObject({code:"reopen_failed",retryAfterMs:5_000,cause:{message:"This Collection's saved records are damaged."}});
   expect(launches).toBe(0);
   // A checkpoint that fails its check earns a wait like a worker that fails.
   await expect(f.invoke({}, {readOnly:true})).rejects.toMatchObject({code:"dataset_reopen_wait"});
@@ -232,7 +232,7 @@ it("journals only operations whose deferred foreign keys can commit",async()=>{
       return ctx.db.query('SELECT * FROM items');
     }}`,
   });
-  await expect(f.invoke({parent:false})).rejects.toThrow("foreign-key");
+  await expect(f.invoke({parent:false})).rejects.toThrow("foreign key");
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(0);
   const valid=await f.invoke({parent:true},{idempotencyKey:"valid"});
@@ -314,7 +314,7 @@ it("recovers a host commit whose acknowledgment was lost and returns its receipt
   } }) });
   await expect(f.invoke({ id: "once", value: "saved" })).rejects.toThrow("lost host acknowledgment");
   expect(await f.invoke({ id: "once", value: "saved" })).toMatchObject({ revision: 1, replayed: true, result: [{ id: "once", value: "saved" }] });
-  await expect(f.invoke({ id: "once", value: "changed" })).rejects.toThrow("another payload");
+  await expect(f.invoke({ id: "once", value: "changed" })).rejects.toThrow("already used for different values");
   expect((await f.invoke({}, { readOnly: true })).result).toHaveLength(1);
 });
 
@@ -396,7 +396,7 @@ it.each(["abort","close"] as const)("stops a worker that is still starting on %s
     const invocation=f.invoke({},{signal:controller.signal});
     await starting;
     if(kind==="abort")controller.abort(new Error("Request cancelled."));else void f.supervisor.close();
-    await expect(invocation).rejects.toThrow(kind==="abort" ? "Request cancelled." : "Dataset host");
+    await expect(invocation).rejects.toThrow(kind==="abort" ? "Request cancelled." : "dohc closed this workspace's Collections");
     expect(await exit).toBe("SIGKILL");
   } finally { vi.useRealTimers(); }
 });
@@ -491,7 +491,7 @@ it("waits longer before each reopen of a dataset whose replay ran out of CPU",as
   const {state,read}=await failingReopens({reopenWaitCapMs:20_000});
   await expect(read()).rejects.toMatchObject({code:"worker_budget",retryAfterMs:5_000});
   await expect(read()).rejects.toMatchObject({code:"dataset_reopen_wait",retryAfterMs:5_000,
-    message:"The dataset stopped before its work finished. Try again in 5 s."});
+    message:"dohc's work on this Collection stopped before it finished. Try again in 5 s."});
   expect(state.replayed).toEqual([1]);
   // Each failure right after a wait ends doubles the wait, up to its cap.
   for(const [elapsed,wait] of [[5_000,10_000],[10_000,20_000],[20_000,20_000]]) {
@@ -749,7 +749,7 @@ it("refuses cache installation after authority transfers during the snapshot",as
   const result=await f.invoke({id:"one",value:"saved"});expect(result.revision).toBe(1);
   await vi.waitFor(()=>expect(release).toBeTypeOf("function"),workerWait);
   f.journal.fence({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
-  const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("transferred");
+  const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("moved to another host");
   release!();await check;
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
   await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0),workerWait);
@@ -839,7 +839,7 @@ it("keeps genuine active-user saturation as an immediate overload",async()=>{
     if(command.command.kind==="prepare"&&!release){release=controls.deliver;entered();return;}controls.deliver();
   })});
   f.initialize("second");const active=f.invoke({}, {readOnly:true});await preparing;
-  try {await expect(f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true})).rejects.toThrow("workers are busy");}
+  try {await expect(f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true})).rejects.toThrow("busy with other Collections");}
   finally {release!();await active;}
 });
 
@@ -851,7 +851,7 @@ it("counts retiring-worker waiters against the shared 128-request admission limi
       pending.push(f.invoke({}, {scope:{...f.scope,datasetId},readOnly:true,signal:controller.signal}).catch(error=>error));
     }
     f.initialize("over-limit");
-    await expect(f.invoke({}, {scope:{...f.scope,datasetId:"over-limit"},readOnly:true})).rejects.toThrow("host queue is full");
+    await expect(f.invoke({}, {scope:{...f.scope,datasetId:"over-limit"},readOnly:true})).rejects.toThrow("too much Collection work waiting");
   }finally{for(const controller of controllers)controller.abort(new Error("cancelled"));await Promise.all(pending);f.release();}
 });
 
@@ -862,7 +862,7 @@ it("does not restart the original queue deadline when worker capacity is pending
     let outcome:unknown;
     const pending=f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true}).catch(error=>{outcome=error;return error;});
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(outcome).toBeInstanceOf(Error);expect((await pending).message).toContain("expired while waiting");
+    expect(outcome).toBeInstanceOf(Error);expect((await pending).message).toContain("stopped waiting");
   }finally{vi.useRealTimers();f.release();}
 });
 
@@ -882,6 +882,6 @@ it.each(["abort","deadline"])("settles %s promptly when its own old worker is be
     if(kind==="abort"){controller.abort(new Error("cancelled"));await new Promise<void>(resolve=>setImmediate(resolve));}
     else await vi.advanceTimersByTimeAsync(30_000);
     expect(outcome).toBeInstanceOf(Error);
-    expect((await pending).message).toContain(kind==="abort"?"cancelled":"expired");
+    expect((await pending).message).toContain(kind==="abort"?"cancelled":"stopped waiting");
   }finally{vi.useRealTimers();release!();await other;await pending;}
 });

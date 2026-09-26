@@ -117,8 +117,8 @@ describe("error words", () => {
 
   it("shows a plain Collection reply as written, names and instructions included", () => {
     for (const message of [
-      "Dataset changed after this preview. Preview it again.",
-      "Dataset approval changed. Reload it before retrying.",
+      "The Collection changed after this preview. Preview the change again.",
+      "The Collection's rules changed. Reload the Collection, then try again.",
       "Journal.md changed on disk. Open it again.",
       "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
       ...["Materialization", "Checkpoint", "Materialization is truncated.: Status", "Dataset operation"].map((field) =>
@@ -131,9 +131,9 @@ describe("error words", () => {
       });
     }
     expect(withErrorWords("dohc could not prepare this review.", acrossIpc(
-      new Error("Dataset changed after this preview. Preview it again."),
+      new Error("The Collection changed after this preview. Preview the change again."),
       "desktop:dataset",
-    ))).toBe("dohc could not prepare this review. Dataset changed after this preview. Preview it again.");
+    ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
   });
 
   it("tells a person what to do for each way the engine can be unavailable", () => {

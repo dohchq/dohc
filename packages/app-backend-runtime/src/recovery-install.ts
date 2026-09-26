@@ -99,7 +99,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       if (!row || (row.phase !== "installed" && row.phase !== "claimed") || row.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(row.source_json)), input.sourceCursor)) throw new Error("Recovery transfer is not installed with this identity.");
       if (row.phase === "claimed") return receipt(row);
       const head = JSON.parse(String(row.head_json)) as ValidatedDatasetRecovery["headCheckpoint"] & { stage: CheckpointStage; sourceState: string };
-      if (head.sourceState !== "fenced" && !(options.allowOwnerRecoveryClaim && input.oldHostStopped === true)) throw new Error("Transfer requires a fenced source dataset.");
+      if (head.sourceState !== "fenced" && !(options.allowOwnerRecoveryClaim && input.oldHostStopped === true)) throw new Error("Stop the old host before moving this Collection.");
       journal.claimInactiveCheckpoint({ expected: input.sourceCursor, hostEpoch: randomUUID(), approvedRevisionHash: input.sourceCursor.approvedRevisionHash,
         source: head.source, schemaSql: head.schemaSql, definitionJson: head.definitionJson, capacityBytes: head.capacityBytes, checkpoint: head.stage, authorize: input.authorize,
         account(allocation) {
@@ -125,7 +125,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           if (previous.phase !== "installed" && previous.phase !== "claimed") throw new Error("Recovery import is incomplete; discard it before retrying.");
           return receipt(previous);
         }
-        if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)) throw new Error("Dataset already exists at the recovery target.");
+        if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)) throw new Error("This Collection already exists. Recovery does not replace existing data.");
         const bytes = Buffer.byteLength(JSON.stringify(recovery.manifest.cursor)) + 2048;
         account(context, scope, bytes);
         db.prepare("INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)").run(importId, scope.workspaceId, scope.datasetId, input.manifestSha256, JSON.stringify(recovery.manifest.cursor), ownerToken, bytes);
@@ -169,7 +169,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           if (++count > 1_000_000) throw new Error("Recovery has too many records.");
         }
         const current = recovery.checkpoint;
-        if (current.record.kind !== "checkpoint") throw new Error("Recovery checkpoint is missing.");
+        if (current.record.kind !== "checkpoint") throw new Error("This recovery file has no saved records.");
         const currentStage = await checkpoint(current.blob, current.record.sha256, "current");
         const headStage = await checkpoint(recovery.headCheckpoint.blob, recovery.headCheckpoint.sha256, "head");
         const headJson = JSON.stringify({ ...recovery.headCheckpoint, blob: undefined, stage: headStage, sourceState: recovery.manifest.sourceState });
@@ -190,10 +190,10 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
         }
         return tx(() => {
           authorize(); const c = recovery.manifest.cursor, cp = current.record as Extract<JournalExportRecord, { kind: "checkpoint" }>;
-          if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)) throw new Error("Dataset already exists at the recovery target.");
+          if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)) throw new Error("This Collection already exists. Recovery does not replace existing data.");
           account(context, scope, recovery.headCheckpoint.capacityBytes, recovery.headCheckpoint.capacityBytes);
           const incomplete = db.prepare("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN dohc_dataset_checkpoints c ON c.stage_id=m.stage_id WHERE m.import_id=? AND (c.state!=1 OR c.workspace_id!=? OR c.dataset_id!=?) LIMIT 1").get(importId, scope.workspaceId, scope.datasetId);
-          if (incomplete) throw new Error("Recovery checkpoint staging is incomplete.");
+          if (incomplete) throw new Error("dohc did not finish copying this recovery file's records. Try again.");
           db.prepare("UPDATE dohc_dataset_checkpoints SET state=2,reserved_bytes=0 WHERE stage_id IN(SELECT stage_id FROM dohc_dataset_import_checkpoints WHERE import_id=? AND role!='head')").run(importId);
           db.prepare("INSERT INTO dohc_dataset_journals VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)").run(scope.workspaceId, scope.datasetId, c.hostEpoch, c.approvedRevisionHash, cp.source, cp.schemaSql, cp.definitionJson, c.revision, c.digest, cp.capacityBytes, currentStage.stageId, cp.sha256, cp.cursor.revision, cp.cursor.digest, cp.previous ? JSON.stringify(cp.previous) : null);
           db.prepare(`INSERT INTO dohc_dataset_checkpoint_history SELECT ?,?,revision,json_extract(body,'$.cursor'),json_extract(body,'$.previous'),json_extract(body,'$.source'),json_extract(body,'$.schemaSql'),json_extract(body,'$.definitionJson'),json_extract(body,'$.capacityBytes'),json_extract(stage_json,'$.stageId'),json_extract(body,'$.sha256') FROM dohc_dataset_import_records WHERE import_id=? AND kind='checkpoint'`).run(scope.workspaceId, scope.datasetId, importId);

@@ -101,7 +101,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
       if ("definition" in plan) {
         const result = await bridge().dataset({ action: "create", workspaceId: props.workspaceId, definition: plan.definition });
         if (!alive.current) return;
-        if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId) throw new Error("The collection creation returned a different dataset.");
+        if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId) throw new Error("dohc created a different Collection than the one you asked for. Try again.");
         props.onCreated({ kind: "transactional", datasetId: result.revision.datasetId, tableId: plan.definition.tables[0]!.tableId });
       } else {
         const result = await bridge().createWorkspaceFile({ workspaceId: props.workspaceId, relativePath: `${plan.folder}/${COLLECTION_SCHEMA_FILENAME}`, initialText: serializeCollectionSchema(plan.schema) });

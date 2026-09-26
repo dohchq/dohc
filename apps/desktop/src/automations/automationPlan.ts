@@ -223,7 +223,7 @@ export function unsupportedReason(automation: Automation): string | null {
   if (!RECORD_TRIGGERS.has(automation.when.kind)) {
     return "dohc can run automations that start from a record change. Other triggers come later.";
   }
-  const DATASET = "dohc cannot run automations on dataset tables and operations yet.";
+  const DATASET = "Automations cannot name a table or a Collection action yet.";
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);

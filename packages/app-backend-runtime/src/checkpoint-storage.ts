@@ -57,22 +57,22 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
   function validateRow(value: StageRow | undefined): StageRow {
     if (!value || !Number.isSafeInteger(value.byte_length) || value.byte_length < 0 || value.byte_length > maximumBytes || !/^[a-f0-9]{64}$/.test(value.sha256)
       || ![0, 1, 2].includes(value.state) || !Number.isSafeInteger(value.next_index) || value.next_index < 0 || value.next_index > Math.ceil(value.byte_length / CHECKPOINT_CHUNK_BYTES)
-      || !Number.isSafeInteger(value.reserved_bytes) || value.reserved_bytes < 0 || value.reserved_bytes > storageBytes(value.byte_length)) throw new Error("Checkpoint manifest is damaged.");
+      || !Number.isSafeInteger(value.reserved_bytes) || value.reserved_bytes < 0 || value.reserved_bytes > storageBytes(value.byte_length)) throw new Error("This Collection's saved records are damaged.");
     return value;
   }
   const row = (stage: CheckpointStage): StageRow => {
     const value = validateRow(db.prepare("SELECT * FROM dohc_dataset_checkpoints WHERE stage_id=? AND workspace_id=? AND dataset_id=?")
       .get(validText(stage.stageId), validText(stage.scope.workspaceId), validText(stage.scope.datasetId)) as StageRow | undefined);
     if (value.byte_length !== stage.expectedBytes || value.sha256 !== stage.sha256 || stage.chunkSize !== CHECKPOINT_CHUNK_BYTES
-      || stage.chunkCount !== Math.ceil(value.byte_length / CHECKPOINT_CHUNK_BYTES)) throw new Error("Checkpoint stage changed or is unavailable.");
+      || stage.chunkCount !== Math.ceil(value.byte_length / CHECKPOINT_CHUNK_BYTES)) throw new Error("The Collection's records changed while dohc saved them. Try again.");
     return value;
   };
   function chunk(value: StageRow, index: number): Uint8Array {
     const expected = Math.min(CHECKPOINT_CHUNK_BYTES, value.byte_length - index * CHECKPOINT_CHUNK_BYTES);
     const size = db.prepare("SELECT length(bytes) AS byte_length FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
-    if (!size || size.byte_length !== expected || expected <= 0 || expected > CHECKPOINT_CHUNK_BYTES) throw new Error("Checkpoint chunk integrity check failed.");
+    if (!size || size.byte_length !== expected || expected <= 0 || expected > CHECKPOINT_CHUNK_BYTES) throw new Error("This Collection's saved records are damaged.");
     const item = db.prepare("SELECT bytes,sha256 FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
-    if (!item || !(item.bytes instanceof Uint8Array) || item.bytes.byteLength !== expected || digest(item.bytes) !== item.sha256) throw new Error("Checkpoint chunk integrity check failed.");
+    if (!item || !(item.bytes instanceof Uint8Array) || item.bytes.byteLength !== expected || digest(item.bytes) !== item.sha256) throw new Error("This Collection's saved records are damaged.");
     return item.bytes;
   }
   function stageCheckpoint(input: { scope: DatasetScope; expectedBytes: number; sha256: string; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): CheckpointStage {
@@ -104,11 +104,11 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     const stage = structuredClone(input.stage);
     return tx(() => {
       callback(input.authorize); const value = row(stage);
-      if (value.state === 2) throw new Error("Checkpoint is already active.");
-      if (value.next_index !== Math.ceil(value.byte_length / CHECKPOINT_CHUNK_BYTES)) throw new Error("Checkpoint chunks are incomplete.");
+      if (value.state === 2) throw new Error("These Collection records are already saved.");
+      if (value.next_index !== Math.ceil(value.byte_length / CHECKPOINT_CHUNK_BYTES)) throw new Error("dohc did not finish saving this Collection's records. Try again.");
       const hash = createHash("sha256");
       for (let index = 0; index < value.next_index; index++) { callback(input.authorize); hash.update(chunk(value, index)); }
-      if (hash.digest("hex") !== value.sha256) throw new Error("Checkpoint integrity check failed.");
+      if (hash.digest("hex") !== value.sha256) throw new Error("This Collection's saved records are damaged.");
       db.prepare("UPDATE dohc_dataset_checkpoints SET state=1 WHERE stage_id=?").run(value.stage_id);
       callback(input.authorize); return manifest({ ...value, state: 1 });
     });
@@ -119,15 +119,15 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     const readPending=() => {
       callback(authorize);
       const value=row(stage);
-      if(value.state!==0)throw new Error("Materialization checkpoint is no longer pending.");
-      if(value.next_index!==stage.chunkCount)throw new Error("Checkpoint chunks are incomplete.");
+      if(value.state!==0)throw new Error("These Collection records were already saved or discarded.");
+      if(value.next_index!==stage.chunkCount)throw new Error("dohc did not finish saving this Collection's records. Try again.");
       return value;
     };
     const initial=tx(readPending),hash=createHash("sha256");
     for(let index=0;index<initial.next_index;index++) {
       tx(()=>{
         const value=readPending();
-        if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("Checkpoint stage changed.");
+        if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("The Collection's records changed while dohc saved them. Try again.");
         hash.update(chunk(value,index));
         callback(authorize);
       });
@@ -136,8 +136,8 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     const sha256=hash.digest("hex");
     return tx(()=>{
       const value=readPending();
-      if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("Checkpoint stage changed.");
-      if(sha256!==value.sha256)throw new Error("Checkpoint integrity check failed.");
+      if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("The Collection's records changed while dohc saved them. Try again.");
+      if(sha256!==value.sha256)throw new Error("This Collection's saved records are damaged.");
       db.prepare("UPDATE dohc_dataset_checkpoints SET state=1 WHERE stage_id=?").run(value.stage_id);
       callback(authorize);
       return manifest({...value,state:1});
@@ -145,7 +145,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
   }
   function storageBytes(length: number) { return length + Math.ceil(length / CHECKPOINT_CHUNK_BYTES) * 128 + 512; }
   function discard(value: StageRow, account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown) {
-    if (value.state === 2) throw new Error("Active checkpoints cannot be discarded.");
+    if (value.state === 2) throw new Error("dohc cannot discard the records this Collection uses now.");
     if (value.reserved_bytes && !account) throw new Error("Discarding this checkpoint requires quota accounting.");
     const stage = manifest(value);
     if (account) callback(() => account(Object.freeze({ bytes: -value.reserved_bytes, scope: Object.freeze({ ...stage.scope }), stage })));
@@ -200,12 +200,12 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     resolve(key: DatasetScope, input: Uint8Array | CheckpointStage, requireStaged = false) {
       const value = input instanceof Uint8Array ? { expectedBytes: input.byteLength, sha256: digest(input), bytes: input } : input;
       if (input instanceof Uint8Array) {
-        if (input.byteLength > maximumBytes) throw new Error("Checkpoint exceeds its size limit.");
+        if (input.byteLength > maximumBytes) throw new Error("This Collection's records are larger than the space reserved for them.");
         return { ...value, storageBytes: storageBytes(value.expectedBytes), stagedCreditBytes: 0 };
       }
       const stored = row(input);
-      if (stored.workspace_id !== key.workspaceId || stored.dataset_id !== key.datasetId || stored.state === 0) throw new Error("Checkpoint is not sealed for this dataset.");
-      if (requireStaged && stored.state !== 1) throw new Error("Checkpoint is already active.");
+      if (stored.workspace_id !== key.workspaceId || stored.dataset_id !== key.datasetId || stored.state === 0) throw new Error("These saved records are not ready for this Collection.");
+      if (requireStaged && stored.state !== 1) throw new Error("These Collection records are already saved.");
       return { ...value, stageId: stored.stage_id, storageBytes: storageBytes(stored.byte_length), stagedCreditBytes: stored.reserved_bytes };
     },
     /** Journal-only: remove a cache blob, never a checkpoint in authoritative history. */
@@ -230,7 +230,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
         return stageId;
       }
       const value = row(input);
-      if (value.state !== 1 || value.workspace_id !== key.workspaceId || value.dataset_id !== key.datasetId) throw new Error("Checkpoint is not available for activation.");
+      if (value.state !== 1 || value.workspace_id !== key.workspaceId || value.dataset_id !== key.datasetId) throw new Error("These Collection records are not ready to use.");
       db.prepare("UPDATE dohc_dataset_checkpoints SET state=2,reserved_bytes=0 WHERE stage_id=?").run(value.stage_id);
       return value.stage_id;
     },
