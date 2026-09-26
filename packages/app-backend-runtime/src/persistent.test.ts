@@ -469,7 +469,7 @@ describe("persistent dataset worker",()=>{
       const launch:AppRuntimeLauncher=options=>{
         const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
         child.on("message",message=>{
-          if((message as {id:number}).id===finalizeId) child.kill("SIGKILL");
+          if(finalizeId!==undefined && (message as {id?:number}).id===finalizeId) child.kill("SIGKILL");
           else options.onMessage(message);
         });
         child.on("error",options.onError);child.on("close",options.onExit);

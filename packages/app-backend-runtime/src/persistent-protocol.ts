@@ -74,6 +74,8 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
 export type PersistentResult = DatasetCursor | PreparedOperation | MigratedCheckpoint | null;
 export type PersistentReply = {id:number;ok:true;result:PersistentResult}
   | {id:number;ok:false;error:string;code:string;refusal?:AppOperationRefusal};
+// The worker sends {ready:true} once, after it has loaded and listens for commands.
+export type PersistentWorkerMessage = PersistentReply | {ready:true};
 
 export class PersistentRuntimeError extends Error {
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }
