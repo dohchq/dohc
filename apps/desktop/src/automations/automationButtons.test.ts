@@ -3,9 +3,9 @@ import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contr
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import {
   datasetButtonAccess,
-  datasetButtonRefusal,
   documentButtonAccess,
   resolveButton,
+  sharedDatasetButtonRefusal,
 } from "./automationButtons";
 
 const file = (...entries: string[]) => parseAutomationsFile(`version: 1\nautomations:\n${entries.join("\n")}\n`);
@@ -111,22 +111,27 @@ describe("datasetButtonAccess", () => {
   });
 });
 
-describe("datasetButtonRefusal", () => {
+describe("sharedDatasetButtonRefusal", () => {
   const paid = file("  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}, operation: markPaid}]");
 
   it("refuses someone who cannot edit the table before saying anything about the automation", () => {
-    expect(datasetButtonRefusal({ definition, file: paid, description: describedAs(["list"]), field: "Mark paid", table: null }))
+    expect(sharedDatasetButtonRefusal({ definition, file: paid, description: describedAs(["list"]), field: "Mark paid", table: null }))
       .toBe("Only people who can edit Invoices can use this button.");
-    expect(datasetButtonRefusal({ definition, file: null, description: describedAs(["list"]), field: "Mark paid", table: null }))
+    expect(sharedDatasetButtonRefusal({ definition, file: null, description: describedAs(["list"]), field: "Mark paid", table: null }))
       .toBe("Only people who can edit Invoices can use this button.");
-    expect(datasetButtonRefusal({ definition, file: paid, description: describedAs(["markPaid"]), field: "Mark paid", table: "Customers" }))
+    expect(sharedDatasetButtonRefusal({ definition, file: paid, description: describedAs(["markPaid"]), field: "Mark paid", table: "Customers" }))
       .toBe("Only people who can edit Customers can use this button.");
   });
 
-  it("stops a press that passes access, because dataset automations start only from a record change", () => {
-    expect(datasetButtonRefusal({ definition, file: paid, description: describedAs(["markPaid"]), field: "Mark paid", table: null }))
-      .toBe("dohc can run automations that start from a record change. Other triggers come later.");
-    expect(datasetButtonRefusal({ definition, file: null, description: describedAs(["markPaid"]), field: "Mark paid", table: "Invoices" }))
+  it("counts the read that finds the pressed record among the operations a presser must be able to use", () => {
+    expect(sharedDatasetButtonRefusal({ definition, file: paid, description: describedAs(["markPaid"]), field: "Mark paid", table: null }))
+      .toBe("Only people who can edit Invoices can use this button.");
+  });
+
+  it("stops a press that passes access, because the shared dataset's server runs no automations yet", () => {
+    expect(sharedDatasetButtonRefusal({ definition, file: paid, description: describedAs(["list", "markPaid"]), field: "Mark paid", table: null }))
+      .toBe("dohc can't run buttons on shared dataset Collections yet.");
+    expect(sharedDatasetButtonRefusal({ definition, file: null, description: describedAs(["markPaid"]), field: "Mark paid", table: "Invoices" }))
       .toBe("No automation uses this button.");
   });
 });

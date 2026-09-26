@@ -17,7 +17,7 @@ import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
 import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
-import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor } from "./dataset-automation-claims.js";
+import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -288,11 +288,31 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   function describePermission(permission: Permission): DatasetDescription {
     return describeApprovedDataset(permission.revision, permission.operations);
   }
+  // The head a press of this button claims at, while this host writes the dataset and its rules have the button.
+  function pressableHead(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): DatasetCursor {
+    const key = scope(raw);
+    const head = journal.head(key, () => undefined);
+    if (!head.active) throw new DatasetHostError("conflict", "This Collection moved to a server, so its buttons can't run here.");
+    live(key);
+    const table = revision(key).definition.tables.find(candidate => candidate.tableId === raw.tableId);
+    if (!table?.fields.some(field => field.fieldId === raw.fieldId && field.type === "button")) throw new DatasetHostError("invalid", "This button is not in the Collection's approved rules.");
+    return head.cursor;
+  }
   const host = {
-    /** For the trusted executor. Commits claim through the host; deleting a dataset forgets its claims. */
+    /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
     automationClaims: { subscribe: automations.subscribe, unsubscribe: automations.unsubscribe, subscriptions: automations.subscriptions,
       next: automations.next, settle: automations.settle, release: automations.release, retry: automations.retry,
-      claims: automations.claims, claim: automations.claim, failures: automations.failures },
+      claims: automations.claims, claim: automations.claim, failures: automations.failures, pressed: automations.pressed,
+      /** Throws why this host cannot take a press of this button, as `press` would. */
+      assertPressable(raw: DatasetScope & Pick<DatasetPressInput, "tableId" | "fieldId">): void { pressableHead(raw); },
+      /**
+       * A press of a Button field in the approved rules, on a dataset this
+       * host still writes. The caller has checked who pressed and what they
+       * may use.
+       */
+      press(raw: DatasetScope & DatasetPressInput): DatasetPressed {
+        return automations.press({ ...raw, cursor: pressableHead(raw) });
+      } },
     deletionStatus(context: Context, raw: DatasetScope) {
       const key = scope(raw); owner(context,key);
       return { deleted: Boolean(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) };

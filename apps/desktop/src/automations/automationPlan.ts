@@ -291,10 +291,6 @@ export function datasetFindOf(condition: string): DatasetFindFilter[] | { proble
   return visit(node) ? filters : { problem: DATASET_FIND_SHAPE };
 }
 
-const RECORD_TRIGGERS = new Set<AutomationTrigger["kind"]>([
-  "record-added", "record-changed", "field-changed", "record-removed", "starts-matching",
-]);
-
 /** The dataset operations an automation's steps invoke, by name, once each. */
 export function operationsOf(automation: Automation): string[] {
   const names = new Set<string>();
@@ -305,7 +301,7 @@ export function operationsOf(automation: Automation): string[] {
 }
 
 const DATASET_GROUP_TRIGGER_UNSUPPORTED = "This Collection's automations cannot start from Group messages. Choose a record change as the trigger.";
-export const RECORD_TRIGGERS_ONLY = "dohc can run automations that start from a record change. Other triggers come later.";
+const DATASET_SCHEDULE_UNSUPPORTED = "This Collection's automations cannot start on a schedule yet. Choose a record change or a button as the trigger.";
 
 /**
  * Why this executor cannot run an automation yet, or null when it can. The
@@ -444,16 +440,17 @@ export function subscriptionFor(trigger: AutomationTrigger): { kinds: Automation
 
 /**
  * The dataset ledger subscription a dataset Collection's automation needs:
- * its table, and its watched fields as field ids of the approved rules. Or
- * why the automation cannot watch the dataset.
+ * its table, and its watched fields as field ids of the approved rules. Null
+ * for a button, whose presses claim instead. Or why the automation cannot
+ * run on the dataset.
  */
 export function datasetSubscriptionFor(
   automation: Automation,
   definition: DatasetDefinition,
-): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } {
+): { tableId: string; kinds: AutomationChangeKind[]; fieldIds: string[] | null } | { problem: string } | null {
   const trigger = automation.when;
   if (trigger.kind === "group-message") return { problem: DATASET_GROUP_TRIGGER_UNSUPPORTED };
-  if (!RECORD_TRIGGERS.has(trigger.kind) || !("table" in trigger)) return { problem: RECORD_TRIGGERS_ONLY };
+  if (!("table" in trigger)) return { problem: DATASET_SCHEDULE_UNSUPPORTED };
   const table = trigger.table === null
     ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
     : definition.tables.find((candidate) => candidate.name === trigger.table);
@@ -462,9 +459,12 @@ export function datasetSubscriptionFor(
       ? `${definition.name} has several tables. Name the one this automation watches.`
       : `${definition.name} has no table named ${trigger.table}.` };
   }
-  const subscription = subscriptionFor(trigger);
-  if (subscription === null) return { problem: RECORD_TRIGGERS_ONLY };
-  const { kinds, fields } = subscription;
+  if (trigger.kind === "button") {
+    return table.fields.some((field) => field.type === "button" && field.name === trigger.field)
+      ? null
+      : { problem: `${table.name} has no button named ${trigger.field}.` };
+  }
+  const { kinds, fields } = subscriptionFor(trigger)!;
   const fieldIds: string[] = [];
   for (const name of fields ?? []) {
     const field = table.fields.find((candidate) => candidate.name === name);

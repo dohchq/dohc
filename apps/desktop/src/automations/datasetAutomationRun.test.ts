@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@dohc/app-backend-runtime";
-import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetAutomationClaim, DatasetChangeClaimFact } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
@@ -41,9 +41,10 @@ automations:
 `);
 if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("fixture");
 const automation = parsed.entries[0].automation;
+const added: DatasetChangeClaimFact = { kind: "added", datasetId: definition.datasetId, tableId: TABLE, recordId: "a", version: 1, fields: [{ fieldId: STATUS, previous: null, next: "Open" }] };
 const claim: DatasetAutomationClaim = {
   claimId: "claim-1", workspaceId: "workspace", datasetId: definition.datasetId, automationId: "collection:Budget#close", hostEpoch: "epoch", revision: 7,
-  fact: { kind: "added", datasetId: definition.datasetId, tableId: TABLE, recordId: "a", version: 1, fields: [{ fieldId: STATUS, previous: null, next: "Open" }] },
+  fact: added,
   actor: { kind: "owner" }, depth: 0, state: "running", attempts: 1, run: 1, error: null, createdAtMs: 1_000, updatedAtMs: 1_000,
 };
 
@@ -73,7 +74,7 @@ describe("a dataset automation run", () => {
     });
     const dependencies = (surface: DatasetRunHost) => ({
       withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
-      evaluator: { evaluate: async () => "busy" as const }, store, nowMs: () => 2_000,
+      evaluator: { evaluate: async () => "busy" as const }, store, nowMs: () => 2_000, personName: (userId: string) => userId,
     });
 
     // The first attempt stops while its edit is in flight: the plan is saved, the effect is not.
@@ -116,7 +117,7 @@ describe("the rules a dataset run uses", () => {
     let reads = 0;
     const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1 }, {
+    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId }, {
       claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -157,7 +158,7 @@ automations:
     expect(await runDatasetAutomation({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
-      store, nowMs: () => 1,
+      store, nowMs: () => 1, personName: (userId: string) => userId,
     }, {
       claim, automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
@@ -219,7 +220,7 @@ automations:
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
     const added: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ship",
       fact: { kind: "added", datasetId: definition.datasetId, tableId: A, recordId: "1", version: 5, fields: [{ fieldId: A_STATUS, previous: null, next: "New" }] } };
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1 }, {
+    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId }, {
       claim: added, automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -272,9 +273,9 @@ automations:
     const outcome = await runDatasetAutomation({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "x" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1, personName: (userId: string) => userId,
     }, {
-      claim: { ...claim, fact: { ...claim.fact!, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
+      claim: { ...claim, fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: stamp, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: "u-owner", grants: editors }, signal: new AbortController().signal, stopped: new AbortController().signal,
     });
@@ -308,12 +309,12 @@ automations:
         : { result: await edit(), revision: 8, replayed: false },
     });
     const input = (editors: typeof ana[], stopped: AbortSignal) => ({
-      claim: { ...claim, fact: { ...claim.fact!, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
+      claim: { ...claim, fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: stamp, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner" as const, ownerUserId: "u-owner", grants: editors }, signal: new AbortController().signal, stopped,
     });
     const dependencies = (surface: DatasetRunHost) => ({ withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
-      evaluator: { evaluate: async () => [{ ok: true as const, value: "x" }] }, store, nowMs: () => 1 });
+      evaluator: { evaluate: async () => [{ ok: true as const, value: "x" }] }, store, nowMs: () => 1, personName: (userId: string) => userId });
     // Planned while only the owner edits: every field was readable. It stops mid-edit.
     const first = host(async () => { stop.abort(); throw new Error("The host closed."); });
     expect(await runDatasetAutomation(dependencies(first), input([], stop.signal))).toEqual({ kind: "wait", reason: "stopped" });

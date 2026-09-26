@@ -4699,6 +4699,7 @@ export const PressAutomationButtonPayload = z.object({
   workspaceId: WORKSPACE_ID,
   collectionPath: PATH_STRING,
   field: z.string().min(1).max(256),
+  // A document record's id, or a dataset record's primary key as JSON.
   recordId: z.string().min(1).max(1024),
   pressId: z.uuid(),
   // A dataset table's name. A document Collection has one table and sends null.

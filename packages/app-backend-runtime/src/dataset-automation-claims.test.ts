@@ -17,12 +17,15 @@ import {
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
   DATASET_AUTOMATION_HISTORY,
+  DATASET_AUTOMATION_PRESS_RETENTION_MS,
   DATASET_AUTOMATION_RECLAIM_EXHAUSTED,
   DATASET_AUTOMATION_RECORD_ID_TOO_LONG,
   type DatasetActor,
   type DatasetAutomationClaim,
   type DatasetAutomationClaims,
+  type DatasetChangeClaimFact,
   type DatasetChangeKind,
+  type DatasetPressInput,
 } from "./dataset-automation-claims.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -31,9 +34,17 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const scope = { workspaceId: "workspace", datasetId: id(1) };
-const TASKS = id(2), STATUS = id(4), NOTES = id(5), TAGS = id(6);
+const TASKS = id(2), STATUS = id(4), NOTES = id(5), TAGS = id(6), BUTTON = id(10);
+const ANA = { kind: "owner", userId: "user-ana" } as const, BEN = { kind: "named", userId: "user-ben" } as const;
+// The executor's hash of the automation a press was checked against.
+const CHECKED = digest("collection:tasks#paid as checked");
 const authorize = () => {};
 
+/** A claim's committed change; a press has none. */
+function changeOf(claim: DatasetAutomationClaim): DatasetChangeClaimFact {
+  if (claim.fact === null || claim.fact.kind === "button") throw new Error("This claim holds no change.");
+  return claim.fact;
+}
 function drain(claims: Pick<DatasetAutomationClaims, "next">): DatasetAutomationClaim[] {
   const started: DatasetAutomationClaim[] = [];
   for (let claim = claims.next(scope.workspaceId); claim; claim = claims.next(scope.workspaceId)) started.push(claim);
@@ -52,7 +63,7 @@ function transactions(db: DatabaseSync) {
 const tasks = (count: number) => Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",");
 // Everything the ledger retains for the dataset, as it charged it.
 function retained(db: DatabaseSync): number {
-  return ["claims", "revisions", "failure_generations"].reduce((sum, table) =>
+  return ["claims", "revisions", "failure_generations", "presses"].reduce((sum, table) =>
     sum + Number(db.prepare(`SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_automation_${table}`).get()!.bytes), 0);
 }
 
@@ -132,7 +143,7 @@ it("claims each changed record once per subscribed automation, by table, change 
   // A claim carries only the fields its automation watches.
   expect(started[2]).toMatchObject({ state: "running", attempts: 1, run: 1, depth: 0, actor: { kind: "owner" }, hostEpoch: "host-1",
     fact: { tableId: TASKS, fields: [{ fieldId: STATUS, previous: "Open", next: "Done" }] } });
-  expect(started[0]!.fact!.fields.map(field => field.fieldId)).toEqual([id(3), STATUS, NOTES]);
+  expect(changeOf(started[0]!).fields.map(field => field.fieldId)).toEqual([id(3), STATUS, NOTES]);
   expect(new Set(started.map(claim => claim.claimId)).size).toBe(started.length);
   expect(f.claims.next(scope.workspaceId)).toBeNull();
   // Each wake comes after its commit, and only a commit that claimed wakes.
@@ -382,7 +393,7 @@ it("carries small values whole and names fields whose values are too large", () 
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added"]));
   f.commit(`INSERT INTO tasks VALUES('a','Open','${"x".repeat(10_000)}')`);
-  expect(f.claims.next(scope.workspaceId)!.fact!.fields).toEqual([
+  expect(changeOf(f.claims.next(scope.workspaceId)!).fields).toEqual([
     { fieldId: id(3), previous: null, next: "a" },
     { fieldId: STATUS, previous: null, next: "Open" },
     { fieldId: NOTES, previous: null, next: null, truncated: true },
@@ -416,8 +427,8 @@ it("keeps a whole claim within 64 KiB when every field of the widest table chang
   const served = Buffer.byteLength(JSON.stringify(started));
   expect(served).toBeLessThanOrEqual(64 * 1024);
   expect(served).toBeGreaterThan(62 * 1024);
-  expect(started.fact!.fields).toHaveLength(127);
-  expect(started.fact!.fields.filter(field => field.truncated).length).toBeGreaterThan(100);
+  expect(changeOf(started).fields).toHaveLength(127);
+  expect(changeOf(started).fields.filter(field => field.truncated).length).toBeGreaterThan(100);
   // Its longest failure still fits: every quote in it doubles as JSON.
   const failed = f.claims.settle(started, { state: "failed", error: '"'.repeat(5000) });
   expect(Buffer.byteLength(JSON.stringify(failed.error))).toBeLessThanOrEqual(1024);
@@ -437,11 +448,113 @@ it("keeps subscriptions current, and forgets a deleted dataset", () => {
   expect(() => f.claims.subscribe(scope, subscription("collection:tasks#b", []))).toThrow("change kinds");
   expect(() => f.claims.subscribe(scope, { ...subscription("collection:tasks#b", ["added"]), definitionHash: "edited" })).toThrow("definition hash");
   f.commit("INSERT INTO tasks VALUES('a','Open','')", { kind: "automation", automationId: "collection:tasks#b", depth: 1 });
+  f.claims.press({ cursor: f.cursor, pressId: "press-1", automationId: "collection:tasks#paid", definitionHash: CHECKED, tableId: TASKS, fieldId: BUTTON, recordId: "a", presser: ANA, request: request("a", ANA) });
   f.db.exec("BEGIN IMMEDIATE"); f.claims.forget(scope); f.db.exec("COMMIT");
-  for (const table of ["subscriptions", "claims", "revisions"]) {
+  for (const table of ["subscriptions", "claims", "revisions", "presses"]) {
     expect(f.db.prepare(`SELECT count(*) AS count FROM dohc_dataset_automation_${table} WHERE dataset_id=?`).get(scope.datasetId)).toEqual({ count: 0 });
   }
   expect(f.claims.subscriptions(scope.workspaceId)).toEqual([{ datasetId: id(99), ...subscription("collection:other#b", ["removed"]) }]);
+});
+
+// The press as its window asked for it, as main hashes it.
+const request = (...asked: unknown[]) => digest(JSON.stringify(asked));
+function presses(f: ReturnType<typeof ledger>) {
+  return (pressId: string, recordId: string | number = "a", presser: DatasetPressInput["presser"] = ANA, automationId = "collection:tasks#paid") =>
+    f.claims.press({ cursor: f.cursor, pressId, automationId, definitionHash: CHECKED, tableId: TASKS, fieldId: BUTTON, recordId, presser, request: request(recordId, presser, automationId) });
+}
+
+it("claims a press for the person who pressed, answers the same press sent again, and runs a button once per record", () => {
+  const f = ledger();
+  const press = presses(f);
+  f.commit("INSERT INTO tasks VALUES('a','Open','')");
+  const first = press("press-1");
+  expect(first).toMatchObject({ kind: "claimed", claim: { automationId: "collection:tasks#paid", state: "pending", depth: 0, attempts: 0, run: 1,
+    hostEpoch: "host-1", revision: 1, fact: { kind: "button", datasetId: scope.datasetId, tableId: TASKS, recordId: "a", fieldId: BUTTON, definitionHash: CHECKED }, actor: ANA } });
+  if (first.kind === "busy") throw new Error("The first press ran.");
+  // The press sent again, and a double click, answer the one claim.
+  expect(press("press-1")).toEqual({ kind: "joined", claim: first.claim });
+  expect(press("press-2")).toEqual({ kind: "joined", claim: first.claim });
+  // Someone else's press gets no claim while it runs for Ana, and neither does a press of another automation the button now runs.
+  expect(press("press-3", "a", BEN)).toEqual({ kind: "busy" });
+  expect(press("press-9", "a", ANA, "collection:tasks#settle")).toEqual({ kind: "busy" });
+  expect(f.claims.pressed(scope.workspaceId, "press-3")).toBeNull();
+  // Another button on the record runs on its own.
+  expect(f.claims.press({ cursor: f.cursor, pressId: "press-8", automationId: "collection:tasks#paid", definitionHash: CHECKED, tableId: TASKS, fieldId: id(11), recordId: "a",
+    presser: BEN, request: request("refund", BEN) })).toMatchObject({ kind: "claimed" });
+  // Another record runs on its own, and a number is not its text.
+  const numbered = press("press-4", 1), text = press("press-5", "1");
+  expect([numbered.kind, text.kind]).toEqual(["claimed", "claimed"]);
+  // A press id names one press.
+  expect(() => press("press-1", "b")).toThrow("already names another press");
+  expect(() => press("press-2", "a", BEN)).toThrow("already names another press");
+  expect(() => press("press-6", { id: 1 } as unknown as string)).toThrow("Invalid automation record");
+  expect(() => f.claims.press({ cursor: f.cursor, pressId: "press-10", automationId: "collection:tasks#paid", definitionHash: "edited", tableId: TASKS, fieldId: BUTTON,
+    recordId: "c", presser: ANA, request: request("c", ANA) })).toThrow("definition hash");
+  // The same request sent again answers its press, whatever its button or automation resolves to now.
+  expect(f.claims.press({ cursor: f.cursor, pressId: "press-1", automationId: "collection:tasks#renamed", definitionHash: CHECKED, tableId: TAGS, fieldId: id(11), recordId: "z",
+    presser: ANA, request: request("a", ANA, "collection:tasks#paid") })).toEqual({ kind: "joined", claim: first.claim });
+  // Once the run settles, a new press runs again, and the settled press still answers its claim.
+  for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  expect(f.claims.pressed(scope.workspaceId, "press-2")).toMatchObject({ claim: { claimId: first.claim.claimId, state: "done" }, request: request("a", ANA, "collection:tasks#paid") });
+  expect(press("press-1")).toMatchObject({ kind: "joined", claim: { claimId: first.claim.claimId, state: "done" } });
+  const again = press("press-7", "a", BEN);
+  expect(again).toMatchObject({ kind: "claimed", claim: { actor: BEN, state: "pending" } });
+  expect(again.kind !== "busy" && again.claim.claimId).not.toBe(first.claim.claimId);
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("keeps a claim a remembered press names past the run history, until the press is 30 days old", () => {
+  const f = ledger();
+  const press = presses(f);
+  const first = press("press-first");
+  if (first.kind === "busy") throw new Error("The first press ran.");
+  for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  for (let index = 0; index <= DATASET_AUTOMATION_HISTORY; index++) {
+    press(`press-${index}`, index);
+    for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  }
+  expect(f.claims.pressed(scope.workspaceId, "press-first")?.claim.claimId).toBe(first.claim.claimId);
+  f.tick(DATASET_AUTOMATION_PRESS_RETENTION_MS + 1);
+  expect(f.claims.pressed(scope.workspaceId, "press-first")).toBeNull();
+  // The next press forgets the old ones.
+  press("press-late", "late");
+  // The press sent again once the ledger forgot it still finds its claim, when nothing committed since.
+  expect(press("press-first")).toMatchObject({ kind: "joined", claim: { claimId: first.claim.claimId, state: "done" } });
+  expect(() => press("press-first", "a", BEN)).toThrow("already names another press");
+  // The next settle trims the claims no press names.
+  for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  const count = (table: string) => f.db.prepare(`SELECT count(*) AS count FROM dohc_dataset_automation_${table}`).get();
+  expect([count("presses"), count("claims")]).toEqual([{ count: 2 }, { count: DATASET_AUTOMATION_HISTORY + 1 }]);
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("treats a forgotten press id that asks for something else as a new press", () => {
+  const f = ledger();
+  const press = presses(f);
+  const first = press("press-1");
+  if (first.kind === "busy") throw new Error("The first press ran.");
+  for (const started of drain(f.claims)) f.claims.settle(started, { state: "done" });
+  f.tick(DATASET_AUTOMATION_PRESS_RETENTION_MS + 1);
+  const again = press("press-1", "a", BEN);
+  expect(again).toMatchObject({ kind: "claimed", claim: { actor: BEN, state: "pending" } });
+  expect(again.kind !== "busy" && again.claim.claimId).not.toBe(first.claim.claimId);
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("tries a failed press again only while its button does not run on the record, for any automation", () => {
+  const f = ledger();
+  const press = presses(f);
+  const ana = press("press-ana");
+  if (ana.kind === "busy") throw new Error("Ana's press ran.");
+  const [started] = drain(f.claims);
+  f.claims.settle(started!, { state: "failed", error: "Status is not a field." });
+  // The button now runs another automation, which Ben presses.
+  const ben = press("press-ben", "a", BEN, "collection:tasks#settle");
+  expect(ben).toMatchObject({ kind: "claimed" });
+  expect(() => f.claims.retry(ana.claim)).toThrow("This button is already running for this record.");
+  expect(f.claims.claims(scope.workspaceId, "collection:tasks#paid").map(claim => claim.state)).toEqual(["failed"]);
+  for (const claim of drain(f.claims)) f.claims.settle(claim, { state: "done" });
+  expect(f.claims.retry(ana.claim)).toMatchObject({ claimId: ana.claim.claimId, state: "pending", run: 2 });
 });
 
 // The whole host, with a real worker: the actor comes from the context, and
@@ -450,12 +563,13 @@ const hostSource = `globalThis.operations={
   create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);return {id:ctx.requestId};},
   read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');}
 };`;
-const ITEMS = id(12), CREATE = id(15), READ = id(16);
+const ITEMS = id(12), CREATE = id(15), READ = id(16), WELCOME = id(17);
 const hostDefinition: DatasetDefinition = {
   formatVersion: 1, datasetId: scope.datasetId, name: "Sign-ups", schemaPath: "signups/schema.sql", operationsPath: "signups/operations.js",
   tables: [{ tableId: ITEMS, name: "Items", sqlName: "items", primaryKey: "id", fields: [
     { fieldId: id(13), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
     { fieldId: id(14), name: "Value", sqlColumn: "value", type: "text", required: true, unique: false },
+    { fieldId: WELCOME, name: "Welcome", type: "button" },
   ] }],
   operations: [
     { operationId: CREATE, name: "create", label: "Sign up", tableId: ITEMS, kind: "create", access: "link", readOnly: false, fieldIds: [id(14)] },
@@ -491,7 +605,7 @@ async function host(operationSource = hostSource) {
   const invoke = (context: Context, operationId: string, idempotencyKey: string, appId?: string) => current.invoke(context, { ...scope, revision: 1,
     revisionSha256: revision.revisionSha256, operationId, input: operationId === CREATE ? { value: idempotencyKey } : {}, idempotencyKey,
     ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
-  return { db, wakes, storage, invoke, revision, get host() { return current; }, get claims() { return current.automationClaims; },
+  return { db, journal, wakes, storage, invoke, revision, get host() { return current; }, get claims() { return current.automationClaims; },
     async restart() { await supervisor.close(); supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") }); current = create(); } };
 }
 
@@ -510,13 +624,30 @@ it("claims a host commit once, as the actor its context names, and never on a re
   expect(f.storage.bytes).toBe(retained(f.db));
 });
 
+it("claims a press only for a button in the approved rules, while this host writes the dataset", async () => {
+  const f = await host();
+  const press = (pressId: string, fieldId = WELCOME) =>
+    f.claims.press({ ...scope, pressId, automationId: "collection:signups#welcome", definitionHash: CHECKED, tableId: ITEMS, fieldId, recordId: "a", presser: ANA, request: request(pressId) });
+  expect(() => press("press-1", id(14))).toThrow("not in the Collection's approved rules");
+  expect(() => f.claims.assertPressable({ ...scope, tableId: ITEMS, fieldId: id(14) })).toThrow("not in the Collection's approved rules");
+  const head = f.journal.head(scope, authorize).cursor;
+  expect(press("press-2")).toMatchObject({ kind: "claimed", claim: { hostEpoch: head.hostEpoch, revision: head.revision, actor: ANA } });
+  f.host.archiveDataset("owner", scope);
+  expect(() => press("press-3")).toThrow("archived");
+  f.host.restoreDataset("owner", scope);
+  f.journal.fence({ expected: head, authorize });
+  expect(() => f.claims.assertPressable({ ...scope, tableId: ITEMS, fieldId: WELCOME })).toThrow("buttons can't run here");
+  expect(() => press("press-4")).toThrow("buttons can't run here");
+  expect(f.storage.bytes).toBe(retained(f.db));
+});
+
 it("claims a write whose operation spells its table in another case", async () => {
   // A changeset names a table as its schema declares it, and the schema must declare the approved name.
   const f = await host(hostSource.replace("INSERT INTO items", "INSERT INTO ITEMS"));
   f.claims.subscribe(scope, subscription("collection:signups#welcome", ["added"], null, ITEMS));
   await f.invoke("owner", CREATE, "first");
   await f.invoke("owner", CREATE, "second");
-  expect(drain(f.claims).map(claim => claim.fact!.fields[1])).toEqual([
+  expect(drain(f.claims).map(claim => changeOf(claim).fields[1])).toEqual([
     { fieldId: id(14), previous: null, next: "first" }, { fieldId: id(14), previous: null, next: "second" },
   ]);
 });
@@ -530,7 +661,7 @@ it("rolls a commit back when its claims cannot be kept, and the next write still
   f.storage.limit = Number.POSITIVE_INFINITY;
   await f.invoke("owner", CREATE, "kept");
   expect(await f.invoke("owner", READ, "read-1")).toMatchObject({ result: [{ value: "kept" }] });
-  expect(drain(f.claims).map(claim => [claim.revision, claim.fact!.fields[1]!.next])).toEqual([[1, "kept"]]);
+  expect(drain(f.claims).map(claim => [claim.revision, changeOf(claim).fields[1]!.next])).toEqual([[1, "kept"]]);
 });
 
 it("takes an automation's identity from its context, and grants it no owner administration", async () => {

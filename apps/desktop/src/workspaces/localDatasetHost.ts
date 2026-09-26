@@ -9,7 +9,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
-import type { DatasetAutomationClaim, DatasetAutomationSubscription } from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetAutomationClaim, DatasetAutomationSubscription, DatasetPressed, DatasetPressInput } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
@@ -526,6 +526,22 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         claims(automationId: string) { assertCurrent(); return host.automationClaims.claims(workspaceId, automationId); },
         claim(automationId: string, claimId: string) { assertCurrent(); return host.automationClaims.claim(workspaceId, automationId, claimId); },
         failures() { assertCurrent(); return host.automationClaims.failures(workspaceId); },
+        /**
+         * Claims a press by `pressedBy`, the account main pressed for. Every
+         * person on this computer is the owner of its datasets, so the run
+         * acts with the owner's authority, which is theirs.
+         */
+        press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed {
+          assertCurrent();
+          const { pressedBy, ...press } = input;
+          return host.automationClaims.press({ workspaceId, datasetId, ...press, presser: { kind: "owner", userId: pressedBy } });
+        },
+        /** Throws why this host cannot take a press of this button, as `press` would. */
+        assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">) {
+          assertCurrent(); host.automationClaims.assertPressable({ workspaceId, datasetId, ...button });
+        },
+        /** A press the ledger remembers, with its claim, or null. */
+        pressed(pressId: string) { assertCurrent(); return host.automationClaims.pressed(workspaceId, pressId); },
       },
       close(): Promise<void> {
         return closePromise ??= (async () => {
