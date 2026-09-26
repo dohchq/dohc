@@ -323,7 +323,7 @@ export function ChatLane(props: {
             type="button"
             data-testid="chats-lane-new-messages"
             onClick={() => listRef.current?.scrollToEnd()}
-            className="dohc-pop-in absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-hover dohc-focus-visible"
+            className="dohc-pop-in absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line dohc-focus-visible"
           >
             <ArrowDown size={11} aria-hidden />
             <span className="tabular-nums">{newCount}</span>

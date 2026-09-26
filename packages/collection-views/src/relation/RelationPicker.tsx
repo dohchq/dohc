@@ -165,8 +165,8 @@ export function RelationPicker({
               type="button"
               role="option"
               aria-selected={selected.includes(record.id)}
-              className={`rounded px-1 text-left text-[13px] transition-colors duration-75 hover:bg-hover ${
-                selected.includes(record.id) ? "bg-line/60 text-ink" : "text-muted"
+              className={`rounded px-1 text-left text-[13px] transition-colors duration-75 ${
+                selected.includes(record.id) ? "bg-selected text-ink" : "text-muted hover:bg-hover"
               }`}
               onClick={() => {
                 emit(record.id);
