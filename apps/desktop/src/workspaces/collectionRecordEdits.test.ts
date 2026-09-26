@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 
 import {
   actorOriginIdFor,
@@ -42,6 +43,7 @@ interface FakeSessionLog {
 
 function fakeSession(options: {
   settleError?: Error;
+  onSettle?: () => Promise<void>;
   /** Runs just before each update's turn on the session chain, as a remote update would land. */
   beforeTurn?: (doc: Y.Doc) => void;
 } = {}): {
@@ -104,6 +106,7 @@ function fakeSession(options: {
       await chain;
       log.order.push("settle");
       if (options.settleError) throw options.settleError;
+      await options.onSettle?.();
       return { materialized: true };
     },
     async close() {
@@ -232,6 +235,36 @@ afterEach(() => {
 });
 
 describe("setCollectionRecordFields", () => {
+  it.each([
+    '{status: draft, score: .nan}',
+    '&root {status: draft, score: .nan}',
+    '!custom &root {status: draft, score: .nan}',
+    ': note\nstatus: draft\nscore: .nan',
+    'status: &v .nan\nscore: *v',
+    'status: &v .nan\nscore: {nested: [*v]}',
+  ])("refuses unsafe property candidates before writing the file: %s", async yaml => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const file = join(root, "one.md");
+    const markdown = `---\n${yaml}\n---\n\nBody`;
+    const original = Buffer.from(markdown);
+    await writeFile(file, original);
+    const { session, log } = fakeSession({
+      onSettle: async () => { await writeFile(file, yDocToMarkdown(log.doc)); },
+    });
+    const imported = markdownToYDoc(markdown);
+    try {
+      Y.applyUpdate(log.doc, Y.encodeStateAsUpdate(imported));
+      const before = Y.encodeStateAsUpdate(log.doc);
+      await expect(setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "one.md", fields: { status: "done" }, author: AGENT,
+      })).rejects.toThrow("without rewriting the others");
+      expect(log.order).toEqual(["close"]);
+      expect(log.journaled).toEqual([]);
+      expect(Y.encodeStateAsUpdate(log.doc)).toEqual(before);
+      expect(await readFile(file)).toEqual(original);
+    } finally { imported.destroy(); log.doc.destroy(); }
+  });
+
   it("journals each field as its own update with the agent's actor origin, settles once, then releases", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();

@@ -155,6 +155,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
+        RuntimeError::Collab(refused @ CollabError::FrontmatterEditRefused) => {
+            return WireError::new(ErrorCode::InvalidParams, refused.to_string());
+        }
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. }) => {
             return WireError::new(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
         }
@@ -393,6 +396,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         CollabError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
+        | CollabError::FrontmatterEditRefused
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }

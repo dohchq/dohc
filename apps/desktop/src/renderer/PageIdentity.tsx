@@ -1,3 +1,10 @@
+import {
+  frontmatterEditsRefused,
+  markdownFrontmatterEditsRefused,
+  setFrontmatterValue,
+  patchFrontmatter,
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
+} from "@dohc/ydoc-projection/frontmatter";
 import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -121,6 +128,8 @@ export function PageIdentity(props: PageIdentityProps) {
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
+  const [editRefused, setEditRefused] = useState(false);
+  useEffect(() => setEditRefused(false), [ydoc, body]);
   const icon =
     typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
 
@@ -128,19 +137,23 @@ export function PageIdentity(props: PageIdentityProps) {
   // there is no second save cycle: a Y.Map transaction for collab, or a
   // frontmatter rewrite handed back through onChange for local markdown.
   function writeField(key: "title" | "icon", value: string | undefined) {
-    if (readOnly) return;
-    if (ydoc) {
-      ydoc.transact(() => {
-        const map = ydoc.getMap(FRONTMATTER_FIELD);
-        if (value === undefined || value === "") map.delete(key);
-        else map.set(key, value);
-      });
-      return;
+    // An unsplittable block cannot change one property without
+    // rewriting the others, so the write is refused before it starts.
+    if (readOnly || (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body))) return;
+    try {
+      if (ydoc) {
+        if (value === undefined || value === "") patchFrontmatter(ydoc, new Map(), [key]);
+        else setFrontmatterValue(ydoc, key, value);
+      } else {
+        const next = { ...parseFrontmatter(body).meta };
+        if (value === undefined || value === "") delete next[key];
+        else next[key] = value;
+        props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
+      }
+      setEditRefused(false);
+    } catch {
+      setEditRefused(true);
     }
-    const next = { ...parseFrontmatter(body).meta };
-    if (value === undefined || value === "") delete next[key];
-    else next[key] = value;
-    props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
   }
 
   // The title keeps its own draft so typing stays smooth; it re-syncs from
@@ -215,6 +228,7 @@ export function PageIdentity(props: PageIdentityProps) {
   return (
     <div className="dohc-page-identity group" data-testid="page-identity">
       <div className="dohc-page-identity__inner">
+        {editRefused ? <span role="status" className="dohc-page-properties__flag" title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
         <div className="dohc-page-identity__icon-row">
           {icon ? (
             <button

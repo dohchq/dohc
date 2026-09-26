@@ -14,6 +14,11 @@ import {
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
+import {
+  frontmatterEditsRefused,
+  patchFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter";
+import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../renderer/markdown/frontmatter";
 
 import {
   readWorkspaceText,
@@ -239,7 +244,7 @@ function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Arra
       captured.update = encoded;
     });
     // Setting a map key always emits an update.
-    scratch.transact(() => scratch.getMap(FRONTMATTER_FIELD).set(field, value));
+    patchFrontmatter(scratch, new Map([[field, value]]));
     if (captured.update === undefined) throw new Error(`Setting "${field}" produced no update.`);
     return captured.update;
   } finally {
@@ -313,6 +318,7 @@ export async function setCollectionRecordFields(
             kept[field] = currentValue;
             return null;
           }
+          if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;
           return frontmatterUpdate(doc, field, value);
         },
