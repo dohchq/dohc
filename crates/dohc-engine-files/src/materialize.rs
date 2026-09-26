@@ -227,7 +227,8 @@ impl AtomicReplacer for StdReplacer {}
 /// Linux and macOS ask the kernel for an exclusive rename. Other Unix
 /// systems, and filesystems that refuse the flag, claim the name with a hard
 /// link and then remove the incoming name. A Unix filesystem that supports
-/// neither (FAT, exFAT, some SMB and FUSE mounts) falls back to a rename
+/// neither (some SMB and FUSE mounts, or FAT on a kernel without the flag;
+/// Linux 6.x FAT and exFAT accept it) falls back to a rename
 /// after an absence check, which a file another program creates in between
 /// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
@@ -3385,6 +3386,8 @@ enum Exhaustion {
     Locked,
     /// ERROR_ACCESS_DENIED with a probe that opened. That proves nothing, so
     /// the step gets one more try (the transient contender may be gone).
+    /// Only Windows reports this error, so other targets never build it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Reattempt,
     /// Anything else is terminal io.
     Terminal,
