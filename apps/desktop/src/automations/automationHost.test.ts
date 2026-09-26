@@ -5,6 +5,7 @@ import {
   createAutomationHosts,
   HOST_FRESH_MS,
   hostOfAnswer,
+  relayUnreachable,
   type HostAnswer,
   type HostRequest,
 } from "./automationHost";
@@ -316,6 +317,13 @@ describe("host answers and labels", () => {
     expect(hostOfAnswer({ status: 409, body: { ok: true, host: null } })).toBeUndefined();
     expect(hostOfAnswer({ status: 200, body: { ok: true, host: { ...host(ME, 1, null, null), extra: 1 } } })).toBeUndefined();
     expect(hostOfAnswer({ status: 200, body: { ok: true, host: host(" padded", 1, null, null) } })).toBeUndefined();
+  });
+
+  it("tells a relay that did not answer from a failure", () => {
+    expect(relayUnreachable(new TypeError("fetch failed"))).toBe(true);
+    expect(relayUnreachable(new DOMException("The operation timed out.", "TimeoutError"))).toBe(true);
+    expect(relayUnreachable(new DOMException("The operation was aborted.", "AbortError"))).toBe(false);
+    expect(relayUnreachable(new Error("Reconnect your sharing server, then try again."))).toBe(false);
   });
 
   it("names the computer within the relay's bounds", () => {

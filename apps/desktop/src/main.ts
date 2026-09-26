@@ -198,7 +198,13 @@ import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./autom
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { AutomationScheduler } from "./automations/automationScheduler";
-import { computerLabel, computersOfAnswer, createAutomationHosts, hostOfAnswer } from "./automations/automationHost";
+import {
+  computerLabel,
+  computersOfAnswer,
+  createAutomationHosts,
+  hostOfAnswer,
+  relayUnreachable,
+} from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "./automations/skippedRunsNotice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
@@ -3658,7 +3664,14 @@ async function scheduleHostState(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(change.body),
     })
-    : await request({ method: "GET" });
+    : await request({ method: "GET" }).catch((error: unknown) => {
+      // Offline, a read says so where the host shows. A choice still fails.
+      if (relayUnreachable(error)) return null;
+      throw error;
+    });
+  if (answer === null) {
+    return { kind: "note", message: "dohc could not reach your server to check which computer runs schedules." };
+  }
   // Another computer changed the host first: show it as it is now.
   if (change && answer.status === 409) answer = await request({ method: "GET" });
   // An answer for an account that signed out meanwhile belongs to no one here.

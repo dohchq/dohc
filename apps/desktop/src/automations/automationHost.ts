@@ -91,6 +91,14 @@ function isHost(value: unknown): value is RelayAutomationHost {
     (host.releasedThroughMs === null || time(host.releasedThroughMs));
 }
 
+/**
+ * A relay request that got no answer: the network or the relay is down, or
+ * the request ran out of time. dohc expects this offline, so it is not an error.
+ */
+export function relayUnreachable(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError");
+}
+
 /** The host from a relay answer, or undefined when the answer is not one. */
 export function hostOfAnswer(answer: { status: number; body: unknown }): RelayAutomationHost | null | undefined {
   const { body } = answer;

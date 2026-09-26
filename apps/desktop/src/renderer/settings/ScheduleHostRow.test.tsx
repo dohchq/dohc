@@ -101,6 +101,19 @@ describe("Schedules run on", () => {
     expect(screen.queryByTestId("settings-row-schedule-host")).toBeNull();
   });
 
+  it("checks again after a note, as when the connection comes back", async () => {
+    const onError = vi.fn();
+    const readScheduleHost = vi.fn()
+      .mockResolvedValueOnce({ kind: "note", message: "dohc could not reach your server to check which computer runs schedules." })
+      .mockResolvedValueOnce(relay());
+    install({ readScheduleHost });
+    render(<ScheduleHostRow workspaceId="ws" onError={onError} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Check again" }));
+    expect(await screen.findByTestId("schedule-host-laptop")).toBeTruthy();
+    expect(screen.queryByTestId("schedule-host-note")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("reports a failed read through the shell and offers Try again", async () => {
     const onError = vi.fn();
     const readScheduleHost = vi.fn()

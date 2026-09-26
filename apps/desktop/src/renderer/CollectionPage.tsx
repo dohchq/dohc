@@ -72,6 +72,8 @@ export interface CollectionPageProps {
   onOpenRecord: (recordPath: string) => void;
   // Opens any workspace file in a tab, such as automations.yaml.
   onOpenFile: (path: string) => void;
+  // Opens the setting where the owner chooses which computer runs schedules.
+  onOpenScheduleSettings: () => void;
   // The shell's error hook and success notices: a toast, then a row in
   // Notices. A success notice can carry an Undo.
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
@@ -102,6 +104,7 @@ export function CollectionPage({
   onNewRecord,
   onOpenRecord,
   onOpenFile,
+  onOpenScheduleSettings,
   onError,
   onNotice,
   automationFocus,
@@ -475,6 +478,7 @@ export function CollectionPage({
       closeAsk={closeAsk}
       onClose={closeAutomations}
       onOpenFile={onOpenFile}
+      onOpenScheduleSettings={onOpenScheduleSettings}
       onError={onError}
       onNotice={onNotice}
     />

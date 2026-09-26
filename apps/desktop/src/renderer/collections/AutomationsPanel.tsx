@@ -1,8 +1,13 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ListCollectionAutomationsResult, WriteCollectionAutomationsResult } from "../../ipc/bridgeContract";
+import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ListCollectionAutomationsResult,
+  ScheduleHostResult,
+  WriteCollectionAutomationsResult,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { SwitchControl } from "../settings/SettingRow";
@@ -188,6 +193,167 @@ function LastRun(props: { lastRun: ValidAutomationSummary["lastRun"]; onOpen: ()
   );
 }
 
+// How a next run shows: the person's local time, down to the minute.
+const RUN_TIME: Intl.DateTimeFormatOptions = {
+  weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+};
+// The longest delay setTimeout keeps; a longer one fires at once.
+const LONGEST_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** When a switched-on schedule that can run is next due after `nowMs`, or null. */
+function nextRunOf(summary: ValidAutomationSummary, nowMs: number): number | null {
+  const { automation } = summary;
+  if (!automation.enabled || automation.when.kind !== "schedule" || summary.cannotRun !== null) return null;
+  try {
+    return nextDue(automation.when, nowMs);
+  } catch {
+    // A time zone this computer cannot follow: main already says it cannot run.
+    return null;
+  }
+}
+
+/**
+ * Each schedule's next run in local time, by automation id. The panel works
+ * it out from the schedule as main does, and again when the soonest one
+ * comes due or the window gets focus, as after the computer sleeps or moves
+ * to another time zone. A new formatter each time follows that zone.
+ */
+function useNextRuns(file: ListCollectionAutomationsResult | null): ReadonlyMap<string, string> {
+  const [tick, setTick] = useState(0);
+  const { runs, soonestMs } = useMemo(() => {
+    const nowMs = Date.now();
+    const format = new Intl.DateTimeFormat(undefined, RUN_TIME);
+    const shown = new Map<string, string>();
+    let soonest: number | null = null;
+    if (file?.status !== "read") return { runs: shown, soonestMs: soonest };
+    for (const entry of file.automations) {
+      if (!entry.valid) continue;
+      const next = nextRunOf(entry, nowMs);
+      if (next === null) continue;
+      shown.set(entry.automationId, format.format(next));
+      soonest = soonest === null ? next : Math.min(soonest, next);
+    }
+    return { runs: shown, soonestMs: soonest };
+  }, [file, tick]);
+  useEffect(() => {
+    if (soonestMs === null) return;
+    const again = () => setTick((value) => value + 1);
+    const timer = window.setTimeout(again, Math.min(Math.max(soonestMs - Date.now(), 0), LONGEST_TIMEOUT_MS));
+    window.addEventListener("focus", again);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", again);
+    };
+  }, [runs, soonestMs]);
+  return runs;
+}
+
+type RelayHost = Extract<ScheduleHostResult, { kind: "relay" }>;
+/**
+ * What the panel knows about the computer that runs schedules: the relay's
+ * last answer, and why dohc could not check it again, such as offline.
+ */
+type ScheduleHostView = { relay: RelayHost | null; note: string | null };
+
+/**
+ * Which of the owner's computers runs this workspace's schedules. The panel
+ * reads it only while it shows a next run, and again when the host or the
+ * account changes. An answer for another workspace or account never lands.
+ */
+function useScheduleHost(workspaceId: string, wanted: boolean, onError: ErrorReport) {
+  const [host, setHost] = useState<ScheduleHostView | null>(null);
+  const request = useRequestSequence([workspaceId]);
+  const reportError = useRef(onError);
+  reportError.current = onError;
+  const read = useCallback(async () => {
+    const token = request.next();
+    try {
+      const result = await bridge().readScheduleHost({ workspaceId });
+      if (!request.isCurrent(token)) return;
+      // A note keeps the host the relay named last, now unchecked.
+      setHost((current) => ({
+        relay: result.kind === "relay" ? result : result.kind === "note" ? current?.relay ?? null : null,
+        note: result.kind === "note" ? result.message : null,
+      }));
+    } catch (error) {
+      if (request.isCurrent(token)) {
+        reportError.current("dohc could not read which computer runs schedules.", error, () => void read());
+      }
+    }
+  }, [workspaceId]);
+  useEffect(() => {
+    request.next();
+    setHost(null);
+    if (!wanted) return;
+    void read();
+    const offHost = bridge().onScheduleHostChanged((changed) => {
+      if (changed === workspaceId) void read();
+    });
+    const offSession = bridge().onCloudSessionChanged(({ phase }) => {
+      request.next();
+      setHost(null);
+      if (phase === "ready") void read();
+    });
+    return () => {
+      offHost();
+      offSession();
+    };
+  }, [wanted, read, workspaceId]);
+  return { host, read };
+}
+
+/** The name of the computer that runs schedules when it is another one, or null. */
+function otherHostName(relay: RelayHost | null): string | null {
+  if (relay === null || relay.hostInstallId === null) return null;
+  const computer = relay.computers.find((entry) => entry.installId === relay.hostInstallId);
+  return computer?.thisComputer ? null : computer?.label ?? "another computer";
+}
+
+/** A schedule's next run, and the computer that runs it when that is not this one. */
+function NextRun(props: { at: string | undefined; runsOn: string | null }) {
+  if (props.at === undefined) return null;
+  return (
+    <StatusLine tone="muted" icon={CalendarClock} label="Schedule">
+      Next run {props.at}{props.runsOn === null ? null : ` on ${props.runsOn}`}
+    </StatusLine>
+  );
+}
+
+/**
+ * Says once, above the list, what stops or delays this workspace's
+ * schedules: no computer runs them, a handover waits, or dohc could not
+ * check. Each offers its way forward.
+ */
+function ScheduleHostNote(props: { host: ScheduleHostView | null; onCheckAgain: () => void; onChooseComputer: () => void }) {
+  const relay = props.host?.relay ?? null;
+  const note = props.host?.note ?? null;
+  const from = relay?.computers.find((computer) => computer.installId === relay.handoverFrom);
+  const choose = (
+    <SecondaryButton size="compact" className="mt-1.5" onClick={props.onChooseComputer}>Choose a computer</SecondaryButton>
+  );
+  return (
+    <>
+      {note === null ? null : (
+        <div data-testid="schedule-host-unchecked" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+          <p className="m-0">{note}</p>
+          <SecondaryButton size="compact" className="mt-1.5" onClick={props.onCheckAgain}>Check again</SecondaryButton>
+        </div>
+      )}
+      {relay?.hostInstallId === null ? (
+        <div data-testid="schedule-host-missing" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+          <p className="m-0">No computer runs this workspace's schedules.</p>
+          {choose}
+        </div>
+      ) : from ? (
+        <div data-testid="schedule-host-handover" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+          <p className="m-0">Schedules wait for {from.thisComputer ? "this computer" : from.label} to hand over.</p>
+          {choose}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 type MenuItem = { label: string; onSelect: () => void; disabled?: boolean };
 
 const MENU_WIDTH_PX = 144;
@@ -337,11 +503,19 @@ export function AutomationsPanel(props: {
   focus: { automationId: string; seq: number } | null;
   onClose: () => void;
   onOpenFile: (path: string) => void;
+  /** Opens the setting where the owner chooses which computer runs schedules. */
+  onOpenScheduleSettings: () => void;
   onError: ErrorReport;
   onNotice: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, collectionPath, onError, onNotice } = props;
   const { file, holdsUnreadable, version, reload: load } = props.automations;
+  const nextRuns = useNextRuns(file);
+  const scheduleHost = useScheduleHost(workspaceId, nextRuns.size > 0, onError);
+  const relayHost = scheduleHost.host?.relay ?? null;
+  // Without a computer to run them, schedules have no next run to show.
+  const noHost = relayHost?.hostInstallId === null;
+  const runsOn = otherHostName(relayHost);
   const fileRef = useRef(file);
   fileRef.current = file;
   const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
@@ -778,6 +952,11 @@ export function AutomationsPanel(props: {
                 <SecondaryButton size="compact" className="mt-1.5" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
               </div>
             ) : null}
+            <ScheduleHostNote
+              host={scheduleHost.host}
+              onCheckAgain={() => void scheduleHost.read()}
+              onChooseComputer={props.onOpenScheduleSettings}
+            />
             <ul className="m-0 list-none p-0">
               {file.automations.map((entry, index) =>
                 entry.valid ? (
@@ -817,6 +996,7 @@ export function AutomationsPanel(props: {
                         collectionPath={collectionPath}
                         onAllow={(step, seq) => allow(entry.automationId, entry.definitionHash, step, seq)}
                       />
+                      <NextRun at={noHost ? undefined : nextRuns.get(entry.automationId)} runsOn={runsOn} />
                     </div>
                     <LastRun
                       lastRun={entry.lastRun}
