@@ -148,6 +148,20 @@ async function openIndependentPlaintextLineage(
   return session;
 }
 
+// Types `text` at the end of an open session's document and settles it.
+async function appendToLineage(
+  session: Awaited<ReturnType<typeof openIndependentPlaintextLineage>>,
+  text: string,
+): Promise<void> {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(doc);
+  const body = doc.getText("plainText");
+  body.insert(body.length, text);
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(doc, before));
+  await session.settleNow();
+}
+
 async function pullAndExpect(
   daemon: LiveDaemonCapture,
   rootPath: string,
@@ -368,14 +382,23 @@ it.skipIf(engine.missing)(
         daemonA,
         rootA,
         path,
-        "winner from A\n",
+        "winner from A",
       );
       const sessionB = await openIndependentPlaintextLineage(
         daemonB,
         rootB,
         path,
-        "recovered from B\n",
+        "recovered from B",
       );
+      // Neither daemon had a relay position when its session recorded, so
+      // neither record claimed its lineage. The first push gives each a
+      // position, and the enrolment sweep leaves each lineage to its live
+      // session: claiming under the session would refuse its next write as
+      // stale. Each next keystroke claims its lineage in its own record.
+      await daemonA.relay.push();
+      await daemonB.relay.push();
+      await appendToLineage(sessionA, "\n");
+      await appendToLineage(sessionB, "\n");
       expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
       expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
 
