@@ -42,8 +42,6 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 5
-    permissions:
-      contents: read
     outputs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
@@ -274,12 +272,16 @@ jobs:
           retention-days: 7
 
   verification:
-    name: PR verification
+    name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
     needs: [changes, javascript, rust]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 5
     steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
       - name: Require every selected gate
         env:
           JOBS: ${{ toJSON(needs) }}

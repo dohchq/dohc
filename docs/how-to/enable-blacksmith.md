@@ -31,12 +31,16 @@ Defer app installation too if Blacksmith must receive no repository activity bef
 2. Restrict its runner group's repository access to `dohc-ai/dohc`.
 3. Set the billing email and an early monthly spending alert in Blacksmith.
 4. Confirm an acceptable monthly budget and any provider-enforced cutoff before enabling automatic runs.
-5. Keep fork workflows disabled in GitHub Actions settings.
+5. While private, keep fork PR workflows disabled in GitHub Actions settings.
+6. Before making the repository public, require approval for all external contributors in GitHub Actions settings.
+7. Inspect workflow changes before approving any outside contributor's run.
 
 Blacksmith's [documented spending threshold](https://docs.blacksmith.sh/introduction/settings) sends an email; it does not promise to stop jobs.
 GitHub's Actions spending limit does not cap Blacksmith's separate bill.
 Timeouts and cancellation limit wasted work, not total monthly spending.
-Repository writers can change workflow files, so the switch is not a boundary against a malicious writer.
+PRs can change their own workflow files, including the switch and fork checks.
+Use GitHub's [fork approval controls](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/approving-workflow-runs-from-public-forks) to control who can start those runs.
+The workflow switch is not a spending boundary against malicious contributors or repository writers.
 
 ## Turn it on
 
@@ -74,10 +78,13 @@ The path filter uses Git, avoiding the PR files API's file limit.
 The canonical verifier records the tested commit and base in `result.json`.
 
 Require the `PR verification` result after enabling CI and confirming the repository plan supports required checks.
-It succeeds only when selection succeeds and every selected gate passes.
+When this job runs, it succeeds only when selection succeeds and every selected gate passes.
 Intentionally unselected gates must be skipped; failed or cancelled gates cannot pass.
-A skipped workflow while Blacksmith is off is not verification evidence.
-Manual runs prove only their requested gates, so retain evidence for every gate selected by the PR.
+GitHub treats jobs skipped by their condition as passing required checks.
+Forks, drafts, and all PRs while Blacksmith is off therefore still require recorded local evidence before merging.
+A skipped check is not verification evidence.
+Manual runs report `Manual verification`, so a partial benchmark cannot satisfy the required PR check.
+Retain evidence for every gate selected by the PR.
 
 Download the `verification-js-*` and `verification-rust-*` artifacts for receipts, logs, and step durations.
 Artifacts expire after seven days. The workflow excludes browser traces, test workspaces, and profiles.
@@ -88,4 +95,5 @@ Record the run URL and verification scope in the PR before artifacts expire.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
+Remove `PR verification` from required checks while cloud CI is off.
 Resume local verification. Manual dispatch returns to self-hosted runners.

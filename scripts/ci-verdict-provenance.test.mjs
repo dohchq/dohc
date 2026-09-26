@@ -400,7 +400,8 @@ test("both gate filters select on ignore rules and vendored engine dependencies"
   assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
 });
 
-// These workflow expressions use the common JavaScript/Actions boolean subset.
+// These cases use string/boolean comparisons shared by JavaScript and Actions.
+// Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.
 function workflowExpression(expression, { github, vars = {}, inputs = {}, needs = {}, cancelled = false }) {
   const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
@@ -488,7 +489,13 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
   const job = load(workflow).jobs.verification;
   assert.deepEqual(job.needs, ["changes", "javascript", "rust"]);
-  const source = job.steps[0].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
+  assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
+  assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
+  const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
+  const setupIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
+  assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "self-hosted verdicts need Node on PATH");
+  assert.equal(job.steps[setupIndex].with["node-version"], "24");
+  const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
   const run = (jobs, event = "pull_request", gate = "all") => spawnSync(process.execPath, ["--input-type=module", "-e", source], {
     env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate}, encoding: "utf8", timeout: 10_000,
