@@ -378,10 +378,12 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
-  // write dedupes engine-side. A keyed update's promise rejects when the
-  // engine did not record it under its key, with the engine's refusal when
-  // the key already recorded other content; nothing of a rejected update
-  // stays in the document. An update without a key never rejects.
+  // write dedupes engine-side. A keyed update's promise rejects with the
+  // engine's refusal when the key already recorded other content, and
+  // otherwise when the engine never answered; the error then says whether
+  // the update may have been recorded. A rejected update does not stay in
+  // the document unless the engine recorded it. An update without a key
+  // never rejects.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -713,20 +715,6 @@ function isFileLockedCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
-}
-
-// Whether `doc` already holds every change `update` makes: applying it
-// to a copy moves neither its state vector nor its delete set.
-function holdsUpdate(doc: Y.Doc, update: Uint8Array): boolean {
-  const probe = new Y.Doc();
-  try {
-    Y.applyUpdate(probe, Y.encodeStateAsUpdate(doc));
-    const held = Y.snapshot(probe);
-    Y.applyUpdate(probe, update);
-    return Y.equalSnapshots(held, Y.snapshot(probe));
-  } finally {
-    probe.destroy();
-  }
 }
 
 function isLineageChangedCause(error: unknown): boolean {
@@ -2149,13 +2137,13 @@ export function createWorkspaceEngineCapture(
     };
 
     // A recovery replay carries no idempotency key, so it must never carry a
-    // keyed update. A failed attempt therefore restores the canonical doc to
-    // its state before the update, when the generation shares that doc, and
-    // rebuilds the generation from the engine's durable state. If that state
-    // holds the update, the engine recorded it. If not, the update goes once
-    // more under its key and the engine's key ledger decides. The caller
-    // hears "not recorded" only when a rebuilt generation shows the update
-    // absent; any other failure after a send may have recorded it.
+    // keyed update. A failed send therefore restores the canonical doc to
+    // its state before the update, when the generation shares that doc,
+    // rebuilds the generation, and resends the update under its key, so the
+    // engine's key ledger answers: the same content already recorded is a
+    // success, other content is the key's refusal. Once a send has gone out,
+    // a failure the ledger did not answer may have recorded the update, and
+    // the caller hears exactly that.
     const applyKeyedUpdate = async (
       update: Uint8Array,
       applyOptions: Parameters<
@@ -2164,15 +2152,17 @@ export function createWorkspaceEngineCapture(
       armed: () => void,
     ): Promise<void> => {
       let sent = false;
+      const unanswered = (error: unknown): Error =>
+        sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
       for (let attempt = 0; ; attempt += 1) {
-        if (canonicalDoc === null || closed) throw closedError();
+        if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
         try {
           if (current === null) await reviveDeadSession(doc);
         } catch (error) {
-          throw sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
+          throw unanswered(error);
         }
-        if (current === null) throw closedError();
+        if (current === null) throw unanswered(closedError());
         const generation = current;
         // The first generation's doc is the canonical doc, and it takes the
         // update before the journal answers. Keep the state to return to.
@@ -2215,11 +2205,7 @@ export function createWorkspaceEngineCapture(
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
           if (refused) throw error;
-          if (current === null || current === generation) {
-            throw keyedWriteUncertain(error);
-          }
-          if (canonicalDoc !== null && holdsUpdate(canonicalDoc, update)) return;
-          if (attempt > 0) throw keyedWriteNotRecorded(error);
+          if (attempt > 0) throw keyedWriteUncertain(error);
         }
       }
     };

@@ -2097,12 +2097,13 @@ async function keyedFaultCapture(prefix: string) {
   return { ...fixture, capture, session, errors };
 }
 
-it("answers success when the retry of a keyed write committed but its response was lost", async () => {
+it("answers success when a keyed write's answer was lost and its resend finds the key recorded", async () => {
   const { capture, session, state } = await keyedFaultCapture(
     "dohc-ydoc-keyed-lost-response-",
   );
-  // The first send never records. The retry records, and its answer is lost.
-  state.applyFaults.push("drop", "commit-then-drop");
+  // The send records, and its answer is lost. The resend under the same key
+  // meets the key's own record.
+  state.applyFaults.push("commit-then-drop");
   await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
     idempotencyKey: "claim/1/0",
   });
@@ -2130,6 +2131,30 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   state.daemonAlive = true;
   expect((await session.settleNow()).content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("says a keyed write may have been recorded after two sends went unanswered", async () => {
+  const { capture, session, state } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-two-drops-",
+  );
+  // Neither send is answered. A rebuilt session that lacks the write does
+  // not prove the engine never recorded it, so the caller is not told so.
+  state.applyFaults.push("drop", "drop");
+  await expect(
+    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("may have been recorded");
+  expect(session.doc.getText("plainText").toString()).toBe("");
+
+  // The caller's retry under the key lands the write once.
+  await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect((await session.settleNow()).content).toBe("KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -2182,7 +2207,7 @@ it("rejects a keyed write on a dead session while the daemon is still down, and 
     session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
       idempotencyKey: "claim/1/0",
     }),
-  ).rejects.toThrow("Retry it with the same idempotency key.");
+  ).rejects.toThrow("The engine did not record this write");
   expect(session.doc.getText("plainText").toString()).toBe("TYPED ");
   expect(errors.filter((context) => context.startsWith("Y.Doc local update"))).toHaveLength(1);
 
