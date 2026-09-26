@@ -11,7 +11,8 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
-import { resolveAppDatasetCapability, verifyAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { resolveAppDatasetCapability, verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
@@ -67,7 +68,10 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           const revision = await resolveDatasetRevision(capability);
           return { ...capability, operations: capability.operations.map(operation => {
             const read = revision.definition.operations.find(read => read.operationId === operation.operationId && read.kind === "read" && read.access === "helper");
-            if (!read) return operation;
+            if (!read || !hasGeneratedDatasetRevision(revision)) return operation;
+            const table = revision.definition.tables.find(table => table.tableId === read.tableId)!;
+            const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey)!;
+            if (!read.fieldIds.includes(primary.fieldId)) return operation;
             return { ...operation, fields: revision.definition.tables.find(table => table.tableId === read.tableId)!.fields
               .filter(field => read.fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) };
           }) };

@@ -23,18 +23,21 @@ describe("datasetDefinitionFromDrafts", () => {
     expect(datasetColumnFields(parseDatasetDefinition(result).tables[0]!)[1]?.required).toBe(true);
     expect(datasetColumnFields(result.tables[0]!)[2]?.default).toBe("New");
     expect(result.tables[0]?.fields[3]?.type).toBe("attachment");
-    expect(result.operations[0]?.fieldIds).not.toContain(result.tables[0]?.fields[0]?.fieldId);
+    expect(result.operations[0]?.fieldIds).toContain(result.tables[0]?.fields[0]?.fieldId);
   });
 });
 
 it("keeps generated reads private until an app binding explicitly approves their fields", async () => {
-  const { effectiveDatasetOperations } = await import("@dohc/security-contract/dataset");
+  const { effectiveDatasetOperations } = await import("@dohc/security-contract/dataset-authorization");
   const definition = datasetDefinitionFromDrafts({ name: "Dashboard", schemaPath: "dashboard/schema.sql", operationsPath: "dashboard/operations.js", fields: drafts });
-  const read = definition.operations.find(operation => operation.kind === "read")!;
-  const revision = { datasetId: definition.datasetId, revision: 1, revisionSha256: "a".repeat(64), definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64), definition };
+  const { generateDatasetSources } = await import("../../workspaces/datasetGenerator");
+  const { describeDatasetRevision } = await import("@dohc/security-contract/dataset-artifacts");
+  const generated = generateDatasetSources(definition);
+  const read = generated.definition.operations.find(operation => operation.kind === "read")!;
+  const revision = describeDatasetRevision({ definition: generated.definition, revision: 1, schemaSql: generated.files[definition.schemaPath]!, operationSource: generated.files[definition.operationsPath]! });
   const binding = { kind: "dataset" as const, datasetId: definition.datasetId, revision: 1, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
   const caller = { kind: "link" as const, grantId: "g", principalId: "p" };
   expect(effectiveDatasetOperations(binding, revision, caller).some(operation => operation.kind === "read")).toBe(false);
   expect(effectiveDatasetOperations({ ...binding, linkReads: [{ operationId: read.operationId, fieldIds: read.fieldIds }] }, revision, caller))
-    .toEqual([{ ...read, access: "link" }]);
+    .toEqual([{ ...read, access: "link" }, generated.definition.operations.find(operation => operation.kind === "create")]);
 });

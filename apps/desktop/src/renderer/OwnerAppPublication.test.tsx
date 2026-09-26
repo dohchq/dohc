@@ -557,17 +557,17 @@ describe("owner app publication", () => {
 it("reviews a chosen read and its fields, with approval off by default", async () => {
   vi.stubGlobal("dohcDesktop", api);
   const read = { operationId: "00000000-0000-4000-8000-000000000003", name: "records.list", access: "helper" as const, readOnly: true,
-    fields: [{ fieldId: "00000000-0000-4000-8000-000000000004", name: "Name" }] };
+    fields: [{ fieldId: "00000000-0000-4000-8000-000000000005", name: "Email" }, { fieldId: "00000000-0000-4000-8000-000000000004", name: "Name" }] };
   api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, capabilities: [{ ...datasetCapability, operationIds: [read.operationId], operations: [read] }] } : answer(request));
   render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
   await review();
   const choice = screen.getByRole("checkbox", { name: /records.list/ }) as HTMLInputElement;
   expect(choice.checked).toBe(false);
-  expect(screen.getByText("Fields: Name")).toBeTruthy();
+  expect(screen.getByText("Fields: Email, Name")).toBeTruthy();
   fireEvent.click(choice); expect(choice.checked).toBe(true);
   fireEvent.click(choice); expect(choice.checked).toBe(false);
   fireEvent.click(choice);
   await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
-  expect(api.publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", linkReads: [{ operationId: read.operationId, fieldIds: [read.fields[0].fieldId] }] }));
+  expect(api.publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", linkReads: [{ operationId: read.operationId, fieldIds: read.fields.map(field => field.fieldId) }] }));
   cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer); api.listRelayShareLinks.mockResolvedValue(page);
 });

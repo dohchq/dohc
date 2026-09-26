@@ -1,9 +1,7 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import {
-  parseAppBackendCaller,
   parseAppBackendJson,
-  type AppBackendCaller,
   type AppBackendJson,
 } from "./appBackend";
 
@@ -383,24 +381,6 @@ export function parseDatasetBindingReference(value: unknown): AppDatasetBinding 
   }
   return result;
 }
-export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
-  const approved = parseDatasetRevision(approvedRevision);
-  const result = parseDatasetBindingReference(value);
-  if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
-  const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
-  if (result.operationIds.some(id => !operations.has(id))) fail();
-  for (const read of result.linkReads ?? []) {
-    const operation = approved.definition.operations.find(operation => operation.operationId === read.operationId);
-    if (!operation || operation.kind !== "read" || !operation.readOnly || operation.access === "owner" ||
-        read.fieldIds.length !== operation.fieldIds.length || read.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
-  }
-  for (const restriction of result.createFields ?? []) {
-    const operation = approved.definition.operations.find(operation => operation.operationId === restriction.operationId);
-    if (!operation || operation.kind !== "create" || restriction.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
-  }
-  return result;
-}
-
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields", "linkReads"]);
@@ -420,41 +400,6 @@ export function parseAppDatasetCapability(value: unknown): AppDatasetCapability 
   unique(operations.map(operation => operation.name));
   if (operations.length !== binding.operationIds.length || operations.some(operation => !binding.operationIds.includes(operation.operationId))) fail();
   return { ...binding, operationIds: [...binding.operationIds].sort(), operations };
-}
-
-/** The caller supplies a revision obtained from the owner's approved host catalog. */
-export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
-  const approved = parseDatasetRevision(approvedRevision);
-  const binding = parseDatasetBinding(value, approved);
-  const selected = new Set(binding.operationIds);
-  return parseAppDatasetCapability({ ...binding, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
-    .map(({ operationId, name, access, readOnly, kind, fieldIds, tableId }) => ({ operationId, name, access, readOnly,
-      ...(kind === "read" && binding.linkReads?.some(read => read.operationId === operationId) ? { fields: approved.definition.tables.find(table => table.tableId === tableId)!.fields
-        .filter(field => fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) } : {}) })) });
-}
-
-export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
-  const parsed = parseAppDatasetCapability(value);
-  const { operations: _, ...binding } = parsed;
-  const expected = resolveAppDatasetCapability(binding, approvedRevision);
-  if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
-  return expected;
-}
-
-/** Caller must be derived from current host credentials, never request JSON. */
-export function effectiveDatasetOperations(binding: unknown, approvedRevision: DatasetRevision, caller: AppBackendCaller): DatasetOperation[] {
-  const approved = parseDatasetRevision(approvedRevision);
-  const parsed = parseDatasetBinding(binding, approved);
-  const principal = parseAppBackendCaller(caller);
-  const allowed = new Set(parsed.operationIds);
-  if (principal.kind === "link" && parsed.linkReads?.length) {
-    const reads = new Set(parsed.linkReads.map(read => read.operationId));
-    return approved.definition.operations.filter(operation => allowed.has(operation.operationId) && reads.has(operation.operationId)).map(operation => ({ ...operation, access: "link" }));
-  }
-  return approved.definition.operations.filter(operation => allowed.has(operation.operationId) && (
-    principal.kind === "owner" || operation.access === "link" ||
-    (operation.access === "helper" && principal.kind === "named" && principal.helper)
-  ));
 }
 
 /** Stable inventory ordering and fixed member ordering for definition hashing. */

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { parseAppPublicationCandidate, verifyAppDatasetCapability, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveCompatibleDatasetRevision, type DatasetAccess, type DatasetAuthority, type InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";

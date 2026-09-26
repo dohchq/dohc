@@ -1,11 +1,8 @@
+import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
-  effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision,
-  parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
-  datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision,
-} from "./dataset";
+import { datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
+import { effectiveDatasetOperations, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -390,10 +387,12 @@ it("permits only display names and source locations in access-preserving revisio
 });
 
 it("allows only the explicitly approved link reads and their exact fields", () => {
-  const approved = revision(), request = binding(approved);
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  const request = binding(approved);
   request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
   const caller = { kind: "link" as const, grantId: "g", principalId: "p" };
-  expect(effectiveDatasetOperations(request, approved, caller)).toEqual([{ ...approved.definition.operations[1], access: "link" }]);
+  expect(effectiveDatasetOperations(request, approved, caller)).toEqual([approved.definition.operations[0], { ...approved.definition.operations[1], access: "link" }]);
   const capability = resolveAppDatasetCapability(request, approved);
   expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
   expect(capability.operations.find(operation => operation.operationId === id(6))?.fields).toEqual([
@@ -408,4 +407,20 @@ it("allows only the explicitly approved link reads and their exact fields", () =
   ]) expect(() => parseDatasetBinding({ ...request, linkReads }, approved)).toThrow();
   expect(() => parseDatasetBinding({ ...request, operationIds: [id(5)] }, approved)).toThrow();
   expect(effectiveDatasetOperations({ ...request, linkReads: [] }, approved, caller).map(operation => operation.name)).toEqual(["submit"]);
+});
+
+it("rejects authored reads and reads omitting the primary key even with exact field approval", () => {
+  const approved = revision(), request = binding(approved);
+  request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
+  expect(() => parseDatasetBinding(request, approved)).toThrow();
+  approved.definition.operations[1]!.fieldIds = [id(4)];
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  request.linkReads[0]!.fieldIds = [id(4)];
+  expect(() => parseDatasetBinding(request, approved)).toThrow();
+});
+it("gives named app recipients approved reads alongside link creates without helper access", () => {
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
+  expect(effectiveDatasetOperations(request, approved, { kind: "named", userId: "u", grantId: "g", access: "view", helper: false }).map(operation => operation.name)).toEqual(["submit", "list"]);
 });

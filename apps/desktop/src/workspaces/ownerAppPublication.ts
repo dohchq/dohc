@@ -2,7 +2,8 @@ import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICA
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { parseDatasetBindingReference, resolveAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { parseDatasetBindingReference, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { posix } from "node:path";
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";

@@ -8,7 +8,8 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
-import { verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
+import { type AppDatasetCapability } from "@dohc/security-contract/dataset";
+import { verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendAuth } from "./appBackendAuthority";

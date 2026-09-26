@@ -44,7 +44,7 @@ export function datasetDefinitionFromDrafts(input: {
   return {
     formatVersion: 1, datasetId, name: input.name, schemaPath: input.schemaPath, operationsPath: input.operationsPath, tables: [table],
     operations: [
-      op("read", "helper", true, "View records", "records.list", userFieldIds),
+      op("read", "helper", true, "View records", "records.list", fields.map(field => field.fieldId)),
       op("create", "link", false, "Create record", "records.create", userFieldIds),
       op("edit", "helper", false, "Edit record", "records.edit", userFieldIds),
       op("delete", "owner", false, "Delete record", "records.delete", []),

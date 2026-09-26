@@ -25,7 +25,7 @@ function DatasetApproval({ capability }: { capability: AppDatasetCapability }) {
   return <div data-testid="app-publication-capability" className="space-y-2">
     <p className="m-0">This app uses the Collection's approved actions. Its responses appear in the same Collection.</p>
     <dl className="m-0 space-y-1 text-[12px]">
-      <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => capability.linkReads?.length ? capability.linkReads.some(read => read.operationId === operation.operationId) : operation.access === "link")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link" || capability.linkReads?.some(read => read.operationId === operation.operationId))} /></dd></div>
       <div><dt className="inline font-medium text-ink">Helper actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "helper")} /></dd></div>
       <div><dt className="inline font-medium text-ink">Owner actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "owner")} /></dd></div>
     </dl>

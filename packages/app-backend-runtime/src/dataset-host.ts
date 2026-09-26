@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { datasetRevisionsPreserveAccess, describeApprovedDataset, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetRevisionsPreserveAccess, describeApprovedDataset, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { effectiveDatasetOperations, parseDatasetBinding, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { validateDatasetReadResult } from "./dataset-read-result.js";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
 import type { PersistentRuntimeOptions } from "./persistent.js";
@@ -256,6 +259,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const result = options.compileOperations ? await options.compileOperations(source, path) : source;
     if (typeof result !== "string" || !result.length || Buffer.byteLength(result) > 256 * 1024 || result.includes("\0")) throw new Error("The built Collection actions are larger than this host allows.");
     return result;
+  }
+  const generatedBuilds = new Map<string, Promise<string>>();
+  function generatedSource(approved: DatasetRevision): Promise<string> {
+    const cached = generatedBuilds.get(approved.revisionSha256);
+    if (cached) return cached;
+    const build = compile(generateDatasetOperations(approved.definition), approved.definition.operationsPath);
+    generatedBuilds.set(approved.revisionSha256, build);
+    if (generatedBuilds.size > 8) generatedBuilds.delete(generatedBuilds.keys().next().value!);
+    void build.catch(() => { if (generatedBuilds.get(approved.revisionSha256) === build) generatedBuilds.delete(approved.revisionSha256); });
+    return build;
   }
   function currentGrant(key: DatasetScope, value: unknown, approved: DatasetRevision): StoredGrant {
     const grant = value as StoredGrant;
@@ -795,46 +808,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       authorize();
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
       const committedBy = actor(permitted.authority);
-      const approvedLinkRead = permitted.authority.caller.kind === "link" && permitted.linkReads?.some(read => read.operationId === operationId);
-      const response = await options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
+      const approvedLinkRead = permitted.authority.caller.kind !== "owner" && permitted.linkReads?.some(read => read.operationId === operationId);
+      const table = permitted.revision.definition.tables.find(table => table.tableId === operation.tableId)!;
+      if (approvedLinkRead) {
+        if (!hasGeneratedDatasetRevision(permitted.revision)) denied();
+        const expected = await generatedSource(permitted.revision);
+        authorize();
+        if (journal.head(key, authorize).source !== expected) denied();
+      }
+      const response = await options.supervisor.invoke({ scope: key, tables: approvedLinkRead ? [table.sqlName] : permitted.revision.definition.tables.map(table => table.sqlName),
+        restrictTables: approvedLinkRead || undefined,
         operation: operation.name, caller: approvedLinkRead ? { ...permitted.authority.caller, approvedRead: operationId } : permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
         files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize,
         recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }) });
       if (approvedLinkRead) {
-        const result = response.result;
-        if (!result || typeof result !== "object" || Array.isArray(result)) denied();
-        const scalar = (value: JsonValue | undefined) => value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number";
-        const cursor = (value: JsonValue | undefined, grouped = false): JsonValue => {
-          if (value === null || value === undefined) return null;
-          if (typeof value !== "object" || Array.isArray(value) || !scalar(value.value) ||
-              (!grouped && typeof value.id !== "string" && !Number.isSafeInteger(value.id)) ||
-              Object.keys(value).some(key => !["id", "value"].includes(key))) denied();
-          return value;
-        };
-        if (typeof result.groupBy === "string" && operation.fieldIds.includes(result.groupBy) && Array.isArray(result.groups) && result.groups.every(scalar)) {
-          authorize();
-          return { ...response, result: { groupBy: result.groupBy, groups: result.groups, nextGroupCursor: cursor(result.nextGroupCursor, true) } };
-        }
-        if (!Array.isArray(result.rows)) denied();
-        const rows = result.rows.map(row => {
-          if (!row || typeof row !== "object" || Array.isArray(row) || !row.values || typeof row.values !== "object" || Array.isArray(row.values) ||
-              Object.keys(row.values).some(fieldId => !operation.fieldIds.includes(fieldId)) ||
-              (typeof row.id !== "string" && !Number.isSafeInteger(row.id)) || !Number.isSafeInteger(row.version)) denied();
-          return { id: row.id, version: row.version, values: row.values };
-        });
-        const metadata: Record<string, JsonValue> = {};
-        for (const key of ["range", "group"] as const) {
-          const value = result[key];
-          if (value === undefined) continue;
-          if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.fieldId !== "string" || !operation.fieldIds.includes(value.fieldId)) denied();
-          if (key === "group") {
-            if (!scalar(value.value) || Object.keys(value).some(name => !["fieldId", "value"].includes(name))) denied();
-          } else if (typeof value.start !== "string" || typeof value.end !== "string" || Object.keys(value).some(name => !["fieldId", "start", "end"].includes(name))) denied();
-          metadata[key] = value;
-        }
+        const result = validateDatasetReadResult(response.result, input, permitted.revision.definition, operation);
         authorize();
-        return { ...response, result: { rows, nextCursor: cursor(result.nextCursor), ...metadata } };
+        return { ...response, result };
       }
       return response;
     },

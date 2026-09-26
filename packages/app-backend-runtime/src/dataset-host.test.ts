@@ -1,3 +1,5 @@
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import type { JsonValue } from "./protocol.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -679,35 +681,122 @@ it("connects schema history to immutable source and reverses rules forward witho
 
 });
 
-it("reads current approved fields through a link, denies writes and other reads, and withdraws access", async () => {
-  const f = await fixture();
-  const operationSource = `globalThis.operations={
-    create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?)',[ctx.requestId,input.value,'private']);return {accepted:true};},
-    read(ctx,input){
-      if(ctx.caller.approvedRead!=='${id(7)}')ctx.refuse('forbidden','Missing host approval');
-      if(input.extra)return {rows:[{id:'one',version:1,values:{['${id(5)}']:'private'}}]};
-      if(input.group)return {groupBy:'${id(4)}',groups:['First'],nextGroupCursor:null};
-      return {rows:ctx.db.query('SELECT id,value FROM items ORDER BY id').map(row=>({id:row.id,version:1,values:{['${id(4)}']:row.value}})),nextCursor:null};}
-  };`;
-  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
-  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql, operationSource });
+
+async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
+  const f = await fixture(overrides);
+  const generated = structuredClone(definition);
+  const secret = generated.tables[0]!.fields[2]!;
+  if (secret.type !== "button") secret.default = "private";
+  generated.tables[0]!.fields.push(
+    { fieldId: id(10), name: "Tags", sqlColumn: "tags", type: "multi-select", options: ["New", "Done"], required: false, unique: false },
+    { fieldId: id(11), name: "Related", sqlColumn: "related", type: "relation", relation: { datasetId: id(1), tableId: id(20), fieldId: id(21), many: true }, required: false, unique: false },
+    { fieldId: id(12), name: "Count", sqlColumn: "count", type: "number", required: false, unique: false },
+  );
+  generated.tables.push({ tableId: id(20), name: "Other", sqlName: "other", primaryKey: "id", fields: [
+    { fieldId: id(21), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+    { fieldId: id(22), name: "Private", sqlColumn: "private", type: "text", required: true, unique: false },
+  ] });
+  generated.operations[1]!.fieldIds.push(id(10), id(11), id(12));
+  const source = generateDatasetOperations(generated);
+  const schema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL DEFAULT 'private',tags TEXT,related TEXT,count REAL,_record_version INTEGER NOT NULL DEFAULT 1); CREATE TABLE other(id TEXT PRIMARY KEY NOT NULL,private TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1);";
+  const revision = describeDatasetRevision({ definition: generated, revision: 1, schemaSql: schema, operationSource: source });
+  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: schema, operationSource: source });
   const binding = { ...f.binding([id(6), id(7), id(8), id(9)]), revisionSha256: revision.revisionSha256 };
-  const invoke = (context: Context, operationId: string, input = {}, app = false) => f.host.invoke(context, {
+  const approved = { ...binding, linkReads: [{ operationId: id(7), fieldIds: generated.operations[1]!.fieldIds }] };
+  const invoke = (context: Context, operationId: string, input: JsonValue = {}, app = true) => f.host.invoke(context, {
     ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: crypto.randomUUID(),
     ...(app ? { access: { kind: "app" as const, appId: "form" } } : {}),
   });
-  f.host.setBinding("owner", { ...scope, appId: "form", binding });
-  await expect(invoke("friend", id(7), {}, true)).rejects.toThrow("access");
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...binding, linkReads: [{ operationId: id(7), fieldIds: [id(3), id(4)] }] } });
-  await invoke("owner", id(6), { value: "First" });
-  const first = await invoke("friend", id(7), {}, true);
-  expect(first.result).toMatchObject({ rows: [{ values: { [id(4)]: "First" } }] });
-  expect(JSON.stringify(first.result)).not.toContain("private");
-  await expect(invoke("friend", id(7), { extra: true }, true)).rejects.toThrow("access");
-  expect((await invoke("friend", id(7), { group: true }, true)).result).toEqual({ groupBy: id(4), groups: ["First"], nextGroupCursor: null });
-  await invoke("owner", id(6), { value: "Later" });
-  expect(JSON.stringify((await invoke("friend", id(7), {}, true)).result)).toContain("Later");
-  for (const operationId of [id(6), id(8), id(9)]) await expect(invoke("friend", operationId, {}, true)).rejects.toThrow("access");
+  return { ...f, generated, revision, binding, approved, invoke };
+}
+it("refuses authored link reads at approval and when a stored binding is invoked", async () => {
+  const f = await fixture(); await f.activate();
+  const binding = { ...f.binding([id(7)]), linkReads: [{ operationId: id(7), fieldIds: [id(3), id(4)] }] };
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding })).toThrow();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(7)]) });
+  f.db.prepare("UPDATE dohc_dataset_bindings SET binding_json=?").run(JSON.stringify(binding));
+  await expect(f.invoke("friend", id(7), {}, "form")).rejects.toThrow();
+});
+it("requires the primary key in the approved fields", async () => {
+  const f = await linkReadFixture();
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.approved, linkReads: [{ operationId: id(7), fieldIds: [id(4)] }] } })).toThrow();
+});
+it("reads approved fields for link and named recipients, preserves form creates, and withdraws access", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding });
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  await f.invoke("friend", id(6), { values: { [id(4)]: "First" } });
+  for (const context of ["friend", "helper"] as const) {
+    const result = await f.invoke(context, id(7));
+    expect(result.result).toMatchObject({ rows: [{ values: { [id(4)]: "First" } }] });
+    expect(JSON.stringify(result.result)).not.toContain("private");
+    for (const operation of [id(8), id(9)]) await expect(f.invoke(context, operation)).rejects.toThrow("access");
+  }
+  expect((await f.invoke("friend", id(7), { groupBy: id(4), limit: 8 })).result).toEqual({ groupBy: id(4), groups: ["First"], nextGroupCursor: null });
+  for (const [fieldId, value] of [[id(10), ["New"]], [id(11), ["related-record"]]] as const) {
+    const group = { fieldId, value: [...value] };
+    expect((await f.invoke("friend", id(7), { group })).result).toEqual({ rows: [], nextCursor: null, group });
+  }
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
-  await expect(invoke("friend", id(7), {}, true)).rejects.toThrow("access");
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
+});
+it("confines approved reads to their own table after a full-table operation", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  await f.invoke("owner", id(6), { values: { [id(4)]: "First" } }, false);
+  const original = f.supervisor.invoke.bind(f.supervisor);
+  vi.spyOn(f.supervisor, "invoke").mockImplementation(input => {
+    expect(input.tables).toEqual(["items"]);
+    return original(input);
+  });
+  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
+});
+it("refuses executable source that differs from the verified generated artifact", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  f.db.prepare("UPDATE dohc_dataset_journals SET source=?").run("globalThis.operations={read(){return {rows:[],nextCursor:null}}};");
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("damaged");
+});
+it.each<JsonValue>([
+  { rows: [{ id: "one", version: 1, values: { [id(3)]: "one", [id(4)]: 42, [id(10)]: [], [id(11)]: [], [id(12)]: 1 } }], nextCursor: null },
+  { rows: [], nextCursor: { id: "one", value: 42 } },
+  { rows: [], nextCursor: { id: 42, value: "one" } },
+  { groupBy: id(12), groups: ["private"], nextGroupCursor: null },
+  { groupBy: id(12), groups: [1], nextGroupCursor: { value: "private" } },
+])("refuses wrong-typed rows, ids, group values and cursors: %j", async result => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  vi.spyOn(f.supervisor, "invoke").mockResolvedValue({ result, revision: 1, replayed: false });
+  await expect(f.invoke("friend", id(7), result && typeof result === "object" && "groupBy" in result ? { groupBy: id(12), limit: 8 } : {})).rejects.toThrow("access");
+});
+
+it("verifies compiled generated reads and caches only a successful build", async () => {
+  const { compileDatasetOperations } = await import("./dataset-compiler.js");
+  const compile = vi.fn(compileDatasetOperations);
+  const f = await linkReadFixture({ compileOperations: compile });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  compile.mockRejectedValueOnce(new Error("busy compiler"));
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("busy compiler");
+  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
+  await f.invoke("helper", id(7));
+  expect(compile).toHaveBeenCalledTimes(3);
+});
+
+it("retains generated read approvals and permits fresh approval after display changes and a button", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  const original = f.host.approvedArtifacts("owner", scope);
+  const next = structuredClone(f.generated);
+  next.name = "Renamed Collection";
+  next.tables[0]!.name = "Renamed table";
+  next.tables[0]!.fields[1]!.name = "Renamed field";
+  next.tables[0]!.fields.push({ fieldId: id(99), name: "Run", type: "button" });
+  next.schemaPath = "revisions/2/schema.sql";
+  next.operationsPath = "revisions/2/operations.js";
+  const revision = describeDatasetRevision({ definition: next, revision: 2, schemaSql: original.schemaSql, operationSource: original.operationSource });
+  await f.host.migrate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: original.schemaSql, operationSource: original.operationSource, expected: original.cursor, migrationSql: "SELECT 1;" });
+  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.approved, revision: 2, revisionSha256: revision.revisionSha256 } });
+  await expect(f.invoke("helper", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
 });
