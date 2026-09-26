@@ -61,6 +61,37 @@ async function values(sources: string[]) {
 }
 
 describe("formula helpers", () => {
+  it("compares guarded values deeply without rerunning their formula", async () => {
+    expect(await evaluator.evaluate(scope, [
+      expression('({b: [2, 3], a: 1})'),
+      { ...expression('"matched"'), when: [{ index: 0, equals: { a: 1, b: [2, 3] } }] },
+      { ...expression('record.Missing.name'), when: [{ index: 0, equals: { a: 1, b: [3, 2] } }] },
+    ])).toEqual([
+      { ok: true, value: { b: [2, 3], a: 1 } }, { ok: true, value: "matched" }, { ok: true, value: null },
+    ]);
+  });
+
+  it("bounds and validates comparison values with the request scope", async () => {
+    expect(await evaluator.evaluate(scope, [expression("null"), {
+      ...expression("1"), when: [{ index: 0, equals: "x".repeat(AUTOMATION_LIMITS.scopeBytes) }],
+    }])).toEqual([{ ok: false, error: tooLarge }, { ok: false, error: tooLarge }]);
+    await expect(evaluator.evaluate(scope, [expression("null"), {
+      ...expression("1"), when: [{ index: 0, equals: 1n as unknown as JsonValue }],
+    }])).rejects.toThrow("The automation scope must hold only JSON values.");
+  });
+
+  it("resolves comparison guards in the host without sending them to the worker", async () => {
+    await using standIn = await standInWorker(`
+      for (const item of items) reply({ kind: "result", result: { ok: true,
+        value: item.source === "predicate" ? true : Object.hasOwn(item, "when") }, prepareMs: 0, runMs: 0 });
+    `);
+    const fresh = createAutomationEvaluator(standIn);
+    try {
+      expect(await fresh.evaluate(scope, [expression("predicate"), {
+        ...expression("selected"), when: [{ index: 0, equals: true }],
+      }])).toEqual([{ ok: true, value: true }, { ok: true, value: false }]);
+    } finally { await fresh.close(); }
+  });
   it("skips guarded runtime errors, loops, and oversized sources without evaluating them", async () => {
     const when = [{ index: 0, truthy: true }];
     expect(await evaluator.evaluate(scope, [

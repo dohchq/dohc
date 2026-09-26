@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { isDeepStrictEqual } from "node:util";
 import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
 import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
@@ -256,7 +257,8 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
-    const measured = measureScope(scope);
+    const guards = items.flatMap(item => "when" in item ? item.when ?? [] : []);
+    const measured = measureScope(guards.length ? { ...scope, ...{ formulaGuards: guards } } : scope);
     if (typeof measured === "object") throw new Error(measured.problem);
     const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
       : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);
@@ -273,7 +275,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           if (guards.some(guard => results[guard.index] === undefined)) break;
           if (guards.some(guard => {
             const result = results[guard.index]!;
-            return !result.ok || Boolean(result.value) !== guard.truthy;
+            return !result.ok || ("truthy" in guard ? Boolean(result.value) !== guard.truthy : !isDeepStrictEqual(result.value, guard.equals));
           })) {
             results[index] = { ok: true, value: null };
             continue;
@@ -284,7 +286,13 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           else waiting.push(index);
         }
         if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
-        await dispatch(scope, waiting.map(index => items[index]!), (offset, result) => { results[waiting[offset]!] = result; }, spent);
+        const runnable = waiting.map(index => {
+          const item = items[index]!;
+          if (!("when" in item)) return item;
+          const { when: _when, ...formula } = item;
+          return formula;
+        });
+        await dispatch(scope, runnable, (offset, result) => { results[waiting[offset]!] = result; }, spent);
       }
     }).finally(() => { queued--; });
     queue = done.catch(() => undefined);
@@ -299,8 +307,9 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
       if (!formulas.every((formula, index) => formula.when === undefined || (Array.isArray(formula.when)
         && formula.when.length <= index && formula.when.every(guard => guard !== null && typeof guard === "object"
-          && Number.isSafeInteger(guard.index) && guard.index >= 0 && guard.index < index && typeof guard.truthy === "boolean")))) {
-        throw new Error("A formula guard must refer to an earlier formula and say whether its result must be truthy.");
+          && Number.isSafeInteger(guard.index) && guard.index >= 0 && guard.index < index
+          && ("truthy" in guard ? typeof guard.truthy === "boolean" && !("equals" in guard) : "equals" in guard && guard.equals !== undefined))))) {
+        throw new Error("A formula guard must refer to an earlier formula and require truthiness or a JSON value.");
       }
       return formulas.length === 0 ? [] : run(scope, [...formulas]);
     },

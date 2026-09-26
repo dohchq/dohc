@@ -77,7 +77,7 @@ export type AutomationFormula = (
   | { kind: "text"; parts: AutomationTextPart[] }
 ) & {
   /** All guards must match earlier successful results. Otherwise this formula returns null without running. */
-  when?: Array<{ index: number; truthy: boolean }>;
+  when?: Array<{ index: number } & ({ truthy: boolean } | { equals: JsonValue })>;
 };
 
 export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result" | "busy";

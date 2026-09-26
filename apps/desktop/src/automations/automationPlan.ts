@@ -512,19 +512,24 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
   const add = (slot: Slot, source: string, when: NonNullable<AutomationFormula["when"]> = []) => {
     const index = formulas.length;
     slots.push(slot);
-    formulas.push({ kind: "expression", source, ...(when.length ? { when } : {}) });
+    formulas.push({ kind: "expression", source, ...(when.length ? { when: [...when] } : {}) });
     return index;
   };
   const conditions: NonNullable<AutomationFormula["when"]> = [];
-  if (automation.if !== null) conditions.push({ index: add({ kind: "only-if" }, automation.if), truthy: true });
   const trigger = automation.when;
-  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") add({ kind: "to" }, trigger.to.expression);
-  if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
-    add({ kind: "matched-before" }, `((record) => (${trigger.condition}\n))(${BEFORE_BINDING})`);
-    add({ kind: "matches" }, trigger.condition);
-  } else if (trigger.kind === "starts-matching") {
-    add({ kind: "matches" }, trigger.condition);
+  if (trigger.kind === "field-changed" && trigger.to?.kind === "formula") {
+    const fact = claim.change.fields.find(candidate => candidate.field === trigger.field);
+    const next = fact ? factValue(fact.next) : "truncated";
+    const equals = next === "truncated" ? (record?.values[trigger.field] ?? null) : (next?.value ?? null);
+    conditions.push({ index: add({ kind: "to" }, trigger.to.expression), equals });
   }
+  if (trigger.kind === "starts-matching" && claim.change.kind === "changed") {
+    conditions.push({ index: add({ kind: "matched-before" }, `((record) => (${trigger.condition}\n))(${BEFORE_BINDING})`), truthy: false });
+    conditions.push({ index: add({ kind: "matches" }, trigger.condition, conditions), truthy: true });
+  } else if (trigger.kind === "starts-matching") {
+    conditions.push({ index: add({ kind: "matches" }, trigger.condition), truthy: true });
+  }
+  if (automation.if !== null) conditions.push({ index: add({ kind: "only-if" }, automation.if, conditions), truthy: true });
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   const addSteps = (entries: readonly OrderedStep[], when: NonNullable<AutomationFormula["when"]>) => {
