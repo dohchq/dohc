@@ -13,7 +13,7 @@ import type {
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
-import { writeAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { expressionProblem } from "../../automations/automationPlan";
 import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
@@ -63,7 +63,7 @@ const run = (overrides: Partial<Run>): Run => ({
   writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
 });
 
-function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean } = {}) {
+function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean; roundTripWrites?: boolean } = {}) {
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
   const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
@@ -74,7 +74,20 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     writeCollectionAutomations: vi.fn(async (payload: WriteCollectionAutomationsPayload) => {
       written.push(payload);
       const result = writeResults.shift() ?? { status: "written" as const, contentHash: "b".repeat(64) };
-      if (result.status === "written") current = read(payload.automations.map((automation) => summary(automation)));
+      if (result.status === "written") {
+        let automations = payload.automations;
+        if (options.roundTripWrites) {
+          const written = writeAutomationsFile(automations.map((automation) => ({ status: "valid", automation })));
+          if (written.status !== "ok") throw new Error("Fixture automation could not be written");
+          const parsed = parseAutomationsFile(written.text);
+          if (parsed.status !== "read") throw new Error("Fixture automation could not be read");
+          automations = parsed.entries.map((entry) => {
+            if (entry.status !== "valid") throw new Error("Fixture automation is invalid after writing");
+            return entry.automation;
+          });
+        }
+        current = read(automations.map((automation) => summary(automation)));
+      }
       return result;
     }),
     listCollectionAutomationRuns: vi.fn(async (): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs })),
@@ -675,7 +688,9 @@ describe("the builder", () => {
   });
 
   it.each(["existing", "new"])("keeps a newer %s draft after retrying an older save, then saves it against the acknowledged version", async (kind) => {
-    const { bridge, written } = makeBridge(kind === "new" ? { status: "missing" } : read([summary(stamp)]));
+    const { bridge, written } = makeBridge(
+      kind === "new" ? { status: "missing" } : read([summary(stamp)]), [], { roundTripWrites: true },
+    );
     bridge.writeCollectionAutomations.mockRejectedValueOnce(new Error("Write unavailable"));
     const onError = vi.fn();
     const user = userEvent.setup();
