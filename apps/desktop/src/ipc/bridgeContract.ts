@@ -5552,6 +5552,9 @@ export type PressAutomationButtonResult =
   // `settled` is set when a press sent again finds its run already ended;
   // otherwise the window hears the end as an automation run event.
   | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null }
+  // A shared view's press went to the relay, to run on the owner's computer.
+  // Its changes arrive as synced edits, and a failure as a notice.
+  | { busy: false; relayed: true }
   // The button is running on this record for someone else.
   | { busy: true; reason: string };
 

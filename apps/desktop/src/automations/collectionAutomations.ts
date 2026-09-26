@@ -228,6 +228,12 @@ export interface CollectionAutomationsOptions {
   onPressSettled(event: PressSettled): void;
   /** A press's run went back to wait. */
   onPressWaiting(event: { claimId: string; reason: PressWaitReason }): void;
+  /**
+   * Holds off a handover while a relayed press's run writes: null when this
+   * computer no longer runs the workspace's automations or a handover began.
+   * Unset, relayed presses run with no hold.
+   */
+  holdForHost?(): (() => void) | null;
   onError(context: string, error: unknown): void;
   /**
    * This workspace's dataset host, while it is open; resolves null when it is
@@ -443,6 +449,22 @@ function wakesAgent(automation: Automation): boolean {
   const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
     step.kind === "wake-agent" || (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
   return walk(automation.do);
+}
+
+// A relayed press's engine id: the relay's id and the definition hash the
+// presser saw. The relay mints UUIDs, so the first "." ends it.
+function relayedPressId(pressId: string, hash: string): string {
+  return `${pressId}.${hash}`;
+}
+
+/** The definition a relayed press's claim is bound to, or null for any other claim. */
+function boundDefinition(claim: Pick<AutomationClaim, "trigger" | "change">): string | null {
+  if (claim.change.kind !== "button" || !("key" in claim.trigger)) return null;
+  return /^press:[^.]+\.([0-9a-f]{16})$/u.exec(claim.trigger.key)?.[1] ?? null;
+}
+
+function changedSincePressed(field: string): string {
+  return `${field} changed after it was pressed. Press it again.`;
 }
 
 function collectionNamed(path: string): ReachCollection {
@@ -825,6 +847,11 @@ export class CollectionAutomations {
     if (claimed === null) return null;
     if (claimed.claims.length > 0) this.notifyClaimed();
     return claimed.mark;
+  }
+
+  /** Whether any Collection has an automation dohc can run, switched on or not. */
+  hasAutomations(): boolean {
+    return this.everyAutomation().length > 0;
   }
 
   /** The automations in one Collection's file, with why each can or cannot run. */
@@ -1384,6 +1411,56 @@ export class CollectionAutomations {
   private async doneOutcome(claim: Pick<AutomationClaimSummary, "automationId" | "claimId">): Promise<"done" | "ended"> {
     const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
     return runs.some((run) => !run.superseded && run.outcome?.state === "done") ? "done" : "ended";
+  }
+
+  /**
+   * A press from a shared view that the relay carried here: `automationId`
+   * names the automation the recipient saw, and `pressedBy` is the user the
+   * relay verified. It runs as a press on this computer, checked the same
+   * way, unless the button now runs another automation. Answers the press
+   * and the button's field, for the notice a failure sends.
+   */
+  async pressRelayed(
+    input: { automationId: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<{ pressed: CollectionAutomationPress; field: string | null }> {
+    await this.ready();
+    const id = parseCollectionAutomationId(input.automationId);
+    const automation = id ? this.definitionFor(id) : null;
+    if (id === null || automation === null || automation.when.kind !== "button" || automation.when.table !== null) {
+      throw new Error("This button no longer runs an automation in its Collection.");
+    }
+    const field = automation.when.field;
+    // The press runs only the automation the person saw when they pressed.
+    if (definitionHash(automation) !== input.definitionHash) throw new Error(changedSincePressed(field));
+    const resolved = resolveButton(this.files.get(id.collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(id.collectionPath).name);
+    if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
+      throw new Error(`${field} now runs another automation. Press it again.`);
+    }
+    // The engine's press id carries that definition, so the claim stays
+    // bound to it through a restart; the run refuses any other.
+    const pressId = relayedPressId(input.pressId, input.definitionHash);
+    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy }, watch);
+    return { pressed, field };
+  }
+
+  /**
+   * The claim the engine already holds for a relayed press, found without
+   * making one, or null when it holds none. A host that restarted resumes a
+   * press only through this; one with no claim goes back to the relay first.
+   */
+  async relayedClaim(input: { automationId: string; definitionHash: string; pressId: string }): Promise<{
+    claimId: string;
+    settled: Omit<PressSettled, "claimId"> | null;
+  } | null> {
+    const key = `press:${relayedPressId(input.pressId, input.definitionHash)}`;
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    const claim = listed.claims.find((candidate) => "key" in candidate.trigger && candidate.trigger.key === key);
+    if (!claim) return null;
+    if (claim.state === "failed") return { claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "done") return { claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    return { claimId: claim.claimId, settled: null };
   }
 
   private async buttonState(
@@ -2145,6 +2222,11 @@ export class CollectionAutomations {
       if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
       return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: async () => undefined };
     }
+    // A relayed press runs only the automation its presser saw.
+    const bound = held.source === "engine" ? boundDefinition(held.claim) : null;
+    if (bound !== null && bound !== definitionHash(automation) && automation.when.kind === "button") {
+      return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+    }
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
     // notice and Try again runs it once that is fixed.
@@ -2184,6 +2266,23 @@ export class CollectionAutomations {
     // current editor to confirm it.
     if (stop.aborted) return release;
     if (stepHeld) return { kind: "release", waitsFor: "held" };
+    // A relayed press runs only on the computer that still runs the
+    // workspace's automations, and holds off a handover while its run
+    // writes, new or resumed after a restart. After a handover it runs
+    // nowhere. A claim that waits never gets here, so it holds nothing.
+    let hostHold: (() => void) | undefined;
+    if (held.source === "engine" && boundDefinition(held.claim) !== null && this.options.holdForHost) {
+      const taken = this.options.holdForHost();
+      if (taken === null) {
+        return {
+          kind: "settle",
+          input: { state: "failed", error: "This workspace's automations moved to another computer before this press ran." },
+          outcome: "failed",
+          settled: () => this.pruneRuns(claim.automationId),
+        };
+      }
+      hostHold = taken;
+    }
     const collection = collectionNamed(id.collectionPath);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
       ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
@@ -2192,7 +2291,7 @@ export class CollectionAutomations {
         evaluator: this.options.evaluator,
         store: this.options.store,
         nowMs: () => this.nowMs(),
-      }, { claim: held.claim, automation, collection, roster, signal, stopped: stop }));
+      }, { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
     // A pause or close stopped the run; its progress is saved, and the next
     // drain resumes it.
@@ -2281,9 +2380,12 @@ export class CollectionAutomations {
     claimId: string,
     stopped: AbortSignal,
     runClaim: (signal: AbortSignal) => Promise<CollectionAutomationRunOutcome>,
+    /** Called once the run's writes have really stopped. */
+    onStopped?: () => void,
   ): Promise<CollectionAutomationRunOutcome | null> {
     const controller = new AbortController();
     const abort = () => controller.abort();
+    let started = false;
     stopped.addEventListener("abort", abort, { once: true });
     const cancelDeadline = (this.options.deadline ?? startDeadline)(abort);
     let grace: ReturnType<typeof setTimeout> | undefined;
@@ -2298,6 +2400,10 @@ export class CollectionAutomations {
         error: errorText(error),
         timedOut: controller.signal.aborted,
       }));
+      // The hold ends only when the run's writes have really stopped, even
+      // after the deadline's grace, or a close, gave up waiting for them.
+      started = true;
+      void run.finally(() => onStopped?.());
       const outcome = await Promise.race([run, outlived]);
       if (outcome === "outlived") {
         this.options.onError(`run automation claim "${claimId}"`, new Error("A write did not stop after the deadline."));
@@ -2308,6 +2414,7 @@ export class CollectionAutomations {
       cancelDeadline();
       clearTimeout(grace);
       stopped.removeEventListener("abort", abort);
+      if (!started) onStopped?.();
     }
   }
 

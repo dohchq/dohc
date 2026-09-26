@@ -1973,6 +1973,18 @@ describe("Button fields", () => {
     expect(button.getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("frees a shared view's button once the owner's computer has the press", async () => {
+    const bridge = buttonsWith({ press: async () => ({ busy: false, relayed: true }) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onNotice = vi.fn();
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Sent Mark paid for Invoice 12"));
+    expect(button.getAttribute("aria-busy")).toBeNull();
+  });
+
   it("still reports a run that ends after its Collection closed, through the surface that showed it", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);

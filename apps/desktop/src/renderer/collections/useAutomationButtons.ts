@@ -233,6 +233,13 @@ export function createAutomationButtons(scope: { workspaceId: string; collection
           finish(key);
           return;
         }
+        if ("relayed" in result) {
+          // The owner's computer runs it. Its changes arrive as synced
+          // edits, and a failure as a notice, so the button is free again.
+          finish(key);
+          report().onNotice(`Sent ${field} for ${record.label}`);
+          return;
+        }
         run.claimId = result.claimId;
         const settled = result.settled ?? earlySettles.get(result.claimId);
         earlySettles.delete(result.claimId);
