@@ -1065,6 +1065,21 @@ describe("the builder", () => {
     ]);
   });
 
+  it("keeps a message's lines, and says how to fix a brace it cannot read", async () => {
+    const told: Automation = { ...stamp, do: [{ kind: "notify", text: "Done\nNext: review", to: [{ kind: "literal", value: "install-here" }] }] };
+    const { written } = makeBridge({ status: "read", contentHash: HASH, automations: [summary(told)], you: "install-here" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const message = screen.getByRole("textbox", { name: "Step 1, message" }) as HTMLTextAreaElement;
+    expect(message.value).toBe("Done\nNext: review");
+    // userEvent reads "{{" as one "{".
+    await user.type(message, " {{");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Close each { with }. To write a brace itself, type {{ or }}.", undefined, SLOW)).toBeTruthy();
+    expect(written).toEqual([]);
+  });
+
   it("offers no step for you where steps cannot name you", async () => {
     makeBridge({ status: "missing" });
     const user = userEvent.setup();
