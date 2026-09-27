@@ -1,6 +1,6 @@
 import {normalizeShareLabel, type ShareLabels} from "@dohc/security-contract/share-labels";
 export async function ownerShareLabels(input: {
-  rootPath: string; selector: {paths?: unknown; channelWireId?: unknown}; sharerName: string;
+  rootPath: string; selector: {paths?: unknown; channelWireId?: unknown};
   groupName(wireId: string): Promise<string | null>;
   appName?(path: string): Promise<string | null>;
 }): Promise<ShareLabels> {
@@ -9,23 +9,28 @@ export async function ownerShareLabels(input: {
   const isGroup = typeof input.selector.channelWireId === "string";
   const group = isGroup ? await input.groupName(input.selector.channelWireId as string) : null;
   const app = !group && paths.length === 1 ? await input.appName?.(paths[0]!) : null;
-  return {subjectName: normalizeShareLabel(group ?? app ?? (paths.length ? paths.map(leaf).join(", ") : isGroup ? null : leaf(input.rootPath))),
-    sharerName: normalizeShareLabel(input.sharerName)};
+  return {subjectName: normalizeShareLabel(group ?? app ?? (paths.length ? paths.map(leaf).join(", ") : isGroup ? null : leaf(input.rootPath)))};
 }
 
 export async function refreshOwnerShareLabels(input: {
   workspaceId: string;
-  list(): Promise<{granted: Array<{shareId: string; workspaceId: string; selector: unknown; subjectName?: string | null; sharerName?: string | null}>}>;
+  list(): Promise<{granted: Array<{shareId: string; workspaceId: string; selector: unknown; subjectName?: string | null; revokedAtMs?: number | null; status?: string}>}>;
   labels(selector: {paths?: unknown; channelWireId?: unknown}): Promise<ShareLabels>;
   update(shareId: string, labels: ShareLabels): Promise<unknown>;
 }): Promise<void> {
   const seen = new Set<string>();
+  const failures: unknown[] = [];
   for (const row of (await input.list()).granted) {
-    if (row.workspaceId !== input.workspaceId || seen.has(row.shareId) || !row.selector || typeof row.selector !== "object") continue;
+    if (row.revokedAtMs != null || row.status === "revoked" || row.workspaceId !== input.workspaceId || seen.has(row.shareId) || !row.selector || typeof row.selector !== "object") continue;
     seen.add(row.shareId);
-    const labels = await input.labels(row.selector);
-    if (labels.subjectName !== row.subjectName || labels.sharerName !== row.sharerName) await input.update(row.shareId, labels);
+    try {
+      const labels = await input.labels(row.selector);
+      if (labels.subjectName !== row.subjectName) await input.update(row.shareId, labels);
+    } catch (error) {
+      failures.push(error);
+    }
   }
+  if (failures.length) throw new AggregateError(failures, "Some share labels could not be refreshed.");
 }
 
 // A sync pass can be frequent. Labels refresh in the background, with one

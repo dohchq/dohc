@@ -166,7 +166,7 @@ export async function fetchShareViewInfo(input: {
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),
-    sharerName: normalizeShareLabel(body.sharerName),
+    sharerName: normalizeShareLabel(body.sharerName, 320),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
     selector: parseSelector(body.selector, body.access, input.shareId),

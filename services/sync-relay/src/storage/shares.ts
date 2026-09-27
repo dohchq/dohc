@@ -946,6 +946,7 @@ export function revokeShare(storage: StorageContext, shareId: string, revokedAtM
         .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
+      storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
       const revoked = storage.db
         .prepare(
           `UPDATE sync_relay_share_grants

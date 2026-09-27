@@ -39,7 +39,6 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sync_relay_share_labels (
     share_id TEXT PRIMARY KEY REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
     subject_name TEXT CHECK (subject_name IS NULL OR length(subject_name) BETWEEN 1 AND 160),
-    sharer_name TEXT CHECK (sharer_name IS NULL OR length(sharer_name) BETWEEN 1 AND 160),
     updated_at_ms INTEGER NOT NULL
   ) STRICT;
 

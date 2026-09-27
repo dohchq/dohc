@@ -34,7 +34,7 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
       const data = await namedRequest("/api/apps/summary", controller.signal, target).catch(() => null);
       if (controller.signal.aborted || request.current !== controller) return;
       if (data && typeof data === "object" && "access" in data && typeof data.access === "string" && "subjectName" in data && "sharerName" in data) {
-        setSummary({subjectName: normalizeShareLabel(data.subjectName), sharerName: normalizeShareLabel(data.sharerName), access: data.access});
+        setSummary({subjectName: normalizeShareLabel(data.subjectName), sharerName: normalizeShareLabel(data.sharerName, 320), access: data.access});
       }
     }
   };

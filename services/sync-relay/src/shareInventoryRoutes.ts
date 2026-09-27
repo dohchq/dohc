@@ -19,6 +19,7 @@ export function createShareInventoryRoutes(
     | "listSharesReceivedBy"
     | "getShare"
     | "setShareLabels"
+    | "shareHasActiveGrants"
     | "getShareGrant"
     | "listActiveShareGrantsForRecipient"
     | "findChannelCreateKind"
@@ -35,6 +36,7 @@ export function createShareInventoryRoutes(
   independentGrantSummary: ReturnType<typeof createShareSummaries>["independentGrantSummary"],
   linkInventorySummary: ReturnType<typeof createShareSummaries>["linkInventorySummary"],
   publicEditRelease?: PublicEditRelease,
+  senderLabel?: (userId: string, email: string | null) => Promise<string>,
 ) {
   async function respondToShareInventory(
     request: Request,
@@ -63,10 +65,11 @@ export function createShareInventoryRoutes(
           const granterEmail = lookupUserEmail
             ? await lookupUserEmail(fallback.share.granterUserId)
             : null;
-          return { fallback, granterEmail };
+          const sharerName = await senderLabel?.(fallback.share.granterUserId, granterEmail) ?? granterEmail;
+          return { fallback, granterEmail, sharerName };
         }),
       );
-      const received = receivedLookups.flatMap(({ fallback, granterEmail }) => {
+      const received = receivedLookups.flatMap(({ fallback, granterEmail, sharerName }) => {
         const effective = resolveReceivedShareAuthority({
           storage,
           actorUserId: actor.userId,
@@ -78,6 +81,7 @@ export function createShareInventoryRoutes(
               { share: effective.share, grant: effective.grant },
               granterEmail,
               effective.genericChatWritable,
+              sharerName,
             ),
           ];
         }
@@ -102,6 +106,7 @@ export function createShareInventoryRoutes(
                 currentFallback,
                 granterEmail,
                 effective.genericChatWritable,
+                sharerName,
               ),
             ];
       });
@@ -112,9 +117,9 @@ export function createShareInventoryRoutes(
     if (route.route === "share" && request.method === "PUT") {
       const input = await readJsonObject(request);
       const share = storage.getShare(route.shareId);
-      if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
-      if (Object.keys(input).sort().join() !== "sharerName,subjectName") throw badRequest("Share labels require subjectName and sharerName.");
-      storage.setShareLabels(share.shareId, {subjectName: normalizeShareLabel(input.subjectName), sharerName: normalizeShareLabel(input.sharerName)}, nowMs());
+      if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) || !storage.shareHasActiveGrants(share.shareId)) throw notFound();
+      if (Object.keys(input).sort().join() !== "subjectName") throw badRequest("Share labels require subjectName.");
+      storage.setShareLabels(share.shareId, {subjectName: normalizeShareLabel(input.subjectName)}, nowMs());
       return jsonResponse({ok: true});
     }
     if (route.route === "share" && request.method === "GET") {
@@ -123,6 +128,7 @@ export function createShareInventoryRoutes(
       const granterEmail = lookupUserEmail
         ? await lookupUserEmail(initial.share.granterUserId)
         : null;
+      const sharerName = await senderLabel?.(initial.share.granterUserId, granterEmail) ?? granterEmail;
       const authorized = resolveReceivedShareAuthority({
         storage,
         actorUserId: actor.userId,
@@ -133,6 +139,7 @@ export function createShareInventoryRoutes(
         { share: authorized.share, grant: authorized.grant },
         granterEmail,
         authorized.genericChatWritable,
+        sharerName,
       );
       return jsonResponse({ ok: true, ...summary });
     }

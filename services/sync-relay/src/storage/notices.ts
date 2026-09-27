@@ -223,7 +223,8 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
       if (found.state === "ended") return void settle();
       if (found.state === "wait") return;
       const { share, recipientUserId } = found;
-      const senderLabel = Array.from(storage.getShareLabels(share.shareId).sharerName ?? input.senderLabel).slice(0, NOTICE_SENDER_LABEL_MAX_CHARS).join("");
+      const senderLabel = input.senderLabel !== "the owner" && Array.from(input.senderLabel).length <= NOTICE_SENDER_LABEL_MAX_CHARS
+        ? input.senderLabel : "Someone";
       const title = found.title(senderLabel);
       const noticeId = noticeIdFrom(share.granterUserId, `share-received:${input.grantId}`);
       const existing = storage.db
@@ -241,7 +242,7 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
         senderUserId: share.granterUserId,
         senderLabel,
         title,
-        body: `${shareAccessLabel(found.access)} access`,
+        body: `${shareAccessLabel(found.access)} access · From ${input.senderLabel}`,
         target: { share: share.shareId },
         originInstallId: "relay",
         nowMs: input.nowMs,

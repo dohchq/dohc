@@ -55,7 +55,7 @@ import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
-import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -281,7 +281,7 @@ export function createSyncRelayHandler({
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
-  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, shareSenderLabel}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -303,7 +303,7 @@ export function createSyncRelayHandler({
   }) : undefined;
   const namedDocuments = namedBrowserSessionLimits ? createNamedRecipientDocuments({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
-    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit,
+    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit, shareSenderLabel,
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -331,14 +331,11 @@ export function createSyncRelayHandler({
     linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
-  // A granter's name on the notice a share sends: their display name, or
-  // the email the recipient already sees beside the share.
-  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+  async function shareSenderLabel(granterUserId: string, knownEmail?: string | null): Promise<string> {
     const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
-    if (name !== null) return name;
-    const email = await lookupUserEmail?.(granterUserId);
-    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
-  };
+    const email = knownEmail === undefined ? await lookupUserEmail?.(granterUserId) : knownEmail;
+    return formatShareSender(name, email);
+  }
 
   // Delivers the share notices this person can receive now, before their
   // pull; only those look up a granter's name, once per granter. A failure
@@ -503,6 +500,7 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     publicEditRelease,
+    shareSenderLabel,
   );
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(

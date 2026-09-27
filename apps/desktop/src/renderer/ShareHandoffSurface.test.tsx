@@ -83,7 +83,7 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
     mountInto={{workspaceId: "host", onMounted: vi.fn()}} />);
   const user = userEvent.setup();
   expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
-  expect(screen.getByTestId("open-share-summary").textContent).toContain("Trip plans · Ana · Edit access");
+  expect(screen.getByTestId("open-share-summary").textContent).toContain("Trip plans · Ana (granter@dohc.test) · Edit access");
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));

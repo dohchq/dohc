@@ -1,4 +1,4 @@
-import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
+import {shareAccessLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
@@ -323,7 +323,7 @@ export function OpenSharedView(props: {
       </div>
 
       {preview?.shareId === shareId && <p data-testid="open-share-summary" className="m-0 text-[13px] text-ink">
-        {preview.subjectName ?? shareSubjectFallback(preview.selector)} · {preview.sharerName ?? preview.granterEmail ?? "the owner"} · {shareAccessLabel(preview.access)} access
+        {preview.subjectName ?? shareSubjectFallback(preview.selector)} · {shareSenderLabel(preview.sharerName, preview.granterEmail)} · {shareAccessLabel(preview.access)} access
       </p>}
       {props.mountInto ? (
         <div className="flex flex-col gap-1.5">

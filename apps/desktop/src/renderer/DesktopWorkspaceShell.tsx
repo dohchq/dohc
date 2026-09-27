@@ -1,3 +1,4 @@
+import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsContext } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
@@ -3836,7 +3837,7 @@ export function DesktopWorkspaceShell(props: {
   // copy, which the recipient then sends for the granter to accept.
   const shareViewDocumentsWritable =
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
-  const shareGranterName = shareView?.sharerName ?? shareView?.granterEmail ?? "the owner";
+  const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;

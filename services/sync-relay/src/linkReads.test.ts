@@ -5084,7 +5084,7 @@ describe("relay capability reads", () => {
 it("exposes only the subject label to a valid link capability and stays opaque to probes", async () => {
   const storage = await newStorage(), h = handler(storage), link = await seed(h);
   const shareId = storage.getShareGrant(link.grantId)!.shareId;
-  storage.setShareLabels(shareId, {subjectName: "Trip plans", sharerName: "Ana"}, 1);
+  storage.setShareLabels(shareId, {subjectName: "Trip plans"}, 1);
   const result = await json(await h(linkRequest(link.capability, "/sync/link/share")));
   expect(result).toMatchObject({subjectName: "Trip plans", access: "view"});
   expect(result).not.toHaveProperty("sharerName");

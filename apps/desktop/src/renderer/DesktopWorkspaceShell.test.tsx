@@ -7802,13 +7802,14 @@ describe("shared view banner", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "sam@dohc.test",
+        sharerName: "IT Security",
         access: "view",
       },
     });
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      "Shared view from IT Security (sam@dohc.test) — read-only. Ask sam@dohc.test for changes.",
     );
     expect(banner.textContent).not.toContain("You can chat about");
   });
@@ -7950,7 +7951,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from another dohc user. Markdown edits save to the live host. Other file changes need their acceptance.",
+      "Shared view from the owner. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
   });
 

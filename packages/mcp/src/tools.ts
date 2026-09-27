@@ -1,4 +1,4 @@
-import {normalizeShareLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
+import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
@@ -1366,7 +1366,7 @@ export async function workspaceStatus(ctx: ToolContext) {
   return {
     ...(entry?.shareView ? {receivedShare: {
       subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
-      sharerName: normalizeShareLabel(entry.shareView.sharerName) ?? normalizeShareLabel(entry.shareView.granterEmail),
+      sharerName: shareSenderLabel(entry.shareView.sharerName, entry.shareView.granterEmail),
       access: ctx.shareAccess ?? null,
     }} : {}),
     synced,

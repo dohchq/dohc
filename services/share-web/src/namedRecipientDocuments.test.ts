@@ -17,11 +17,11 @@ function request(user = "alice", body: unknown = {grantId: "grant"}) {
   return new Request(`${origin}/api/live/named-documents`, {method: "POST", body: JSON.stringify(body),
     headers: {host: "share.example.test", origin, "content-type": "application/json", cookie: `${cookieName}=${user}`}});
 }
-async function fixture(maxFiles = 8, access = "edit") {
+async function fixture(maxFiles = 8, access = "edit", lookup?: (storage: Awaited<ReturnType<typeof testStorage>>) => Promise<string>) {
   resetOpSeq();
   const storage = await testStorage(); storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1});
   storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: "owner", createdAtMs: 1,
-    labels: {subjectName: "Trip", sharerName: "Ana"}, selectorJson: JSON.stringify({paths: ["docs"], versionId: null})},
+    labels: {subjectName: "Trip"}, selectorJson: JSON.stringify({paths: ["docs"], versionId: null})},
     grant: {grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "alice", principalEmail: null,
       access, generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
   for (const content of ["# Shared", "# Private", "# Side", "{}"]) storage.putBlob({workspaceId: "workspace", sha256: sha256(content), content: Buffer.from(content), createdAtMs: 1});
@@ -36,7 +36,7 @@ async function fixture(maxFiles = 8, access = "edit") {
     return {userId: cookie.slice(cookieName.length + 1), workspaceId};
   });
   const relay = createNamedRecipientDocuments({storage, resolveActor: actor, publicOrigin: origin, exchangeKey,
-    limits: {...limits, maxSessions: 8, retentionMs: 60000}, maxFiles});
+    limits: {...limits, maxSessions: 8, retentionMs: 60000}, maxFiles, shareSenderLabel: () => lookup ? lookup(storage) : Promise.resolve("Ana (owner@dohc.test)")});
   const forwarded: Request[] = [];
   const web = createNamedRecipientDocumentsClient({relayUrl: "https://relay.test", publicOrigin: origin, exchangeKey, limits, browserLimits,
     fetchRelay: async input => {forwarded.push(input.clone()); return relay(input);}});
@@ -48,7 +48,7 @@ it("opens only current selected Markdown objects through the named account and k
   input.headers.set("authorization", "Bearer forged"); input.headers.set("x-user-id", "owner"); input.headers.set("x-dohc-relay-exchange-key", "forged");
   const response = await f.web(input);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({subjectName: "Trip", sharerName: "Ana", access: "edit", userId: "alice", workspaceId: "workspace", grantId: "grant", shareId: "share",
+  expect(await response.json()).toMatchObject({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "workspace", grantId: "grant", shareId: "share",
     files: [{objectId: "a", path: "docs/a.md"}], limits: browserLimits});
   expect(f.actor).toHaveBeenCalledTimes(1);
   expect(f.forwarded[0]!.headers.has("authorization")).toBe(false);
@@ -95,4 +95,18 @@ it("keeps cancelled navigation in capacity until account resolution finishes", a
   release.resolve();
   expect((await second).status).toBe(200);
   expect((await f.web(request())).status).toBe(200);
+});
+
+it("rechecks named navigation after revocation during the sender lookup", async () => {
+  const f = await fixture(8, "edit", async storage => {
+    storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4});
+    return "Ana (owner@dohc.test)";
+  });
+  expect((await f.web(request())).status).toBe(404);
+});
+it("opens named documents without a sender label when account lookup fails", async () => {
+  const f = await fixture(8, "edit", async () => {throw Error("account unavailable");});
+  const response = await f.web(request());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({sharerName: null, access: "edit"});
 });

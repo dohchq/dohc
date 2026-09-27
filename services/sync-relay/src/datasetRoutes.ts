@@ -231,7 +231,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
 }
 
 export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
-  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number; shareSenderLabel?: (userId: string) => Promise<string>}) {
   const admit = createAppBackendAdmission(options.limits);
   return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response> => {
     const published = host.publication(auth, route.publicationId);
@@ -263,7 +263,13 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
           if (authority.caller.kind !== "named") throw notFound();
           const grant = storage.getShareGrant(authority.caller.grantId);
           if (!grant) throw notFound();
-          return {...storage.getShareLabels(grant.shareId), access: authority.caller.access};
+          const share = storage.getShare(grant.shareId);
+          if (!share) throw notFound();
+          const sharerName = await options.shareSenderLabel?.(share.granterUserId).catch(() => null) ?? null;
+          signal.throwIfAborted();
+          const current = host.publication(auth, route.publicationId);
+          if (!current || current.authority.caller.kind !== "named") throw notFound();
+          return {...storage.getShareLabels(grant.shareId), sharerName, access: current.authority.caller.access};
         }
         if (route.action === "descriptor") {
           if (auth.kind !== "named") throw notFound();

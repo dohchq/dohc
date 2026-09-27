@@ -9,7 +9,7 @@ import type {SyncRelayStorage} from "./storage";
 
 /** Named invitation navigation. Coordinates identify a selection; only the account cookie authorizes it. */
 export function createNamedRecipientDocuments(options: {storage: SyncRelayStorage; resolveActor: ResolveActor;
-  publicOrigin: string; exchangeKey: string; limits: NamedLiveBrowserHttpLimits; maxFiles: number}) {
+  publicOrigin: string; exchangeKey: string; limits: NamedLiveBrowserHttpLimits; maxFiles: number; shareSenderLabel?: (userId: string) => Promise<string>}) {
   const {storage, publicOrigin} = options, limits = parseNamedLiveBrowserHttpLimits(options.limits);
   if (new URL(publicOrigin).origin !== publicOrigin || !publicOrigin.startsWith("https://") ||
     options.exchangeKey.length < 32 || !Number.isSafeInteger(options.maxFiles) || options.maxFiles < 1) throw new TypeError("Invalid named navigation configuration.");
@@ -50,13 +50,14 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
           if (!objectId) return refuse();
           files.push({objectId, path: file.path});
         }
+        const sharerName = await options.shareSenderLabel?.(share.granterUserId).catch(() => null) ?? null;
         const current = authorizeNamedLiveEditShareGrant({storage, actorUserId: context.userId, grantId});
         if (!current.ok || current.grant.access !== "edit" || current.share.shareId !== context.shareId || current.share.workspaceId !== context.workspaceId ||
           current.grant.generation !== authority.grant.generation) return refuse();
         controller.signal.throwIfAborted();
         const body = JSON.stringify({ userId: context.userId, workspaceId: context.workspaceId,
           shareId: context.shareId, grantId: context.grantId, files, access: current.grant.access,
-          ...storage.getShareLabels(context.shareId) });
+          ...storage.getShareLabels(context.shareId), sharerName });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
         return new Response(body, {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
       } catch {return refuse();}

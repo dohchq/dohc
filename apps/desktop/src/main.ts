@@ -1186,8 +1186,7 @@ async function labelsForOwnerShare(workspace: EngineWorkspace, credentials: Clou
     const lookup = async <T>(read: () => Promise<T>): Promise<T | null> => {
       try {return await read();} catch (error) {if (options.refresh) throw error; return null;}
     };
-    const settings = await lookup(() => readCachedUserSettingsFile(stateDir()));
-    const labels = await ownerShareLabels({rootPath: workspace.rootPath, selector, sharerName: settings?.settings.profile.preferredName ?? credentials.email,
+    const labels = await ownerShareLabels({rootPath: workspace.rootPath, selector,
       appName: async path => {
         const config = await lookup(() => readWorkspaceTextIfPresent(workspace.rootPath, `${path}/dohc.json`));
         return config && !config.truncated ? parseDohcSiteConfig(config.text).config?.title ?? null : null;
@@ -1840,10 +1839,10 @@ function engineForWorkspace(
       let groups: Promise<Map<string, string>> | undefined;
       return refreshOwnerShareLabels({workspaceId: workspace.workspaceId,
         list: async () => {
-          const listing = await relayShareJsonWithCredentials<{granted: Array<{shareId: string; workspaceId: string; selector: unknown; subjectName?: string | null; sharerName?: string | null}>}>(credentials, "/sync/shares");
+          const listing = await relayShareJsonWithCredentials<{granted: Array<{shareId: string; workspaceId: string; selector: unknown; subjectName?: string | null; revokedAtMs?: number | null; status?: string}>}>(credentials, "/sync/shares");
           let cursor: string | undefined;
           do {
-            const page = await relayShareJsonWithCredentials<{links: Array<{shareId: string; selector: unknown; subjectName?: string | null; sharerName?: string | null}>; nextCursor?: string}>(credentials,
+            const page = await relayShareJsonWithCredentials<{links: Array<{shareId: string; selector: unknown; subjectName?: string | null; revokedAtMs?: number | null; status?: string}>; nextCursor?: string}>(credentials,
               `/sync/${encodeURIComponent(workspace.workspaceId)}/shares/links${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
             listing.granted.push(...page.links.map(row => ({...row, workspaceId: workspace.workspaceId})));
             cursor = page.nextCursor;

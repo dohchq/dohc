@@ -1,4 +1,4 @@
-import {shareSubjectFallback} from "@dohc/security-contract/share-labels";
+import {shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { ipcErrorMessage } from "../ipcError";
 import { useEffect, useRef, useState } from "react";
 import type {
@@ -398,7 +398,7 @@ export function SharedWithMeList(props: {
                 ) : null}
               </div>
               <div className="truncate text-[11px] text-subtle">
-                {`From ${share.sharerName ?? share.granterEmail ?? "the owner"}`}
+                {`From ${shareSenderLabel(share.sharerName, share.granterEmail)}`}
                 {mounted
                   ? ` — in this workspace as shared-with-me/${mounted.label}${
                       mounted.damaged

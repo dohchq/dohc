@@ -49,6 +49,6 @@ export function namedFiles(value: unknown, userId: string, grantId: string): Nam
     const objectId = parseLiveUpdateIdentifier(file.objectId); seen.add(objectId);
     return {objectId, path: file.path};
   });
-  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName), access: "edit", userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
+  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
     files, limits: parseNamedLiveBrowserLimits(value.limits)};
 }

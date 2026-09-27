@@ -88,7 +88,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
       ...(shareId !== null ? { shareId } : {}),
       granterEmail: shareViewGranterEmail(raw),
       ...(normalizeShareLabel(raw.subjectName) ? {subjectName: normalizeShareLabel(raw.subjectName)} : {}),
-      ...(normalizeShareLabel(raw.sharerName) ? {sharerName: normalizeShareLabel(raw.sharerName)} : {}),
+      ...(normalizeShareLabel(raw.sharerName, 320) ? {sharerName: normalizeShareLabel(raw.sharerName, 320)} : {}),
       ...(damaged
         ? { damaged: true as const }
         : { access: level, genericChatWritable }),

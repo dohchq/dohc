@@ -73,8 +73,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
     renderView();
     const invite = await screen.findByTestId("chats-join-shared");
-    expect(invite.closest("li")?.textContent).toContain("Trip group · Ana");
-    expect(invite.closest("li")?.textContent).toContain("read-write");
+    expect(invite.closest("li")?.textContent).toContain("Trip group · Ana (owner@example.com)");
+    expect(invite.closest("li")?.textContent).toContain("Read-write");
 
     // The first read cannot name an invitation it has not been told about
     // yet, so it names the channels it shows and main adds the invitations to

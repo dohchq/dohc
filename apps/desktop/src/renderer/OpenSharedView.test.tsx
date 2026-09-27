@@ -718,7 +718,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
 });
 
 it("previews the verified subject, sharer and access when opening separately", async () => {
-  bridgeMock.getRelayReceivedShare.mockResolvedValue({found: true, share: {shareId: "share-1", subjectName: "Trip plans", sharerName: "Ana", access: "comment", selector: {paths: ["docs"], versionId: null}}});
-  render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} resolvedShare={{shareId: "share-1", shareCode: "dohc-share:share-1:http://localhost:1788", share: {shareId: "share-1", subjectName: "Trip plans", sharerName: "Ana", access: "comment", selector: {paths: ["docs"], versionId: null}} as RelayShareReceivedRow}}/>);
-  expect((await screen.findByTestId("open-share-summary")).textContent).toContain("Trip plans · Ana · Comment access");
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({found: true, share: {shareId: "share-1", subjectName: "Trip plans", sharerName: "Ana", granterEmail: "ana@example.test", access: "comment", selector: {paths: ["docs"], versionId: null}}});
+  render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} resolvedShare={{shareId: "share-1", shareCode: "dohc-share:share-1:http://localhost:1788", share: {shareId: "share-1", subjectName: "Trip plans", sharerName: "Ana", granterEmail: "ana@example.test", access: "comment", selector: {paths: ["docs"], versionId: null}} as RelayShareReceivedRow}}/>);
+  expect((await screen.findByTestId("open-share-summary")).textContent).toContain("Trip plans · Ana (ana@example.test) · Comment access");
 });

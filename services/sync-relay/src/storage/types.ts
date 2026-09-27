@@ -916,6 +916,7 @@ export interface SyncRelayStorage {
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
+  shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
