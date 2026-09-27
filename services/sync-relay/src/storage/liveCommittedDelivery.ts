@@ -51,6 +51,7 @@ import {
   LIVE_DELIVERY_OWNERS as OWNERS,
 } from "./liveCommittedDeliverySchema";
 import { LIVE_JOURNAL_TABLE } from "./schema";
+import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import {
   appendValidatedLiveJournal,subtractJournalRanges,
   journalDocument,
@@ -798,7 +799,7 @@ export class LiveCommittedDeliveryStore {
       const bytes = (prior.hasCheckpoint ? 0 : prior.bytes) + rowBytes;
       integrity(
         count <= 4095 &&
-          hasCheckpoint === (restored!==null || count === 4095 || bytes >= 20_971_520),
+          hasCheckpoint === (restored!==null || liveJournalCheckpointDue(count, bytes)),
       );
       position = { count, bytes };
     } else {
