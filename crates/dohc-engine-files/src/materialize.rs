@@ -2942,6 +2942,18 @@ fn is_same_file(kept: &Path, copy: &Path) -> std::io::Result<bool> {
     same_file::is_same_file(kept, copy)
 }
 
+fn has_multiple_links(path: &Path) -> std::io::Result<bool> {
+    let file = open_displaced(path)?;
+    #[cfg(windows)]
+    let count = winapi_util::file::information(&file)?.number_of_links();
+    #[cfg(unix)]
+    let count = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()?.nlink()
+    };
+    Ok(count > 1)
+}
+
 /// `notes (kept copy).md`, then `notes (kept copy 2).md`, within `budget`
 /// bytes. A name with no extension, or only a leading dot, takes the suffix
 /// at its end. The stem gives up bytes, never splitting a character; the
@@ -3175,6 +3187,13 @@ fn recover_displacement(
             options.now_ms,
         )?;
         return Ok(false);
+    }
+    // Save may have linked the visible copy but stopped before unlinking
+    // staging. Leave both names and the row for the next Save to finish.
+    if displacement.state == DisplacementState::Kept
+        && has_multiple_links(&moved.path).map_err(|err| MaterializeError::io(&moved.path, &err))?
+    {
+        return Ok(true);
     }
     if displacement.target_path.is_empty() {
         let inspected = moved.inspect(store)?;
@@ -4913,6 +4932,80 @@ mod tests {
         assert_eq!(name("a.tar.gz", 1), "a.tar (kept copy).gz");
         assert_eq!(name(".env", 1), ".env (kept copy)");
         assert_eq!(name("Makefile", 3), "Makefile (kept copy 3)");
+    }
+
+    #[test]
+    fn recovery_leaves_interrupted_kept_copy_link_for_next_save() {
+        for target_exists in [false, true] {
+            for known_bytes in [false, true] {
+                let scratch = Scratch::new("kept-copy-interrupted-link");
+                let root = std::fs::canonicalize(&scratch.root).unwrap();
+                let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+                enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
+                let expected = store.put_binary_blob(b"preimage").unwrap();
+                let staging = staging_dir(&root, true).unwrap();
+                let name = staged_name("kept-link", 0);
+                let kept = staging.join(&name);
+                let bytes: &[u8] = if known_bytes {
+                    b"preimage"
+                } else {
+                    b"outside edit"
+                };
+                std::fs::write(&kept, bytes).unwrap();
+                let id = store
+                    .open_displacement(&DisplacementSpec {
+                        job_id: "kept-link".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes.md".into(),
+                        displaced_name: name,
+                        expected_sha256: expected,
+                        content_sha256: Some(hex_sha256(b"job content")),
+                        now_ms: 1,
+                    })
+                    .unwrap();
+                // The earlier inspection could not read the staged bytes.
+                store
+                    .resolve_displacement(
+                        id,
+                        DisplacementResolution::Keep {
+                            displaced_sha256: None,
+                        },
+                        None,
+                        1,
+                    )
+                    .unwrap();
+                let target = root.join("notes.md");
+                if target_exists {
+                    std::fs::write(&target, b"job content").unwrap();
+                }
+                let copy = root.join("notes (kept copy).md");
+                // Save claimed the visible name but stopped before unlinking staging.
+                std::fs::hard_link(&kept, &copy).unwrap();
+                let rows = store.list_kept_displacements("ws").unwrap();
+                let options = options_with(&StdReplacer);
+                for _ in 0..2 {
+                    recover_displacements(&store, &root, Some("ws"), &options).unwrap();
+                    assert!(kept.exists(), "recovery must leave Save's staging link");
+                    assert!(is_same_file(&kept, &copy).unwrap());
+                    assert_eq!(store.list_kept_displacements("ws").unwrap(), rows);
+                    assert_eq!(target.exists(), target_exists);
+                    if target_exists {
+                        assert_eq!(std::fs::read(&target).unwrap(), b"job content");
+                    }
+                }
+                assert_eq!(
+                    save_kept_displacement(&store, &root, "ws", id, &options).unwrap(),
+                    KeptCopySave::Saved("notes (kept copy).md".into())
+                );
+                assert!(!kept.exists());
+                assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&target, b"later original edit").unwrap();
+                assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+                std::fs::write(&copy, b"later copy edit").unwrap();
+                assert_eq!(std::fs::read(&target).unwrap(), b"later original edit");
+            }
+        }
     }
 
     /// A name near its budget gives up stem bytes, never its extension or
