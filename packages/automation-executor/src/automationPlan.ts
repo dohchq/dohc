@@ -692,6 +692,12 @@ export interface RunInputs {
   chat: ChatDirectory | null;
   /** The person who pressed the button, or null for a change. */
   person: AutomationScope["person"];
+  /**
+   * The only keys of the trigger record formulas may read, when the run could
+   * not read the record's fields. A formula that reads another stops with an
+   * error instead of reading nothing.
+   */
+  recordKeys?: string[];
 }
 
 /**
@@ -882,6 +888,7 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
     person: person ?? author,
     bindings: bound,
     now: localIsoTime(nowMs),
+    ...(inputs.recordKeys ? { recordKeys: inputs.recordKeys } : {}),
   };
   return { scope, formulas, slots };
 }

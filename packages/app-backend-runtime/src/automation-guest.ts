@@ -8,6 +8,7 @@ type GuestScope = {
   message?: GuestObject;
   bindings?: GuestObject;
   now: string;
+  recordKeys?: string[];
 };
 type GuestTextPart = { kind: "text"; text: string } | { kind: "expression"; expression: string };
 
@@ -191,8 +192,28 @@ export function automationGuest(scopeJson: string, kind: GuestKind): GuestEvalua
       return Number.isFinite(shifted) ? shift(Math.round(shifted), -(places as number)) : value;
     },
   });
+  // A record whose other keys formulas may not read: reading one throws, so a
+  // formula never takes a field it cannot see for an empty one. What every
+  // object has, such as toString, still works.
+  const allowed = scope.recordKeys;
+  // Asking whether it has a key, or for the key's descriptor, is a read too.
+  const check = (key: string | symbol) => {
+    if (allowed !== undefined && typeof key === "string" && !allowed.includes(key) && !(key in Object.prototype)) {
+      throw new TypeError(`Formulas can read only this record's ${allowed.join(", ")}, not ${key}.`);
+    }
+  };
+  const sealed = (record: GuestObject | undefined): GuestObject | null => record === undefined ? null : allowed === undefined ? record
+    : new Proxy(record, {
+      get(target, key, receiver) { check(key); return Reflect.get(target, key, receiver); },
+      has(target, key) { check(key); return Reflect.has(target, key); },
+      getOwnPropertyDescriptor(target, key) { check(key); return Reflect.getOwnPropertyDescriptor(target, key); },
+    });
+  const record = sealed(scope.record);
+  const trigger = allowed !== undefined && scope.trigger.record && typeof scope.trigger.record === "object" && !isArray(scope.trigger.record)
+    ? freeze({ ...scope.trigger, record: sealed(scope.trigger.record as GuestObject) })
+    : scope.trigger;
   const names = {
-    record: scope.record ?? null, previous: scope.previous ?? {}, trigger: scope.trigger, person: scope.person,
+    record, previous: scope.previous ?? {}, trigger, person: scope.person,
     message: scope.message ?? null, ...scope.bindings, ...helpers,
   };
   try {

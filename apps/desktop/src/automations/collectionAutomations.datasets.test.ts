@@ -64,15 +64,33 @@ ${step}`;
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
 const hosts: LocalDatasetHost[] = [];
-afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); });
+const drains: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const drain of drains.splice(0)) await drain();
+  for (const host of hosts.splice(0)) await host.close();
+});
 
 const TEAM: ChatDirectoryChannel = { id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team", runningThreadId: null };
 
-async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean } = {}) {
+// Generated operations with more code after them, as someone who adds to
+// them writes: dohc no longer knows the operations. This code refuses every
+// call an automation makes, and every read of one record, as a trigger read
+// or a press's record check would make, so a run that calls any fails.
+const AUTHORED_OPERATIONS = `${files[definition.operationsPath]}
+for (const [name, operation] of Object.entries(globalThis.operations)) {
+  globalThis.operations[name] = (ctx, input) => {
+    if (ctx.caller.kind === "automation") ctx.refuse("not_for_automations", "This operation does not run for automations.");
+    if (input.limit === 1) ctx.refuse("one_record", "This read lists records; it does not find one.");
+    return operation(ctx, input);
+  };
+}
+`;
+
+async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; operations?: string } = {}) {
   const root = await createTestScratch("dohc-dataset-automations-");
   for (const [path, text] of Object.entries(files)) {
     await mkdir(join(root, dirname(path)), { recursive: true });
-    await writeFile(join(root, path), text);
+    await writeFile(join(root, path), path === definition.operationsPath ? options.operations ?? text : text);
   }
   const writeAutomations = (body: string) => writeFile(join(root, "Budget", "automations.yaml"), `version: 1\nautomations:\n${body}`);
   await writeAutomations(closePaid());
@@ -80,15 +98,30 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   let executor: CollectionAutomations | undefined;
   const waiters = new Set<() => void>();
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
-  const until = (condition: () => boolean | Promise<boolean>) => new Promise<void>((resolve) => {
-    const check = async () => { if (waiters.has(check) && await condition()) { waiters.delete(check); resolve(); } };
+  // Checks run on every wake without waiting for the last one; the test waits for them all before its host closes.
+  const checking = new Set<Promise<void>>();
+  const until = (condition: () => boolean | Promise<boolean>) => new Promise<void>((resolve, reject) => {
+    const check = () => {
+      const run = (async () => {
+        if (!waiters.has(check)) return;
+        try {
+          if (await condition()) { waiters.delete(check); resolve(); }
+        } catch (error) {
+          if (waiters.delete(check)) reject(error);
+        }
+      })();
+      checking.add(run);
+      void run.finally(() => checking.delete(run));
+    };
     waiters.add(check);
-    void check();
+    check();
   });
+  const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   const host = await createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     onAutomationClaims: () => { executor?.notifyClaimed(); wake(); },
     onDatasetsChanged: () => executor?.datasetsChanged() });
   hosts.push(host);
+  drains.push(settledChecks);
   const blobs = new Map<string, Uint8Array>();
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
@@ -223,6 +256,39 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
 }
 
 describe("Collection automations on a dataset", () => {
+  it("runs a change's automation on a dataset whose operations someone wrote, from the change's facts alone", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(closePaid("      - notify: 'Invoice {record.id} paid, was {previous.Paid}'\n        to: [user-owner]\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "done");
+    expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} paid, was false` })]);
+    expect((await f.record(invoice))?.values[STATUS]).toBe("Open");
+  });
+
+  it("stops a run that must compare a value too large for its claim, instead of comparing it as empty", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations("  - id: close-paid\n    name: Cleared notes\n    when:\n      field-changed: Notes\n      to: null\n    do:\n      - notify: Cleared\n        to: [user-owner]\n");
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [STATUS]: "Open", [NOTES]: "short" });
+    await f.edit(invoice, { [NOTES]: "n".repeat(9000) });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]?.error).toBe("The new value of Notes is too large for dohc to compare without reading the record.");
+    expect(f.notices).toEqual([]);
+  });
+
+  it("stops a run whose formula reads a field dohc did not read, instead of reading it as empty", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(closePaid("      - if: record.Status == \"Open\"\n        do:\n          - notify: Open\n            to: [user-owner]\n        otherwise:\n          - notify: Not open\n            to: [user-owner]\n"));
+    await f.executor.open();
+    const { id: invoice } = await f.create({ [PAID]: false, [STATUS]: "Open" });
+    await f.edit(invoice, { [PAID]: true });
+    await f.until(() => f.claims()[0]?.state === "failed");
+    expect(f.claims()[0]?.error).toMatch(/Formulas can read only this record's id, not Status\./);
+    expect(f.notices).toEqual([]);
+  });
+
   it("sets a field through the pinned edit when a watched field changes, once, and History names the automation", async () => {
     const f = await world();
     await f.executor.open();
@@ -741,6 +807,25 @@ ${step}`;
   const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string }, description = owner(f)) =>
     f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
       description, () => undefined);
+
+  it("runs a press on a dataset whose operations someone wrote, calling none of them for its own checks", async () => {
+    const f = await world({ operations: AUTHORED_OPERATIONS });
+    await f.writeAutomations(markPaid("      - notify: 'Invoice {record.id} was pressed'\n        to: [user-owner]\n"));
+    await f.executor.open();
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+      .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
+    const { id: invoice } = await f.create({ [STATUS]: "Open" });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(12) });
+    if (pressed.busy) throw new Error("The press ran.");
+    await f.until(() => f.settled.length === 1);
+    expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
+    expect(f.notices).toEqual([expect.objectContaining({ body: `Invoice ${invoice} was pressed` })]);
+    // A step that changes records still refuses these operations.
+    await f.writeAutomations(markPaid());
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
+    const refusal = "Budget's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.";
+    await f.until(async () => JSON.stringify(await f.executor.automationsIn("Budget")).includes(refusal));
+  });
 
   it("runs a press on the record as it is now, for the person who pressed, once, and tells the window how it settled", async () => {
     const f = await world();
