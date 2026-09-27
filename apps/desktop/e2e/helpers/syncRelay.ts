@@ -1,14 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { desktopRoot } from "./desktopApp";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
 // integration tests: NODE_ENV=test + SYNC_RELAY_TEST_AUTH accepts
 // `Bearer test:<user>` without a Postgres auth backend, and SQLite storage
-// lives on the spec's tmpfs fixture dir. WSL-safety: the child is tracked
-// and stopped by PID via SIGTERM — never a pattern kill.
+// lives in the spec's scratch directory. IPC requests orderly shutdown on
+// Windows too, where child.kill("SIGTERM") would bypass the relay's cleanup.
 
 const relayRoot = join(desktopRoot, "../../services/sync-relay");
 
@@ -37,7 +38,14 @@ export async function spawnSyncRelay(input: {
   const started = performance.now();
   const child: ChildProcess = spawn(
     process.execPath,
-    ["--import", "tsx/esm", "src/main.ts"],
+    [
+      "--import", process.platform === "win32" ? "tsx" : "tsx/esm",
+      "--input-type=module", "--eval",
+      `process.on("message", (message) => {
+        if (message === "SIGTERM") process.emit("SIGTERM");
+      });
+      await import(${JSON.stringify(pathToFileURL(join(relayRoot, "src/main.ts")).href)});`,
+    ],
     {
       cwd: relayRoot,
       env: {
@@ -59,9 +67,33 @@ export async function spawnSyncRelay(input: {
           : {}),
         FORCE_COLOR: "0",
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      windowsHide: true,
     },
   );
+  // Register at spawn: exitCode can be set before the process's stdio closes.
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  let stopping: Promise<void> | undefined;
+  const stop = (): Promise<void> => stopping ??= (async () => {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+      await closed;
+      return;
+    }
+    // Allow the service's 10 s HTTP drain, then bound a wedged child's lifetime.
+    const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+    try {
+      if (child.connected) {
+        child.send("SIGTERM", (error) => {
+          if (error) child.kill("SIGTERM");
+        });
+      } else {
+        child.kill("SIGTERM");
+      }
+      await closed;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
   const startupStatus = () =>
     `after ${Math.round(performance.now() - started)}ms ` +
     `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})`;
@@ -70,7 +102,6 @@ export async function spawnSyncRelay(input: {
   let stderr = "";
   const baseUrl = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
       reject(
         new Error(
           `sync relay did not report a port ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
@@ -88,6 +119,10 @@ export async function spawnSyncRelay(input: {
     child.stderr?.on("data", (chunk) => {
       stderr += String(chunk);
     });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
     child.on("exit", () => {
       clearTimeout(timeout);
       reject(
@@ -96,6 +131,9 @@ export async function spawnSyncRelay(input: {
         ),
       );
     });
+  }).catch(async (error: unknown) => {
+    await stop();
+    throw error;
   });
 
   const port = Number(new URL(baseUrl).port);
@@ -104,22 +142,7 @@ export async function spawnSyncRelay(input: {
     port,
     dbPath: input.dbPath,
     diagnostics: () => ({ stdout, stderr }),
-    stop: () =>
-      new Promise<void>((resolve) => {
-        if (child.exitCode !== null || child.signalCode !== null) {
-          resolve();
-          return;
-        }
-        const timer = setTimeout(() => {
-          // Our own child only — bounded escalation, never a pattern kill.
-          child.kill("SIGKILL");
-        }, 3_000);
-        child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-        child.kill("SIGTERM");
-      }),
+    stop,
   };
 }
 
