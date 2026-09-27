@@ -925,6 +925,13 @@ async function workspaceRelativePath(
   return relative(root, canonical).split(sep).join("/");
 }
 
+async function documentPath(context: CliWorkspaceContext, cwd: string, path: string): Promise<string> {
+  const root = await realpath(context.rootPath);
+  const folder = await realpath(cwd);
+  // The document port checks the target's authority. Keep missing paths for create.
+  return relative(root, resolve(folder, path)).split(sep).join("/");
+}
+
 async function resolveAttachments(
   context: CliWorkspaceContext,
   cwd: string,
@@ -2194,7 +2201,8 @@ async function dispatch(
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserReadPath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       try {
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
@@ -2213,7 +2221,8 @@ async function dispatch(
           reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
         };
       }
-      const validated = validateUserWritePath(request.args.path);
+      const resolvedPath = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserWritePath(resolvedPath);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       const path = validated.normalized;
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
@@ -2249,7 +2258,8 @@ async function dispatch(
         };
       }
       // A new file, so the stricter materialization rules apply.
-      const validated = validateUserMaterializePath(request.args.path, { platform: process.platform });
+      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserMaterializePath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
         return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };

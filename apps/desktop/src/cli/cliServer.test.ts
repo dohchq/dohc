@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
+import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
@@ -1415,6 +1416,27 @@ describe("CLI socket server", () => {
         origin: { attribution: agent },
       },
     ]);
+  });
+
+  it("resolves document CLI paths from the caller's folder and refuses workspace escapes", async () => {
+    const cwd = join(workspaceRoot, "notes");
+    await mkdir(cwd);
+    const paths: string[] = [];
+    context.documents = {
+      async read(path) { paths.push(path); return { path, markdown: "Live text" }; },
+      async edit({ path }) { paths.push(path); return { path, changed: true }; },
+      async create({ path }) { paths.push(path); return { path }; },
+    };
+    for (const verb of ["read", "edit", "create"]) {
+      for (const path of ["plan.md", "../root.md", join(cwd, "absolute.md"), "../../outside.md", "../.dohc/private.md"]) {
+        const result = await executeCli({
+          argv: ["document", verb, path, ...(verb === "read" ? [] : ["--text", "Body"])], cwd,
+          request: (request) => invoke(request.verb, request.args),
+        });
+        expect(result.exitCode, result.stderr).toBe(path.includes("outside") || path.includes("private") ? 1 : 0);
+      }
+    }
+    expect(paths).toEqual(Array.from({ length: 3 }, () => ["notes/plan.md", "root.md", "notes/absolute.md"]).flat());
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
