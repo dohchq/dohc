@@ -971,9 +971,9 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
-      if (Number(revoked.changes ?? 0) > 0) {
-        storage.db.prepare("UPDATE sync_relay_share_removals SET voided = 1 WHERE share_id = ?").run(shareId);
-      }
+      storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+        WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
+        .run(shareId, Number(revoked.changes ?? 0));
       // Open proposals can outlive their grants and still pin their blobs.
       storage.db
         .prepare(

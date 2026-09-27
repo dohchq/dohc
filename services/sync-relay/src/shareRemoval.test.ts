@@ -124,20 +124,38 @@ it("retries each removal with the same receipt and cannot replay an older Undo a
   }
 });
 
-it("does not return a single-grant receipt for a no-op whole-share removal", async () => {
+it("voids both partial receipts when Stop sharing finds an already-empty share", async () => {
   const {storage} = await fixture();
   storage.removeShareAccess({...removal, grantId: "named"});
   storage.removeShareAccess({...removal, grantId: "link"});
   const context = storage as StorageContext;
   const receipts = context.db.prepare("SELECT undo_id FROM sync_relay_share_removals").all();
+  expect(receipts).toHaveLength(2);
   const h = testHandler(storage, {nowMs: () => 4000});
   const response = await h(request("owner", "/sync/shares/s/revoke", post()));
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ok: true, shareId: "s"});
   expect(context.db.prepare("SELECT undo_id FROM sync_relay_share_removals").all()).toEqual(receipts);
   for (const receipt of receipts) {
-    expect(() => storage.undoShareRemoval({...removal, undoId: String(receipt.undo_id)})).not.toThrow();
+    expect(() => storage.undoShareRemoval({...removal, nowMs: 4000, undoId: String(receipt.undo_id)})).toThrow("Access changed");
   }
+  for (const grantId of ["named", "link", "dependent"]) {
+    expect(storage.getShareGrant(grantId)?.status).toBe("revoked");
+  }
+});
+
+it("refuses Bob's Undo after Stop sharing an empty share that had only Bob's access", async () => {
+  const {storage} = await fixture();
+  storage.createShare({
+    share: {...storage.getShare("s")!, shareId: "bob-share"},
+    grant: {...storage.getShareGrant("named")!, shareId: "bob-share", grantId: "bob", principalUserId: "bob"},
+  });
+  const input = {...removal, shareId: "bob-share"};
+  const removed = storage.removeShareAccess({...input, grantId: "bob"});
+  if (!removed.ok || !removed.undo) throw Error("removal failed");
+  expect(storage.removeShareAccess({...input, nowMs: 4000})).toEqual({ok: true, grant: null});
+  expect(() => storage.undoShareRemoval({...input, nowMs: 4000, undoId: removed.undo!.undoId})).toThrow("Access changed");
+  expect(storage.getShareGrant("bob")?.status).toBe("revoked");
 });
 
 it("retries Stop sharing with the newest whole-share receipt without extending its expiry", async () => {
