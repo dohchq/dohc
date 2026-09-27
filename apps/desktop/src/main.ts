@@ -75,7 +75,6 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
-  WorkspaceDaemonRequester,
   decodeAutomationGroupHandover,
   type AutomationGroupRelayRecord,
   type EngineStoreRefusal,
@@ -263,7 +262,8 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
-import { createNoticeStore, RefusalNotices, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -906,32 +906,12 @@ function noticeStore(): NoticeStore {
     session: noticeSession,
     installId: localReactorFallbackId,
     onChanged: notifyNoticesChanged,
-    refusalNotices: async () => {
-      const sessions = desktopEngine.sessions;
-      const workspaces = listWorkspaces();
-      if (!sessions) return workspaces.map(({ workspaceId }) => ({ workspaceId, notices: null }));
-      const results = await Promise.allSettled(workspaces.map(async workspace => sessions.run(workspace, async ({ client, workspace: handle }) => {
-        const result = await new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
-          workspaceId: workspace.workspaceId,
-        }, { workspace: handle });
-        return RefusalNotices.parse(result).notices;
-      })));
-      return results.map((result, index) => {
-        const { workspaceId } = workspaces[index]!;
-        if (result.status === "rejected") {
-          console.warn("[notices] could not read workspace sync refusals", workspaceId, result.reason);
-        }
-        return { workspaceId, notices: result.status === "fulfilled" ? result.value : null };
-      });
-    },
-    dismissRefusal: async (workspaceId, noticeId) => {
-      const workspace = findWorkspace(workspaceId);
-      const sessions = desktopEngine.sessions;
-      if (!workspace || !sessions) throw new Error("The workspace is not available. Open it and try again.");
-      await sessions.run(workspace, async ({ client, workspace: handle }) => {
-        await new WorkspaceDaemonRequester(client).request("sync.dismissRefusal", { workspaceId, noticeId }, { workspace: handle });
-      });
-    },
+    ...createWorkspaceRefusalNotices({
+      sessions: () => desktopEngine.sessions,
+      workspaces: listWorkspaces,
+      withOperation: withPhysicalWorkspaceOperation,
+      workspaceForRegistered: workspace => receivedShareEngine.workspaceForRegistered(workspace),
+    }),
   });
   return cachedNoticeStore;
 }
