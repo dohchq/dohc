@@ -1,15 +1,69 @@
-import { createContext, useContext, useId, useState } from "react";
+import { createContext, useCallback, useContext, useId, useMemo, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 
 export const AgentSettingsContext = createContext<DesktopUserSettings | null>(null);
 
+type YourNames = Pick<DesktopUserSettings["profile"], "preferredName" | "agentName">;
+// Your names alone. Every settings save is a new settings object, and the
+// chat lists that ask whose message it is must not render again for a save
+// that leaves the names as they were.
+const YourNamesContext = createContext<YourNames>({});
+
+export function AgentSettingsProvider(props: {
+  settings: DesktopUserSettings | null;
+  children: ReactNode;
+}) {
+  const preferredName = props.settings?.profile.preferredName;
+  const agentName = props.settings?.profile.agentName;
+  const names = useMemo(() => ({ preferredName, agentName }), [preferredName, agentName]);
+  return (
+    <AgentSettingsContext.Provider value={props.settings}>
+      <YourNamesContext.Provider value={names}>{props.children}</YourNamesContext.Provider>
+    </AgentSettingsContext.Provider>
+  );
+}
+
 type AgentAuthor = {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
 };
+
+/**
+ * Whether you, or your agent, wrote a message. A signed-in message carries
+ * the verified id of the person who sent it, or who owns the agent that did.
+ * A signed-out message was written on this computer, so its names decide:
+ * the names main records, which default to "You" and "Agent".
+ */
+export function isOwnAuthor(
+  kind: "human" | "agent",
+  author: AgentAuthor,
+  viewerAuthorId: string | undefined,
+  profile: YourNames | undefined,
+): boolean {
+  if (author.authorUserId) return author.authorUserId === viewerAuthorId;
+  const yourName = profile?.preferredName ?? "You";
+  return kind === "human"
+    ? author.authorDisplayName === yourName
+    : author.authorDisplayName === (profile?.agentName ?? "Agent") &&
+      author.authorOwnerDisplayName === yourName;
+}
+
+/** isOwnAuthor with this window's names, the same function until they change. */
+export function useIsOwnAuthor(): (
+  kind: "human" | "agent" | "automation",
+  author: AgentAuthor,
+  viewerAuthorId: string | undefined,
+) => boolean {
+  const names = useContext(YourNamesContext);
+  return useCallback(
+    (kind, author, viewerAuthorId) =>
+      kind !== "automation" && isOwnAuthor(kind, author, viewerAuthorId, names),
+    [names],
+  );
+}
 
 export function AgentBadge(props: {
   testIdPrefix: string;
@@ -20,10 +74,7 @@ export function AgentBadge(props: {
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const ownAgent = author.authorUserId
-    ? author.authorUserId === props.viewerAuthorId
-    : author.authorDisplayName === settings?.profile.agentName &&
-      author.authorOwnerDisplayName === (settings?.profile.preferredName ?? "You");
+  const ownAgent = isOwnAuthor("agent", author, props.viewerAuthorId, settings?.profile);
   const command = ownAgent && settings ? configuredRunnerCommand(settings.runner) : undefined;
   return (
     <span

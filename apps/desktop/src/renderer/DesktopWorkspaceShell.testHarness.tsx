@@ -13,9 +13,6 @@ import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {
   AgentRunStatusResult,
-  DismissAutomationFailurePayload,
-  ListAutomationFailuresPayload,
-  ListAutomationFailuresResult,
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
@@ -277,9 +274,6 @@ function makeBaseBridge(
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
-  const automationFailuresCallbacks = new Set<
-    (event: { workspaceId: string }) => void
-  >();
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -601,13 +595,8 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    listAutomationFailures: vi.fn(
-      async (
-        _payload: ListAutomationFailuresPayload,
-      ): Promise<ListAutomationFailuresResult> => ({ failures: [] }),
-    ),
-    dismissAutomationFailure: vi.fn(
-      async (_payload: DismissAutomationFailurePayload) => undefined,
+    retryAutomationNotice: vi.fn(
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
@@ -627,15 +616,7 @@ function makeBaseBridge(
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
-    emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
-      for (const callback of [...automationFailuresCallbacks]) callback(event);
-    },
-    onAutomationFailuresChanged: vi.fn(
-      (listener: (event: { workspaceId: string }) => void) => {
-        automationFailuresCallbacks.add(listener);
-        return () => automationFailuresCallbacks.delete(listener);
-      },
-    ),
+    onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,

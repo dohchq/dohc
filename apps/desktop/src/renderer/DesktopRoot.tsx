@@ -8,7 +8,7 @@ import {
   type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { applyAppearanceSettings } from "./theme";
+import { applyLookSettings, differsOnlyInLook } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
@@ -71,12 +71,22 @@ export function DesktopRoot() {
     return registry.workspaces;
   }, []);
 
+  // The look applies to the document directly. The shell keeps the copy it
+  // has when nothing else changed, so a save that only restyles the window,
+  // such as the accent or the editor font, does not render it again. Its
+  // look settings may then be older; saves send only what they change.
+  const acceptUserSettings = useCallback((result: DesktopUserSettingsSnapshot) => {
+    applyLookSettings(result.settings);
+    setUserSettings((current) =>
+      current !== null && differsOnlyInLook(current, result) ? current : result);
+  }, []);
+
   const refreshUserSettings = useCallback(async () => {
     const request = userSettingsRequests.next();
     const result = DesktopUserSettingsResult.parse(await bridge().getUserSettings());
-    if (userSettingsRequests.isCurrent(request)) setUserSettings(result);
+    if (userSettingsRequests.isCurrent(request)) acceptUserSettings(result);
     return result;
-  }, []);
+  }, [acceptUserSettings]);
 
   const dismissShareHandoff = useCallback(() => {
     if (shareHandoffStatus.status === "idle") return;
@@ -158,7 +168,7 @@ export function DesktopRoot() {
   useEffect(() => {
     const unsubscribe = bridge().onUserSettingsChanged((result) => {
       userSettingsRequests.next();
-      setUserSettings(result);
+      acceptUserSettings(result);
       // The broadcast is the writer's authoritative result. Re-read as a
       // backstop for an external edit that landed beside that write.
       void refreshUserSettings().catch(() => undefined);
@@ -168,13 +178,7 @@ export function DesktopRoot() {
       userSettingsRequests.next();
       unsubscribe();
     };
-  }, [refreshUserSettings]);
-
-  // The theme follows the settings file, including an edit made outside dohc.
-  const appearance = userSettings?.settings.appearance;
-  useEffect(() => {
-    if (appearance) applyAppearanceSettings(appearance);
-  }, [appearance]);
+  }, [acceptUserSettings, refreshUserSettings]);
 
   useEffect(
     () =>

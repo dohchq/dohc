@@ -111,6 +111,13 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", edit: "documentEdit", create: "documentCreate",
 };
 
+// The socket verb whose result each `dohc automation` verb prints.
+export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
+  runs: "automationRuns",
+  run: "automationRun",
+  retry: "automationRetry",
+};
+
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
@@ -165,6 +172,9 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_record: { cli: "collectionRecord" },
   dohc_set_record_fields: { cli: "collectionSetFields" },
   dohc_create_record: { cli: "collectionCreateRecord" },
+  dohc_list_automation_runs: { cli: "automationRuns" },
+  dohc_read_automation_run: { cli: "automationRun" },
+  dohc_retry_automation_run: { cli: "automationRetry" },
 };
 
 // One request per operation an app page can send over its app channel. The
@@ -324,6 +334,13 @@ export async function mcpToolNames(): Promise<string[]> {
   return (await listTools()).tools.map((tool) => tool.name);
 }
 
+// Why a shared view does not offer a tool that reads. Every other tool it
+// does not offer changes the workspace.
+const NOT_SHARED_READS: Record<string, string> = {
+  dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
+  dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
+};
+
 async function mcpSection(): Promise<{ text: string; version: string }> {
   const { tools, version } = await listTools();
   const shared = new Set((await listTools("view")).tools.map((tool) => tool.name));
@@ -339,7 +356,7 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
     return [
       `### \`${tool.name}\``,
       tool.description ?? "",
-      shared.has(tool.name) ? "" : "Changes the workspace, so a shared view does not offer it.",
+      shared.has(tool.name) ? "" : NOT_SHARED_READS[tool.name] ?? "Changes the workspace, so a shared view does not offer it.",
       args,
       returnsText,
     ].filter(Boolean).join("\n\n");
@@ -367,17 +384,23 @@ function shellBlock(line: string): string {
   return "```sh\n" + line + "\n```";
 }
 
-// What a verb returns. Chat and history verbs print their socket verb's
+// What a verb returns. Chat, history, and automation verbs print their socket verb's
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "chat" ? name : command === "history" ? HISTORY_RESULTS[name] : command === "document" ? DOCUMENT_RESULTS[name] : undefined;
+  const socketVerb = command === "chat"
+    ? name
+    : command === "history"
+      ? HISTORY_RESULTS[name]
+      : command === "document"
+        ? DOCUMENT_RESULTS[name]
+        : command === "automation" ? AUTOMATION_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
-    // History and document refusals exit with their reason instead of printing JSON.
+    // A history, document or automation refusal exits with its reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => (command !== "history" && command !== "document") || branch.properties?.ok?.const !== false);
+      .filter((branch) => (command !== "history" && command !== "document" && command !== "automation") || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.`;
   }
@@ -415,6 +438,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "app") checkCovered(name, Object.keys(command.verbs), [...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)]);
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
+  if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
   return [
     `### \`dohc ${name}\``,

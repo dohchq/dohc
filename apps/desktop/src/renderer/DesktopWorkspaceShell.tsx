@@ -1,4 +1,4 @@
-import { AgentSettingsContext } from "./workbench/AgentBadge";
+import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { hasBlockingModal } from "./modalFocus";
@@ -75,11 +75,9 @@ import {
   DEFAULT_SIDEBAR_SETTINGS,
   type DesktopUserSettings,
 } from "../settings/userSettings";
-import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
-import { useAutomationRetry } from "./collections/useAutomationRetry";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -3851,27 +3849,6 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
   const {
-    automationFailures,
-    dismissAutomationFailure,
-    reloadAutomationFailures,
-    automationFailureToast,
-    hideAutomationFailureToast,
-  } = useAutomationFailures(
-    workspaceId,
-    workspaceIsReady,
-    reportShellError,
-  );
-  // A notice's Try again. Main wakes the drain; the notices read again here
-  // too, because a repeated retry sends no failure event.
-  const rereadAutomationFailures = useCallback(() => {
-    void reloadAutomationFailures().catch(() => undefined);
-  }, [reloadAutomationFailures]);
-  const automationFailureRetry = useAutomationRetry({
-    workspaceId,
-    onError: reportShellError,
-    onQueued: rereadAutomationFailures,
-  });
-  const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
   } = useAutomationHolds(
@@ -4139,11 +4116,12 @@ export function DesktopWorkspaceShell(props: {
     reloadShareProposals,
     workspaceIsReady,
   ]);
-  const sentNoticeProps = useSentNoticeProps({
+  const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
     workspaces: props.workspaces,
     openFile,
+    openAutomation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -4567,7 +4545,7 @@ export function DesktopWorkspaceShell(props: {
     [dismissShellError, shellErrors, syncFailureNotice],
   );
   return (
-    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
+    <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <div
       data-testid="workspace-shell"
@@ -4832,13 +4810,7 @@ export function DesktopWorkspaceShell(props: {
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
                   })}
-              automationFailures={automationFailures}
-              onDismissAutomationFailure={dismissAutomationFailure}
               {...crashReportNotice}
-              onRetryAutomationFailure={automationFailureRetry.retry}
-              onOpenAutomation={openAutomation}
-              automationFailureToast={automationFailureToast}
-              onHideAutomationFailureToast={hideAutomationFailureToast}
               automationHolds={automationHolds}
               onAllowAutomationHold={allowAutomationHold}
               automationHoldsUnreadable={automationHoldsUnreadable}
@@ -5559,7 +5531,7 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
 
-      {automationFailureRetry.dialog}
+      {sentNoticeRetryDialog}
 
       {engineRebuild ? (
         <Overlay
@@ -5922,6 +5894,6 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
     </CollectionFieldMarksProvider>
-    </AgentSettingsContext.Provider>
+    </AgentSettingsProvider>
   );
 }

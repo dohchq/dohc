@@ -1,4 +1,4 @@
-import { AgentBadge } from "./AgentBadge";
+import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
@@ -462,6 +462,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
+  const isOwn = useIsOwnAuthor();
   const {
     nav,
     messages,
@@ -551,6 +552,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <ChatAvatar
               name={comment.authorDisplayName}
               kind={comment.authorKind}
+              own={isOwn(comment.authorKind, comment, reactionControls.viewerAuthorId)}
               size="comment"
             />
           )}
@@ -752,6 +754,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ChatAvatar
             name={openingMessage.authorDisplayName}
             kind={openingMessage.authorKind}
+            own={isOwn(openingMessage.authorKind, openingMessage, reactionControls.viewerAuthorId)}
           />
           <div className="flex min-w-0 flex-1 flex-col leading-tight">
             <span className="flex items-center gap-1.5">

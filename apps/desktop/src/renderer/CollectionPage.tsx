@@ -45,6 +45,8 @@ import {
   AutomationsPanel,
   useCollectionAutomations,
 } from "./collections/AutomationsPanel";
+import { buttonAutomation } from "./collections/automationDraft";
+import type { Automation } from "./collections/automationSentence";
 import { RecordButton } from "./collections/RecordButton";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
@@ -87,9 +89,6 @@ export interface CollectionPageProps {
   // each ask. The page reports when it has taken the ask.
   automationFocus: { automationId: string; seq: number } | null;
   onAutomationFocused: () => void;
-  // Opens the automation builder with the trigger set to this button. Absent
-  // until the builder ships, so the Fields dialog offers nothing.
-  onChooseButtonAutomation?: (field: string) => void;
 }
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
@@ -117,7 +116,6 @@ export function CollectionPage({
   onNotice,
   automationFocus,
   onAutomationFocused,
-  onChooseButtonAutomation,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -226,6 +224,9 @@ export function CollectionPage({
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [panelFocus, setPanelFocus] = useState<{ automationId: string; seq: number } | null>(null);
+  // A button nothing uses opens the builder with its trigger filled in.
+  const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(null);
+  const panelStarts = useRef(0);
   useEffect(() => {
     if (!automationFocus) return;
     setPanelFocus(automationFocus);
@@ -251,6 +252,7 @@ export function CollectionPage({
   const closeAutomations = useCallback(() => {
     setAutomationsOpen(false);
     setPanelFocus(null);
+    setPanelStart(null);
   }, []);
 
   // Invalidation: refresh when a settled batch touches this collection's
@@ -502,6 +504,8 @@ export function CollectionPage({
       automations={automations}
       fields={schema.fields}
       focus={panelFocus}
+      start={panelStart}
+      onStarted={() => setPanelStart(null)}
       closeAsk={closeAsk}
       onClose={closeAutomations}
       onOpenFile={onOpenFile}
@@ -539,7 +543,12 @@ export function CollectionPage({
       relationTargets={relationTargets}
       apply={applySchemaChange}
       buttonStates={buttonStates}
-      onChooseButtonAutomation={onChooseButtonAutomation}
+      onChooseButtonAutomation={(field) => {
+        setFieldsOpen(false);
+        panelStarts.current += 1;
+        setPanelStart({ automation: buttonAutomation(field, null, []), seq: panelStarts.current });
+        setAutomationsOpen(true);
+      }}
       onClose={() => setFieldsOpen(false)}
     />
   ) : null;

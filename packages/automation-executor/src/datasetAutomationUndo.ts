@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
+import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetUndoRequest, RunWrite, StoredRun } from "./automationRunStore";
 import type { CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { readDatasetRecord, send, type DatasetInvocation, type DatasetRunHost } from "./datasetAutomationRun";
@@ -17,6 +18,14 @@ import { readDatasetRecord, send, type DatasetInvocation, type DatasetRunHost } 
 // keep the later change. A field any edit wrote that the rules do not mark
 // reversible stays. Records the runs added stay: a dataset's rules decide
 // whether a record can be deleted, and an automation does not.
+//
+// An action goes back through its reverse action, newest first, with the
+// undo its own result carried, keyed by the commit it made so a retry
+// replays what already went back. The first reverse the dataset refuses
+// stops the Undo, since an older action's reverse may expect the state a
+// newer one left. An action the rules give no reverse stays. Only a
+// dataset whose operations someone wrote has actions, and only a generated
+// one runs edits, so one run never mixes the two.
 
 export const DATASET_UNDO_RULES_CHANGED = "Collection rules changed after this run, so dohc cannot undo it.";
 
@@ -27,6 +36,7 @@ export interface DatasetUndoHost extends Pick<DatasetRunHost, "revision" | "reso
 }
 
 type Edit = Extract<RunWrite, { kind: "dataset-edit" }>;
+type Action = Extract<RunWrite, { kind: "dataset-action" }>;
 
 /** The runs' writes, oldest first. */
 function writesOf(runs: readonly StoredRun[]): RunWrite[] {
@@ -38,9 +48,25 @@ function editsOf(runs: readonly StoredRun[]): Edit[] {
   return writesOf(runs).filter((write): write is Edit => write.kind === "dataset-edit");
 }
 
-/** Whether the rules any of these runs' edits ran under no longer resolve, so Undo must not start. */
-export function datasetUndoRulesChanged(host: Pick<DatasetRunHost, "resolves">, runs: readonly StoredRun[]): boolean {
-  return editsOf(runs).some((edit) => !host.resolves(edit.rules));
+function actionsOf(runs: readonly StoredRun[]): Action[] {
+  return writesOf(runs).filter((write): write is Action => write.kind === "dataset-action");
+}
+
+/**
+ * Whether the rules any of these runs' edits or actions ran under no longer
+ * resolve, or now name another reverse for an action than the one it ran
+ * with, so Undo must not start.
+ */
+export function datasetUndoRulesChanged(host: Pick<DatasetRunHost, "resolves" | "revision">, runs: readonly StoredRun[]): boolean {
+  if ([...editsOf(runs), ...actionsOf(runs)].some((write) => !host.resolves(write.rules))) return true;
+  return actionsOf(runs).some((action) => action.undo !== undefined && reverseOf(host, action)?.operationId !== action.reverseOperationId);
+}
+
+/** The reverse the rules name now for an action that ran, or undefined. */
+function reverseOf(host: Pick<DatasetRunHost, "revision">, action: Action): DatasetOperation | undefined {
+  const { definition } = host.revision(action.rules.datasetId);
+  const forward = definition.operations.find((operation) => operation.operationId === action.operationId);
+  return definition.operations.find((operation) => operation.name === forward?.reversedBy && operation.kind === "action");
 }
 
 interface FieldChange {
@@ -100,10 +126,26 @@ export async function undoDatasetAutomationRuns(
 ): Promise<CollectionAutomationUndone> {
   const saved = runs.flatMap((run) => run.undoRequests);
   const undone: CollectionAutomationUndone = {
-    reverted: 0, removed: 0, changedSince: 0, missing: 0, irreversible: 0,
+    reverted: 0, removed: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
     kept: writesOf(runs).filter((write) => write.kind === "dataset-created").length,
-    actions: writesOf(runs).filter((write) => write.kind === "dataset-action").length,
   };
+  // Newest commit first, by the revision each made: a clock can move back between two runs.
+  const newestFirst = actionsOf(runs).sort((left, right) =>
+    left.rules.datasetId === right.rules.datasetId ? right.revision - left.revision : left.rules.datasetId < right.rules.datasetId ? -1 : 1);
+  for (const action of newestFirst) {
+    signal.throwIfAborted();
+    const reverse = reverseOf(host, action);
+    if (action.undo === undefined || reverse === undefined) {
+      undone.actions += 1;
+      continue;
+    }
+    // The caller checked datasetUndoRulesChanged; rules that changed since run no other reverse.
+    if (reverse.operationId !== action.reverseOperationId) throw new Error(DATASET_UNDO_RULES_CHANGED);
+    const idempotencyKey = `u.${createHash("sha256").update(JSON.stringify(["dohc-action-undo-v1", claimId, action.rules.datasetId, action.revision, action.operationId])).digest("hex")}`;
+    const result = await send(() => host.invokeAsOwner({ ...action.rules, operationId: reverse.operationId, input: action.undo!, idempotencyKey, signal }));
+    if ("refused" in result) throw new Error(`${action.name} was not undone. ${reverse.label} refused: ${result.refused.message}`);
+    undone.actionsReversed += 1;
+  }
   for (const record of changesOf(host, runs)) {
     const changed = record.fields.filter((field) => !isDeepStrictEqual(field.before, field.after));
     const { definition } = host.revision(record.last.rules.datasetId);

@@ -15,6 +15,8 @@ export function generateDatasetOperations(value: DatasetDefinition): string {
 }
 
 export function hasGeneratedDatasetOperations(source: string, definition: DatasetDefinition): boolean {
+  // dohc generates no actions, so rules with one are someone's own.
+  if (definition.operations.some(operation => operation.kind === "action")) return false;
   return source === generateDatasetOperations(definition);
 }
 

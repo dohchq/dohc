@@ -2587,6 +2587,42 @@ export async function createRecord(
   });
 }
 
+// An automation's runs, and Try again, through the desktop's Automations
+// panel calls. An automation is named by its Collection's folder and its id
+// in that Collection's automations.yaml.
+export async function listAutomationRuns(
+  ctx: ToolContext,
+  args: { collectionPath: string; automation: string },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationRuns", { collectionPath: resolved.normalized, automation: args.automation });
+}
+
+export async function readAutomationRun(
+  ctx: ToolContext,
+  args: { collectionPath: string; automation: string; run: string },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationRun", { ...args, collectionPath: resolved.normalized });
+}
+
+export async function retryAutomationRun(
+  ctx: ToolContext,
+  args: { collectionPath: string; automation: string; run: string; startOver?: boolean },
+) {
+  // Try again changes records, so the path must clear the write rules.
+  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationRetry", {
+    collectionPath: resolved.normalized,
+    automation: args.automation,
+    run: args.run,
+    startOver: args.startOver ?? false,
+  });
+}
+
 // Live documents change through the desktop, which applies an edit to the
 // session an open editor holds. The path is checked here and again there.
 export async function readDocument(ctx: ToolContext, args: { path: string }) {
