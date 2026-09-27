@@ -230,7 +230,7 @@ import { createScheduleRecords } from "./automations/scheduleRecords";
 import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
-import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
+import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
 import {
@@ -1254,6 +1254,13 @@ const shareRosters = createShareRosters({
   localUserId: async () => {
     await warmCredentialCache().catch(() => undefined);
     return cachedCredentials?.userId ?? null;
+  },
+  // This computer's own id for its person names them, signed in or not, only
+  // where nobody else ever had a part in the workspace.
+  localPersonId: async (workspace) => {
+    const proved = await provedNeverShared(workspace, () =>
+      withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
+    return proved ? localReactorFallbackId() : null;
   },
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),

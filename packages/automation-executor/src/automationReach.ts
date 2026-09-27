@@ -67,8 +67,10 @@ export interface FormerEditor {
 /** What this computer knows about who can edit and reach what in a workspace. */
 export type ReachRoster =
   // The owner's computer. A workspace that does not sync has no grants, and
-  // its owner is this computer's person, whose account may be unknown.
-  | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[]; formerEditors?: readonly FormerEditor[] }
+  // its owner is this computer's person, whose account may be unknown. In a
+  // workspace proved never shared, `localPersonId` is this computer's own id
+  // for that person, which names them with or without an account.
+  | { kind: "owner"; ownerUserId: string | null; localPersonId?: string; grants: readonly RosterGrant[]; formerEditors?: readonly FormerEditor[] }
   | { kind: "unknown"; problem: RosterProblem }
   // A collaborator's computer. The relay tells a recipient only about their
   // own grant, so the other editors are unknown. The recipient's grant bounds
