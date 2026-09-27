@@ -1,4 +1,4 @@
-import { AgentBadge } from "./AgentBadge";
+import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
@@ -148,6 +148,7 @@ export function PostCard(props: {
   onOpenBookmark?: () => void;
   onOpenPath?: (path: string) => void;
 }) {
+  const isOwn = useIsOwnAuthor();
   const message = props.data.openingMessage;
   const isAgent = message?.authorKind === "agent";
   const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
@@ -197,6 +198,7 @@ export function PostCard(props: {
           <ChatAvatar
             name={message?.authorDisplayName ?? "?"}
             kind={message?.authorKind ?? "human"}
+            own={message ? isOwn(message.authorKind, message, props.data.viewerAuthorId) : false}
           />
           <div className="flex min-w-0 flex-1 flex-col leading-tight">
             <span className="flex items-center gap-1.5">

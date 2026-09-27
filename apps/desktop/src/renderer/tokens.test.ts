@@ -9,33 +9,7 @@ import {
   palette,
   type ThemeTokens,
 } from "./tokens";
-
-// WCAG contrast (relative-luminance math per WCAG 2.x, no dependency).
-function luminance(hex: string): number {
-  const match = /^#([0-9a-f]{6})$/i.exec(hex);
-  if (!match) throw new Error(`expected 6-digit hex, got ${hex}`);
-  const [r, g, b] = [0, 2, 4].map((i) => {
-    const channel = parseInt(match[1].slice(i, i + 2), 16) / 255;
-    return channel <= 0.03928
-      ? channel / 12.92
-      : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(fg: string, bg: string): number {
-  const [hi, lo] = [luminance(fg), luminance(bg)].sort((a, b) => b - a);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
-// An sRGB mix, the fill an avatar draws with `bg-hue-*/15` over its card.
-function mix(fg: string, bg: string, amount: number): string {
-  const channel = (hex: string, i: number) => parseInt(hex.slice(1 + i, 3 + i), 16);
-  return `#${[0, 2, 4]
-    .map((i) => Math.round(channel(fg, i) * amount + channel(bg, i) * (1 - amount)))
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("")}`;
-}
+import { contrastRatio as contrast, mixHex as mix } from "./accentColor";
 
 describe("WCAG AA contrast, both modes", () => {
   const PAIRS: Array<{
