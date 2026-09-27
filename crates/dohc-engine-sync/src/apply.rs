@@ -623,13 +623,7 @@ fn is_persisted_safe_integer(value: i64) -> bool {
 }
 
 pub(crate) fn is_replicated_channel_slug(value: &str) -> bool {
-    is_bounded_replicated_id(value, 200)
-        && value.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
+    dohc_engine_domain::chats::is_replicated_channel_slug(value)
 }
 
 #[derive(Deserialize)]
@@ -1057,22 +1051,17 @@ fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u
         hasher.update(attempt.to_be_bytes());
     }
     let suffix = hex(&hasher.finalize());
-    const MAX_COLLISION_BASE_UTF16_UNITS: usize = 200 - 1 - 64;
-    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_UTF16_UNITS);
+    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
+    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
     let slug = format!("{bounded_requested}-{suffix}");
     debug_assert!(is_replicated_channel_slug(&slug));
     slug
 }
 
-fn truncate_slug_base(value: &str, max_utf16_units: usize) -> String {
-    let mut utf16_units = 0;
-    let mut end = 0;
-    for (index, ch) in value.char_indices() {
-        if utf16_units + ch.len_utf16() > max_utf16_units {
-            break;
-        }
-        utf16_units += ch.len_utf16();
-        end = index + ch.len_utf8();
+fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
     }
     value[..end].trim_end_matches('-').to_owned()
 }

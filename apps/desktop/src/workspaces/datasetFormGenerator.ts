@@ -1,3 +1,4 @@
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
@@ -16,7 +17,7 @@ export interface DatasetFormInput {
 /** Generates a consumer app. The caller obtains the revision from the approved host catalog. */
 export function generateDatasetFormSources(input: DatasetFormInput): { files: Record<string, string> } {
   const revision = parseDatasetRevision(input.approvedRevision);
-  if (!isShareablePath(input.appRoot) || !/^[A-Za-z0-9_@./-]+$/.test(input.appRoot) || input.appRoot.length > 900) {
+  if (!isShareablePath(input.appRoot) || !isPortableNamePath(input.appRoot, 900)) {
     throw new Error("Choose a workspace folder for the form app.");
   }
   const table = revision.definition.tables.find(table => table.tableId === input.tableId);

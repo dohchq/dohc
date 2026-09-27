@@ -1,3 +1,4 @@
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
 import { defaultTreeAdapter, parse as parseHtml, serialize, serializeOuter, type DefaultTreeAdapterTypes } from "parse5";
@@ -43,7 +44,6 @@ const spaces = { html: "http://www.w3.org/1999/xhtml", svg: "http://www.w3.org/2
 const imageTypes = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"], [".avif", "image/avif"]]);
 const javascriptType = /^(?:text\/(?:javascript|ecmascript|jscript|x-javascript|x-ecmascript)|application\/(?:javascript|ecmascript))$/i;
 const remote = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/;
-const publishableName = /^[A-Za-z0-9_@./-]+$/;
 // Link-only attributes a stylesheet loses when it becomes a <style> element.
 const linkOnly = new Set(["href", "rel", "crossorigin", "integrity", "referrerpolicy", "as", "fetchpriority", "hreflang", "type", "sizes", "imagesrcset", "imagesizes", "blocking"]);
 const text = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -185,7 +185,9 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
   const baseElement = elements.find(({ element, inTemplate }) => !inTemplate && element.namespaceURI === spaces.html && element.tagName === "base" && attribute(element, "href") !== undefined)?.element;
   let base = posix.dirname(entry);
   if (baseElement) {
-    const href = attribute(baseElement, "href")!.trim();
+    const rawHref = attribute(baseElement, "href")!.trim();
+    let href: string;
+    try { href = decodeURIComponent(rawHref.split(/[?#]/, 1)[0]!); } catch { throw new Error(`${entry} has an invalid base address.`); }
     if (remote.test(href)) throw new Error(`${entry} sets its base address to ${href}. Remove the <base> element so the page's links point into the app.`);
     const resolved = posix.normalize(posix.join(href.startsWith("/") ? posix.dirname(entry) : base, href.endsWith("/") ? href : posix.dirname(`${href}x`)));
     if (resolved === ".." || resolved.startsWith("../")) throw new Error(outside(href));
@@ -200,7 +202,7 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     try { decoded = decodeURIComponent(value.split(/[?#]/, 1)[0]!); } catch { throw new Error(`${entry} links ${value}, which is not a valid file address.`); }
     const path = posix.normalize(posix.join(decoded.startsWith("/") ? posix.dirname(entry) : base, decoded));
     if (!decoded || path === ".." || path.startsWith("../")) throw new Error(outside(value));
-    if (!publishableName.test(path)) throw new Error(`${entry} links ${decoded}. Rename it using only letters, digits, and _ @ . / -, then publish again.`);
+    if (!isPortableNamePath(path)) throw new Error(`${entry} links ${decoded}. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again.`);
     const expected = kinds[kind];
     if (!(expected.test as readonly string[]).includes(extension(path))) throw new Error(`${entry} links ${value} as ${expected.words}. Use ${expected.allowed} file instead.`);
     if (!inputs.has(path)) throw new Error(`${entry} links ${value}, which is not in the app. Add the file or fix the link.`);

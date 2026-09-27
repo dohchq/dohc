@@ -1,3 +1,4 @@
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
@@ -13,7 +14,7 @@ const manifestLimit = 64 * 1024;
 // Without app.publish.json a folder publishes as a static page: index.html and the styles, scripts,
 // images, and fonts beside it. The compiler names a referenced file this leaves out and says why.
 // These are the types the compiler accepts. Build configuration and installed packages stay out.
-const staticAppFile = /^[A-Za-z0-9_@./-]+\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2)$/i;
+const staticAppFile = /\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2)$/i;
 const staticAppExcluded = (path: string) => /(?:^|\/)(?:package\.json|dohc\.json|tsconfig(?:\.[^/]*)?\.json)$/.test(path) ||
   path.split("/").some(part => part === "node_modules" || part.startsWith("."));
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
@@ -44,7 +45,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
     if (path.startsWith("/")) throw new Error(`${manifestPath} lists ${path}. Write the path relative to ${appRoot}, without a leading /.`);
     const resolved = posix.normalize(`${appRoot}/${path}`);
     if (resolved === ".." || resolved.startsWith("../")) throw new Error(`${manifestPath} lists ${path}, which is outside the workspace.`);
-    if (!isShareablePath(resolved)) throw new Error(`${manifestPath} lists ${path}, which dohc cannot publish.`);
+    if (!isShareablePath(resolved) || !isPortableNamePath(resolved)) throw new Error(`${manifestPath} lists ${path}, which dohc cannot publish.`);
     return resolved;
   };
   const entryPath = resolve(row.entryPath, "entryPath");
@@ -75,7 +76,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
 function staticDeclaration(appRoot: string, paths: readonly string[]): ReturnType<typeof parseAppPublicationDeclaration> {
   const entryPath = `${appRoot}/index.html`;
   if (!paths.includes(entryPath)) throw new Error(`dohc found no index.html or app.publish.json in ${appRoot}. Add one to publish this app.`);
-  const inputs = [entryPath, ...paths.filter(path => staticAppFile.test(path) && !staticAppExcluded(path))];
+  const inputs = [entryPath, ...paths.filter(path => isPortableNamePath(path) && staticAppFile.test(path) && !staticAppExcluded(path))];
   if (inputs.length >= inputBounds.maxInputFiles) throw new Error(`${appRoot} has more than ${inputBounds.maxInputFiles - 1} files to publish. List the files to publish in an app.publish.json.`);
   return { entryPath, inputs, packageMap: {}, collection: undefined, dataset: undefined };
 }

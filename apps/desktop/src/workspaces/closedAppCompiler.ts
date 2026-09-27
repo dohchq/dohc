@@ -1,3 +1,4 @@
+import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -46,7 +47,7 @@ const extension = (path: string) => posix.extname(path).toLowerCase();
 const text = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 
 function canonicalPath(path: string): string {
-  if (typeof path !== "string" || !/^[A-Za-z0-9_@./-]+$/.test(path) || path.startsWith("/") ||
+  if (typeof path !== "string" || !isPortableNamePath(path) || path.startsWith("/") ||
       path.split("/").some(part => part === "" || part === "." || part === "..")) throw new Error("Invalid closed app path.");
   return path;
 }
@@ -217,7 +218,7 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
           const path = posix.normalize(posix.join(inPage ? page!.base : posix.dirname(args.importer), decoded));
           const refuse = (text: string) => ({ errors: [{ text: `${importer} imports ${args.path}${text}` }] });
           if (path === ".." || path.startsWith("../")) return refuse(", which is outside the workspace.");
-          if (!/^[A-Za-z0-9_@./-]+$/.test(path)) return refuse(". Rename it using only letters, digits, and _ @ . / -, then publish again.");
+          if (!isPortableNamePath(path)) return refuse(". Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again.");
           if (!acceptedTypes.has(extension(path))) return refuse(`. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not ${extension(path) || "files without a type"}.`);
           if (!inputs.has(path)) return refuse(", which is not in the app. Add the file, or list it in app.publish.json.");
           return { path, namespace };

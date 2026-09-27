@@ -95,3 +95,10 @@ describe("dataset form generation", () => {
     expect(() => generate({ approvedRevision: value, relationChoices })).toThrow(/key and label/);
   });
 });
+
+it.each(["apps/会议", "приложения/форма", "फॉर्म"])("generates form sources under %s", appRoot => {
+  expect(Object.keys(generate({ appRoot }).files)).toContain("app.publish.json");
+});
+it.each(["apps/CON", "apps/aux.txt", "apps/" + "界".repeat(86)])("rejects nonportable form folder %s", appRoot => {
+  expect(() => generate({ appRoot })).toThrow();
+});

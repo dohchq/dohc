@@ -380,7 +380,7 @@ describe("closed app compiler", () => {
       ['<link rel="stylesheet" href="//fonts.example.test/a.css">', "site/index.html loads //fonts.example.test/a.css from outside the app."],
       ['<script src="missing.js"></script>', "site/index.html links missing.js, which is not in the app. Add the file or fix the link."],
       ['<img src="map.svg">', "site/index.html links map.svg as an image. Use a PNG, JPEG, GIF, WebP, or AVIF file instead."],
-      ['<img src="my%20map.png">', "site/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again."],
+      ['<img src="my%20map.png">', "site/index.html links my map.png. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again."],
       ['<img srcset="missing.png 2x">', "site/index.html links missing.png, which is not in the app."],
       ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
       ['<link rel="stylesheet" href="app.css" disabled>', "site/index.html links the stylesheet app.css as disabled. Published apps apply every stylesheet."],
@@ -438,7 +438,7 @@ describe("closed app compiler", () => {
 
     it.each([
       ["url(img/missing.png)", "app/css/style.css imports img/missing.png, which is not in the app."],
-      ["url(img/my%20bg.png)", "app/css/style.css imports img/my%20bg.png. Rename it using only letters, digits, and _ @ . / -, then publish again."],
+      ["url(img/my%20bg.png)", "app/css/style.css imports img/my%20bg.png. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again."],
       ["url(img/bg.svg)", "app/css/style.css imports img/bg.svg. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .svg."],
       ["url(data:text/html,<b>x</b>)", "app/css/style.css embeds a data URL of type text/html. Use an image or a WOFF2 font instead."],
       ["url(https://example.test/a.png)", "app/css/style.css loads https://example.test/a.png from outside the app."],
@@ -487,4 +487,28 @@ describe("closed app compiler", () => {
       expect(await readFile(join(parent, "private-config.json"), "utf8")).toContain("invalid private");
     } finally { vi.unstubAllEnvs(); await rm(parent, { recursive: true, force: true }); }
   });
+});
+
+it("publishes Unicode HTML, script and percent-encoded asset paths", async () => {
+  const result = await compileClosedApp({ entryPath: "会议/index.html", bounds,
+    inputs: [file("会议/index.html", '<!doctype html><script src="'+encodeURIComponent('скрипт.js')+'"></script><img src="'+encodeURIComponent('图片.png')+'">'),
+      file("会议/скрипт.js", 'document.body.dataset.loaded = "yes";'), file("会议/图片.png", "image")] });
+  expect(result.dependencyLock.map(file => file.path)).toContain("会议/图片.png");
+  expect(result.files.map(file => file.path)).toContain("page.json");
+});
+it("publishes Unicode module imports and CSS URLs", async () => {
+  const result = await compileClosedApp({ entryPath: "हिन्दी/main.js", bounds,
+    inputs: [file("हिन्दी/main.js", 'import "./样式.css"; import { value } from "./данные.js"; console.log(value);'),
+      file("हिन्दी/данные.js", 'export const value = 42;'), file("हिन्दी/样式.css", 'body { background: url('+encodeURIComponent('图片.png')+'); }'), file("हिन्दी/图片.png", "image")] });
+  expect(result.dependencyLock.map(file => file.path)).toContain("हिन्दी/图片.png");
+});
+it.each(["CON.js", "app/aux.css", "app/" + "界".repeat(86) + ".js"])("rejects unsafe publication path %s", async path => {
+  await expect(compileClosedApp({ entryPath: path, bounds, inputs: [file(path, "")] })).rejects.toThrow(/path/);
+});
+
+it("decodes a Unicode base URL before resolving app sources", async () => {
+  const result = await compileClosedApp({ entryPath: "app/index.html", bounds, inputs: [
+    file("app/index.html", '<!doctype html><base href="' + encodeURIComponent("会议") + '/"><script src="main.js"></script>'),
+    file("app/会议/main.js", 'document.title = "Ready";')] });
+  expect(result.dependencyLock.map(file => file.path)).toContain("app/会议/main.js");
 });

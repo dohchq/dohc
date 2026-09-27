@@ -1,6 +1,6 @@
+import { isReservedWindowsName, nameByteLength } from "./names";
 // Pure @-mention scanning shared by storage/indexing and renderer surfaces.
-// Keep this module dependency-free so every layer agrees on token boundaries
-// and on which Markdown code ranges make a token inert.
+// Every layer uses the same token boundaries and ignored Markdown code ranges.
 
 type MentionKind = "user" | "agent";
 
@@ -30,14 +30,12 @@ interface MentionScanOptions {
   ignoreCode?: boolean;
 }
 
-// Keep the renderer scanner's original Unicode-aware ignore-case behavior,
-// including JavaScript's case-fold equivalents for the a-z range.
-const HANDLE_BODY = "[a-z0-9][a-z0-9._-]*";
+const HANDLE_BODY = "[\\p{L}\\p{N}][\\p{L}\\p{N}\\p{M}._-]*";
 const MENTION_RE = new RegExp(`(^|[\\s(\\[{])@(${HANDLE_BODY})`, "giu");
 const TERMINAL_HANDLE_PUNCTUATION_RE = /[._-]+$/u;
 
-function normalizeHandle(handle: string): string {
-  return handle.normalize("NFC").toLowerCase();
+export function normalizeHandle(handle: string): string {
+  return handle.normalize("NFC").toLowerCase().normalize("NFC");
 }
 
 // Character ranges [start, end) inside inline-code spans or fenced code
@@ -103,7 +101,7 @@ export function scanMentionTokens(
     if (inCode(start)) continue;
     const parsedHandle = handle.replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
     // "@..." / "@___" trims to nothing — a bare "@" is not a mention token.
-    if (parsedHandle.length === 0) continue;
+    if (parsedHandle.length === 0 || nameByteLength(normalizeHandle(parsedHandle)) > 200 || isReservedWindowsName(parsedHandle)) continue;
     found.push({ start, end: start + 1 + parsedHandle.length, handle: parsedHandle });
   }
   return found;
@@ -169,24 +167,10 @@ interface ActiveMentionQuery {
 }
 
 export function activeMentionQuery(value: string, caret: number): ActiveMentionQuery | null {
-  const clampedCaret = Math.max(0, Math.min(caret, value.length));
-  let index = clampedCaret;
-  while (index > 0) {
-    const char = value[index - 1] ?? "";
-    if (char === "@") {
-      const before = index >= 2 ? value[index - 2] : undefined;
-      if (before === undefined || /[\s(\[{]/u.test(before)) {
-        const query = value.slice(index, clampedCaret);
-        if (query.length === 0 || /^[a-z0-9._-]*$/iu.test(query)) {
-          return { start: index - 1, query };
-        }
-      }
-      return null;
-    }
-    if (!/[a-z0-9._-]/iu.test(char)) return null;
-    index -= 1;
-  }
-  return null;
+  const before = value.slice(0, Math.max(0, Math.min(caret, value.length)));
+  const match = /(^|[\s(\[{])@([\p{L}\p{N}\p{M}._-]*)$/u.exec(before);
+  if (!match || nameByteLength(normalizeHandle(match[2]!)) > 200) return null;
+  return { start: match.index + match[1]!.length, query: match[2]! };
 }
 
 export function matchMentionCandidates(
@@ -194,7 +178,7 @@ export function matchMentionCandidates(
   candidates: readonly MentionCandidate[],
   limit = 6,
 ): MentionCandidate[] {
-  const needle = query.trim().toLowerCase();
+  const needle = normalizeHandle(query.trim());
   return candidates
     .map((candidate) => ({ candidate, score: candidateScore(needle, candidate) }))
     .filter((entry) => entry.score > 0)
@@ -214,8 +198,8 @@ function kindRank(kind: MentionKind): number {
 
 function candidateScore(needle: string, candidate: MentionCandidate): number {
   if (needle.length === 0) return 1;
-  const handle = candidate.handle.toLowerCase();
-  const label = candidate.label.toLowerCase();
+  const handle = normalizeHandle(candidate.handle);
+  const label = normalizeHandle(candidate.label);
   if (handle === needle || label === needle) return 4;
   if (handle.startsWith(needle) || label.startsWith(needle)) return 3;
   if (handle.includes(needle) || label.includes(needle)) return 2;

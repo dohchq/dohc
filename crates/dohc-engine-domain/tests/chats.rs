@@ -3653,8 +3653,8 @@ fn channel_slug_matches_ts_output() {
     // Node oracle (String.normalize NFC + the TS regex chain):
     assert_eq!(channel_slug_for_name("General Chat"), "general-chat");
     assert_eq!(channel_slug_for_name("  Hello_World  "), "hello-world");
-    assert_eq!(channel_slug_for_name("Café Room"), "caf-room");
-    assert_eq!(channel_slug_for_name("Ünïcode 123!!"), "ncode-123");
+    assert_eq!(channel_slug_for_name("Café Room"), "café-room");
+    assert_eq!(channel_slug_for_name("Ünïcode 123!!"), "ünïcode-123");
     assert_eq!(channel_slug_for_name("---a--b---"), "a-b");
 }
 
@@ -3832,4 +3832,109 @@ fn agent_owner_name_survives_both_writes_and_reopen() {
         assert_eq!(message.author_display_name, "Nova");
         assert_eq!(message.author_owner_display_name.as_deref(), Some("Ada"));
     }
+}
+
+#[test]
+fn unicode_group_names_create_lookup_and_collide_without_losing_marks() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (index, name) in ["Команда", "会议", "فريق", "हिन्दी", "Café"]
+        .iter()
+        .enumerate()
+    {
+        let id = format!("unicode-{index}");
+        let channel = chats
+            .create_channel(WS, &id, name, ChatChannelKind::Channel, 10, &NO_FAULTS)
+            .expect("create Unicode group");
+        assert_eq!(channel.slug, name.to_lowercase());
+        assert_eq!(
+            chats
+                .find_channel_by_slug(WS, name)
+                .unwrap()
+                .unwrap()
+                .channel_id,
+            id
+        );
+    }
+    assert!(
+        chats
+            .create_channel(
+                WS,
+                "duplicate",
+                "Cafe\u{301}",
+                ChatChannelKind::Channel,
+                11,
+                &NO_FAULTS
+            )
+            .is_err()
+    );
+    assert!(
+        chats
+            .create_channel(
+                WS,
+                "duplicate-case",
+                "КОМАНДА",
+                ChatChannelKind::Channel,
+                11,
+                &NO_FAULTS
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn stored_slug_is_a_lookup_identity_not_a_new_filename() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    LinkedChatStore::new(&mut store)
+        .create_channel(
+            WS,
+            "device",
+            "CON",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .unwrap();
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .find_channel_by_slug(WS, "CON")
+            .unwrap()
+            .is_some()
+    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_channels SET slug = 'con' WHERE channel_id = 'device'",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    let mut chats = LinkedChatStore::new(&mut store);
+    assert_eq!(
+        chats
+            .find_channel_by_slug(WS, "CON")
+            .unwrap()
+            .unwrap()
+            .channel_id,
+        "device"
+    );
+    chats
+        .start_channel_thread(
+            &start_thread(
+                "device",
+                "thread-device",
+                "message-device",
+                "Hello",
+                ChatActorKind::Human,
+                11,
+            ),
+            &NO_FAULTS,
+        )
+        .unwrap();
 }

@@ -1,3 +1,4 @@
+import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -125,6 +126,7 @@ import {
 // The renderer never sees raw Electron APIs.
 
 const OPAQUE_ID = z.string().min(1).max(200);
+const CHAT_CHANNEL_SLUG = z.string().min(1).refine(value => nameByteLength(value) <= 200);
 
 // Length caps: IPC payloads are untrusted; bound every renderer-supplied
 // string so a hostile/buggy caller cannot cause memory/latency pressure.
@@ -1014,7 +1016,7 @@ const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
   filePath: z.never().optional(),
   headingAnchor: z.never().optional(),
@@ -1604,7 +1606,7 @@ export const ChatFileMentionRecord = z.object({
   channelId: OPAQUE_ID.optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
-  channelSlug: z.string().min(1).max(100).optional(),
+  channelSlug: CHAT_CHANNEL_SLUG.optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
 });
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
@@ -1912,7 +1914,7 @@ const CHAT_CHANNEL_NAME_MAX = 80;
 export const ChatChannelRecord = z.object({
   id: OPAQUE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
@@ -2017,7 +2019,7 @@ const ChatFeedChannelRecord = z.object({
   id: OPAQUE_ID,
   wireId: z.string().min(1).max(256).optional(),
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
 });
 
