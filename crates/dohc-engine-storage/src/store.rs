@@ -359,6 +359,30 @@ impl EngineStore {
         materialize::open_displacement(&self.conn, spec)
     }
 
+    /// Record, in one synced transaction, that each of these jobs may move its
+    /// target aside. One fsync covers a whole batch, before any of its renames.
+    pub fn prepare_displacements(&self, specs: &[DisplacementSpec]) -> Result<(), StorageError> {
+        materialize::prepare_displacements(&self.conn, specs)
+    }
+
+    /// The prepared row of one job, if its batch wrote one.
+    pub fn prepared_displacement(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<Displacement>, StorageError> {
+        materialize::prepared_displacement(&self.conn, job_id)
+    }
+
+    /// Delete these displacement rows in one transaction.
+    pub fn discard_displacements(&self, ids: &[i64]) -> Result<(), StorageError> {
+        materialize::discard_displacements(&self.conn, ids)
+    }
+
+    /// Every prepared row, newest first.
+    pub fn list_prepared_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_prepared_displacements(&self.conn)
+    }
+
     /// Record that the job's content is at the target.
     pub fn mark_displacement_placed(&self, displacement_id: i64) -> Result<(), StorageError> {
         materialize::mark_displacement_placed(&self.conn, displacement_id)

@@ -2547,10 +2547,10 @@ CREATE TABLE automation_group_state (
 ";
 
 /// Files the materializer moved off a target before writing or deleting it.
-/// An `open` row is written before the move, turns `placed` once the job's
-/// content is at the target, and is deleted when nothing is left at the
-/// displaced name. A `kept` row is the evidence of bytes another program wrote
-/// that the engine has not captured.
+/// An `open` row (or, for a batch, a `prepared` row) is written before the
+/// move, turns `placed` once the job's content is at the target, and is
+/// deleted when nothing is left at the displaced name. A `kept` row is the
+/// evidence of bytes another program wrote that the engine has not captured.
 const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
 CREATE TABLE materialization_displacements (
     displacement_id INTEGER PRIMARY KEY,
@@ -2560,7 +2560,7 @@ CREATE TABLE materialization_displacements (
     displaced_name TEXT NOT NULL,
     expected_sha256 TEXT NOT NULL,
     content_sha256 TEXT,
-    state TEXT NOT NULL CHECK (state IN ('open', 'placed', 'kept')),
+    state TEXT NOT NULL CHECK (state IN ('prepared', 'open', 'placed', 'kept')),
     displaced_sha256 TEXT,
     created_at_ms INTEGER NOT NULL,
     resolved_at_ms INTEGER,
@@ -3015,7 +3015,7 @@ mod tests {
             ),
             (
                 "v2-materialization-displacements",
-                "d615108255ddb4fb2c3c8a9a4e992010740681c8375e30990f3e689dda84d090",
+                "56ed2f2f3c8ae1c797e2dbc028039d78c09cc71f6194aa003bab394e33dbe3f9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

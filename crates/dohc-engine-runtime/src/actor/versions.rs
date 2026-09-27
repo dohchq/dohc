@@ -12,13 +12,16 @@ use dohc_engine_domain::{
     SecretMomentRecord, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
     VersionedTextStore, list_secret_files_keyless, list_secret_moments_in_time_window_keyless,
 };
-use dohc_engine_files::{ProjectionTargetKind, ProjectionTargetState, probe_projection_target};
+use dohc_engine_files::{
+    ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    remove_empty_directory_target,
+};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
     StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -349,6 +352,82 @@ pub(super) fn switch_projection_job_id(
         "version-switch-mat_"
     };
     format!("{prefix}{}", hex_sha256(identity.as_bytes()))
+}
+
+/// Whether `path` lies strictly inside the directory `ancestor`.
+fn is_inside(path: &str, ancestor: &str) -> bool {
+    path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
+}
+
+fn relay_delete_precedes_write(
+    change: &dohc_engine_sync::MomentMaterializationChange,
+    changes: &[dohc_engine_sync::MomentMaterializationChange],
+) -> bool {
+    change.operation == "delete"
+        && changes
+            .iter()
+            .any(|other| other.operation == "write" && is_inside(&change.path, &other.path))
+}
+
+/// Enqueue one batch of a sync page in one transaction and materialize it in
+/// one replay. Clears `projections` and adds the batch's deletes to
+/// `deleted`.
+fn run_relay_batch(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    projections: &mut Vec<SwitchProjection>,
+    deleted: &mut Vec<String>,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    if projections.is_empty() {
+        return Ok(());
+    }
+    let batch = std::mem::take(projections);
+    let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        for projection in &batch {
+            if let Some(bytes) = projection.inline_content.as_deref()
+                && put_binary_blob(tx, bytes)? != projection.spec.content_sha256
+            {
+                return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
+            }
+            upsert_projection_job(tx, &projection.spec, projection.operation)?;
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    for projection in &batch {
+        if projection.operation == MaterializationOperation::Delete {
+            deleted.push(projection.spec.target_path.clone());
+        }
+    }
+    let selected: HashSet<String> = batch
+        .into_iter()
+        .map(|projection| projection.spec.job_id)
+        .collect();
+    let replay = replay_pending_materializations(
+        store,
+        root_dir,
+        MaterializationReplayScope {
+            workspace_id,
+            self_writes: Some(self_writes),
+            progress: None,
+        },
+        now_ms,
+        &dohc_engine_storage::NoFaults,
+        Some(&selected),
+        false,
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs > 0 {
+        return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+    Ok(())
 }
 
 #[allow(
@@ -872,10 +951,61 @@ impl ActorHandle {
                 return Err(DomainError::StateCorrupt { reason: "ordinary materialization policy unavailable" }.into());
             }
             let mut secret_key = None;
-            for change in changes {
+            // A change can depend on another in the same page: a file becomes a
+            // directory (delete `notes`, write `notes/work.md`) or the reverse
+            // (delete `d/a.md`, write `d`). Deletes under a path being written
+            // run first, and the page runs in batches that each hold no two
+            // paths that alias or where one is inside the other. Aliases keep
+            // their page order, matching sequential replay. Every probe sees
+            // earlier batches; each batch shares one displacement commit.
+            let mut changes = changes;
+            changes.retain(|change| change.version_id == active);
+            let first: Vec<bool> = changes
+                .iter()
+                .map(|change| relay_delete_precedes_write(change, &changes))
+                .collect();
+            let mut alias_order = HashMap::new();
+            let mut keyed: Vec<_> = first.into_iter().zip(changes).map(|(first, change)| {
+                let key: Vec<String> = change.path.split('/').map(dohc_engine_sync::collision_key).collect();
+                let order = alias_order.entry(key.clone()).or_insert_with(|| {
+                    (first, change.path.split('/').count(), change.path.clone())
+                });
+                // Every alias inherits the group's strongest dependency.
+                // The stable sort retains page order within the group.
+                order.0 |= first;
+                order.1 = order.1.max(change.path.split('/').count());
+                (key, change)
+            }).collect();
+            keyed.sort_by(|(a, _), (b, _)| {
+                let a = &alias_order[a];
+                let b = &alias_order[b];
+                b.0.cmp(&a.0).then_with(|| {
+                    if a.0 { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }
+                }).then_with(|| a.2.cmp(&b.2))
+            });
+            let mut projections: Vec<SwitchProjection> = Vec::new();
+            let mut batch_aliases = HashSet::new();
+            let mut deleted: Vec<String> = Vec::new();
+            for (key, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                // A retry from a former active version cannot repaint the current version.
-                if change.version_id != active { continue; }
+                if batch_aliases.iter().any(|planned: &Vec<String>| {
+                    planned.starts_with(&key) || key.starts_with(planned)
+                }) {
+                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
+                    batch_aliases.clear();
+                }
+                // A file replacing a directory whose tracked files this page
+                // deleted: the empty directory gives way.
+                if root_dir.join(&change.path).is_dir() {
+                    for path in deleted.iter().filter(|path| is_inside(path, &change.path)) {
+                        let mut parent = path.as_str();
+                        while let Some((directory, _)) = parent.rsplit_once('/') {
+                            remove_empty_directory_target(&root_dir, directory)?;
+                            if directory.split('/').count() == change.path.split('/').count() { break; }
+                            parent = directory;
+                        }
+                    }
+                }
                 let secret = change.content_kind == "secret";
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
                     return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
@@ -906,32 +1036,63 @@ impl ActorHandle {
                 let (operation, sha, inline) = match (change.operation, desired) {
                     ("write" | "delete", Some((_, _, true))) => continue,
                     ("write" | "delete", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
-                    ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => continue,
+                    ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => {
+                        deleted.push(change.path);
+                        continue;
+                    }
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
                     _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
-                let projection = planned_projection(&workspace_id, &active, change.path, operation, sha,
-                    preimage, now_ms, now_ms, secret, inline);
-                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-                    if let Some(bytes) = projection.inline_content.as_deref() {
-                        if put_binary_blob(tx, bytes)? != projection.spec.content_sha256 {
-                            return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
-                        }
-                    }
-                    upsert_projection_job(tx, &projection.spec, projection.operation)?;
-                    Ok::<_, StorageError>(())
-                })?;
-                if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
-                let selected = HashSet::from([projection.spec.job_id]);
-                let replay = replay_pending_materializations(store, &root_dir,
-                    MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None},
-                    now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
-                let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
-                if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }
+                batch_aliases.insert(key);
+                projections.push(planned_projection(&workspace_id, &active, change.path, operation, sha,
+                    preimage, now_ms, now_ms, secret, inline));
             }
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_inside, relay_delete_precedes_write};
+    use dohc_engine_sync::MomentMaterializationChange;
+
+    #[test]
+    fn descendant_delete_precedes_only_ancestor_writes() {
+        for operation in ["delete", "write"] {
+            let mut changes = vec![
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "notes".into(),
+                    operation,
+                    content_kind: "text",
+                },
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "notes/a.md".into(),
+                    operation: "delete",
+                    content_kind: "text",
+                },
+            ];
+            for _ in 0..2 {
+                for change in &changes {
+                    assert_eq!(
+                        relay_delete_precedes_write(change, &changes),
+                        operation == "write" && change.path == "notes/a.md",
+                    );
+                }
+                changes.reverse();
+            }
+        }
+    }
+
+    #[test]
+    fn containment_respects_component_boundaries() {
+        assert!(is_inside("D/sub/a.md", "D"));
+        assert!(!is_inside("Dog/a.md", "D"));
+        assert!(!is_inside("D", "D"));
     }
 }

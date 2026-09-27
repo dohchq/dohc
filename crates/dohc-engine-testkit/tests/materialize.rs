@@ -8,8 +8,9 @@
 use dohc_engine_files::{
     AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, KeptCopySave,
     MaterializeOptions, NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay,
-    materialize_secret_one, recover_displacements, recover_path_displacements, run_pending_jobs,
-    save_kept_displacement, workspace_lacks_atomic_placement,
+    finish_prepared_displacements, materialize_secret_one, recover_displacements,
+    recover_path_displacements, run_pending_jobs, save_kept_displacement,
+    workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -2788,4 +2789,162 @@ fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit()
     assert!(result.is_err(), "the rename reported failure");
     assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS), "it took effect");
     assert!(workspace_lacks_atomic_placement(sc.workspace()));
+}
+
+/// Stage `n` overwrites of `f{i}.md`, each file on disk holding its preimage.
+fn stage_overwrites(sc: &Scratch, store: &mut EngineStore, n: usize) {
+    for i in 0..n {
+        let before = format!("preimage {i}");
+        let after = format!("content {i}");
+        std::fs::write(sc.target(&format!("f{i}.md")), &before).expect("preimage on disk");
+        store
+            .put_binary_blob(before.as_bytes())
+            .expect("preimage blob");
+        let job = spec(
+            &format!("j{i}"),
+            &format!("f{i}.md"),
+            &hex_sha256(after.as_bytes()),
+            Preimage::Present(hex_sha256(before.as_bytes())),
+            1,
+            10 + i as i64,
+        );
+        stage_job(store, after.as_bytes(), &job);
+    }
+}
+
+/// Counts, at the first rename of a batch, the rows its one synced commit
+/// wrote.
+struct CountPreparedAtFirstRename {
+    db: PathBuf,
+    prepared_then: Mutex<Option<i64>>,
+}
+
+impl AtomicReplacer for CountPreparedAtFirstRename {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        let mut seen = self.prepared_then.lock().unwrap();
+        if seen.is_none() {
+            let conn = rusqlite::Connection::open_with_flags(
+                &self.db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("read the store");
+            *seen = Some(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_displacements WHERE state = 'prepared'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count prepared rows"),
+            );
+        }
+        drop(seen);
+        StdReplacer.displace(target, displaced)
+    }
+}
+
+/// A batch writes every job's displacement row in one synced commit before
+/// its first rename, uses them, and leaves none behind.
+#[test]
+fn a_batch_writes_every_displacement_row_before_its_first_rename() {
+    let sc = Scratch::new("batch-prepared");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrites(&sc, &mut store, 3);
+    let replacer = CountPreparedAtFirstRename {
+        db: sc.db(),
+        prepared_then: Mutex::new(None),
+    };
+
+    assert_eq!(
+        drain(&store, &sc, &replacer, &NoFaults),
+        vec![JobOutcome::Completed; 3]
+    );
+    assert_eq!(*replacer.prepared_then.lock().unwrap(), Some(3));
+    for i in 0..3 {
+        assert_eq!(
+            read(&sc, &format!("f{i}.md")).as_deref(),
+            Some(format!("content {i}").as_bytes())
+        );
+    }
+    assert_nothing_displaced(&sc, &store);
+}
+
+/// A crash mid-batch leaves the prepared rows of jobs that never ran. Replay
+/// discards them, puts the interrupted job's file back, and runs every job.
+#[test]
+fn a_crash_mid_batch_recovers_every_job() {
+    let sc = Scratch::new("batch-crash");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrites(&sc, &mut store, 3);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert_eq!(
+            store
+                .list_unsettled_displacements()
+                .expect("unsettled")
+                .len(),
+            3,
+            "one moved file and two unused prepared rows"
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed; 3]
+    );
+    for i in 0..3 {
+        assert_eq!(
+            read(&sc, &format!("f{i}.md")).as_deref(),
+            Some(format!("content {i}").as_bytes())
+        );
+    }
+    assert_nothing_displaced(&sc, &store);
+}
+
+/// While dohc is stopped, another program swaps the directory holding a
+/// displaced file for a link to an empty directory. Cleanup cannot prove the
+/// file is gone through the link, so the row stays, and the file is found
+/// again once the directory is back.
+#[test]
+fn cleanup_keeps_a_prepared_row_behind_a_substituted_linked_ancestor() {
+    let sc = Scratch::new("prepared-linked-ancestor");
+    let elsewhere = Scratch::new("prepared-linked-elsewhere");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::create_dir(sc.target("dir")).expect("dir");
+    std::fs::write(sc.target("dir/.dohc-write-j1.displaced"), PREIMAGE).expect("moved file");
+    store
+        .prepare_displacements(&[dohc_engine_storage::DisplacementSpec {
+            job_id: "j1".to_owned(),
+            workspace_id: "ws".to_owned(),
+            target_path: "dir/a.md".to_owned(),
+            displaced_name: ".dohc-write-j1.displaced".to_owned(),
+            expected_sha256: hex_sha256(PREIMAGE),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 1,
+        }])
+        .expect("prepare");
+    std::fs::rename(sc.target("dir"), sc.target("dir-real")).expect("move dir away");
+    if !try_make_dir_alias(elsewhere.workspace(), &sc.target("dir")).expect("alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
+    assert_eq!(
+        store.list_prepared_displacements().expect("prepared").len(),
+        1,
+        "the row stays while the ancestor is a link"
+    );
+
+    remove_dir_alias(&sc.target("dir"));
+    std::fs::rename(sc.target("dir-real"), sc.target("dir")).expect("dir back");
+    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
+    assert_eq!(
+        store.list_prepared_displacements().expect("prepared").len(),
+        1,
+        "the moved file is there, so the row is not unused"
+    );
 }
