@@ -3302,6 +3302,51 @@ fn startup_restores_a_newer_rowless_preimage_before_an_older_open_row() {
     }
 }
 
+#[test]
+fn newest_staged_copy_returns_first_after_a_crash_during_adoption() {
+    for recovery in ["workspace", "path", "job"] {
+        let sc = Scratch::new("adoption-order-crash");
+        {
+            let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+            stage_overwrite(&sc, &mut store);
+            let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+            assert!(matches!(
+                drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+                [JobOutcome::Crashed(_)]
+            ));
+            // The older known preimage has no row. Only the newer outside
+            // bytes will be adopted, while the write sibling still exists.
+            put_staged(&sc, "6a31.1", OUTSIDE);
+            let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
+            let options = MaterializeOptions {
+                faults: faults.as_ref(),
+                ..sweep_options()
+            };
+            assert!(recover_displacements(&store, sc.workspace(), None, &options).is_err());
+            let rows = store.list_unsettled_displacements().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].displaced_name, "6a31.1");
+            assert!(read(&sc, "a.md").is_none());
+            assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+        }
+        let store = EngineStore::open(&sc.db(), 50).unwrap();
+        match recovery {
+            "workspace" => {
+                recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap()
+            }
+            "path" => {
+                recover_path_displacements(&store, sc.workspace(), "ws", "a.md", &sweep_options())
+                    .unwrap()
+            }
+            _ => {
+                drain(&store, &sc, &StdReplacer, &NoFaults);
+            }
+        }
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE), "{recovery}");
+        assert_nothing_displaced(&sc, &store);
+    }
+}
+
 struct CrossVolumeStage {
     change: bool,
 }
@@ -3377,15 +3422,20 @@ fn windows_staging_and_failed_return_preserve_attributes() {
     drop(lock);
     StdReplacer.displace(&target, &staged).unwrap();
     assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    std::fs::write(&destination, b"occupied").unwrap();
+    assert!(StdReplacer.place(&staged, &destination).is_err());
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    std::fs::remove_file(&destination).unwrap();
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0x1 | 0x2)
         .open(&staged)
         .unwrap();
-    assert!(StdReplacer.place(&staged, &destination).is_err());
+    // The link claims the destination even while this handle prevents
+    // removal of the staging name. Placement must still report success.
+    StdReplacer.place(&staged, &destination).unwrap();
     assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
     drop(lock);
-    StdReplacer.place(&staged, &destination).unwrap();
     assert_eq!(
         std::fs::metadata(&destination).unwrap().file_attributes(),
         attrs
