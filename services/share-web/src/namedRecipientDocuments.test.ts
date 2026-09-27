@@ -21,7 +21,7 @@ async function fixture(maxFiles = 8, access = "edit") {
   resetOpSeq();
   const storage = await testStorage(); storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1});
   storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: "owner", createdAtMs: 1,
-    selectorJson: JSON.stringify({paths: ["docs"], versionId: null})},
+    labels: {subjectName: "Trip", sharerName: "Ana"}, selectorJson: JSON.stringify({paths: ["docs"], versionId: null})},
     grant: {grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "alice", principalEmail: null,
       access, generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
   for (const content of ["# Shared", "# Private", "# Side", "{}"]) storage.putBlob({workspaceId: "workspace", sha256: sha256(content), content: Buffer.from(content), createdAtMs: 1});
@@ -48,7 +48,7 @@ it("opens only current selected Markdown objects through the named account and k
   input.headers.set("authorization", "Bearer forged"); input.headers.set("x-user-id", "owner"); input.headers.set("x-dohc-relay-exchange-key", "forged");
   const response = await f.web(input);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({userId: "alice", workspaceId: "workspace", grantId: "grant", shareId: "share",
+  expect(await response.json()).toMatchObject({subjectName: "Trip", sharerName: "Ana", access: "edit", userId: "alice", workspaceId: "workspace", grantId: "grant", shareId: "share",
     files: [{objectId: "a", path: "docs/a.md"}], limits: browserLimits});
   expect(f.actor).toHaveBeenCalledTimes(1);
   expect(f.forwarded[0]!.headers.has("authorization")).toBe(false);

@@ -55,7 +55,8 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
           current.grant.generation !== authority.grant.generation) return refuse();
         controller.signal.throwIfAborted();
         const body = JSON.stringify({ userId: context.userId, workspaceId: context.workspaceId,
-          shareId: context.shareId, grantId: context.grantId, files });
+          shareId: context.shareId, grantId: context.grantId, files, access: current.grant.access,
+          ...storage.getShareLabels(context.shareId) });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
         return new Response(body, {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
       } catch {return refuse();}

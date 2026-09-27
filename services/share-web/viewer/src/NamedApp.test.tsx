@@ -26,6 +26,7 @@ async function fillSignIn() {
 function account(signedIn: () => boolean, rest: (path: string, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    if (path === "/api/apps/summary") return jsonResponse({subjectName: "Trip planner", sharerName: "Ana", access: "comment"});
     if (path === "/api/account/session") return jsonResponse({user: signedIn() ? {id: "alice", name: "Alice"} : null});
     return rest(path, init);
   });
@@ -42,6 +43,7 @@ it("signs in, launches with only the workspace and publication ids, and submits 
   expect(container.textContent).toContain("Sign in to open this app"); expect(button("Open app")).toBeUndefined();
   await fillSignIn(); await click("Sign in");
   expect(container.textContent).toContain("Alice"); expect(container.textContent).toContain("external services");
+  expect(container.textContent).toContain("Trip planner"); expect(container.textContent).toContain("Shared by Ana"); expect(container.textContent).toContain("Comment access");
   await click("Open app"); await settle(() => submitted.length === 1);
   expect(submitted[0]).toEqual({action: `https://${"b".repeat(48)}.apps.example/bootstrap`, fields: [`handoff=${"c".repeat(43)}`]});
   expect(button("Opening app")?.disabled).toBe(true);

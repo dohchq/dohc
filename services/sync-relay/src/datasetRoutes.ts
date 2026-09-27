@@ -242,7 +242,7 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
       organizer: authority.caller.kind === "owner"}, route.action, options.nowMs());
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
     try {
-      const get = route.action === "descriptor" || route.action === "blob";
+      const get = route.action === "descriptor" || route.action === "summary" || route.action === "blob";
       if (request.method !== (get ? "GET" : "POST")) throw relayError("method_not_allowed");
       const query = new URL(request.url).searchParams;
       if (route.action === "blob") {
@@ -257,6 +257,14 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
       if (query.size) throw badRequest("App operations do not accept a query.");
       return await response(async () => {
         signal.throwIfAborted();
+        if (route.action === "summary") {
+          if (auth.kind !== "named") throw notFound();
+          if (authority.caller.kind === "owner") return {subjectName: published.candidate.appRoot, sharerName: null, access: "owner"};
+          if (authority.caller.kind !== "named") throw notFound();
+          const grant = storage.getShareGrant(authority.caller.grantId);
+          if (!grant) throw notFound();
+          return {...storage.getShareLabels(grant.shareId), access: authority.caller.access};
+        }
         if (route.action === "descriptor") {
           if (auth.kind !== "named") throw notFound();
           return {publicationId: route.publicationId, authorityRevision, files: published.candidate.files};

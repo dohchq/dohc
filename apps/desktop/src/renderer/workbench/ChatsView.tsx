@@ -4725,11 +4725,9 @@ export function ChatsView(props: {
                   <li key={row.shareId} className="mx-2 flex h-8 items-center gap-2 px-2">
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                      {row.granterEmail ?? "A teammate"}
+                      {row.subjectName ?? "a Group"} · {row.sharerName ?? row.granterEmail ?? "the owner"}
                     </span>
-                    {row.access === "read-only" ? (
-                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
-                    ) : null}
+                    <span className="shrink-0 font-mono text-[10px] text-subtle">{row.access}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"

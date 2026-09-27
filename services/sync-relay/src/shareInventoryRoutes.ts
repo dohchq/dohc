@@ -1,3 +1,5 @@
+import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
+import {readJsonObject} from "./requestInputs";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
@@ -16,6 +18,7 @@ export function createShareInventoryRoutes(
     | "listSharesGrantedBy"
     | "listSharesReceivedBy"
     | "getShare"
+    | "setShareLabels"
     | "getShareGrant"
     | "listActiveShareGrantsForRecipient"
     | "findChannelCreateKind"
@@ -23,6 +26,7 @@ export function createShareInventoryRoutes(
     | "listLinkGrantsByWorkspace"
     | "listActiveIndependentShareGrants"
   >,
+  nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
   lookupUserEmail: ((userId: string) => Promise<string | null> | string | null) | undefined,
   requireShareAction: (shareId: string, actorUserId: string, action: "read") => AuthorizedShareAction,
@@ -105,6 +109,14 @@ export function createShareInventoryRoutes(
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");
 
+    if (route.route === "share" && request.method === "PUT") {
+      const input = await readJsonObject(request);
+      const share = storage.getShare(route.shareId);
+      if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
+      if (Object.keys(input).sort().join() !== "sharerName,subjectName") throw badRequest("Share labels require subjectName and sharerName.");
+      storage.setShareLabels(share.shareId, {subjectName: normalizeShareLabel(input.subjectName), sharerName: normalizeShareLabel(input.sharerName)}, nowMs());
+      return jsonResponse({ok: true});
+    }
     if (route.route === "share" && request.method === "GET") {
       await claimPendingShares(actor.userId);
       const initial = requireShareAction(route.shareId, actor.userId, "read");

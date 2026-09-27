@@ -27,7 +27,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     setFiles(result);
   };
   const refresh = () => {
-    clearSelection(); const controller = start();
+    clearSelection(); setFiles(null); const controller = start();
     void load(controller).catch(() => {if (!controller.signal.aborted) setError("dohc could not open this invitation. Retry or sign in with the invited account.");})
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
@@ -75,7 +75,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   });
   return <div className="viewer named-recipient">
-    <header><div><p className="eyebrow">dohc</p><h1>Shared files</h1></div>
+    <header><div><p className="eyebrow">dohc</p><h1>{files?.subjectName ?? "Shared files"}</h1>{files && <p>{files.sharerName ? `Shared by ${files.sharerName}` : "Shared with you"} · Edit access</p>}</div>
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={busy} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     {!grantId ? <main className="download-card"><p>This invitation is unavailable. Open the invitation the owner shared with you.</p></main> :

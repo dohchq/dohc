@@ -39,7 +39,7 @@ export function createNamedRecipientDocumentsClient(options: {relayUrl: string; 
           response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return refuse();
         const result = await readBoundedJson(response, limits.maxResponseBytes, controller.signal);
         if (!result || typeof result !== "object" || Array.isArray(result) ||
-          Object.keys(result).sort().join() !== "files,grantId,shareId,userId,workspaceId") return refuse();
+          Object.keys(result).sort().join() !== "access,files,grantId,shareId,sharerName,subjectName,userId,workspaceId") return refuse();
         const data = result as Record<string, unknown>;
         for (const key of ["grantId", "shareId", "userId", "workspaceId"]) parseLiveUpdateIdentifier(data[key]);
         if (data.grantId !== grantId || !Array.isArray(data.files)) return refuse();

@@ -1,3 +1,5 @@
+import {parseDohcSiteConfig} from "@dohc/workspace-core";
+import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
@@ -1087,6 +1089,15 @@ async function relayShareJsonWithCredentials<T>(
   if (!credentials.relayUrl) {
     throw new Error("Reconnect your server to refresh its connection settings, then try again.");
   }
+  const creation = /^\/sync\/([^/]+)\/shares(?:\/links)?$/.exec(path);
+  if (creation && init?.method === "POST" && typeof init.body === "string") {
+    const workspace = findWorkspace(decodeURIComponent(creation[1]!));
+    if (workspace && !shareViewIsPresent(workspace.shareView)) {
+      const input = JSON.parse(init.body) as Record<string, unknown>;
+      const labels = await labelsForOwnerShare(workspace, credentials, input);
+      init = {...init, body: JSON.stringify({...input, ...labels})};
+    }
+  }
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
@@ -1152,6 +1163,40 @@ async function relayShareJsonWithCredentials<T>(
     return { kind: "success", body: data as T };
   }
   return data as T;
+}
+
+async function ownerGroupNames(workspace: EngineWorkspace) {
+  const store = linkedChatStoreFor(workspace);
+  const names = new Map<string, string>();
+  for (const channel of await store.listChannels({workspaceId: workspace.workspaceId})) {
+    if (channel.kind !== "channel") continue;
+    const wireId = await store.getChannelWireId({workspaceId: workspace.workspaceId, channelId: channel.id});
+    if (wireId) names.set(wireId, channel.name);
+  }
+  return names;
+}
+
+async function labelsForOwnerShare(workspace: EngineWorkspace, credentials: CloudSessionCredentials, selector: {paths?: unknown; channelWireId?: unknown}, options: {refresh?: boolean; groupNames?: () => Promise<Map<string, string>>} = {}) {
+  const generation = credentialCacheGeneration;
+  const lease = requireWorkspaceAuthority(workspace.workspaceId);
+  try {
+    lease.assertCurrent();
+    if (cachedCredentials?.token !== credentials.token || cachedCredentials.userId !== credentials.userId) throw new Error("Your server session changed. Try again.");
+    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This share belongs to a retired workspace.");
+    const lookup = async <T>(read: () => Promise<T>): Promise<T | null> => {
+      try {return await read();} catch (error) {if (options.refresh) throw error; return null;}
+    };
+    const settings = await lookup(() => readCachedUserSettingsFile(stateDir()));
+    const labels = await ownerShareLabels({rootPath: workspace.rootPath, selector, sharerName: settings?.settings.profile.preferredName ?? credentials.email,
+      appName: async path => {
+        const config = await lookup(() => readWorkspaceTextIfPresent(workspace.rootPath, `${path}/dohc.json`));
+        return config && !config.truncated ? parseDohcSiteConfig(config.text).config?.title ?? null : null;
+      },
+      groupName: async wireId => (await lookup(options.groupNames ?? (() => ownerGroupNames(workspace))))?.get(wireId) ?? null});
+    lease.assertCurrent();
+    if (generation !== credentialCacheGeneration) throw new Error("Your server session changed. Try again.");
+    return labels;
+  } finally {lease.release();}
 }
 
 async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1760,6 +1805,10 @@ function relayClientForWorkspace(input: {
   return desktopEngine.relayClient.bind(input);
 }
 
+const scheduleShareLabelRefresh = createOwnerShareLabelRefresh(
+  error => console.error("[desktop] share label refresh failed", error),
+);
+
 function engineForWorkspace(
   workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol },
   capture: WorkspaceEngineCapture | null,
@@ -1786,6 +1835,26 @@ function engineForWorkspace(
     attachmentId: workspace.attachmentId,
     relay,
   });
+  const refreshShareLabels = () => scheduleShareLabelRefresh(workspace.workspaceId,
+    () => {
+      let groups: Promise<Map<string, string>> | undefined;
+      return refreshOwnerShareLabels({workspaceId: workspace.workspaceId,
+        list: async () => {
+          const listing = await relayShareJsonWithCredentials<{granted: Array<{shareId: string; workspaceId: string; selector: unknown; subjectName?: string | null; sharerName?: string | null}>}>(credentials, "/sync/shares");
+          let cursor: string | undefined;
+          do {
+            const page = await relayShareJsonWithCredentials<{links: Array<{shareId: string; selector: unknown; subjectName?: string | null; sharerName?: string | null}>; nextCursor?: string}>(credentials,
+              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares/links${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+            listing.granted.push(...page.links.map(row => ({...row, workspaceId: workspace.workspaceId})));
+            cursor = page.nextCursor;
+          } while (cursor);
+          return listing;
+        },
+        labels: selector => labelsForOwnerShare(workspace, credentials, selector, {refresh: true, groupNames: () => groups ??= ownerGroupNames(workspace)}),
+        update: (shareId, labels) => relayShareJsonWithCredentials(credentials, `/sync/shares/${encodeURIComponent(shareId)}`, {method: "PUT", body: JSON.stringify(labels)}),
+      });
+    },
+  );
   return createRelaySyncEngine({
     rootDir: workspace.rootPath,
     relay,
@@ -1820,6 +1889,7 @@ function engineForWorkspace(
     afterSuccessfulPull: ({ recovered }) => {
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
+      refreshShareLabels();
       automationHosts.relayAnswered(workspace.workspaceId);
       collectionAutomationsOf(workspace.workspaceId)?.relayAnswered();
       void collectionAutomationsOf(workspace.workspaceId)?.groupMessagesArrived();

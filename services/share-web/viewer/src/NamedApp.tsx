@@ -1,3 +1,4 @@
+import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {useEffect, useRef, useState, type FormEvent} from "react";
 import {accountUser, namedRequest} from "./namedRecipient";
 import {AppLaunchError, launchSharedApp} from "./OpenSharedApp";
@@ -13,6 +14,7 @@ const LAUNCH_REFUSED = "dohc could not open this app with this account. Ask the 
 const LAUNCH_UNAVAILABLE = "dohc could not reach the app. Check your connection, then try again.";
 
 export default function NamedApp({target}: {target: NamedAppTarget | null}) {
+  const [summary, setSummary] = useState<{subjectName: string | null; sharerName: string | null; access: string} | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [pending, setPending] = useState<Pending>(target ? "account" : null), [error, setError] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -26,12 +28,20 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
   };
   const load = async (controller: AbortController) => {
     const user = accountUser(await namedRequest("/api/account/session", controller.signal));
-    if (!controller.signal.aborted && request.current === controller) setAccount(user);
+    if (controller.signal.aborted || request.current !== controller) return;
+    setAccount(user); setSummary(null);
+    if (user && target) {
+      const data = await namedRequest("/api/apps/summary", controller.signal, target).catch(() => null);
+      if (controller.signal.aborted || request.current !== controller) return;
+      if (data && typeof data === "object" && "access" in data && typeof data.access === "string" && "subjectName" in data && "sharerName" in data) {
+        setSummary({subjectName: normalizeShareLabel(data.subjectName), sharerName: normalizeShareLabel(data.sharerName), access: data.access});
+      }
+    }
   };
   const check = () => {const controller = start("account"); void load(controller).then(() => finish(controller, null), () => finish(controller, CHECK_FAILED));};
   useEffect(() => {
     if (!target) return;
-    check();
+    setSummary(null); check();
     return () => request.current?.abort();
   }, [target?.workspaceId, target?.publicationId]);
   const signIn = (event: FormEvent<HTMLFormElement>) => {
@@ -45,7 +55,7 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
   const signOut = () => {
     const controller = start("sign-out");
     void namedRequest("/api/account/sign-out", controller.signal, {}).then(
-      () => {if (!controller.signal.aborted && request.current === controller) setAccount(null); finish(controller, null);},
+      () => {if (!controller.signal.aborted && request.current === controller) {setAccount(null); setSummary(null);} finish(controller, null);},
       () => finish(controller, SIGN_OUT_FAILED));
   };
   const open = () => {
@@ -57,7 +67,7 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
   };
   const busy = pending !== null;
   return <div className="viewer named-recipient">
-    <header><div><p className="eyebrow">dohc</p><h1>Shared app</h1></div>
+    <header><div><p className="eyebrow">dohc</p><h1>{summary?.subjectName ?? "Shared app"}</h1>{summary && <p>{summary.sharerName ? `Shared by ${summary.sharerName}` : "Shared with you"} · {shareAccessLabel(summary.access)} access</p>}</div>
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={pending === "sign-out"} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     {!target ? <main className="download-card"><p>This app link is unavailable. Open the link the owner shared with you.</p></main> :

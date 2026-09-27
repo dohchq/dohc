@@ -1,3 +1,5 @@
+import * as shareLabelsStorage from "./storage/shareLabels";
+import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
@@ -917,6 +919,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
 
+  getShareLabels(shareId: string): ShareLabels { return shareLabelsStorage.getShareLabels(this, shareId); }
+  setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void { shareLabelsStorage.setShareLabels(this, shareId, labels, updatedAtMs); }
   getShare(shareId: string): SyncRelayShareRow | null {
     return sharesStorage.getShare(this, shareId);
   }

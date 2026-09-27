@@ -29,7 +29,7 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
   maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
-const files = (grantId = "grant", userId = "alice") => ({userId, workspaceId: "workspace", shareId: "share", grantId, limits,
+const files = (grantId = "grant", userId = "alice") => ({subjectName: "Trip", sharerName: "Ana", access: "edit", userId, workspaceId: "workspace", shareId: "share", grantId, limits,
   files: [{objectId: "a", path: "docs/a.md"}, {objectId: "b", path: "docs/b.md"}]});
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
@@ -67,7 +67,9 @@ it("signs in through the account endpoint, opens current files, and waits for li
 });
 it("keeps a quarantined draft until explicit discard, then opens a fresh session without merging its old state", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session" ? jsonResponse({user: {id: "alice", name: "Alice"}}) : jsonResponse(files())));
-  await render(); await click("docs/a.md");
+  await render();
+  expect(container.textContent).toContain("Trip"); expect(container.textContent).toContain("Shared by Ana"); expect(container.textContent).toContain("Edit access");
+  await click("docs/a.md");
   await act(async () => {sessions[0]!.state = {...sessions[0]!.state, status: "quarantined", pendingUpdates: 1}; sessions[0]!.notify();});
   expect(container.textContent).toContain("exist only in this tab"); await click("docs/b.md");
   expect(container.querySelector("dialog")?.open).toBe(true); expect(sessions).toHaveLength(1);

@@ -1,3 +1,4 @@
+import {normalizeShareLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { escapeHtml } from "@dohc/workspace-core/html";
 import { isRecord } from "@dohc/workspace-core/records";
@@ -1193,6 +1194,7 @@ interface RemoteIdentity {
 }
 
 interface RegistryWorkspace {
+  shareView?: {grantedSelector?: unknown; subjectName?: unknown; sharerName?: unknown; granterEmail?: unknown; shareId?: unknown};
   workspaceId: string;
   rootPath: string;
   kind: string;
@@ -1352,15 +1354,21 @@ export async function listWorkspaces(ctx: ToolContext) {
 // --- dohc_workspace_status --------------------------------------------------
 
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials] = await Promise.all([
+  const [manifest, remote, credentials, entry] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
+    findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
   const credential = credentialStatusFor(remote, credentials);
   return {
+    ...(entry?.shareView ? {receivedShare: {
+      subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
+      sharerName: normalizeShareLabel(entry.shareView.sharerName) ?? normalizeShareLabel(entry.shareView.granterEmail),
+      access: ctx.shareAccess ?? null,
+    }} : {}),
     synced,
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

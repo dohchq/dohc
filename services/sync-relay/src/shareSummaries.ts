@@ -28,6 +28,7 @@ function storedSelectorKind(
 }
 
 export function createShareSummaries(
+  labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
@@ -54,6 +55,7 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
+      ...labels(share.shareId),
       // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
       // whose own reads answer 404. The row stays listed because it is the
@@ -210,6 +212,7 @@ export function createShareSummaries(
     return {
       shareId: share.shareId,
       grantId: grant.grantId,
+      ...labels(share.shareId),
       selector,
       ...(selector
         ? {}

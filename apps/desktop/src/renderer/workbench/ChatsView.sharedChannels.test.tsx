@@ -62,6 +62,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
         received: [
           {
             shareId: "share-invite",
+            subjectName: "Trip group", sharerName: "Ana",
             channelWireId: "wire-invite",
             access: "read-write",
             granterEmail: "owner@example.com",
@@ -71,7 +72,9 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
     renderView();
-    await screen.findByTestId("chats-join-shared");
+    const invite = await screen.findByTestId("chats-join-shared");
+    expect(invite.closest("li")?.textContent).toContain("Trip group · Ana");
+    expect(invite.closest("li")?.textContent).toContain("read-write");
 
     // The first read cannot name an invitation it has not been told about
     // yet, so it names the channels it shows and main adds the invitations to

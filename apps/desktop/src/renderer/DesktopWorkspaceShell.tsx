@@ -3836,7 +3836,7 @@ export function DesktopWorkspaceShell(props: {
   // copy, which the recipient then sends for the granter to accept.
   const shareViewDocumentsWritable =
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
-  const shareGranterName = shareView?.granterEmail ?? "another dohc user";
+  const shareGranterName = shareView?.sharerName ?? shareView?.granterEmail ?? "the owner";
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
@@ -4630,6 +4630,7 @@ export function DesktopWorkspaceShell(props: {
           }`}
         >
           <Eye size={12} aria-hidden className="shrink-0" />
+          {shareView.subjectName && <span className="max-w-64 truncate font-medium">{shareView.subjectName}</span>}
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`

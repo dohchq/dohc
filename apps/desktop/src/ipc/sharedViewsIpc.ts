@@ -200,6 +200,8 @@ export function registerSharedViewsIpcHandlers<
         setWorkspaceShareView(created.workspaceId, {
           shareId: parsed.shareId,
           granterEmail: info.granterEmail,
+          subjectName: info.subjectName,
+          sharerName: info.sharerName,
           genericChatWritable: info.genericChatWritable,
           // Pin the selector the relay just stated, so later pulls enforce it
           // instead of trusting the relay's selection each time.
@@ -346,6 +348,8 @@ export function registerSharedViewsIpcHandlers<
               const nextShareView = {
                 ...workspace.shareView,
                 genericChatWritable: info.genericChatWritable,
+                subjectName: info.subjectName,
+                sharerName: info.sharerName,
               };
               setWorkspaceShareView(workspace.workspaceId, nextShareView);
               refreshedWorkspace = { ...workspace, shareView: nextShareView };

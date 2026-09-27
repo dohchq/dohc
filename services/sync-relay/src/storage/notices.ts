@@ -1,3 +1,4 @@
+import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { createHash } from "node:crypto";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
@@ -7,6 +8,7 @@ import {
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
   NOTICE_TITLE_MAX_CHARS,
+  NOTICE_SENDER_LABEL_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
   type PostableNoticeKind,
@@ -151,7 +153,7 @@ export interface NoticeShareReceivedInput {
 // a channel the owner's log does not hold yet; or settling, if the grant
 // ended.
 type ShareNoticeState =
-  | { state: "deliver"; share: SyncRelayShareRow; recipientUserId: string; title: (senderLabel: string) => string }
+  | { state: "deliver"; share: SyncRelayShareRow; recipientUserId: string; access: string; title: (senderLabel: string) => string }
   | { state: "wait" }
   | { state: "ended" };
 
@@ -168,7 +170,7 @@ function shareNoticeState(storage: StorageContext, grantId: string): ShareNotice
     principal: { kind: "user", userId: recipientUserId },
   }).ok;
   const title = readable ? shareReceivedTitle(storage, share) : null;
-  return title === null ? { state: "wait" } : { state: "deliver", share, recipientUserId, title };
+  return title === null ? { state: "wait" } : { state: "deliver", share, recipientUserId, access: grant.access, title };
 }
 
 /**
@@ -221,7 +223,8 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
       if (found.state === "ended") return void settle();
       if (found.state === "wait") return;
       const { share, recipientUserId } = found;
-      const title = found.title(input.senderLabel);
+      const senderLabel = Array.from(storage.getShareLabels(share.shareId).sharerName ?? input.senderLabel).slice(0, NOTICE_SENDER_LABEL_MAX_CHARS).join("");
+      const title = found.title(senderLabel);
       const noticeId = noticeIdFrom(share.granterUserId, `share-received:${input.grantId}`);
       const existing = storage.db
         .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
@@ -236,9 +239,9 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
         placement: { workspaceId: null, recipientShareId: share.shareId },
         kind: "share-received",
         senderUserId: share.granterUserId,
-        senderLabel: input.senderLabel,
+        senderLabel,
         title,
-        body: "",
+        body: `${shareAccessLabel(found.access)} access`,
         target: { share: share.shareId },
         originInstallId: "relay",
         nowMs: input.nowMs,
@@ -257,14 +260,11 @@ function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): 
   const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!selector) return null;
   if (!("paths" in selector)) {
-    const channelKind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
-    if (channelKind === "dm") return (senderLabel) => `${senderLabel} sent you a message request`;
-    return channelKind === "channel" ? (senderLabel) => `${senderLabel} shared a channel with you` : null;
+    const kind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
+    if (kind === "dm") return senderLabel => `${senderLabel} sent you a message request`;
+    if (kind !== "channel") return null;
   }
-  const { paths } = selector;
-  const what = paths.length === 0 ? "a version"
-    : paths.length === 1 ? paths[0]!.split("/").at(-1)!
-    : `${paths.length} items`;
+  const what = storage.getShareLabels(share.shareId).subjectName ?? shareSubjectFallback(selector);
   return (senderLabel) => {
     const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
     const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;

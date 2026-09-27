@@ -9,6 +9,7 @@ import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-c
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
+import {createDatasetAppRoutes} from "./datasetRoutes";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
@@ -341,4 +342,16 @@ it("caches only catalog verdicts for relay publications and still observes withd
     await expect(f.invoke(link, id(6), {}, publicationId, "revoked-read")).rejects.toThrow();
     expect(generate).toHaveBeenCalledTimes(1);
   } finally { generate.mockRestore(); }
+});
+
+it("returns app share labels only after named publication authorization", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  f.storage.setShareLabels("s", {subjectName: "Registrations", sharerName: "Ana"}, 10);
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10});
+  const request = new Request("https://relay.test/summary");
+  const target = {route: "app-backend" as const, action: "summary" as const, publicationId, workspaceId: "w"};
+  expect(await (await route(request, target, helper)).json()).toEqual({subjectName: "Registrations", sharerName: "Ana", access: "view"});
+  await expect(route(request, target, {...helper, userId: "stranger"})).rejects.toThrow();
+  f.storage.revokeShareGrant({shareId: "s", grantId: "helper-grant", revokedAtMs: 11});
+  await expect(route(request, target, helper)).rejects.toThrow();
 });

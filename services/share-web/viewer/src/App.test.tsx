@@ -31,6 +31,7 @@ let exposeHeldLogQuery = false;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
+  subjectName: "Trip plans",
   effectiveSelector: {
     paths: [],
     versionId: null,
@@ -709,7 +710,7 @@ describe("App", () => {
     await settle(() => firstHandoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Shared by a dohc user");
+    expect(container.textContent).toContain("Trip plans");
     expect(container.textContent).not.toContain("If dohc didn't open");
   });
 
@@ -782,7 +783,7 @@ describe("App", () => {
     await renderApp();
 
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector(".freshness")?.textContent).toBe(
@@ -827,7 +828,7 @@ describe("App", () => {
 
     expect(currentRequests).toBe(2);
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector("main.content")?.textContent).toBe(
       "No files in this share yet.",
@@ -1213,7 +1214,7 @@ describe("App", () => {
       "This file changed. Refreshing.",
     );
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector("h1")?.textContent).toBe(staleFile.path);
     expect(container.querySelector(".badge")?.textContent).toBe("View");
@@ -1273,7 +1274,7 @@ describe("App", () => {
       "This file isn't available right now.",
     );
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by a dohc user",
+      "Trip plans",
     );
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(file.path);

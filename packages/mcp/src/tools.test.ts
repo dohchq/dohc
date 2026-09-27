@@ -2846,3 +2846,18 @@ it.each([null, "budget"] as const)("returns structured chat dispatch state: %s",
   expect(await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" })).toEqual(response);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "chat", args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" } }));
 });
+
+it("workspace status names a received share without using its labels as authority", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {subjectName: "Trip", sharerName: "Ana"}}]}));
+    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "Trip", sharerName: "Ana", access: "view"}});
+    expect(await workspaceStatus(ctx)).toMatchObject({receivedShare: {access: null}});
+  });
+});
+
+it("uses the received selector for a legacy MCP subject fallback", async () => {
+  await withWorkspace(async ctx => {
+    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {grantedSelector: {paths: ["docs"], access: "view"}}}]}));
+    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "a folder or file", access: "view"}});
+  });
+});

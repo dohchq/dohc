@@ -1,3 +1,4 @@
+import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {
   type ShareAccess,
   isShareAccessValue,
@@ -21,6 +22,8 @@ export interface ShareViewSelector {
 }
 
 export interface ShareViewInfo {
+  subjectName?: string | null;
+  sharerName?: string | null;
   shareId: string;
   granterUserId: string;
   granterEmail: string | null;
@@ -162,6 +165,8 @@ export async function fetchShareViewInfo(input: {
   return {
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
+    subjectName: normalizeShareLabel(body.subjectName),
+    sharerName: normalizeShareLabel(body.sharerName),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
     selector: parseSelector(body.selector, body.access, input.shareId),

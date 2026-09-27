@@ -497,7 +497,7 @@ describe("SharedWithMeList", () => {
         },
       ],
     });
-    await screen.findByText("docs");
+    await screen.findByText("a folder or file");
 
     expect(
       screen.queryByTestId("shared-with-me-skipped"),
@@ -569,4 +569,12 @@ describe("SharedWithMeList", () => {
     await screen.findByTestId("shared-with-me-row");
     expect(screen.queryByTestId("shared-with-me-skipped")).toBeNull();
   });
+});
+
+it("names the received subject and sharer beside its access", async () => {
+  bridgeMock.getWorkspaceRegistry.mockResolvedValue({workspaces: []});
+  bridgeMock.listRelayShares.mockResolvedValue({received: [{shareId: "trip", subjectName: "Trip plans", sharerName: "Ana", granterEmail: "ana@example.test", access: "comment", selector: {paths: ["docs"], versionId: null}}]});
+  render(<SharedWithMeList workspaceId={WORKSPACE_ID}/>);
+  const row = await screen.findByTestId("shared-with-me-row");
+  expect(row.textContent).toContain("Trip plans"); expect(row.textContent).toContain("Ana"); expect(row.textContent).toContain("Comment");
 });

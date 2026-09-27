@@ -2546,6 +2546,7 @@ describe("owner link inventory and impact preconditions", () => {
       "link-damaged",
     ]);
     expect(links[0]).toEqual({
+      subjectName: null, sharerName: null,
       shareId: "share-existing",
       grantId: activeGrantId,
       selector: { paths: ["docs"], versionId: null },
@@ -2589,6 +2590,7 @@ describe("owner link inventory and impact preconditions", () => {
       dependents: [],
     });
     expect(links[2]).toEqual({
+      subjectName: null, sharerName: null,
       shareId: "share-damaged",
       grantId: "link-damaged",
       selector: null,

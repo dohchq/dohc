@@ -575,6 +575,7 @@ export function insertShare(storage: StorageContext, share: SyncRelayShareRow): 
         share.selectorJson,
         Math.trunc(share.createdAtMs),
       );
+    if (share.labels) storage.setShareLabels(share.shareId, share.labels, share.createdAtMs);
   }
 
 export function insertLinkCredential(storage: StorageContext, credential: SyncRelayLinkCredentialRow): void {

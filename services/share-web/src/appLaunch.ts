@@ -119,14 +119,15 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     if (launch.stagedExpires !== undefined && launch.stagedExpires <= now()) {launch.staged = undefined; stagedSlots.delete(launch);}
     if (launch.expires <= now()) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
   } }
-  return { matches(request: Request) { return appHost(request.headers.get("host") ?? "") || new URL(request.url).pathname === "/api/apps/launch"; },
+  return { matches(request: Request) { return appHost(request.headers.get("host") ?? "") || ["/api/apps/launch", "/api/apps/summary"].includes(new URL(request.url).pathname); },
     async handle(request: Request): Promise<Response> {
       const url = new URL(request.url), host = request.headers.get("host") ?? ""; prune();
       const statusRequest = url.pathname === "/status" && appHost(host);
       const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
       const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
       if ((request.method !== "POST" && !(bootstrapRequest && request.method === "GET")) || url.search || request.signal.aborted) return refusal();
-      const issue = host === viewerHost && url.pathname === "/api/apps/launch";
+      const summaryRequest = url.pathname === "/api/apps/summary";
+      const issue = host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest);
       if (!issue && !appHost(host)) return refusal();
       const address = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       if (issue) {
@@ -152,6 +153,18 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
             material = await options.resolveNamedMaterial(issueBody.workspaceId, issueBody.publicationId as string, request.headers.get("cookie"), signal);
           } else return refusal();
           if (!material.ok) return material.status === 503 ? unavailable() : refusal();
+          if (summaryRequest) {
+            if (!namedMaterial(material)) return refusal();
+            const response = await relay({publicationId: body.publicationId, material}, "/summary", signal);
+            try {
+              if (response.status >= 500) throw new RelayUnavailable();
+              if (response.status !== 200 || response.redirected || response.headers.has("location")) return refusal();
+              const data = await readBoundedJson(response, 4096, signal);
+              if (!exact(data, "access,sharerName,subjectName") || !["view", "comment", "edit", "owner"].includes(String(data.access)) ||
+                [data.subjectName, data.sharerName].some(value => value !== null && (typeof value !== "string" || value.length > 320))) return refusal();
+              return Response.json(data, {headers});
+            } finally {await response.body?.cancel().catch(() => {});}
+          }
           const current = await descriptor({ publicationId: body.publicationId, material }, signal);
           // The relay authorizes the resolved profile/account cookies before they get a budget.
           const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;

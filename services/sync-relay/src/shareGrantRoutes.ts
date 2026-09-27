@@ -1,3 +1,4 @@
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -397,10 +398,10 @@ export function createShareGrantRoutes(
       const input = await readJsonObject(request);
       if (
         Object.keys(input).some(
-          (key) => key !== "paths" && key !== "versionId" && key !== "access",
+          (key) => key !== "paths" && key !== "versionId" && key !== "access" && key !== "subjectName" && key !== "sharerName",
         )
       ) {
-        throw badRequest("A link accepts only access, paths, and versionId.");
+        throw badRequest("A link accepts only access, paths, versionId, subjectName, and sharerName.");
       }
       const access = validatePublicLinkAccess(input.access, publicEditRelease);
       const validation = validateShareSelector({
@@ -421,6 +422,7 @@ export function createShareGrantRoutes(
         workspaceId: route.workspaceId,
         granterUserId: actor.userId,
         selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName), sharerName: normalizeShareLabel(input.sharerName)},
         createdAtMs,
       };
       const grant = {
@@ -611,6 +613,7 @@ export function createShareGrantRoutes(
             workspaceId: route.workspaceId,
             granterUserId: actor.userId,
             selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName), sharerName: normalizeShareLabel(input.sharerName)},
             createdAtMs,
           },
           grant: {
@@ -667,6 +670,7 @@ export function createShareGrantRoutes(
           workspaceId: route.workspaceId,
           granterUserId: actor.userId,
           selectorJson: JSON.stringify(selector),
+        labels: {subjectName: normalizeShareLabel(input.subjectName), sharerName: normalizeShareLabel(input.sharerName)},
           createdAtMs,
         },
         grant: {

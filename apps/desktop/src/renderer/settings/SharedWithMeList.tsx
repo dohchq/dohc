@@ -1,3 +1,4 @@
+import {shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { ipcErrorMessage } from "../ipcError";
 import { useEffect, useRef, useState } from "react";
 import type {
@@ -50,12 +51,7 @@ const FOLDER_LEFT_NOTICE =
 
 function selectorLabel(share: RelayShareReceivedRow): string {
   if (!share.selector) return "Unreadable share";
-  if (share.selector.versionId) {
-    const suffix =
-      share.selector.paths.length > 0 ? ` (${share.selector.paths.join(", ")})` : "";
-    return `Version ${share.selector.versionId === "main" ? "Main" : share.selector.versionId}${suffix}`;
-  }
-  return share.selector.paths.join(", ") || "Everything";
+  return share.subjectName ?? shareSubjectFallback(share.selector);
 }
 
 // Ops this mount's pulls skipped, from the mount RECORD. The skip is durable
@@ -402,7 +398,7 @@ export function SharedWithMeList(props: {
                 ) : null}
               </div>
               <div className="truncate text-[11px] text-subtle">
-                {`From ${share.granterEmail ?? "another dohc user"}`}
+                {`From ${share.sharerName ?? share.granterEmail ?? "the owner"}`}
                 {mounted
                   ? ` — in this workspace as shared-with-me/${mounted.label}${
                       mounted.damaged

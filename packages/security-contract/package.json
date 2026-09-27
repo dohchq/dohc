@@ -17,6 +17,7 @@
     "./engine-path-floor": "./src/enginePathFloor.ts",
     "./secret-key-envelope": "./src/secretKeyEnvelope.ts",
     "./chat-wire-ids": "./src/chatWireIds.ts",
+    "./share-labels": "./src/shareLabels.ts",
     "./share-grant": "./src/shareGrant.ts",
     "./share-selector": "./src/shareSelector.ts",
     "./share-discussion": "./src/shareDiscussion.ts",

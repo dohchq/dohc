@@ -26,6 +26,7 @@ function fixture() {
         if (!active) return new Response(null, { status: 403 });
         const url = new URL(request.url);
         expect(url.pathname).toContain(`/sync/link/app-publications/${publicationId}`);
+        if (url.pathname.endsWith("/summary")) return Response.json({subjectName: "Trip planner", sharerName: "Ana", access: "comment"});
         if (url.pathname.endsWith(`/blobs/${file.sha256}`)) return new Response(bytes, { headers: { "content-type": file.contentType } });
         if (url.pathname.endsWith("/backend/invoke")) {
           const body = await request.json();
@@ -50,7 +51,8 @@ function fixture() {
     const call = (path: string, body: unknown = "", custom: Record<string, string> = {}) => post(origin + path, body, { origin, cookie, "x-dohc-app-proof": proof, ...custom });
     return { html, call };
   };
-  return { issue, open, resolutions, requests, revoke() { active = false; }, narrow() { revision++; }, disconnect() { relayDown = true; }, failMaterial() { materialDown = true; } };
+  const summary = (cookie = "account=owner-session") => post(`${config.viewerOrigin}/api/apps/summary`, {workspaceId, publicationId}, {origin: config.viewerOrigin, cookie});
+  return { summary, issue, open, resolutions, requests, revoke() { active = false; }, narrow() { revision++; }, disconnect() { relayDown = true; }, failMaterial() { materialDown = true; } };
 }
 
 it("launches a signed-in app without exposing account cookies or named credentials to its document", async () => {
@@ -90,4 +92,11 @@ it("distinguishes unavailable named session resolution and relay transport from 
   const f = fixture(), app = await f.open();
   f.disconnect(); expect((await app.call("/status")).status).toBe(503);
   f.failMaterial(); expect((await f.issue()).status).toBe(503);
+});
+
+it("names an authorized named app without issuing a launch or exposing labels to probes", async () => {
+  const f = fixture();
+  expect(await (await f.summary()).json()).toEqual({subjectName: "Trip planner", sharerName: "Ana", access: "comment"});
+  expect((await f.summary("account=attacker")).status).toBe(404);
+  f.revoke(); const response = await f.summary(); expect(response.status).toBe(404); expect(await response.text()).not.toContain("Trip planner");
 });

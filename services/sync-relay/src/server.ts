@@ -490,10 +490,11 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     namedBrowserInvitation,
-  } = createShareSummaries(lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
+  } = createShareSummaries((shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
     storage,
+    nowMs,
     claimPendingShares,
     lookupUserEmail,
     requireShareAction,
@@ -1152,7 +1153,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
         (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
-         parts[5] === "descriptor")) {
+         parts[5] === "descriptor" || parts[5] === "summary")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {

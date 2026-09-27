@@ -399,6 +399,8 @@ function mapRelayShareListing(
       shareId: row.shareId,
       ...selector,
       granterEmail: row.granterEmail ?? null,
+      subjectName: row.subjectName,
+      sharerName: row.sharerName,
     });
   }
   return { granted, received };

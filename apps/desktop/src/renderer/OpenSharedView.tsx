@@ -1,3 +1,4 @@
+import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
@@ -78,6 +79,7 @@ export function OpenSharedView(props: {
   resolvedShare?: {
     shareId: string;
     shareCode: string;
+    share?: RelayShareReceivedRow;
   };
   // Present when opened from inside a workspace: enables the default
   // "Add to this workspace" mode (a shared-with-me/ mount). Absent on
@@ -94,6 +96,8 @@ export function OpenSharedView(props: {
       : { kind: "checking" },
   );
   const [code, setCode] = useState("");
+  const [loadedPreview, setPreview] = useState<RelayShareReceivedRow | null>(null);
+  const preview = props.resolvedShare?.share ?? loadedPreview;
   // The folder the person chose, or the default dohc suggested for this
   // share. `chosen` wins; `suggested` counts only for the share it answers.
   const [chosen, setChosen] = useState<string | null>(null);
@@ -105,7 +109,7 @@ export function OpenSharedView(props: {
   const [pastedLiveEditing, setPastedLiveEditing] = useState<ReadonlyMap<string, boolean>>(
     () => new Map(),
   );
-  const accessLookups = useRef(new Map<string, Promise<boolean>>());
+  const accessLookups = useRef(new Map<string, Promise<RelayShareReceivedRow | null>>());
   const [signingIn, setSigningIn] = useState(false);
   const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
@@ -163,25 +167,27 @@ export function OpenSharedView(props: {
   // Only a pasted code has an unknown grant, and only a signed-in session
   // can ask the relay about it. A mode the person picked needs no answer.
   const accessShareId =
-    props.mountInto && !props.resolvedShare && pickedMode === null && gate.kind === "signed-in"
+    !props.resolvedShare && gate.kind === "signed-in"
       ? shareId
       : null;
-  const checkingAccess = accessShareId !== null && !pastedLiveEditing.has(accessShareId);
+  const checkingAccess = pickedMode === null && accessShareId !== null && !pastedLiveEditing.has(accessShareId);
   useEffect(() => {
     const request = accessRequests.next();
+    setPreview(null);
     if (accessShareId === null) return;
     // One relay request per share id: a code pasted again reuses its answer.
     let lookup = accessLookups.current.get(accessShareId);
     if (lookup === undefined) {
       lookup = bridge()
         .getRelayReceivedShare({ shareId: accessShareId })
-        .then((result) => result.found && opensForLiveEditing(result.share))
-        .catch(() => false);
+        .then((result) => result.found ? result.share : null)
+        .catch(() => null);
       accessLookups.current.set(accessShareId, lookup);
     }
-    void lookup.then((live) => {
+    void lookup.then((share) => {
       if (!accessRequests.isCurrent(request)) return;
-      setPastedLiveEditing((current) => new Map(current).set(accessShareId, live));
+      setPreview(share);
+      setPastedLiveEditing((current) => new Map(current).set(accessShareId, share !== null && opensForLiveEditing(share)));
     });
   }, [accessShareId, accessRequests]);
 
@@ -316,6 +322,9 @@ export function OpenSharedView(props: {
         )}
       </div>
 
+      {preview?.shareId === shareId && <p data-testid="open-share-summary" className="m-0 text-[13px] text-ink">
+        {preview.subjectName ?? shareSubjectFallback(preview.selector)} · {preview.sharerName ?? preview.granterEmail ?? "the owner"} · {shareAccessLabel(preview.access)} access
+      </p>}
       {props.mountInto ? (
         <div className="flex flex-col gap-1.5">
           <SectionLabel>Open it</SectionLabel>

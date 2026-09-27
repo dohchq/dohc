@@ -1,3 +1,4 @@
+import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
 import { PublishedApps } from "./PublishedApps";
@@ -403,6 +404,7 @@ function viewMeta(value: unknown): ViewMeta | null {
   }
   return {
     access,
+    subjectName: normalizeShareLabel(record.subjectName),
     effectiveSelector: {
       paths: selectorRecord.paths as string[],
       versionId: selectorRecord.versionId as string | null,
@@ -1303,7 +1305,7 @@ export function App() {
     <div className="viewer">
       <header>
         <div>
-          <p className="eyebrow">Shared by a dohc user</p>
+          <p className="eyebrow">{state.meta.subjectName ?? "Shared with you"}</p>
           <h1>{selected?.path ?? "Shared files"}</h1>
         </div>
         <div className="header-actions">

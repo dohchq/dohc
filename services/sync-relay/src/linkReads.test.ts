@@ -845,6 +845,7 @@ describe("relay capability reads", () => {
       "lastSettledKnown",
       "nextCursor",
       "ok",
+      "subjectName",
     ]);
     expect(Object.keys((projection.files as Array<Record<string, unknown>>)[0]!).sort())
       .toEqual(["blobSha256", "contentKind", "path"]);
@@ -2732,6 +2733,7 @@ describe("relay capability reads", () => {
     const linkMeta = await json(linkMetaResponse);
     expect(linkMeta).toEqual({
       ok: true,
+      subjectName: null,
       effectiveSelector: {
         ...(recipientMeta.selector as Record<string, unknown>),
         access: "view",
@@ -5077,4 +5079,15 @@ describe("relay capability reads", () => {
       callsAfterPublicExhaustion,
     );
   });
+});
+
+it("exposes only the subject label to a valid link capability and stays opaque to probes", async () => {
+  const storage = await newStorage(), h = handler(storage), link = await seed(h);
+  const shareId = storage.getShareGrant(link.grantId)!.shareId;
+  storage.setShareLabels(shareId, {subjectName: "Trip plans", sharerName: "Ana"}, 1);
+  const result = await json(await h(linkRequest(link.capability, "/sync/link/share")));
+  expect(result).toMatchObject({subjectName: "Trip plans", access: "view"});
+  expect(result).not.toHaveProperty("sharerName");
+  const probe = await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"));
+  expect(probe.status).toBe(401); expect(await probe.text()).toBe(LINK_REFUSAL_BODY);
 });
