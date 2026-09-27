@@ -107,6 +107,40 @@ export async function retryFromFailureNotice(
   return result;
 }
 
+/** Try again as the CLI and MCP answer it: a refusal for another computer's run carries the notice that names it. */
+export type AutomationRunRetry =
+  | Exclude<CollectionAutomationRetry, { status: "refused" }>
+  | { status: "refused"; reason: string; notice?: { title: string; body: string } };
+
+/**
+ * Try again for a run named by its automation and claim, as the CLI and MCP
+ * ask for it. A run this computer holds goes to its executor, as Try again
+ * in the ⚡ panel does, and the executor takes its notice back once the run
+ * is queued. For any other run, the notice's rule applies: when this person
+ * sent themselves a failure notice about it from another computer, even one
+ * they dismissed since, the retry is refused with that notice's text, which
+ * names the computer.
+ */
+export async function retryAutomationRun(
+  dependencies: {
+    notices: Pick<NoticeStore, "sentFailure">;
+    installId: string;
+    /** Whether this computer's executor holds the run's claim. */
+    holds(run: { automationId: string; claimId: string }): Promise<boolean>;
+    retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry>;
+  },
+  input: { workspaceId: string; automationId: string; claimId: string; startOver: boolean },
+): Promise<AutomationRunRetry> {
+  const { workspaceId, ...run } = input;
+  if (!(await dependencies.holds(run))) {
+    const sent = await dependencies.notices.sentFailure({ workspaceId, automationId: run.automationId, claimId: run.claimId });
+    if (sent !== null && sent.originInstallId !== dependencies.installId) {
+      return { status: "refused", reason: RETRY_ELSEWHERE, notice: { title: sent.title, body: sent.body } };
+    }
+  }
+  return await dependencies.retry(run);
+}
+
 /** One file's History, as the owner's computer reads it. */
 export interface AutomationsFileHistory {
   /** Waits until every change the engine has seen is in History. */

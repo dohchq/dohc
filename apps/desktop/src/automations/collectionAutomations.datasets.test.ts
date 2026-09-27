@@ -257,6 +257,8 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     withDatasetHost: async (work, open) => {
       opened.push(open);
       if (!hostOpen && !open) return null;
+      // As in main, an opened host serves the executor until it closes.
+      hostOpen = true;
       const override = indexed;
       const current = override === null ? host.automations : { ...host.automations,
         datasets: () => ({ definitions: [override], failures: [] as Array<{ datasetId: string; error: unknown }> }),
@@ -339,6 +341,15 @@ describe("Collection automations on a dataset", () => {
     expect(run!.applied).toEqual([{ ordinal: 0, writes: [expect.objectContaining({
       kind: "dataset-edit", operationId: STATUS_ONLY, recordId: invoice, fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }],
     })] }]);
+    // Reading the run, as the CLI does, names the change that started it and step 1's edit.
+    expect(await f.executor.run(AUTOMATION, f.claims()[0]!.claimId)).toMatchObject({
+      state: "done",
+      // The owner's edit could be a person's or an agent's, so it names neither.
+      trigger: { kind: "changed", recordId: String(invoice), by: null, depth: 0 },
+      failedStep: null,
+      startsOver: false,
+      steps: [{ step: 1, writes: [expect.objectContaining({ kind: "dataset-edit", recordId: invoice })] }],
+    });
     await f.executor.dispose();
   });
 
@@ -478,6 +489,18 @@ describe("Collection automations on a dataset", () => {
     await f.edit(invoice, { [PAID]: true });
     await f.until(async () => (await f.record(invoice))?.values[STATUS] === "Closed");
     expect(f.opened.every((open) => !open)).toBe(true);
+    await f.executor.dispose();
+  });
+
+  it("opens a closed dataset host when someone asks for an automation's runs, as the panel does", async () => {
+    const f = await world({ hostOpen: false });
+    await f.executor.open();
+    await expect(f.executor.runs(AUTOMATION)).resolves.toEqual([]);
+    expect(f.opened).toContain(true);
+    expect(f.host.automations.subscriptions()).toHaveLength(1);
+    // Try again finds the automation in the dataset's ledger, not "no longer in automations.yaml".
+    await expect(f.executor.retry({ automationId: AUTOMATION, claimId: "dac_unknown", startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." });
     await f.executor.dispose();
   });
 
