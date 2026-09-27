@@ -1,6 +1,37 @@
 import {afterEach, expect, it} from "vitest";
+import {seedLinkGrant, seedDependentGrant} from "./testing";
 import {claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testStorage, testHandler, request, jsonBody, json} from "./testing";
 afterEach(closeTestStorages);
+
+it.each(["named", "link"])("clears labels when the last %s grant is revoked through desktop routes", async kind => {
+  const storage = await testStorage(), handler = testHandler(storage);
+  await claimWorkspace(handler, "owner", "workspace");
+  const shareId = await createShare(handler, "owner", "workspace", {paths: ["trip"], recipientUserId: "ana", subjectName: "Trip"});
+  const named = storage.listActiveShareGrantsForRecipient(shareId, "ana")[0]!;
+  seedLinkGrant(storage, {shareId, grantId: "link", secretHash: "secret"});
+  expect(seedDependentGrant(storage, {shareId, parentGrantId: "link", grantId: "dependent", principalUserId: "lee", createdAtMs: 2500}).ok).toBe(true);
+  const revokeNamed = () => handler(request("owner", `/sync/shares/${shareId}/grants/${named.grantId}/revoke`, jsonBody({workspaceId: "workspace"})));
+  const revokeLink = () => handler(request("owner", `/sync/shares/${shareId}/revoke`, jsonBody({workspaceId: "workspace", grantId: "link", expectedDependentGrantIds: ["dependent"]})));
+  expect((await (kind === "named" ? revokeLink() : revokeNamed())).status).toBe(200);
+  expect(storage.getShareLabels(shareId).subjectName).toBe("Trip");
+  expect((await (kind === "named" ? revokeNamed() : revokeLink())).status).toBe(200);
+  expect(storage.getShareLabels(shareId).subjectName).toBeNull();
+  expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
+  expect((await handler(request("owner", `/sync/shares/${shareId}`, {...jsonBody({subjectName: "Resurrected"}), method: "PUT"}))).status).toBe(404);
+});
+
+it("rolls back the grant revocation when clearing its label fails", async () => {
+  const storage = await testStorage(), handler = testHandler(storage);
+  await claimWorkspace(handler, "owner", "workspace");
+  const shareId = await createShare(handler, "owner", "workspace", {paths: ["trip"], recipientUserId: "ana", subjectName: "Trip"});
+  const grant = storage.listActiveShareGrantsForRecipient(shareId, "ana")[0]!;
+  const db = inspectDatabase(storagePath(storage));
+  db.exec("CREATE TRIGGER fail_label_delete BEFORE DELETE ON sync_relay_share_labels BEGIN SELECT RAISE(ABORT, 'label delete failed'); END");
+  db.close();
+  expect(() => storage.revokeShareGrant({shareId, grantId: grant.grantId, revokedAtMs: 3000})).toThrow("label delete failed");
+  expect(storage.getShareGrant(grant.grantId)?.status).toBe("active");
+  expect(storage.getShareLabels(shareId).subjectName).toBe("Trip");
+});
 it("stores bounded display labels, updates only for the owner, and cascades with the share", async () => {
   const storage = await testStorage(), handler = testHandler(storage);
   await claimWorkspace(handler, "owner", "workspace");

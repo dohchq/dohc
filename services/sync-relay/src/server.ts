@@ -343,15 +343,18 @@ export function createSyncRelayHandler({
   // delivery work, so sharing takes the same time whether or not the
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
-    const labels = new Map<string, Promise<string>>();
+    const labels = new Map<string, Promise<{senderLabel: string; senderEmail: string | null}>>();
     for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
       try {
         let label = labels.get(granterUserId);
         if (label === undefined) {
-          label = shareSenderLabel(granterUserId);
+          label = (async () => {
+            const senderEmail = await lookupUserEmail?.(granterUserId) ?? null;
+            return {senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail};
+          })();
           labels.set(granterUserId, label);
         }
-        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+        storage.noticeShareReceived({ grantId, ...await label, nowMs: nowMs() });
       } catch (error) {
         console.error("[sync-relay] share notice failed", error);
       }

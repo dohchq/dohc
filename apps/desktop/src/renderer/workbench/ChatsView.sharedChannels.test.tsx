@@ -22,6 +22,21 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
+  it("keeps the account email visible beside long invitation labels", async () => {
+    const subject = "Long group subject ".repeat(8), name = "Long sender name ".repeat(8), email = "account@example.test";
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({received: [{
+      shareId: "share-invite", subjectName: subject, sharerName: name,
+      channelWireId: "wire-invite", access: "read-write", granterEmail: email,
+    }]}));
+    renderView();
+    const address = await screen.findByText(`(${email})`);
+    expect(address.classList.contains("shrink-0")).toBe(true);
+    expect(address.classList.contains("break-all")).toBe(true);
+    expect(address.closest(".truncate")).toBeNull();
+    expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
+    expect(address.parentElement?.parentElement?.title).toBe(`${subject} · ${name.trim()} (${email})`);
+  });
+
   it("fails closed when sharing metadata is unavailable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],

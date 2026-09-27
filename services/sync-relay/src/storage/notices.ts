@@ -144,6 +144,7 @@ export interface NoticeShareReceivedInput {
   grantId: string;
   // The granter's name, derived by the relay.
   senderLabel: string;
+  senderEmail: string | null;
   nowMs: number;
 }
 
@@ -223,8 +224,7 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
       if (found.state === "ended") return void settle();
       if (found.state === "wait") return;
       const { share, recipientUserId } = found;
-      const senderLabel = input.senderLabel !== "the owner" && Array.from(input.senderLabel).length <= NOTICE_SENDER_LABEL_MAX_CHARS
-        ? input.senderLabel : "Someone";
+      const senderLabel = shareNoticeSender(input.senderLabel, input.senderEmail);
       const title = found.title(senderLabel);
       const noticeId = noticeIdFrom(share.granterUserId, `share-received:${input.grantId}`);
       const existing = storage.db
@@ -252,6 +252,17 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
     if (!(error instanceof RelayError) || error.code !== "notice_list_full") throw error;
     storage.tx(settle);
   }
+}
+
+function shareNoticeSender(full: string, email: string | null): string {
+  const shorten = (value: string, limit: number) => [...value].length <= limit
+    ? value : `${[...value].slice(0, limit - 1).join("")}…`;
+  const name = email && full.endsWith(` (${email})`) ? full.slice(0, -email.length - 3) : full === email ? "" : full;
+  if (email && [...email].length <= NOTICE_SENDER_LABEL_MAX_CHARS) {
+    const room = NOTICE_SENDER_LABEL_MAX_CHARS - [...email].length - 3;
+    return name && room > 1 ? `${shorten(name, room)} (${email})` : email;
+  }
+  return shorten(name && name !== "the owner" ? name : email ?? "Someone", NOTICE_SENDER_LABEL_MAX_CHARS);
 }
 
 // "Ana shared Trip with you", naming what the share holds and shortening the

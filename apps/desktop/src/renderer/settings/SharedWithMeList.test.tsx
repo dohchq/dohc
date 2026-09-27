@@ -578,3 +578,16 @@ it("names the received subject and sharer beside its access", async () => {
   const row = await screen.findByTestId("shared-with-me-row");
   expect(row.textContent).toContain("Trip plans"); expect(row.textContent).toContain("From Ana (ana@example.test)"); expect(row.textContent).toContain("Comment");
 });
+
+it("keeps a long sender email outside the truncating subject and name", async () => {
+  const name = "Long sender name ".repeat(10), email = "account@long.example.test", subject = "Trip plans ".repeat(15);
+  bridgeMock.getWorkspaceRegistry.mockResolvedValue({workspaces: []});
+  bridgeMock.listRelayShares.mockResolvedValue({received: [{shareId: "trip", subjectName: subject, sharerName: `${name.trim()} (${email})`, granterEmail: email, access: "comment", selector: {paths: ["docs"], versionId: null}}]});
+  render(<SharedWithMeList workspaceId={WORKSPACE_ID}/>);
+  const address = await screen.findByText(`(${email})`);
+  expect(address.classList.contains("shrink-0")).toBe(true);
+  expect(address.classList.contains("break-all")).toBe(true);
+  expect(address.closest(".truncate")).toBeNull();
+  expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
+  expect(screen.getByTitle(subject.trim()).classList.contains("truncate")).toBe(true);
+});

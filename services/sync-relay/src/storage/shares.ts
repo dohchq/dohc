@@ -380,6 +380,10 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
           )
           .run(revokedAtMs, grant.grantId);
       }
+      storage.db.prepare(`DELETE FROM sync_relay_share_labels WHERE share_id = ?
+        AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
+          WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
+        .run(grant.shareId, grant.shareId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 

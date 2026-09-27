@@ -153,8 +153,8 @@ describe("a notice when a share reaches a person", () => {
     const shareId = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
     seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret") });
     seedDependentGrant(storage, { shareId, parentGrantId: "link-1", grantId: "from-link-lee", principalUserId: "lee", createdAtMs: CLOCK });
-    storage.noticeShareReceived({ grantId: "from-link-lee", senderLabel: "Owner", nowMs: CLOCK });
-    storage.noticeShareReceived({ grantId: "link-1", senderLabel: "Owner", nowMs: CLOCK });
+    storage.noticeShareReceived({ grantId: "from-link-lee", senderLabel: "Owner", senderEmail: null, nowMs: CLOCK });
+    storage.noticeShareReceived({ grantId: "link-1", senderLabel: "Owner", senderEmail: null, nowMs: CLOCK });
     expect(await notices(h, "lee")).toEqual([]);
   });
 
@@ -361,7 +361,21 @@ it("uses the account sender and states the shared subject and access in Notices"
 it("never shows a truncated account email as the notice sender", async () => {
   const {h} = await relay({lookupUserDisplayName: () => "Helpdesk Team XYZ", lookupUserEmail: () => "it@company.com.phish.example"});
   await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana", subjectName: "Reset your password"});
-  expect(await notices(h, "ana")).toEqual([expect.objectContaining({senderLabel: "Someone", title: "Someone shared Reset your password with you", body: "View access · From Helpdesk Team XYZ (it@company.com.phish.example)"})]);
+  expect(await notices(h, "ana")).toEqual([expect.objectContaining({senderLabel: "Helpdesk… (it@company.com.phish.example)", title: "Helpdesk… (it@company.com.phish.example) shared Reset your password with you", body: "View access · From Helpdesk Team XYZ (it@company.com.phish.example)"})]);
+});
+it.each([
+  {name: "A very long account name", email: "a".repeat(27) + "@example.test", expected: "a".repeat(27) + "@example.test"},
+  {name: "😀".repeat(39), email: null, expected: "😀".repeat(39)},
+  {name: "Ana", email: "a".repeat(40) + "@example.test", expected: "Ana"},
+  {name: null, email: "a".repeat(40) + "@example.test", expected: "a".repeat(39) + "…"},
+])("keeps a bounded identifiable notice sender: $expected", async ({name, email, expected}) => {
+  const {h} = await relay({lookupUserDisplayName: () => name, lookupUserEmail: () => email});
+  await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana"});
+  const [notice] = await notices(h, "ana");
+  expect(notice?.senderLabel).toBe(expected);
+  expect(Array.from(notice!.senderLabel!).length).toBeLessThanOrEqual(40);
+  expect(notice?.title).toContain(expected);
+  expect(notice?.body).toContain(email ? name ? `${name} (${email})` : email : name);
 });
 it("uses a sentence-case notice sender when account details are absent", async () => {
   const {h} = await relay({lookupUserDisplayName: () => null, lookupUserEmail: () => null});
