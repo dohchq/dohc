@@ -28,7 +28,7 @@ it('rejects invalid and oversized requests before relay access',async()=>{
   expect((await forward(list,relay,'text/plain')).status).toBe(404);expect(calls).toBe(0);
 });
 it('maps authentication refusals, preserves actionable statuses, and refuses redirects',async()=>{
-  for(const status of [400,401,403,404,409,413,429,500])expect((await forward(list,async()=>new Response(null,{status}))).status).toBe(404);
+  for(const status of [400,401,403,404,409,413,429,500,503])expect((await forward(list,async()=>new Response(null,{status}))).status).toBe(status>=500?503:404);
   expect((await forward(list,async()=>new Response(null,{status:302,headers:{location:'https://elsewhere.example'}}))).status).toBe(404);
 });
 it('rejects malformed and oversized relay responses',async()=>{

@@ -17,7 +17,7 @@ export function createLinkAppPublicationRoutes(options: {
   publicEditRelease?: PublicEditRelease;
   nowMs(): number;
   requireLinkRead(request: Request, capabilityLimiter: TokenBucketLimiter, grantLimiter: TokenBucketLimiter): {
-    capabilityToken: string; capability: ValidatedLinkCapability; assertAdmitted(): void;
+    capabilityToken: string; capability: ValidatedLinkCapability;
   };
   capabilityLimiter: TokenBucketLimiter;
   grantLimiter: TokenBucketLimiter;
@@ -27,7 +27,7 @@ export function createLinkAppPublicationRoutes(options: {
   const limits = options.limits && {...options.limits};
   return (request: Request, route: LinkAppPublicationRoute): Response => {
     if (!limits || request.headers.has("cookie")) throw notFound();
-    const {capability, assertAdmitted} = options.requireLinkRead(request, options.capabilityLimiter, options.grantLimiter);
+    const {capability} = options.requireLinkRead(request, options.capabilityLimiter, options.grantLimiter);
     const profileSecret = request.headers.get("x-dohc-link-profile-secret");
     if (profileSecret === null || !LINK_SECRET_PATTERN.test(profileSecret)) throw notFound();
     if (request.method !== "GET") throw relayError("method_not_allowed");
@@ -40,7 +40,7 @@ export function createLinkAppPublicationRoutes(options: {
         limits, publicEditRelease: options.publicEditRelease, cursor};
       const signal = AbortSignal.any([request.signal, options.storage.unavailable]);signal.throwIfAborted();
       const {page, assertCurrent} = options.storage.listLinkAppPublications({...input, nowMs: options.nowMs()});
-      assertAdmitted();
+
       const body = JSON.stringify(page), bytes = new TextEncoder().encode(body);
       const release = options.streams.admitLinkBlobBytes(capability.grantId, bytes.byteLength);
       if (!release) throw relayError("link_read_rate_limited");
@@ -67,7 +67,7 @@ export function createLinkAppPublicationRoutes(options: {
     const pinned = {...input, expectedAuthorityRevision: admitted.descriptor.authorityRevision};
     const file = route.sha256 ? admitted.descriptor.files.find(file => file.sha256 === route.sha256) : undefined;
     if (route.sha256 && (!file || file.byteLength > MAX_BLOB_BYTES)) throw notFound();
-    assertAdmitted();
+
     const metadata = file ? null : new TextEncoder().encode(JSON.stringify(admitted.descriptor));
     const byteLength = file?.byteLength ?? metadata!.byteLength;
     const retainedByteLength = byteLength + limits.maxMetadataBytes;

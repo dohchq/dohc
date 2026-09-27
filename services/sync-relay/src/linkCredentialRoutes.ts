@@ -51,7 +51,7 @@ export function createLinkCredentialRoutes(
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
     grantRateLimiter: TokenBucketLimiter,
-  ) => { capabilityToken: string; capability: ValidatedLinkCapability; assertAdmitted(): void },
+  ) => { capabilityToken: string; capability: ValidatedLinkCapability },
   nowMs: () => number,
   newId: () => string,
   newGrantId: () => string,
@@ -292,12 +292,12 @@ export function createLinkCredentialRoutes(
     if (!hasValidRelayExchangeKey(request)) return refused();
     if (request.body !== null) return refused();
     try {
-      const { capabilityToken, capability, assertAdmitted } = requireLinkRead(
+      const { capabilityToken, capability } = requireLinkRead(
         request,
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
-      assertAdmitted();
+
       const code = newLinkHandoffCode();
       if (!LINK_SECRET_PATTERN.test(code)) return refused();
       const mintedAtMs = nowMs();

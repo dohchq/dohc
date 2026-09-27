@@ -73,7 +73,7 @@ it("preserves refusals and conflicts while hiding authentication details and ser
   for (const status of [400, 401, 403, 404, 409, 413, 429, 500]) {
     let cancelled = false;
     const response = await forward(invoke, async () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status }));
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(status >= 500 ? 503 : 404);
     expect(cancelled).toBe(true);
   }
   expect((await forward(invoke, async () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example" } }))).status).toBe(404);

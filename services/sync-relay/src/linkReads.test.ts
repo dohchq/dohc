@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -57,18 +58,29 @@ const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-link-reads";
 const UNKNOWN_CAPABILITY = "z".repeat(43);
-it("keeps hidden blobs and bad credentials opaque even when the read budget is exhausted", async () => {
+it("bounds storage work with the same rate refusal for every target after authentication", async () => {
   const storage = await newStorage();
-  const h = handler(storage, {linkReadRateLimiter: new TokenBucketLimiter(1, 0.000001, 10)});
+  const h = handler(storage, {linkReadRateLimiter: new TokenBucketLimiter(1, 0.000001, 10),
+    appPublicationLimits: {maxFiles: 10, maxMetadataBytes: 16_384, maxBundleBytes: 4096}, appCollectionPolicy: {maxCreatesPerGrant: 10}});
   const seeded = await seed(h);
   expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
   const limited = await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`));
   expect(limited.status).toBe(429);
   expect(await limited.json()).toEqual({ok: false, code: "link_read_rate_limited", error: "This link has reached its request limit. Try again later."});
-  for (const [capability, sha] of [[seeded.capability, seeded.hiddenSha], [seeded.capability, sha256("missing")], [UNKNOWN_CAPABILITY, seeded.sharedSha]]) {
-    const refused = await h(linkRequest(capability!, `/sync/link/blobs/${sha}`));
-    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  const lookup = vi.spyOn(storage, "readCurrentFileState");
+  const publications = vi.spyOn(storage, "listLinkAppPublications");
+  const collection = vi.spyOn(storage, "authorizeLinkAppCollection");
+  for (const path of ["/sync/link/current", `/sync/link/blobs/${seeded.hiddenSha}`, `/sync/link/blobs/${sha256("missing")}`,
+    "/sync/link/app-publications", `/sync/link/app-publications/${"a".repeat(64)}/collection?authorityRevision=1&limit=5`]) {
+    const refused = await h(linkRequest(seeded.capability, path, {headers: {"x-dohc-link-profile-secret": "p".repeat(43)}}));
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({code: "link_read_rate_limited"});
   }
+  expect(lookup).not.toHaveBeenCalled();
+  expect(publications).not.toHaveBeenCalled();
+  expect(collection).not.toHaveBeenCalled();
+  const refused = await h(linkRequest(UNKNOWN_CAPABILITY, `/sync/link/blobs/${seeded.sharedSha}`));
+  expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
 });
 const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found"}';
 const EPOCH_1 = "epoch-1";
@@ -753,7 +765,7 @@ describe("relay capability reads", () => {
           `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=${hold}`,
         ),
       );
-      expect(invalid.status, `hold=${hold}`).toBe(404);
+      expect(invalid.status, `hold=${hold}`).toBe(400);
     }
   });
 
@@ -1971,8 +1983,8 @@ describe("relay capability reads", () => {
         expect(exchange.grantId).toBe(seeded.grantId);
         capability = String(exchange.capabilityToken);
       } else if (failure === "throwing") {
-        expect(failed.status).toBe(404);
-        expect(await json(failed)).toEqual({ok: false, error: "not found"});
+        expect(failed.status).toBe(503);
+        expect(await json(failed)).toEqual(linkRefusalBody("link_live_unavailable"));
       } else {
         expect(failed.status).toBe(404);
         expect(await failed.text()).toBe(LINK_REFUSAL_BODY);

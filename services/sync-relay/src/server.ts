@@ -555,9 +555,8 @@ export function createSyncRelayHandler({
         capability.session.capabilityHash,
         admittedAtMs,
       ) && grantRateLimiter.allow(capability.grantId, admittedAtMs);
-    return { capabilityToken, capability, assertAdmitted() {
-      if (!admitted) throw relayError("link_read_rate_limited");
-    } };
+    if (!admitted) throw relayError("link_read_rate_limited");
+    return { capabilityToken, capability };
   };
 
   const requireFreshLinkRead = (

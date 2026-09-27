@@ -2523,7 +2523,7 @@ describe("share discussion HTTP boundary", () => {
       const response = await test.handler(
         trustedAppend(test.comment, { ...validBody, [field]: `forged-${field}` }),
       );
-      expect(response.status, field).toBe(404);
+      expect(response.status, field).toBe(400);
       expectPrivate(response);
       await response.arrayBuffer();
     }
@@ -2533,7 +2533,7 @@ describe("share discussion HTTP boundary", () => {
       { body: 42, idempotencyKey: "wrong-body-type" },
     ]) {
       const response = await test.handler(trustedAppend(test.comment, malformed));
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(400);
       expectPrivate(response);
       await response.arrayBuffer();
     }
@@ -2573,10 +2573,10 @@ describe("share discussion HTTP boundary", () => {
           ),
         ),
       ];
-      for (const [index, response] of responses.entries()) {
-        expect(response.status).toBe(index === 0 ? 404 : 400);
+      for (const response of responses) {
+        expect(response.status).toBe(400);
         expectPrivate(response);
-        expect(await body(response)).toEqual(index === 0 ? {ok: false, error: "not found"} : {
+        expect(await body(response)).toEqual({
           ok: false, error: "discussion message is invalid", code: "bad_request",
         });
       }
@@ -4028,7 +4028,7 @@ describe("share discussion HTTP boundary", () => {
     const overMax = await test.handler(
       linkRequest(test.view, "/sync/link/discussion?limit=101"),
     );
-    expect(overMax.status).toBe(404);
+    expect(overMax.status).toBe(400);
     expectPrivate(overMax);
   });
 
@@ -5638,7 +5638,7 @@ describe("share discussion HTTP boundary", () => {
     }
   });
 
-  it("keeps every non-state append result behind the generic accountless refusal", async () => {
+  it("preserves validated input errors and keeps unauthorized append results opaque", async () => {
     const test = await fixture();
     const baseline = await genericRefusal(
       await test.handler(
@@ -5678,9 +5678,9 @@ describe("share discussion HTTP boundary", () => {
         idempotencyKey: "reason-invalid-input",
       }),
     );
-    expect(invalidInput.status).toBe(404);
+    expect(invalidInput.status).toBe(400);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({ok: false, error: "not found"});
+    expect(await body(invalidInput)).toEqual({ok: false, error: "discussion message is invalid", code: "bad_request"});
 
     test.storage.appendLinkDiscussionMessage = () => ({ok: false, reason: "rate-limit"});
     const limited = await test.handler(trustedAppend(test.comment, {body: "wait", idempotencyKey: "rate-refusal"}));
@@ -5840,9 +5840,9 @@ describe("share discussion HTTP boundary", () => {
         idempotencyKey: "trusted-invalid-input",
       }),
     );
-    expect(invalidInput.status).toBe(404);
+    expect(invalidInput.status).toBe(400);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({ok: false, error: "not found"});
+    expect(await body(invalidInput)).toEqual({ok: false, error: "discussion message is invalid", code: "bad_request"});
 
     await discussionStateRefusal(
       await test.handler(

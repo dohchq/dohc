@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { loadShareWebConfig } from "./config";
 import {
   createShareWebApplication,
   type CreateShareWebApplicationOptions,
-  EXCHANGE_BUCKET_CAPACITY,
   EXCHANGE_GLOBAL_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
   MAX_SESSIONS_PER_GRANT,
@@ -1016,14 +1016,14 @@ describe("share-web sessions", () => {
       refreshCalls,
       readCapabilities,
     }).toEqual({
-      statuses: [404, 200],
+      statuses: [503, 200],
       refreshCalls: 2,
       readCapabilities: [`LinkCapability ${CAP_ALPHA_2}`],
     });
     expect(afterRetry.headers.get("set-cookie")).toContain("Max-Age=605700");
   });
 
-  it("keeps a near-expiry session when relay refresh answers 500", async () => {
+  it.each([500, 503])("keeps a near-expiry session when relay refresh answers %s", async status => {
     let now = 1_000;
     let refreshCalls = 0;
     const readCapabilities: string[] = [];
@@ -1045,7 +1045,7 @@ describe("share-web sessions", () => {
         }
         if (pathname === "/sync/link-refresh") {
           refreshCalls += 1;
-          return new Response("temporary relay failure", { status: 500 });
+          return new Response("temporary relay failure", { status });
         }
         readCapabilities.push(relayRequest.headers.get("authorization") ?? "");
         return Response.json({ ok: true, access: "view" });
@@ -1165,7 +1165,7 @@ describe("share-web sessions", () => {
       expect((await handler(request(index%2?"/api/exchange":"/api/mcp/exchange",{
         method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
     }
-    for(let index=0;index<EXCHANGE_BUCKET_CAPACITY;index++) {
+    for(let index=0;index<12;index++) {
       expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
     }
     expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
@@ -1476,8 +1476,10 @@ describe("share-web relay call", () => {
     { relay: 409, status: 404 },
     { relay: 413, status: 404 },
     { relay: 429, status: 404 },
-    { relay: 500, status: 404 },
-    { relay: 502, status: 404 },
+    { relay: 500, status: 503 },
+    { relay: 502, status: 503 },
+    { relay: "503, oversized body", status: 503 },
+    { relay: "503, body fails", status: 503 },
     { relay: 204, status: 404 },
     { relay: "network error", status: 404 },
   ];
@@ -1494,6 +1496,10 @@ describe("share-web relay call", () => {
             return new Response(null, { status: 204 });
           case "401, oversized body":
             return new Response(new Uint8Array(2 * 1024 * 1024 + 1), { status: 401 });
+          case "503, oversized body":
+            return new Response(new Uint8Array(2 * 1024 * 1024 + 1), { status: 503 });
+          case "503, body fails":
+            return new Response(new ReadableStream<Uint8Array>({start(controller) {controller.error(new Error("private relay failure"));}}), {status: 503});
           case "401, body fails":
             return new Response(new ReadableStream<Uint8Array>({
               start(controller) {
@@ -1512,16 +1518,16 @@ describe("share-web relay call", () => {
       const answer = await state.call(target);
       const body = await answer.text();
       expect({ relay: outcome.relay, status: answer.status }).toEqual(outcome);
-      if (outcome.status !== 200) expect(body).toBe(shareWebRefusalBody);
+      if (outcome.status !== 200) expect(body).toBe(outcome.status === 503 ? JSON.stringify(linkRefusalBody("link_live_unavailable")) : shareWebRefusalBody);
       expectSecurityHeaders(answer);
-      // The call refreshed first. An opaque target refusal does not evict its session.
+      // Metadata refusal evicts the session; a target refusal keeps it.
       expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
         `LinkCapability ${CAP_ALPHA_2}`,
       ]);
       expect(cookiePairs(answer)).toEqual(opaque ? [] : [state.sessionCookie]);
 
       await (await state.call(target)).body?.cancel();
-      expect(state.calls).toHaveLength(2);
+      expect(state.calls).toHaveLength(opaque && target.name === "meta" ? 1 : 2);
     }
   });
 
@@ -2516,7 +2522,9 @@ describe("share-web protected discussion proxy", () => {
       now = 11_001;
       await vi.advanceTimersByTimeAsync(10_000);
       expect(stalledRefresh?.signal.aborted).toBe(true);
-      await expectDiscussionUnavailable(await pending);
+      const unavailable = await pending;
+      expect(unavailable.status).toBe(503);
+      expect(await unavailable.json()).toEqual(linkRefusalBody("link_live_unavailable"));
 
       const retry = await handler(request("/api/view/discussion", {
         headers: sessionHeaders(state.session, state.cookies),
@@ -3679,12 +3687,12 @@ describe("share-web protected discussion proxy", () => {
       status: 403,
       body: { ok: false, state: "blocked", activityRevision: 11 },
     });
-    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404];
+    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 503];
     for (const [index, status] of genericStatuses.entries()) {
       const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
         status,
-        body: shareWebRefusalBody,
+        body: status === 503 ? JSON.stringify(linkRefusalBody("link_live_unavailable")) : shareWebRefusalBody,
       });
     }
     for (const response of responses) {
@@ -4122,6 +4130,6 @@ it("does not install an Edit renewal when the viewer release is absent", async (
   expect(nearExpiry.headers.get("set-cookie")).toBeNull();
   expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
   now = 901_001;
-  expect((await handle(request("/api/view/meta", {headers}))).status).toBe(404);
+  expect((await handle(request("/api/view/meta", {headers}))).status).toBe(503);
   expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
 });

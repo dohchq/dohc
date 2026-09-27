@@ -113,7 +113,7 @@ export function createDiscussionRoutes(
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
     grantRateLimiter: TokenBucketLimiter,
-  ) => { capabilityToken: string; capability: ValidatedLinkCapability; assertAdmitted(): void },
+  ) => { capabilityToken: string; capability: ValidatedLinkCapability },
   requireFreshLinkRead: (
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
@@ -294,12 +294,12 @@ export function createDiscussionRoutes(
     }
 
     try {
-      const { capabilityToken, capability, assertAdmitted } = requireLinkRead(
+      const { capabilityToken, capability } = requireLinkRead(
         request,
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
-      assertAdmitted();
+
       if (request.method === "GET") {
         const url = new URL(request.url);
         const cursor = discussionCursor.decode(url.searchParams.get("cursor"));
@@ -418,12 +418,12 @@ export function createDiscussionRoutes(
     }
 
     try {
-      const { capabilityToken, capability, assertAdmitted } = requireLinkRead(
+      const { capabilityToken, capability } = requireLinkRead(
         request,
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
-      assertAdmitted();
+
       const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
       const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
       if (observedRevision === null) return privateRefused();

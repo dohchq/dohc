@@ -38,11 +38,8 @@ const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
-export const EXCHANGE_BUCKET_CAPACITY = 12;
-const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
-// Match the relay's global app admission budget. Valid link holders behind
-// one network do not share the malformed-request allowance.
+// Match the relay's global app admission budget.
 export const EXCHANGE_GLOBAL_BUCKET_CAPACITY = 2_400;
 const EXCHANGE_GLOBAL_REFILL_PER_SECOND = 40;
 const MAX_EXCHANGES_IN_FLIGHT = 64;
@@ -854,11 +851,6 @@ export function createShareWebApplication({
     timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   }) : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
-  const exchangeRateLimiter = new TokenBucketLimiter(
-    EXCHANGE_BUCKET_CAPACITY,
-    EXCHANGE_REFILL_PER_SECOND,
-    EXCHANGE_MAX_IPS,
-  );
   const exchangeGlobalRateLimiter = new TokenBucketLimiter(EXCHANGE_GLOBAL_BUCKET_CAPACITY, EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1);
   const exchangeAddressProbes = new TokenBucketLimiter(600, 10, EXCHANGE_MAX_IPS);
   const exchangeAddressInFlight = new Map<string, number>();
@@ -1048,7 +1040,8 @@ export function createShareWebApplication({
 
   async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
     const refreshed = await refreshSession(browser);
-    if (!refreshed.ok) return refused();
+    if (!refreshed.ok) return refreshed.status === 503
+      ? jsonResponse(linkRefusalBody("link_live_unavailable"), {status: 503}) : refused();
     const capabilityToken = browser.session.capabilityToken;
     const current = (): boolean =>
       sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
@@ -1090,11 +1083,18 @@ export function createShareWebApplication({
     );
     try {
       let relayResponse = await fetchRelay(bounded.request);
-      // A refusal can mean an out-of-scope target, so it must not evict the session.
+      // Only share metadata identifies the session itself; target refusals do not.
       if (relayResponse.status === 404) {
+        if (call.path === "/sync/link/share") {
+          sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+        }
         const stale = superseded();
         await relayResponse.body?.cancel().catch(() => undefined);
         return stale ?? refused();
+      }
+      if (relayResponse.status >= 500) {
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_live_unavailable"), {status: 503}));
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1105,7 +1105,7 @@ export function createShareWebApplication({
       if (relayResponse.status === 200) {
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
-      if ([403, 413, 429, 503].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+      if ([403, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
         const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
         const detail = parseLinkRefusal(value, relayResponse.status);
         if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
@@ -1220,15 +1220,14 @@ export function createShareWebApplication({
       exchangeAddressInFlight.set(clientIp, addressPending + 1);
       exchangesInFlight++;
       try {
-        const malformed = () => {exchangeRateLimiter.allow(clientIp, nowMs()); return refused();};
         let secret: string | null = null;
         try {
           if (agent) {
             const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
             if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
           } else secret = await exchangeInput(request);
-        } catch {return malformed();}
-        if (!secret) return malformed();
+        } catch {return refused();}
+        if (!secret) return refused();
         try {
           const bounded = boundedRelayRequest(request.signal, relayUrl, "/sync/link-exchange", {
               method: "POST",

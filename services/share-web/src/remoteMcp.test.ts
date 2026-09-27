@@ -25,6 +25,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
   const calls: Request[] = [];
   let revoked = false;
   let rateLimited: string | undefined;
+  let refusalCode: "link_read_rate_limited" | "link_live_unavailable" = "link_read_rate_limited";
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -38,7 +39,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       const path = new URL(request.url).pathname;
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 401});
-      if (path === rateLimited) return Response.json(linkRefusalBody("link_read_rate_limited"), {status: 429});
+      if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
@@ -70,7 +71,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string) {rateLimited = path;}};
+  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;}};
 }
 
 it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
@@ -82,14 +83,14 @@ it("refuses an out-of-scope blob before requesting rate-limited inventory", asyn
   expect(f.calls.slice(before).map(call => new URL(call.url).pathname)).not.toContain("/sync/link/current");
 });
 
-it("explains metadata limits for discovery but keeps unverified tool targets opaque", async () => {
+it.each(["link_read_rate_limited", "link_live_unavailable"] as const)("returns the same %s metadata refusal for every MCP method", async code => {
   const f = fixture(); const bearer = await f.exchange();
-  f.limit("/sync/link/share");
-  for (const method of ["tools/list", "tools/call"]) {
+  f.limit("/sync/link/share", code);
+  for (const method of ["initialize", "tools/list", "tools/call", "resources/list"]) {
     const response = await f.send("/mcp", {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
       body: JSON.stringify({jsonrpc: "2.0", id: 1, method, ...(method === "tools/call" ? {params: {name: "dohc_read_file", arguments: {blobSha256: withdrawn}}} : {})})});
-    expect(response.status).toBe(method === "tools/list" ? 429 : 404);
-    expect(await response.json()).toEqual(method === "tools/list" ? linkRefusalBody("link_read_rate_limited") : {ok: false, error: "not found"});
+    expect(response.status).toBe(code === "link_read_rate_limited" ? 429 : 503);
+    expect(await response.json()).toEqual(linkRefusalBody(code));
   }
 });
 

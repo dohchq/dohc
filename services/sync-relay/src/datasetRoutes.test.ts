@@ -450,12 +450,12 @@ it("keeps staged files private to their caller and rolls attachment back with a 
   const {file} = await (await f.app("upload", upload)).json();
   const submit = {authorityRevision: 1, operation: "submit", input: {name: "Other", fileId: file.fileId}, idempotencyKey: "submit"};
   const second = {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)};
-  expect((await f.app("invoke", submit, second)).status).toBe(500);
+  expect((await f.app("invoke", submit, second)).status).toBe(503);
   const another = await (await f.app("upload", upload, second)).json();
   expect(another.file.fileId).not.toBe(file.fileId);
   const otherApp = f.publish("a".repeat(64));
   await f.http(`${f.path}/binding`, {publicationId: otherApp, enabled: true});
-  expect((await f.http(`link/app-publications/${otherApp}/backend/invoke`, submit, f.publicHeaders)).status).toBe(500);
+  expect((await f.http(`link/app-publications/${otherApp}/backend/invoke`, submit, f.publicHeaders)).status).toBe(503);
   expect((await f.app("invoke", {...submit, input: {fileId: file.fileId}})).status).toBe(409);
   expect(f.storage.db.prepare("SELECT attached_revision FROM sync_relay_dataset_files WHERE file_id=?").get(file.fileId)!.attached_revision).toBeNull();
   const quota = f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes;

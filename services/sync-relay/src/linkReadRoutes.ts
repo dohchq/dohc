@@ -35,7 +35,7 @@ export function createLinkReadRoutes(
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
     grantRateLimiter: TokenBucketLimiter,
-  ) => { capabilityToken: string; capability: ValidatedLinkCapability; assertAdmitted(): void },
+  ) => { capabilityToken: string; capability: ValidatedLinkCapability },
   requireFreshLinkRead: (
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
@@ -63,7 +63,7 @@ export function createLinkReadRoutes(
       route.route === "link-log"
         ? linkGrantLogReadRateLimiter
         : linkGrantReadRateLimiter;
-    const { capabilityToken, capability, assertAdmitted } = requireLinkRead(
+    const { capabilityToken, capability } = requireLinkRead(
       request,
       capabilityRateLimiter,
       grantRateLimiter,
@@ -71,7 +71,6 @@ export function createLinkReadRoutes(
     if (request.method !== "GET") throw relayError("method_not_allowed");
     const share = storage.getShare(capability.shareId);
     if (!share) throw notFound();
-    if (route.route !== "link-blob") assertAdmitted();
 
     if (route.route === "link-share") {
       const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
@@ -270,7 +269,7 @@ export function createLinkReadRoutes(
     ) {
       throw notFound();
     }
-    assertAdmitted();
+
     const releaseBytes = admitLinkBlobBytes(
       capability.grantId,
       byteLength,

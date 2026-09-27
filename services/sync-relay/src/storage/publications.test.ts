@@ -273,9 +273,9 @@ it("serves only public bundle descriptors and verified bytes through the existin
   expect(await response.json()).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, files: f.published.candidate.files});
   expect(await (await f.http(f.blobPath)).text()).toBe(script.toString());
   expect((await f.http(f.blobPath.replace("authorityRevision=1", "authorityRevision=2"))).status).toBe(404);
-  expect((await f.http(f.blobPath.split("?")[0])).status).toBe(404);
-  expect((await f.http(`${f.path}?authorityRevision=1&authorityRevision=1`)).status).toBe(404);
-  expect((await f.http(`${f.path}?principalId=owner`)).status).toBe(404);
+  expect((await f.http(f.blobPath.split("?")[0])).status).toBe(400);
+  expect((await f.http(`${f.path}?authorityRevision=1&authorityRevision=1`)).status).toBe(400);
+  expect((await f.http(`${f.path}?principalId=owner`)).status).toBe(400);
   expect((await f.http(f.path, {headers: {cookie: "ambient"}})).status).toBe(404);
   expect((await f.http(f.path, {headers: {authorization: "Bearer owner"}})).status).toBe(404);
   const manifest = f.raw.prepare("SELECT manifest_sha256 FROM sync_relay_app_publications").get()!.manifest_sha256;
@@ -472,7 +472,7 @@ it("discovers only currently authorized active apps in bounded pages", async () 
   const first=await firstResponse.json();expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
   expect(first.publications[0]).toEqual({publicationId:ids[0],name:"app"});
   const last=await (await f.http(`/sync/link/app-publications?cursor=${first.nextCursor}`)).json();expect(last.publications).toHaveLength(2);expect(last.nextCursor).toBeNull();
-  expect((await f.http("/sync/link/app-publications?grantId=g")).status).toBe(404);
+  expect((await f.http("/sync/link/app-publications?grantId=g")).status).toBe(400);
   const held=await f.http("/sync/link/app-publications");
   f.storage.withdrawAppPublication({workspaceId:"w",ownerUserId:"owner",publicationId:ids[0]!,expectedAuthorityRevision:1});
   await expect(held.text()).rejects.toThrow();

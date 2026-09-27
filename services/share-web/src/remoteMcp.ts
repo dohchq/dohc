@@ -2,7 +2,7 @@ import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextp
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {opaqueLinkRefusal, relayLinkRefusal} from "./linkRefusal";
+import {relayLinkRefusal} from "./linkRefusal";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
@@ -158,8 +158,7 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
   const parsedBody = request.method === "POST" ? await readBoundedJson(request, 32 * 1024, options.signal) : undefined;
   const metadataResponse = await options.request("/api/view/meta");
   if (!metadataResponse.ok) {
-    const targetCall = parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "tools/call";
-    const result = targetCall ? opaqueLinkRefusal() : await relayLinkRefusal(metadataResponse, options.signal);
+    const result = await relayLinkRefusal(metadataResponse, options.signal);
     await metadataResponse.body?.cancel().catch(() => {});
     return {body: result.body, status: result.status, headers: result.headers};
   }

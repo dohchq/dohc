@@ -332,7 +332,7 @@ it("uses the same authenticated HTTP read and create contract for an agent and b
   const replay=await f.request("POST",f.body,"",{headers:{origin:"https://trusted-app.example"}});expect(await replay.json()).toEqual(receipt);
   const page=await f.request();expect(page.status).toBe(200);expect(page.headers.get("cache-control")).toBe("private, no-store");expect(page.headers.get("access-control-allow-origin")).toBeNull();
   expect(await page.json()).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:null});
-  expect((await f.request("POST",{...f.body,fields:{destination:"Manila"}})).status).toBe(404);
+  expect((await f.request("POST",{...f.body,fields:{destination:"Manila"}})).status).toBe(409);
 });
 
 it.each([{ readFields: ["destination"] }, { readFields: [] }])("refuses collection approvals that imply private submitted fields with readFields $readFields", async ({ readFields }) => {
@@ -392,12 +392,14 @@ it("keeps collection HTTP off by default and rejects ambient or forged authority
   const off=httpFixture({appCollectionPolicy:undefined});expect((await off.request()).status).toBe(404);
   const f=httpFixture();
   for(const headers of [{cookie:"owner"},{authorization:"Bearer owner"},{"x-dohc-link-profile-secret":"bad"}] as Record<string,string>[])expect((await f.request("POST",f.body,"",{headers})).status).toBe(404);
-  expect((await f.request("PUT",f.body)).status).toBe(404);
-  for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"},{...f.body,authorityRevision:1},{...f.body,fields:{destination:null}}])expect((await f.request("POST",body)).status).toBe(404);
+  expect((await f.request("PUT",f.body)).status).toBe(405);
+  for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"}])expect((await f.request("POST",body)).status).toBe(400);
+  expect((await f.request("POST",{...f.body,authorityRevision:1})).status).toBe(404);
+  expect((await f.request("POST",{...f.body,fields:{destination:null}})).status).toBe(400);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
 it.each(["?authorityRevision=2&limit=1&limit=2","?authorityRevision=2&afterPath=a&afterPath=b","?authorityRevision=2&ownerUserId=owner","?authorityRevision=02","?authorityRevision=2&limit=101","?authorityRevision=2&afterPath=%00"])("rejects malformed collection query %s",async query=>{
-  const f=httpFixture();expect((await f.request("GET",undefined,query)).status).toBe(404);
+  const f=httpFixture();expect((await f.request("GET",undefined,query)).status).toBe(400);
 });
 
 it.each(["responses/100%20.md","responses/100 café.md"])("round trips the projected cursor %s",async path=>{
@@ -430,7 +432,7 @@ it("cancels an oversized upload before accepting or enrolling",async()=>{
   const f=httpFixture();let cancelled=false;
   const stream=new ReadableStream<Uint8Array>({pull(controller){controller.enqueue(new Uint8Array(16_385));},cancel(){cancelled=true;}});
   const response=await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers:{...f.headers,"content-type":"application/json"},body:stream,duplex:"half"} as RequestInit));
-  expect(response.status).toBe(404);expect(cancelled).toBe(true);expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+  expect(response.status).toBe(413);expect(cancelled).toBe(true);expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
 function deferredBody() {
   let controller!:ReadableStreamDefaultController<Uint8Array>,reading!:()=>void;
@@ -486,8 +488,8 @@ it("requires both credentials and exact JSON transport before accepting",async()
     const headers=new Headers({...f.headers,"content-type":"application/json"});headers.delete(name);
     expect((await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers,body:JSON.stringify(f.body)}))).status).toBe(404);
   }
-  expect((await f.request("POST",f.body,"",{headers:{"content-type":"text/plain"}})).status).toBe(404);
-  expect((await f.request("POST",f.body,"?authorityRevision=2")).status).toBe(404);
+  expect((await f.request("POST",f.body,"",{headers:{"content-type":"text/plain"}})).status).toBe(400);
+  expect((await f.request("POST",f.body,"?authorityRevision=2")).status).toBe(400);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
 

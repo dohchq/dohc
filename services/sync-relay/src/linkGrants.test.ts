@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { timingSafeEqual } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -5007,6 +5008,7 @@ describe("relay link grants", () => {
     );
     const capability = String(exchanged.capabilityToken);
     expect(limiter.allow(hmac(capability), 2_000)).toBe(true);
+    const replace = vi.spyOn(storage, "replaceLinkSession");
 
     const refused = await h(
       request(null, "/sync/link-refresh", {
@@ -5022,6 +5024,11 @@ describe("relay link grants", () => {
       code: "link_read_rate_limited",
     });
     expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+    storage.revokeShareGrant({shareId: "share-existing", grantId: String(created.grantId), revokedAtMs: 2_000});
+    const revoked = await h(request(null, "/sync/link-refresh", {method: "POST", headers: {authorization: `LinkCapability ${capability}`}}));
+    expect(revoked.status).toBe(404);
+    expect(await json(revoked)).toEqual({ok: false, error: "not found"});
   });
 
   it("spends refreshes from the grant read budget", async () => {
@@ -5537,7 +5544,7 @@ describe("relay link grants", () => {
     ).toBe(missing);
   });
 
-  it("keeps exchange storage failures opaque", async () => {
+  it("keeps exchange storage failure details private and retryable", async () => {
     const storage = await newStorage();
     const throwingStorage = interceptStorage(storage, {
       findLinkGrantByCredentialHash: () => {
@@ -5554,8 +5561,8 @@ describe("relay link grants", () => {
           jsonBody({ secret: "g".repeat(43) }),
         ),
       );
-      expect(response.status).toBe(404);
-      expect(await json(response)).toEqual({ok: false, error: "not found"});
+      expect(response.status).toBe(503);
+      expect(await json(response)).toEqual(linkRefusalBody("link_live_unavailable"));
       expect(errorSpy).toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();
