@@ -1,6 +1,6 @@
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -21,13 +21,13 @@ import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAut
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
 
-type NoticeAction = {
+export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
 };
 
-type Notice = {
+export type Notice = {
   // Sync/update notices use a fixed id; agent notices carry their own
   // per-(workspace, run, kind) id.
   id: string;
@@ -320,6 +320,139 @@ function toneClass(tone: Notice["tone"]): string {
   if (tone === "warning") return "text-warning";
   if (tone === "success") return "text-success";
   return "text-subtle";
+}
+
+// The toast for the newest workspace error, or the notice that something
+// finished. The states page renders it too, so it is its own piece.
+export function WorkspaceErrorToast(props: {
+  error: WorkspaceErrorNotice;
+  onAction?: (id: string) => void;
+  onRetry?: (id: string) => void;
+  onHide?: (id: string) => void;
+}) {
+  const { error } = props;
+  return (
+    <div
+      data-testid={error.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
+      role={error.tone === "success" ? "status" : "alert"}
+      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+    >
+      {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
+      <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+        {error.message}
+      </span>
+      {error.actionLabel && props.onAction ? (
+        <button
+          type="button"
+          data-testid="workspace-shell-error-action"
+          onClick={() => props.onAction?.(error.id)}
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+        >
+          {error.actionLabel}
+        </button>
+      ) : null}
+      {error.canRetry && props.onRetry ? (
+        <button
+          type="button"
+          data-testid="workspace-shell-error-retry"
+          onClick={() => props.onRetry?.(error.id)}
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+        >
+          Try again
+        </button>
+      ) : null}
+      <CopyDetailsButton
+        key={error.id}
+        iconOnly
+        label={error.tone === "success" ? "Copy notice details" : "Copy error details"}
+        data-testid="workspace-shell-error-copy"
+        details={() => error.details}
+      />
+      {props.onHide ? (
+        <button
+          type="button"
+          aria-label={error.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
+          onClick={() => props.onHide?.(error.id)}
+          className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+        >
+          <X size={12} aria-hidden />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+// One row under "On this computer". The states page renders it too.
+export function LocalNoticeRow(props: {
+  notice: Notice;
+  onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  onAction: (action: NoticeAction) => void;
+  onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const { notice } = props;
+  return (
+    <li
+      data-testid={`notice-${notice.id}`}
+      data-notice-row=""
+      tabIndex={-1}
+      onKeyDown={props.onKeyDown}
+      className={ROW_CLASS}
+    >
+      <notice.Icon
+        size={14}
+        aria-hidden
+        className={`mt-0.5 shrink-0 ${toneClass(notice.tone)}`}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[12px] font-medium text-ink">
+            {notice.title}
+          </span>
+          {(notice.actions ?? []).map((action, index) => (
+            <button
+              key={action.label}
+              type="button"
+              disabled={action.disabled}
+              onClick={() => props.onAction(action)}
+              className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50`}
+            >
+              {action.label}
+            </button>
+          ))}
+          {notice.copyText !== undefined ? (
+            <CopyDetailsButton
+              iconOnly
+              label={notice.copyLabel ?? "Copy error details"}
+              data-testid={`notice-${notice.id}-copy`}
+              details={() => notice.copyText ?? ""}
+            />
+          ) : null}
+          {notice.onDismiss ? (
+            <button
+              type="button"
+              data-testid={`notice-${notice.id}-dismiss`}
+              aria-label="Dismiss notice"
+              onClick={props.onDismiss}
+              className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
+            >
+              <X size={11} aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
+          {notice.body}
+        </p>
+        {notice.timeMs !== undefined ? (
+          <time
+            dateTime={new Date(notice.timeMs).toISOString()}
+            className="mt-1 block font-mono text-[10px] text-subtle"
+          >
+            {relativeTime(notice.timeMs)}
+          </time>
+        ) : null}
+      </div>
+    </li>
+  );
 }
 
 export function NoticeCenter(props: {
@@ -1149,53 +1282,12 @@ export function NoticeCenter(props: {
       {open ? null : (
         <div data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
-            <div
-              data-testid={errorToast.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
-              role={errorToast.tone === "success" ? "status" : "alert"}
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              {errorToast.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {errorToast.message}
-              </span>
-              {errorToast.actionLabel && props.onWorkspaceErrorAction ? (
-                <button
-                  type="button"
-                  data-testid="workspace-shell-error-action"
-                  onClick={() => props.onWorkspaceErrorAction?.(errorToast.id)}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                >
-                  {errorToast.actionLabel}
-                </button>
-              ) : null}
-              {errorToast.canRetry && props.onRetryWorkspaceError ? (
-                <button
-                  type="button"
-                  data-testid="workspace-shell-error-retry"
-                  onClick={() => props.onRetryWorkspaceError?.(errorToast.id)}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                >
-                  Try again
-                </button>
-              ) : null}
-              <CopyDetailsButton
-                key={errorToast.id}
-                iconOnly
-                label={errorToast.tone === "success" ? "Copy notice details" : "Copy error details"}
-                data-testid="workspace-shell-error-copy"
-                details={() => errorToast.details}
-              />
-              {props.onHideWorkspaceError ? (
-                <button
-                  type="button"
-                  aria-label={errorToast.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
-                  onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-                >
-                  <X size={12} aria-hidden />
-                </button>
-              ) : null}
-            </div>
+            <WorkspaceErrorToast
+              error={errorToast}
+              onAction={props.onWorkspaceErrorAction}
+              onRetry={props.onRetryWorkspaceError}
+              onHide={props.onHideWorkspaceError}
+            />
           ) : null}
           {sentToast ? (
             <div
@@ -1515,74 +1607,19 @@ export function NoticeCenter(props: {
               ) : null}
             <ul className="m-0 list-none p-0">
               {notices.map((notice) => (
-                <li
+                <LocalNoticeRow
                   key={notice.id}
-                  data-testid={`notice-${notice.id}`}
-                  data-notice-row=""
-                  tabIndex={-1}
+                  notice={notice}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
                   })}
-                  className={ROW_CLASS}
-                >
-                  <notice.Icon
-                    size={14}
-                    aria-hidden
-                    className={`mt-0.5 shrink-0 ${toneClass(notice.tone)}`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate text-[12px] font-medium text-ink">
-                        {notice.title}
-                      </span>
-                      {(notice.actions ?? []).map((action, index) => (
-                        <button
-                          key={action.label}
-                          type="button"
-                          disabled={action.disabled}
-                          onClick={() => runLocalAction(action)}
-                          className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50`}
-                        >
-                          {action.label}
-                        </button>
-                      ))}
-                      {notice.copyText !== undefined ? (
-                        <CopyDetailsButton
-                          iconOnly
-                          label={notice.copyLabel ?? "Copy error details"}
-                          data-testid={`notice-${notice.id}-copy`}
-                          details={() => notice.copyText ?? ""}
-                        />
-                      ) : null}
-                      {notice.onDismiss ? (
-                        <button
-                          type="button"
-                          data-testid={`notice-${notice.id}-dismiss`}
-                          aria-label="Dismiss notice"
-                          onClick={(event) => {
-                            focusPastRow(event.currentTarget);
-                            notice.onDismiss?.();
-                          }}
-                          className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
-                        >
-                          <X size={11} aria-hidden />
-                        </button>
-                      ) : null}
-                    </div>
-                    <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
-                      {notice.body}
-                    </p>
-                    {notice.timeMs !== undefined ? (
-                      <time
-                        dateTime={new Date(notice.timeMs).toISOString()}
-                        className="mt-1 block font-mono text-[10px] text-subtle"
-                      >
-                        {relativeTime(notice.timeMs)}
-                      </time>
-                    ) : null}
-                  </div>
-                </li>
+                  onAction={runLocalAction}
+                  onDismiss={(event) => {
+                    focusPastRow(event.currentTarget);
+                    notice.onDismiss?.();
+                  }}
+                />
               ))}
             </ul>
                 </section>

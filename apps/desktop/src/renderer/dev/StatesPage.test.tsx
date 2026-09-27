@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { StatesPage } from "./StatesPage";
 import { STATES_PAGE_HASH, statesPageRequested } from "./statesRoute";
 
@@ -15,6 +15,7 @@ describe("states page", () => {
   });
 
   it("renders both themes side by side and holds the document light while open", () => {
+    vi.stubGlobal("dohcDesktop", {});
     document.documentElement.dataset.theme = "dark";
     const { unmount } = render(<StatesPage />);
 
@@ -25,8 +26,13 @@ describe("states page", () => {
     for (const title of ["Buttons", "Text inputs", "List rows", "Toasts", "Notices", "Dialog"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
     }
+    // Every forced state names an element the capture can find.
+    for (const mark of document.querySelectorAll<HTMLElement>("[data-force-target]")) {
+      expect(mark.querySelector(mark.dataset.forceTarget ?? "")).not.toBeNull();
+    }
 
     unmount();
     expect(document.documentElement.dataset.theme).toBe("dark");
+    vi.unstubAllGlobals();
   });
 });
