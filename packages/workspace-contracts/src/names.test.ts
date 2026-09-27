@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
 import { scanMentionTokens, normalizeHandle, activeMentionQuery } from "./chatMentions";
 
-const cases: Array<{ name: string; input: string; slug: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/names.json", import.meta.url), "utf8"));
+const cases: Array<{ name: string; input: string; slug: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/shared/names.json", import.meta.url), "utf8"));
 it.each(cases)("shares the engine slug: $name", ({ input, slug }) => {
   expect(nameSlug(input)).toBe(slug);
   expect(nameByteLength(nameSlug(input))).toBeLessThanOrEqual(200);
@@ -27,7 +27,7 @@ it("keeps complete mention offsets and normalizes lookup keys", () => {
   expect(scanMentionTokens("@\u0345abc")).toEqual([]);
 });
 
-const boundaries: { unicodeVersion: string; cases: Array<{ name: string; input: string; maxBytes: number; expected: string }> } = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/name-boundaries.json", import.meta.url), "utf8"));
+const boundaries: { unicodeVersion: string; cases: Array<{ name: string; input: string; maxBytes: number; expected: string }> } = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/shared/name-boundaries.json", import.meta.url), "utf8"));
 it("uses the Unicode version checked by the shared boundary fixtures", () => {
   expect(
     `${process.versions.unicode}.0`,

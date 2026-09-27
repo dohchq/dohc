@@ -4,8 +4,7 @@ use dohc_engine_domain::chats::{
 
 #[test]
 fn shared_unicode_name_fixtures() {
-    let cases: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/names.json")).unwrap();
+    let cases: serde_json::Value = serde_json::from_str(include_str!("shared/names.json")).unwrap();
     for case in cases.as_array().unwrap() {
         let input = case["input"].as_str().unwrap();
         let expected = case["slug"].as_str().unwrap();
@@ -38,7 +37,7 @@ fn unicode_mentions_preserve_marks_and_normalize_keys() {
 fn shared_name_byte_boundaries() {
     use dohc_engine_domain::names::truncate_name;
     let cases: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/name-boundaries.json")).unwrap();
+        serde_json::from_str(include_str!("shared/name-boundaries.json")).unwrap();
     let (major, minor, patch) = unicode_segmentation::UNICODE_VERSION;
     assert_eq!(
         format!("{major}.{minor}.{patch}"),

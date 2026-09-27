@@ -72,7 +72,7 @@ mod diagnostic_tests {
     #[test]
     fn collision_slug_preserves_shared_name_boundaries() {
         let cases: serde_json::Value = serde_json::from_str(include_str!(
-            "../../dohc-engine-domain/tests/fixtures/name-boundaries.json"
+            "../../dohc-engine-domain/tests/shared/name-boundaries.json"
         ))
         .unwrap();
         for case in cases["cases"].as_array().unwrap() {
