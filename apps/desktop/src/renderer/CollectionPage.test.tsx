@@ -361,7 +361,7 @@ describe("CollectionPage", () => {
     ] };
     bridge.listCollectionAutomations.mockResolvedValue(automations as never);
     Object.assign(bridge, {
-      onAutomationFailuresChanged: () => () => undefined,
+      onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     renderPage(bridge);
@@ -402,7 +402,7 @@ describe("CollectionPage", () => {
         cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
       listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
-      onAutomationFailuresChanged: () => () => undefined,
+      onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });
     vi.stubGlobal("dohcDesktop", bridge);

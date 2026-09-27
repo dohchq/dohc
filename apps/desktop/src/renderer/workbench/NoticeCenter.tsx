@@ -6,7 +6,6 @@ import {
   ENGINE_STORE_UPDATE_NEXT_STEP,
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
-  type AutomationFailureNotice,
   type NoticeRow,
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
@@ -83,6 +82,26 @@ export interface SentNotice {
   openable: boolean;
 }
 
+// Notices about one automation, whose Open goes to the automation.
+export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
+  "schedule-skipped", "automation-failed", "automation-switched-off",
+]);
+
+// A failed run's notice offers Try again on the computer that ran it, which
+// holds the run. Anywhere else its text names that computer instead.
+const retriesRun = (notice: NoticeRow): boolean =>
+  notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
+
+// What Copy puts on the clipboard for a failed run's notice.
+const failureDetails = (notice: NoticeRow): string =>
+  errorDetails([
+    ["Notice", notice.title],
+    ["Details", notice.body],
+    ["Automation", notice.target?.automation ?? ""],
+    ["Run", notice.target?.run ?? ""],
+    ["Time", new Date(notice.createdAtMs).toISOString()],
+  ]);
+
 // Sent rows show this many at a time.
 export const SENT_NOTICE_PAGE = 50;
 
@@ -138,19 +157,6 @@ const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
   "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
 
-// Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
-// cap, and the failure reason the reaper records for a run that did not
-// finish. A chain stop is a flag on the failure, not a reason text.
-const AUTOMATION_CHAIN_DEPTH_CAP = 4;
-const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
-
-/** An error text as one sentence: the handler's message rarely ends one. */
-function sentence(text: string): string {
-  const trimmed = text.trim();
-  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
-}
-
-
 // A Collection automation's engine id is "collection:<collection path>#<id>".
 // Its definition lives in the Collection's automations.yaml.
 export function collectionAutomationOf(
@@ -160,71 +166,6 @@ export function collectionAutomationOf(
   const rest = automationId.slice("collection:".length);
   const hash = rest.lastIndexOf("#");
   return hash > 0 ? { collection: rest.slice(0, hash), id: rest.slice(hash + 1) } : null;
-}
-
-// The title and body for one automation's failure notice: what happened,
-// why when the engine recorded a known reason, and the way forward. The two
-// engine-recorded reason codes get their own honest sentences; every other
-// error is the handler's own text. The copy must never claim the handler
-// threw when it did not run at all (chain-stopped) or did not finish
-// (reclaim-exhausted). The way forward is the notice's Try again and Open
-// automation, so the body only states what happened.
-function automationFailureCopy(failure: AutomationFailureNotice): {
-  title: string;
-  body: string;
-} {
-  const count =
-    failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  const name = failure.name ?? collectionAutomationOf(failure.automationId)?.id ?? failure.automationId;
-  if (failure.chainStopped) {
-    return {
-      title: "An automation chain stopped",
-      body:
-        `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${name}" did not run.`,
-    };
-  }
-  if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
-    return {
-      title: `Automation "${name}" did not finish`,
-      body: `${count}dohc stopped retrying a run that did not finish.`,
-    };
-  }
-  return {
-    title: `Automation "${name}" failed`,
-    body: `${count}${sentence(failure.error)}`,
-  };
-}
-
-// One automation failure as a notice, for its row and its toast: the copy,
-// the report Copy puts on the clipboard, and the ways forward. A Collection
-// automation offers Try again, except after a chain stop, and Open
-// automation.
-function automationFailureNotice(
-  failure: AutomationFailureNotice,
-  handlers: {
-    onRetry: ((failure: AutomationFailureNotice) => void) | undefined;
-    onOpen: ((automationId: string) => void) | undefined;
-  },
-): Omit<Notice, "id"> {
-  const collection = collectionAutomationOf(failure.automationId) !== null;
-  const { onRetry, onOpen } = handlers;
-  return {
-    tone: "warning",
-    ...automationFailureCopy(failure),
-    timeMs: failure.updatedAtMs,
-    copyText: errorDetails([
-      ["Automation", failure.automationId],
-      ["Run", failure.claimId],
-      ["Error", failure.error],
-      ["Time", new Date(failure.updatedAtMs).toISOString()],
-    ]),
-    Icon: AlertTriangle,
-    actions: [
-      ...(collection && onOpen ? [{ label: "Open automation", onClick: () => onOpen(failure.automationId) }] : []),
-      ...(collection && !failure.chainStopped && onRetry ? [{ label: "Try again", onClick: () => onRetry(failure) }] : []),
-    ],
-  };
 }
 
 // The one notice for every step a narrower share stopped. It names each
@@ -365,25 +306,11 @@ export function NoticeCenter(props: {
   // invent a title neither of them wrote.
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
   onReviewShareChanges?: (proposalId: string) => void;
-  // Automation failures (ADR 0008): the engine's failed claim rows the
-  // owner has not acknowledged, one notice per automation with the newest
-  // error and a count. Durable — they come back after a restart until
-  // dismissed, and a newer failure re-raises a dismissed one.
-  automationFailures?: readonly AutomationFailureNotice[];
-  onDismissAutomationFailure?: (failure: AutomationFailureNotice) => void;
   // A crash report waiting on this computer. Send report is absent when this
   // build has no report server; main owns the dialog it opens.
   crashReport?: CrashReportNotice | null;
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;
-  // A Collection automation's failed run: run it again, or open the
-  // automation's runs in its Collection. A chain stop cannot run again.
-  onRetryAutomationFailure?: (failure: AutomationFailureNotice) => void;
-  onOpenAutomation?: (automationId: string) => void;
-  // A failure that arrived while the window was open, shown once as a
-  // toast. Closing it keeps its row.
-  automationFailureToast?: AutomationFailureNotice | null;
-  onHideAutomationFailureToast?: () => void;
   // Automation steps that reach more now only because an editor left. Each
   // waits for someone who can edit the Collection to allow it.
   automationHolds?: readonly AutomationHoldNotice[];
@@ -411,6 +338,9 @@ export function NoticeCenter(props: {
   // Run now on a skipped schedule's notice. Resolves to null once the run
   // started here, or to a sentence that says why it did not.
   onRunSentNoticeNow?: (notice: NoticeRow) => Promise<string | null>;
+  // Try again on a failed run's notice. The shell asks first when the run
+  // would start over, and reports why it did not run.
+  onRetrySentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
   // someone dismisses it.
@@ -788,22 +718,6 @@ export function NoticeCenter(props: {
           : {}),
       });
     }
-    for (const failure of props.automationFailures ?? []) {
-      next.push({
-        id: `automation-failure-${failure.automationId}`,
-        ...automationFailureNotice(failure, {
-          onRetry: props.onRetryAutomationFailure,
-          onOpen: props.onOpenAutomation,
-        }),
-        ...(props.onDismissAutomationFailure
-          ? {
-              onDismiss: () =>
-                props.onDismissAutomationFailure?.(failure),
-            }
-          : {}),
-      });
-    }
-
     // Above the sync states: the local save is fine, and this says what is
     // not — live editing for the owner's own documents.
     if (liveDelivery) {
@@ -1009,7 +923,6 @@ export function NoticeCenter(props: {
     props.onSendCrashReport,
     props.onDismissCrashReport,
     props.agentActive,
-    props.automationFailures,
     props.automationHolds,
     props.onAllowAutomationHold,
     props.automationHoldsUnreadable,
@@ -1018,9 +931,6 @@ export function NoticeCenter(props: {
     props.automationStops,
     props.onDismissAutomationStops,
     props.conflictSummaries,
-    props.onDismissAutomationFailure,
-    props.onRetryAutomationFailure,
-    props.onOpenAutomation,
     props.workspaceErrors,
     props.onRetryWorkspaceError,
     props.onWorkspaceErrorAction,
@@ -1070,16 +980,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  const failureToast = useMemo(
-    () =>
-      props.automationFailureToast
-        ? automationFailureNotice(props.automationFailureToast, {
-            onRetry: props.onRetryAutomationFailure,
-            onOpen: props.onOpenAutomation,
-          })
-        : null,
-    [props.automationFailureToast, props.onRetryAutomationFailure, props.onOpenAutomation],
-  );
   useEffect(() => {
     if (errorToast?.tone !== "success" || !props.onHideWorkspaceError) return;
     const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
@@ -1088,11 +988,13 @@ export function NoticeCenter(props: {
   const sentToast = props.sentNoticeToast ?? null;
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
+  // A failure's toast stays until it is closed; any other fades.
+  const sentToastFades = sentToast !== null && sentToast.notice.kind !== "automation-failed";
   useEffect(() => {
-    if (sentToastKey === null || !onHideSentNoticeToast) return;
+    if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
     return () => clearTimeout(timer);
-  }, [sentToastKey, onHideSentNoticeToast]);
+  }, [sentToastKey, sentToastFades, onHideSentNoticeToast]);
 
   // A row about to go takes focus to the next row, or the one before, or
   // the panel, so the keyboard keeps its place in the list.
@@ -1200,13 +1102,35 @@ export function NoticeCenter(props: {
           {sentToast ? (
             <div
               data-testid="sent-notice-toast"
-              role="status"
+              role={sentToastFades ? "status" : "alert"}
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <SenderMark kind={sentToast.notice.senderKind} />
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
               </span>
+              {retriesRun(sentToast.notice) && props.onRetrySentNotice ? (
+                <button
+                  type="button"
+                  data-testid="sent-notice-toast-retry"
+                  onClick={() => {
+                    onHideSentNoticeToast?.();
+                    props.onRetrySentNotice?.(sentToast.notice);
+                  }}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  Try again
+                </button>
+              ) : null}
+              {sentToast.notice.kind === "automation-failed" ? (
+                <CopyDetailsButton
+                  key={sentToastKey}
+                  iconOnly
+                  label="Copy error details"
+                  data-testid="sent-notice-toast-copy"
+                  details={() => failureDetails(sentToast.notice)}
+                />
+              ) : null}
               {sentToast.openable && props.onOpenSentNotice ? (
                 <button
                   type="button"
@@ -1225,48 +1149,6 @@ export function NoticeCenter(props: {
                   type="button"
                   aria-label="Close"
                   onClick={onHideSentNoticeToast}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-                >
-                  <X size={12} aria-hidden />
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {failureToast ? (
-            <div
-              data-testid="automation-failure-toast"
-              role="alert"
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {failureToast.title}. {failureToast.body}
-              </span>
-              {(failureToast.actions ?? []).map((action) => (
-                <button
-                  key={action.label}
-                  type="button"
-                  onClick={() => {
-                    props.onHideAutomationFailureToast?.();
-                    action.onClick();
-                  }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                >
-                  {action.label}
-                </button>
-              ))}
-              <CopyDetailsButton
-                key={`${props.automationFailureToast?.automationId}:${props.automationFailureToast?.generation}`}
-                iconOnly
-                label="Copy error details"
-                data-testid="automation-failure-toast-copy"
-                details={() => failureToast.copyText ?? ""}
-              />
-              {props.onHideAutomationFailureToast ? (
-                <button
-                  type="button"
-                  aria-label="Dismiss automation notice"
-                  onClick={props.onHideAutomationFailureToast}
                   className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
                 >
                   <X size={12} aria-hidden />
@@ -1607,6 +1489,10 @@ export function NoticeCenter(props: {
                       const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
                         ? () => void runSentNoticeNow(notice)
                         : undefined;
+                      const retry = retriesRun(notice) && props.onRetrySentNotice
+                        ? () => props.onRetrySentNotice?.(notice)
+                        : undefined;
+                      const copies = notice.kind === "automation-failed";
                       const running = runningKey === key;
                       const dismissNotice = props.onDismissSentNotice
                         ? () => {
@@ -1650,16 +1536,37 @@ export function NoticeCenter(props: {
                                   {running ? "Starting…" : "Run now"}
                                 </button>
                               ) : null}
+                              {retry ? (
+                                <button
+                                  type="button"
+                                  data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                  onClick={retry}
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                                >
+                                  Try again
+                                </button>
+                              ) : null}
+
                               {openNotice ? (
                                 <button
                                   type="button"
                                   data-testid={`sent-notice-${notice.noticeId}-open`}
                                   aria-busy={busy || undefined}
                                   onClick={openNotice}
-                                  className={`${runNow ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50`}
+                                  className={`${runNow || retry ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50`}
                                 >
-                                  {busy ? "Opening…" : notice.kind === "schedule-skipped" ? "Open automation" : "Open"}
+                                  {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
                                 </button>
+                              ) : null}
+                              {copies ? (
+                                <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
+                                  <CopyDetailsButton
+                                    iconOnly
+                                    label="Copy error details"
+                                    data-testid={`sent-notice-${notice.noticeId}-copy`}
+                                    details={() => failureDetails(notice)}
+                                  />
+                                </span>
                               ) : null}
                               {dismissNotice ? (
                                 <button
@@ -1670,7 +1577,7 @@ export function NoticeCenter(props: {
                                     focusPastRow(event.currentTarget);
                                     dismissNotice();
                                   }}
-                                  className={`${openNotice || runNow ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
+                                  className={`${openNotice || runNow || retry || copies ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
                                 >
                                   <X size={11} aria-hidden />
                                 </button>

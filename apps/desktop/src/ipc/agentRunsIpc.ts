@@ -1,8 +1,5 @@
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  ListAutomationFailuresPayload, ListAutomationFailuresResult, DismissAutomationFailurePayload, type AutomationFailureNotice,
   ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
   StopAgentRunPayload,
@@ -11,9 +8,7 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
-import { automationFailureAckKey, unacknowledgedAutomationFailures } from "../workspaces/registryStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { AgentIntegration, AgentRunRecord } from "../agents/AgentIntegration";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
@@ -31,14 +26,6 @@ export function createAgentRunsIpc<
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
-  withEngineAdapter<Result>(workspace: EngineWorkspace, work: (adapter: Pick<VersionedLiveAdapter, "listAutomationFailures">) => Promise<Result>): Promise<Result | null>;
-  acknowledgeWorkspaceAutomationFailure(workspaceId: string, automationId: string, generation: number): void;
-  /** Dataset automations' failures, from the dataset host's ledger while it is open. */
-  datasetAutomationFailures(workspaceId: string): Promise<Array<Omit<AutomationFailureNotice, "name">>>;
-  notifyAutomationFailuresChanged(workspaceId: string): void;
-  /** A Collection automation's name in its automations.yaml, or null. */
-  automationNameOf(workspaceId: string, automationId: string): string | null;
   requireEngineCapture(workspaceId: string, feature: "Chats"): Promise<{ workspace: Workspace }>;
   linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore, "ensureOpen">;
   agentDispatchStoreHandleFor(workspace: Workspace): { store: Pick<LiveAgentDispatchStoreHandle["store"], "runRecordsForThread"> };
@@ -58,88 +45,13 @@ export function createAgentRunsIpc<
   detectAgentTools(workspaceRoot: string): Promise<AgentToolsResult["tools"]>;
 }) {
   const {
-    registerHandler, assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, acknowledgeWorkspaceAutomationFailure, datasetAutomationFailures, notifyAutomationFailuresChanged,
+    registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     requireEngineCapture, linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace,
     assertAgentRunnableWorkspace, assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,
   } = dependencies;
-
-  function registerAutomationFailures(): void {
-    // Automation failures (ADR 0008): the engine's failed claim rows and the
-    // dataset ledger's — one row per automation with the newest error and a
-    // counting generation — minus what the owner has acknowledged in the
-    // registry.
-    const failuresOf = async (operation: Operation): Promise<Array<Omit<AutomationFailureNotice, "name">> | null> => {
-      const engine = await withEngineAdapter(
-        receivedShareEngine.workspaceForRegistered(operation.workspace),
-        async (adapter) => await adapter.listAutomationFailures(),
-      );
-      if (engine === null) return null;
-      return [
-        ...engine.failures.map((failure) => ({ ...failure, datasetInstance: null })),
-        ...await datasetAutomationFailures(operation.workspace.workspaceId),
-      ];
-    };
-    registerHandler(CHANNELS.listAutomationFailures, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = ListAutomationFailuresPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Automation notice read stopped because this window changed workspaces.",
-        async (operation) => {
-          const failures = await failuresOf(operation);
-          return ListAutomationFailuresResult.parse({
-            failures: unacknowledgedAutomationFailures(
-              failures ?? [],
-              operation.workspace.automationFailureAcks,
-            ).map((failure) => ({
-              ...failure,
-              name: dependencies.automationNameOf(input.workspaceId, failure.automationId),
-            })),
-          });
-        },
-      );
-    });
-
-    // Record that the user has seen an automation's failures. It does not
-    // delete the claim rows — they are the remaining evidence of what failed.
-    // Acknowledging hides the notice; a failure recorded after the render has
-    // a higher generation, so it comes back on its own. The generation is
-    // clamped to what the engine actually holds, so a claimed generation
-    // above the current one cannot pre-acknowledge failures yet to happen.
-    registerHandler(CHANNELS.dismissAutomationFailure, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = DismissAutomationFailurePayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Automation notice update stopped because this window changed workspaces.",
-        async (operation) => {
-          const failures = await failuresOf(operation);
-          if (!failures) {
-            throw new Error("The workspace engine is not running.");
-          }
-          const current = failures.find(
-            (failure) => failure.automationId === input.automationId,
-          );
-          // No failed claims for that automation, or a notice about a
-          // dataset instance that is gone: nothing to acknowledge.
-          if (!current || current.datasetInstance !== input.datasetInstance) return;
-          operation.assertCurrent();
-          acknowledgeWorkspaceAutomationFailure(
-            input.workspaceId,
-            automationFailureAckKey(current),
-            Math.min(input.generation, current.generation),
-          );
-          notifyAutomationFailuresChanged(input.workspaceId);
-        },
-      );
-    });
-  }
 
   function registerChatRunRecords(): void {
     registerHandler(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
@@ -282,5 +194,5 @@ export function createAgentRunsIpc<
     });
   }
 
-  return { registerAutomationFailures, registerChatRunRecords, registerAgentRuns };
+  return { registerChatRunRecords, registerAgentRuns };
 }
