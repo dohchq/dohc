@@ -3320,7 +3320,7 @@ describe("durable link usage inventory", () => {
       }),
     );
     expect([absentKey, wrongKey, wrongSecret, rateLimited].map((response) => response.status))
-      .toEqual([404, 404, 404, 404]);
+      .toEqual([404, 404, 404, 429]);
     expect(await ownerLinkInventoryRow(limited, grantId)).toMatchObject({
       lastUsedAtMs: null,
     });
@@ -5578,10 +5578,10 @@ describe("relay link grants", () => {
       ...jsonBody({secret:value}),headers:{"content-type":"application/json","x-dohc-relay-client-ip":"192.0.2.10"},
     }));
     for(let index=0;index<12;index++) expect((await exchange("z".repeat(43))).status).toBe(404);
-    expect((await exchange("z".repeat(43))).status).toBe(404);
+    expect((await exchange("z".repeat(43))).status).toBe(429);
     for(let index=0;index<100;index++) expect((await exchange(secret)).status).toBe(200);
     storage.revokeShareGrant({shareId:"share-existing",grantId:String(created.grantId),revokedAtMs:2_001});
-    expect((await exchange(secret)).status).toBe(404);
+    expect((await exchange(secret)).status).toBe(429);
     const otherRequest=request(null,"/sync/link-exchange",jsonBody({secret}));
     otherRequest.headers.set("x-dohc-relay-client-ip","192.0.2.11");
     const otherIp=await h(otherRequest);
@@ -5599,8 +5599,8 @@ describe("relay link grants", () => {
     const limitedResponse = await h(
       request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
     );
-    expect(limitedResponse.status).toBe(404);
-    expect(await limitedResponse.json()).toEqual({ok:false,error:"not found"});
+    expect(limitedResponse.status).toBe(429);
+    expect(await limitedResponse.json()).toMatchObject({ok:false,code:"link_read_rate_limited"});
     expect(counted.calls).toHaveLength(1);
 
     expect(limiter.allow("192.0.2.11", 2_000)).toBe(true);
@@ -5617,7 +5617,7 @@ describe("relay link grants", () => {
       input.headers.set("x-dohc-relay-client-ip",ip);return h(input);
     };
     const before=counted.calls.length;
-    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network","z".repeat(43))).status);
+    for(let index=0;index<2_500;index++) expect((await exchange("bad-network","z".repeat(43))).status).toBe(index < 12 ? 404 : 429);
     expect(counted.calls.length-before).toBe(600);
     expect((await exchange("other-network")).status).toBe(200);
     const controller=new AbortController();
@@ -5626,7 +5626,7 @@ describe("relay link grants", () => {
       input.headers.set("x-dohc-relay-client-ip","slow-network");return h(input);
     });
     try {
-      expect((await exchange("slow-network")).status).toBe(404);
+      expect((await exchange("slow-network")).status).toBe(429);
       expect((await exchange("other-network")).status).toBe(200);
     } finally {controller.abort();await Promise.all(pending);}
     expect((await exchange("slow-network")).status).toBe(200);

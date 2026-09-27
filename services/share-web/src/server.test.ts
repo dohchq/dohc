@@ -1151,6 +1151,17 @@ describe("share-web sessions", () => {
     expect(relayCalls).toBe(1);
   });
 
+  it.each(["/api/exchange", "/api/mcp/exchange"])("preserves relay exchange admission for %s without exposing relay details", async path => {
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+      fetchRelay: async () => new Response("private relay details", {status: 429}),
+    });
+    const response = await handler(request(path, exchange(SECRET_ALPHA)));
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe(shareWebRefusalBody);
+    expectSecurityHeaders(response);
+  });
+
   it("admits valid browser and agent exchanges behind one network while bounding malformed requests", async () => {
     let relayCalls = 0;
     const handler = createShareWebHandler({
@@ -1168,7 +1179,7 @@ describe("share-web sessions", () => {
     for(let index=0;index<12;index++) {
       expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
     }
-    expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
+    expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(429);
     expect((await handler(request("/api/exchange",{method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
     expect(relayCalls).toBe(101);
   });
@@ -1180,10 +1191,10 @@ describe("share-web sessions", () => {
     let address=0;
     const exchange=()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":`192.0.${Math.floor(address/250)}.${address++%250}`},body:JSON.stringify({secret:SECRET_ALPHA})}));
     const pending=Array.from({length:64},()=>exchange());
-    expect((await exchange()).status).toBe(404);
+    expect((await exchange()).status).toBe(429);
     release();expect((await Promise.all(pending)).every(response=>response.status===200)).toBe(true);
     for(let index=64;index<EXCHANGE_GLOBAL_BUCKET_CAPACITY;index++) expect((await exchange()).status).toBe(200);
-    expect((await exchange()).status).toBe(404);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
+    expect((await exchange()).status).toBe(429);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
   });
 
   it("keeps another network available during invalid floods and stalled bodies from one address", async () => {
@@ -1193,14 +1204,14 @@ describe("share-web sessions", () => {
         ?Response.json({ok:true,grantId:"grant",capabilityToken:CAP_ALPHA_1,capabilityExpiresAtMs:901_000})
         :new Response(null,{status:404});}});
     const exchange=(ip:string,secret=SECRET_ALPHA)=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":ip},body:JSON.stringify({secret})}));
-    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network",SECRET_BETA)).status);
+    for(let index=0;index<2_500;index++) expect((await exchange("bad-network",SECRET_BETA)).status).toBe(index < 600 ? 404 : 429);
     expect(calls).toBe(600);
     expect((await exchange("other-network")).status).toBe(200);
     const controller=new AbortController();
     const pending=Array.from({length:16},()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":"slow-network"},
       signal:controller.signal,body:new ReadableStream<Uint8Array>(),duplex:"half"} as RequestInit)));
     try {
-      expect((await exchange("slow-network")).status).toBe(404);
+      expect((await exchange("slow-network")).status).toBe(429);
       expect((await exchange("other-network")).status).toBe(200);
     } finally {controller.abort();await Promise.all(pending);}
     expect((await exchange("slow-network")).status).toBe(200);
