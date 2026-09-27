@@ -68,6 +68,20 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RefusalDocumentsParams {
+    workspace_id: String,
+    coordinates: Vec<RefusalCoordinate>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RefusalCoordinate {
+    origin_id: String,
+    origin_seq: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AdoptJoinIdentityParams {
     workspace_id: String,
     replication_epoch: String,
@@ -982,6 +996,43 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "applied": applied }))
+    }
+
+    pub(super) async fn sync_refusal_documents(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RefusalDocumentsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        if params.coordinates.len() > 500
+            || params
+                .coordinates
+                .iter()
+                .any(|key| key.origin_seq < 0 || key.origin_id.len() > 256)
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid refusal coordinates",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let documents = Self::read_under_ctx(
+            &cancellation,
+            "sync.refusalDocuments",
+            open.actor.sync_refusal_documents(
+                open.workspace_id.clone(),
+                params
+                    .coordinates
+                    .into_iter()
+                    .map(|key| (key.origin_id, key.origin_seq))
+                    .collect(),
+            ),
+        )
+        .await?;
+        Ok(json!({"documents": documents}))
     }
 
     pub(super) async fn sync_probe(

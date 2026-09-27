@@ -74,6 +74,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
   VersionedLiveAdapter,
+  WorkspaceDaemonRequester,
   decodeAutomationGroupHandover,
   type AutomationGroupRelayRecord,
   type EngineStoreRefusal,
@@ -257,7 +258,7 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
-import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { createNoticeStore, RefusalDocuments, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -898,6 +899,17 @@ function noticeStore(): NoticeStore {
     session: noticeSession,
     installId: localReactorFallbackId,
     onChanged: notifyNoticesChanged,
+    refusalDocuments: async (workspaceId, coordinates) => {
+      const workspace = findWorkspace(workspaceId);
+      const sessions = desktopEngine.sessions;
+      if (!workspace || !sessions) return [];
+      return sessions.run(workspace, async ({ client, workspace: handle }) => {
+        const result = await new WorkspaceDaemonRequester(client).request("sync.refusalDocuments", {
+          workspaceId, coordinates: coordinates.map(key => ({ originId: key.originId, originSeq: key.originSeq })),
+        }, { workspace: handle });
+        return RefusalDocuments.parse(result).documents;
+      });
+    },
   });
   return cachedNoticeStore;
 }
@@ -3862,6 +3874,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 
 const desktopEngine = createDesktopEngine({
   recordSyncRefusals: (workspace, refusals) => noticeStore().recordSyncRefusals(workspace.workspaceId, refusals),
+  reconcileSyncRefusals: (workspace, paths, current) => noticeStore().reconcileSyncRefusals(workspace.workspaceId, paths, current),
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -5324,6 +5337,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+    reconcileSyncRefusals: workspaceId => noticeStore().reconcileSyncRefusals(workspaceId),
   }));
 
   workspaceEngineIpc.registerHistory();

@@ -113,7 +113,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalDocuments?: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -144,6 +144,7 @@ async function computer(
     installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
+    refusalDocuments: options.refusalDocuments,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
   });
   return state;
@@ -946,8 +947,8 @@ it("keeps sync refusals after restart and never ages out an unreviewed refusal",
   const { notices } = await restarted.store.list();
   expect(notices).toHaveLength(2);
   expect(notices.find(row => row.detail === long.reason)?.body.length).toBeLessThanOrEqual(500);
-  expect(notices.find(row => row.detail === long.reason)?.body).toContain("Review this change on the other computer.");
-  expect(notices[0]).toMatchObject({ store: "local", kind: "sync-refusal", workspaceId: WORKSPACE, body: refusal.reason });
+  expect(notices.find(row => row.detail === long.reason)?.body).not.toContain("x".repeat(20));
+  expect(notices[0]).toMatchObject({ store: "local", kind: "sync-refusal", workspaceId: WORKSPACE });
   await restarted.store.mark(notices, "dismissed", null);
   const again = await computer(null, { directory: first.directory });
   expect((await again.store.list()).notices).toEqual([]);
@@ -977,7 +978,7 @@ it("resumes a large refusal report after restart and dismissal", async () => {
     const current = await computer(null, {directory: first.directory});
     const rows = (await current.store.list()).notices;
     expect(rows).toHaveLength(500);
-    for (const row of rows) seen.add(row.body);
+    for (const row of rows) seen.add(row.detail!);
     await current.store.mark(rows, "dismissed", null);
     refusals.reverse();
     if (page === 0) await expect(current.store.recordSyncRefusals(WORKSPACE, refusals)).rejects.toThrow("Notices are full");
@@ -986,6 +987,55 @@ it("resumes a large refusal report after restart and dismissal", async () => {
   const final = await computer(null, {directory: first.directory});
   const rows = (await final.store.list()).notices;
   expect(rows).toHaveLength(1);
-  seen.add(rows[0]!.body);
+  seen.add(rows[0]!.detail!);
   expect(seen.size).toBe(1_001);
+});
+
+it("names refused files plainly and clears only the recovered document or resolved conflict", async () => {
+  let resolved = false;
+  const refusalDocuments: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] = async (_workspace, keys) => keys.map(key => ({
+    ...key, resolved: resolved && key.originSeq === 1,
+    recoveryRevision: null, recoveryPath: null,
+    document: { versionId: "main", path: `doc-${key.originSeq}.md`, objectId: `object-${key.originSeq}`,
+      lineageClaimId: `lineage-${key.originSeq}`, conflictId: key.originSeq === 1 ? "conflict-a" : null },
+  }));
+  const first = await computer(null, { refusalDocuments });
+  const refusals = [1, 2, 3].map(originSeq => ({ originId: "peer", originSeq, opKind: "ydoc.update", code: "invalid-input", reason: "plaintext projection exceeds 4194304 bytes" }));
+  await first.store.recordSyncRefusals(WORKSPACE, refusals);
+  const notices = (await first.store.list()).notices;
+  expect(notices[0]!.body).toContain("doc-1.md");
+  expect(notices[0]!.body).toContain("Open its conflict and choose a copy.");
+  expect(notices[0]!.body).not.toContain("plaintext projection");
+  expect(notices[0]!.detail).toBe(refusals[0]!.reason);
+  const restarted = await computer(null, { directory: first.directory, refusalDocuments });
+  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "other", path: "doc-2.md" }]);
+  expect((await restarted.store.list()).notices).toHaveLength(3);
+  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc-2.md" }], [refusals[1]!]);
+  expect((await restarted.store.list()).notices).toHaveLength(3);
+  resolved = true;
+  await restarted.store.reconcileSyncRefusals(WORKSPACE);
+  expect((await restarted.store.list()).notices).toHaveLength(2);
+  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc-2.md" }]);
+  expect((await restarted.store.list()).notices.map(row => row.target?.path)).toEqual(["doc-3.md"]);
+});
+
+it("keeps a new refusal after an old conflict resolved, then clears a recovered lineage", async () => {
+  let recoveryRevision = "before";
+  const refusalDocuments: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] = async (_workspace, keys) => keys.map(key => ({
+    ...key, resolved: true, recoveryRevision, recoveryPath: "doc (recovered).md",
+    document: { versionId: "main", path: "doc.md", objectId: "object-a", lineageClaimId: "claim", conflictId: "old-conflict" },
+  }));
+  const first = await computer(null, { refusalDocuments });
+  const refusal = { originId: "peer", originSeq: 1, opKind: "ydoc.update", code: "invalid-input", reason: "plaintext projection exceeds limit" };
+  await first.store.recordSyncRefusals(WORKSPACE, [refusal]);
+  expect((await first.store.list()).notices[0]!.body).not.toContain("Open its conflict");
+  const restarted = await computer(null, { directory: first.directory, refusalDocuments });
+  await restarted.store.reconcileSyncRefusals(WORKSPACE);
+  expect((await restarted.store.list()).notices).toHaveLength(1);
+  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc (recovered).md" }]);
+  expect((await restarted.store.list()).notices).toHaveLength(0);
+  await restarted.store.recordSyncRefusals(WORKSPACE, [{ ...refusal, originSeq: 2 }]);
+  recoveryRevision = "after";
+  await restarted.store.reconcileSyncRefusals(WORKSPACE);
+  expect((await restarted.store.list()).notices).toHaveLength(0);
 });

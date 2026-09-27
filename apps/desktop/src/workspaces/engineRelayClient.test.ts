@@ -198,7 +198,7 @@ afterEach(async () => {
   );
 });
 
-async function harness(daemon = new MockDaemon(), recordRefusals?: import("./engineRelayClient").EngineRelayClientOptions["recordRefusals"]) {
+async function harness(daemon = new MockDaemon(), recordRefusals?: import("./engineRelayClient").EngineRelayClientOptions["recordRefusals"], reconcileRefusals?: import("./engineRelayClient").EngineRelayClientOptions["reconcileRefusals"]) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
@@ -215,6 +215,7 @@ async function harness(daemon = new MockDaemon(), recordRefusals?: import("./eng
     routes,
     requestDeadlineMs: 1_000,
     recordRefusals,
+    reconcileRefusals,
   });
   const relay = { baseUrl: "https://relay.test/", token: "secret-token" };
   const client = live.bind({
@@ -246,6 +247,12 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("finishes durable notice recovery before acknowledging the pull", async () => {
+    const daemon = new MockDaemon();
+    const { client } = await harness(daemon, undefined, async () => { throw new Error("notice save failed"); });
+    await expect(client.pull(async () => undefined)).rejects.toThrow("notice save failed");
+    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
+  });
   it("persists every workspace refusal before cursor commit and retries a failed save", async () => {
     const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input",
       reason: 'dohc could not apply the resolution for "doc.md" because the document is too large. Review its conflict.' };

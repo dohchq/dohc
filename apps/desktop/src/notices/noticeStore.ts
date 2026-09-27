@@ -27,6 +27,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { NoticeRow, NoticeTargetShape, type NoticeRef } from "../ipc/bridgeContract";
 import { relayRequest } from "../workspaces/relayRequest";
+import { writeDurableNoticeFile } from "./durableNoticeFile";
 
 // The local file holds only this computer's notices, so it keeps fewer rows.
 const LOCAL_NOTICE_ROW_LIMIT = 500;
@@ -67,6 +68,7 @@ export interface PostNoticeInput {
 }
 
 export interface NoticeStore {
+  reconcileSyncRefusals(workspaceId: string, paths?: readonly { versionId: string; path: string }[], current?: readonly { originId: string; originSeq: number }[]): Promise<void>;
   recordSyncRefusals(workspaceId: string, refusals: readonly import("../workspaces/engineRelayClient").WorkspacePullRefusal[]): Promise<void>;
   // Throws when the notice breaks the relay's rules, before keeping it.
   postNotice(input: PostNoticeInput): Promise<void>;
@@ -118,6 +120,8 @@ const PostRequest = z.object({
 }).and(Reach);
 
 const LocalRow = z.object({
+  refusal: z.object({ originId: z.string(), originSeq: z.number(),
+    openConflictId: z.string().nullable(), recoveryRevision: z.string().nullable() }).optional(),
   noticeId: NoticeRow.shape.noticeId,
   kind: NoticeRow.shape.kind,
   workspaceId: NoticeRow.shape.workspaceId,
@@ -132,6 +136,14 @@ const LocalRow = z.object({
   dismissedAtMs: z.number().int().nonnegative().nullable(),
 });
 type LocalRow = z.infer<typeof LocalRow>;
+
+export const RefusalDocuments = z.object({ documents: z.array(z.object({
+  originId: z.string(), originSeq: z.number(), resolved: z.boolean(),
+  recoveryRevision: z.string().nullable(), recoveryPath: z.string().nullable(),
+  document: z.object({ versionId: z.string(), path: z.string(), objectId: z.string().nullable(),
+    lineageClaimId: z.string().nullable(), conflictId: z.string().nullable() }).nullable(),
+})) });
+type RefusalDocument = z.infer<typeof RefusalDocuments>["documents"][number];
 
 const RelayRow = z.object({
   noticeId: NoticeRow.shape.noticeId,
@@ -228,6 +240,7 @@ export function createNoticeStore(deps: {
   session(): Promise<NoticeSession | null>;
   installId(): string;
   onChanged(): void;
+  refusalDocuments?(workspaceId: string, coordinates: readonly { originId: string; originSeq: number }[]): Promise<RefusalDocument[]>;
   nowMs?: () => number;
   outboxPostLimit?: number;
 }): NoticeStore {
@@ -275,6 +288,10 @@ export function createNoticeStore(deps: {
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
     await mkdir(deps.directory, { recursive: true });
     const path = join(deps.directory, name);
+    if (name === "local.json" && "refusalReports" in value && Object.keys(value.refusalReports).length > 0) {
+      await writeDurableNoticeFile(path, JSON.stringify(value));
+      return;
+    }
     await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 });
     await rename(`${path}.tmp`, path);
   }
@@ -601,6 +618,10 @@ export function createNoticeStore(deps: {
   }
 
   async function recordSyncRefusals(workspaceId: string, refusals: readonly import("../workspaces/engineRelayClient").WorkspacePullRefusal[]): Promise<void> {
+    const documents: RefusalDocument[] = [];
+    for (let start = 0; start < refusals.length; start += 500) {
+      documents.push(...await deps.refusalDocuments?.(workspaceId, refusals.slice(start, start + 500)) ?? []);
+    }
     await locked(async () => {
       const prior = await loadLocal();
       const file = { ...prior, rows: [...prior.rows], refusalReports: {...prior.refusalReports} };
@@ -623,16 +644,50 @@ export function createNoticeStore(deps: {
           }
           file.rows.splice(file.rows.indexOf(replaceable), 1);
         }
-        const body = refusal.reason.startsWith("dohc could not") ? refusal.reason :
-          `dohc could not apply a change from another computer. ${refusal.reason} Review the changed file on that computer.`;
+        const state = documents.find(row => row.originId === refusal.originId && row.originSeq === refusal.originSeq);
+        const document = state?.document;
+        const openConflictId = state?.resolved ? null : document?.conflictId ?? null;
+        const name = document ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
+        const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
+        const body = `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${openConflictId
+          ? "Open its conflict and choose a copy."
+          : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
         file.rows.push(LocalRow.parse({ noticeId, workspaceId, kind: "sync-refusal",
+          refusal: { originId: refusal.originId, originSeq: refusal.originSeq, openConflictId, recoveryRevision: state?.recoveryRevision ?? null },
           title: "A change needs your review",
           body: [...body].length > 500 ? [...body].slice(0, 400).join("") + "… Review this change on the other computer." : body,
-          detail: body, target: {}, createdAtMs: nowMs(), readAtMs: null, dismissedAtMs: null }));
+          detail: refusal.reason, target: NoticeTargetShape.safeParse(document ? { path: document.path } : {}).data ?? {}, createdAtMs: nowMs(), readAtMs: null, dismissedAtMs: null }));
         recorded.add(noticeId);
         progress.push(noticeId);
       }
       await saveLocal(file);
+    });
+    deps.onChanged();
+  }
+
+  async function reconcileSyncRefusals(workspaceId: string, paths: readonly { versionId: string; path: string }[] = [], current: readonly { originId: string; originSeq: number }[] = []): Promise<void> {
+    if (!deps.refusalDocuments) return;
+    const rows = await locked(async () => (await loadLocal()).rows.filter(row =>
+      row.workspaceId === workspaceId && row.kind === "sync-refusal" && row.dismissedAtMs === null && row.refusal));
+    if (!rows.length) return;
+    const keys = [...new Map([...rows.map(row => row.refusal!), ...current].map(key => [JSON.stringify([key.originId, key.originSeq]), key])).values()];
+    const documents: RefusalDocument[] = [];
+    for (let start = 0; start < keys.length; start += 500) documents.push(...await deps.refusalDocuments(workspaceId, keys.slice(start, start + 500)));
+    const fresh = documents.filter(row => current.some(key => key.originId === row.originId && key.originSeq === row.originSeq));
+    const resolved = new Set(rows.filter(row => {
+      const state = documents.find(state => state.originId === row.refusal!.originId && state.originSeq === row.refusal!.originSeq);
+      if (!state || fresh.includes(state)) return false;
+      const document = state.document;
+      if (!document) return false;
+      if (fresh.some(other => other.document?.versionId === document.versionId && other.document?.objectId === document.objectId)) return false;
+      return (state.resolved && row.refusal!.openConflictId !== null && row.refusal!.openConflictId === document.conflictId)
+        || (state.recoveryRevision !== null && state.recoveryRevision !== row.refusal!.recoveryRevision)
+        || paths.some(path => path.versionId === document.versionId && (path.path === document.path || path.path === state.recoveryPath));
+    }).map(row => row.noticeId));
+    if (!resolved.size) return;
+    await locked(async () => {
+      const file = await loadLocal();
+      await saveLocal({ ...file, rows: file.rows.map(row => resolved.has(row.noticeId) ? { ...row, dismissedAtMs: nowMs() } : row) });
     });
     deps.onChanged();
   }
@@ -939,7 +994,7 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  return { recordSyncRefusals, postNotice, list, mark, sync, dismissFirst, withdraw };
+  return { recordSyncRefusals, reconcileSyncRefusals, postNotice, list, mark, sync, dismissFirst, withdraw };
 }
 
 // Folds one page into the stored rows. A page that starts the list over

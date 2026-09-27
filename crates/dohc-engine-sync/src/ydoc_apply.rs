@@ -2617,7 +2617,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
              LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
-             WHERE d.workspace_id=?1 ORDER BY d.version_id,d.object_id,d.lineage_claim_id,d.origin_id,d.origin_seq LIMIT 256",
+             WHERE d.workspace_id=?1 ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
         ).map_err(SyncError::corrupt)?;
         let rows = statement.query_map([workspace_id], |row| Ok((
             row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?,

@@ -5493,6 +5493,61 @@ mod tests {
     }
 
     #[test]
+    fn inactive_updates_follow_relay_order_across_origins() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let first = old.doc.plaintext_insert(0, "first ");
+        let second_machine = dohc_engine_collab::Ydoc::wire();
+        second_machine.apply(&old.doc.encode_full_state()).unwrap();
+        let second = second_machine.plaintext_insert(0, "second ");
+        for (index, (origin, update)) in [("z-first", first), ("a-second", second)]
+            .into_iter()
+            .enumerate()
+        {
+            let sha = store.put_binary_blob(&update).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: origin.into(),
+                origin_seq: 0,
+                relay_seq: Some(100 + index as i64),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        assert!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                .unwrap()
+                .is_empty()
+        );
+        let text: String = store.read_with(|conn| conn.query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",
+            [], |row| row.get(0))).unwrap();
+        assert_eq!(text, second_machine.plaintext_string());
+    }
+
+    #[test]
     fn inactive_updates_queue_as_rows_and_compact_once_per_batch() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let old = dohc_engine_collab::load_persisted(&store, &key)

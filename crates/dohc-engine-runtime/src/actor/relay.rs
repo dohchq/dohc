@@ -1132,6 +1132,45 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn sync_refusal_documents(
+        &self,
+        workspace_id: String,
+        coordinates: Vec<(String, i64)>,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        self.run(move |store, _cache| {
+            store.read_with(|conn| {
+                use rusqlite::OptionalExtension;
+                coordinates.into_iter().map(|(origin, seq)| {
+                    let payload: Option<String> = conn.query_row(
+                        "SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                        rusqlite::params![workspace_id, origin, seq], |row| row.get(0),
+                    ).optional()?;
+                    let payload: serde_json::Value = payload.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
+                    let version = payload["versionId"].as_str().or(payload["targetVersionId"].as_str());
+                    let path = payload["path"].as_str().or_else(|| payload["transition"]["result"]["pathRef"].as_u64()
+                        .and_then(|index| usize::try_from(index).ok()).and_then(|index| payload["paths"][index].as_str()));
+                    let object = payload["objectId"].as_str().or(payload["transition"]["result"]["objectId"].as_str()).or(payload["transition"]["current"]["objectId"].as_str());
+                    let lineage = payload["lineageClaimId"].as_str().or(payload["lineageTransition"]["successor"]["lineageClaimId"].as_str());
+                    let (archived_conflict, recovery_revision): (Option<String>, Option<String>) = conn.query_row("SELECT open_conflict_id,last_surfaced_projection_sha256 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+                        rusqlite::params![workspace_id, version, object, lineage], |row| Ok((row.get(0)?,row.get(1)?))).optional()?.unwrap_or_default();
+                    let correlation = version.zip(object).zip(lineage).map(|((version, object), lineage)| format!("ydoc-inactive-recovery:{}",
+                        dohc_engine_storage::hex_sha256(format!("{workspace_id}\0{version}\0{object}\0{lineage}").as_bytes())));
+                    let recovery_path: Option<String> = if recovery_revision.is_some() {
+                        conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND metadata_correlation_id=?3 AND blob_sha256=?4 ORDER BY updated_at_ms DESC LIMIT 1",
+                            rusqlite::params![workspace_id, version, correlation, recovery_revision], |row| row.get(0)).optional()?
+                    } else { None };
+                    let conflict = archived_conflict.or_else(|| payload["conflictId"].as_str().map(str::to_owned));
+                    let resolved = if let Some(conflict) = conflict.as_deref() {
+                        conn.query_row("SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2 AND status='resolved')",
+                            rusqlite::params![workspace_id, conflict], |row| row.get::<_, bool>(0))?
+                    } else { false };
+                    Ok(serde_json::json!({"originId":origin,"originSeq":seq,"recoveryRevision":recovery_revision,"recoveryPath":recovery_path,"document":version.zip(path).map(|(version,path)|
+                        serde_json::json!({"versionId":version,"path":path,"objectId":object,"lineageClaimId":lineage,"conflictId":conflict})),"resolved":resolved}))
+                }).collect::<Result<Vec<_>, rusqlite::Error>>()
+            }).map_err(|error| RuntimeError::Storage(dohc_engine_storage::StorageError::corrupt_public(error)))
+        }).await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {

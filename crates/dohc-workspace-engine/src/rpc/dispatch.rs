@@ -73,6 +73,7 @@ impl EngineService {
             "sync.claim"
                 | "sync.adoptJoinIdentity"
                 | "sync.pull"
+                | "sync.refusalDocuments"
                 | "liveApplication.captureOwnerActivation"
                 | "liveApplication.releaseOwnerActivation"
                 | "liveApplication.ownerState"
@@ -284,6 +285,10 @@ impl EngineService {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
             "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
+            "sync.refusalDocuments" => {
+                self.sync_refusal_documents(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }

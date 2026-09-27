@@ -647,6 +647,7 @@ export interface WorkspacePullRefusal {
 }
 
 export interface EngineRelayClientOptions {
+  reconcileRefusals?(workspace: EngineWorkspace, paths: readonly { versionId: string; path: string }[], current: readonly WorkspacePullRefusal[]): Promise<void>;
   recordRefusals?(workspace: EngineWorkspace, refusals: WorkspacePullRefusal[]): Promise<void>;
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
@@ -660,6 +661,7 @@ const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 
 export class EngineRelayClient {
   private readonly recordRefusals: EngineRelayClientOptions["recordRefusals"];
+  private readonly reconcileRefusals: EngineRelayClientOptions["reconcileRefusals"];
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
   private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
@@ -671,6 +673,7 @@ export class EngineRelayClient {
 
   constructor(options: EngineRelayClientOptions) {
     this.recordRefusals = options.recordRefusals;
+    this.reconcileRefusals = options.reconcileRefusals;
     this.sessions = options.sessions;
     this.routes = options.routes;
     this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
@@ -893,6 +896,7 @@ export class EngineRelayClient {
             await this.recordRefusals(workspace, pageRefusals);
           }
           await materializePage(pageChangedPaths);
+          await this.reconcileRefusals?.(workspace, pageChangedPaths, pageRefusals);
           appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
           if (!hasMore) break;
         }
