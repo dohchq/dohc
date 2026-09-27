@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "activeView": "app-view:apps%2Ftrip",
+  "sidebarVisible": false,
+  "sidebarWidth": 333,
+  "chatsVisible": true,
+  "chatsWidth": 444,
+  "openEditorsHeight": 210,
+  "editorGroups": [
+    {
+      "id": "left",
+      "tabs": [
+        "notes/旅.md",
+        "dohc://graph",
+        "dohc://history",
+        "dohc://chats",
+        "dohc://chats/new",
+        "dohc://chats/channel/team%2Fone",
+        "dohc://chats/dm/person%20one",
+        "dohc://app/apps%2Ftrip",
+        "dohc://versions/compare/try%2Fone",
+        "dohc://moment-diff/moment%20one",
+        "dohc://collection/notes%2F%E6%97%85",
+        "dohc://data-collection/123e4567-e89b-42d3-a456-426614174001/123e4567-e89b-42d3-a456-426614174002"
+      ],
+      "activeTab": "dohc://collection/notes%2F%E6%97%85",
+      "size": 0.35
+    },
+    {
+      "id": "right",
+      "tabs": [
+        "notes/旅.md",
+        "notes/dohc://example.md"
+      ],
+      "activeTab": "notes/dohc://example.md",
+      "size": 0.65
+    }
+  ],
+  "activeEditorGroup": "left",
+  "expandedFolders": [
+    "notes"
+  ],
+  "pinned": [
+    "notes/旅.md"
+  ],
+  "recentFiles": [
+    "notes/旅.md"
+  ],
+  "collectionViews": {
+    "notes/旅": "board"
+  }
+}

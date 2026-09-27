@@ -1,3 +1,4 @@
+import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
@@ -17,6 +18,8 @@ interface DatasetAccess {
   authorize(): void;
 }
 export interface DatasetInvocation extends DatasetAccess {
+  /** Recover the full host-approved schema, but grant the operation only tables. */
+  restrictTables?: true;
   operation: string;
   caller: JsonValue;
   callerKey: string;
@@ -504,7 +507,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (!current.active || !sameAuthority(captured.cursor, current.cursor)) throw new Error("The Collection's rules changed. Reload the Collection. Then try again.");
     };
     try {
-      worker = await recover(lane, input);
+      worker = await recover(lane, input.restrictTables ? { ...input, tables: parseDatasetRevision(JSON.parse(captured.definitionJson)).definition.tables.map(table => table.sqlName) } : input);
       currentAuthority();
       input.signal?.addEventListener("abort", abort, { once: true });
       if (!input.readOnly) {
@@ -513,7 +516,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }
       const prepared = await worker.runtime.prepare({ expected: worker.cursor, source: captured.source, operation: input.operation,
         caller: input.caller, input: input.input, nowMs: now(), requestId: randomUUID(), secret: randomBytes(32).toString("base64url"),
-        files: input.files, readOnly: input.readOnly });
+        files: input.files, readOnly: input.readOnly, tables: input.tables });
       currentAuthority();
       if (input.readOnly) {
         const after = head(input);

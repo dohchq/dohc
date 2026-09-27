@@ -346,7 +346,7 @@ describe("tabs", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
   ])("keeps a process-owning %s in its existing editor group", (_label, path, alias) => {
     let state = withTabs(path, "a.md");
     state = moveTabToNewGroup(
@@ -559,7 +559,7 @@ describe("tabs", () => {
 
   it("recognizes chats as a virtual workbench tab", () => {
     expect(isChatsTabPath(CHATS_TAB_PATH)).toBe(true);
-    expect(isChatsTabPath("dohc://chats/extra")).toBe(false);
+    expect(isChatsTabPath("tab://chats/extra")).toBe(false);
     expect(isChatsTabPath(null)).toBe(false);
     expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
   });
@@ -569,8 +569,8 @@ describe("tabs", () => {
     expect(isMomentDiffTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
-    expect(parseMomentDiffTabPath("dohc://moment-diff/")).toBeNull();
-    expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
+    expect(parseMomentDiffTabPath("tab://moment-diff/")).toBeNull();
+    expect(parseMomentDiffTabPath("tab://moment-diff/%ZZ")).toBeNull();
     expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
     expect(parseMomentDiffTabPath(null)).toBeNull();
   });
@@ -580,8 +580,8 @@ describe("tabs", () => {
     expect(isCollectionTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseCollectionTabPath(path)).toBe("projects/road trips");
-    expect(parseCollectionTabPath("dohc://collection/")).toBeNull();
-    expect(parseCollectionTabPath("dohc://collection/%ZZ")).toBeNull();
+    expect(parseCollectionTabPath("tab://collection/")).toBeNull();
+    expect(parseCollectionTabPath("tab://collection/%ZZ")).toBeNull();
     expect(parseCollectionTabPath("notes/today.md")).toBeNull();
     expect(parseCollectionTabPath(null)).toBeNull();
   });
@@ -609,8 +609,8 @@ describe("tabs", () => {
     expect(isVersionCompareTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseVersionCompareTabPath(path)).toBe("version id/with strange chars");
-    expect(parseVersionCompareTabPath("dohc://versions/compare/")).toBeNull();
-    expect(parseVersionCompareTabPath("dohc://versions/compare/%ZZ")).toBeNull();
+    expect(parseVersionCompareTabPath("tab://versions/compare/")).toBeNull();
+    expect(parseVersionCompareTabPath("tab://versions/compare/%ZZ")).toBeNull();
     expect(parseVersionCompareTabPath("notes/today.md")).toBeNull();
     expect(parseVersionCompareTabPath(null)).toBeNull();
   });
@@ -620,7 +620,7 @@ describe("tabs", () => {
     expect(isSiteTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseSiteTabPath(path)).toBe("clients/acme website");
-    expect(parseSiteTabPath("dohc://app/")).toBeNull();
+    expect(parseSiteTabPath("tab://app/")).toBeNull();
     expect(parseSiteTabPath(null)).toBeNull();
     expect(parseSiteTabPath("not-a-site-path")).toBeNull();
 
@@ -777,7 +777,7 @@ describe("rail widths", () => {
 describe("ui-state persistence round-trip", () => {
   it("restores Apps tabs and drops tabs from genuinely removed surfaces", () => {
     const sitePath = siteTabPath("client-portal");
-    const removedPath = "dohc://retired-dashboard/client-portal";
+    const removedPath = "tab://retired-dashboard/client-portal";
     const restored = parseUiState({
       ...serializeUiState(withTabs("notes/a.md")),
       editorGroups: [
@@ -798,7 +798,7 @@ describe("ui-state persistence round-trip", () => {
     expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
     expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
     expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/dohc://app/a.md")).toBe(false);
+    expect(isRemovedVirtualTabPath("notes/tab://app/a.md")).toBe(false);
     expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
   });
 
@@ -836,9 +836,9 @@ describe("ui-state persistence round-trip", () => {
     ).toEqual(defaultWorkbenchState());
   });
 
-  it("a version-2 file without openEditorsHeight falls back to the default", () => {
+  it("a version-3 file without openEditorsHeight falls back to the default", () => {
     const raw = {
-      version: 2,
+      version: 3,
       editorGroups: [
         { id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 1 },
       ],
@@ -863,7 +863,7 @@ describe("ui-state persistence round-trip", () => {
 
   it("repairs groups field by field and normalizes positive sizes", () => {
     const state = parseUiState({
-      version: 2,
+      version: 3,
       sidebarWidth: 5,
       chatsWidth: 9999,
       editorGroups: [
@@ -899,7 +899,7 @@ describe("ui-state persistence round-trip", () => {
 
   it("keeps the first restored Chats owner and repairs duplicate Chats focus", () => {
     const state = parseUiState({
-      version: 2,
+      version: 3,
       editorGroups: [
         {
           id: "left",
@@ -934,10 +934,10 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
   ])("keeps the first restored %s owner", (_label, path, alias) => {
     const state = parseUiState({
-      version: 2,
+      version: 3,
       editorGroups: [
         {
           id: "left",
@@ -967,7 +967,7 @@ describe("ui-state persistence round-trip", () => {
       (_, index) => `file-${index}.md`,
     );
     const state = parseUiState({
-      version: 2,
+      version: 3,
       editorGroups: [
         {
           id: "left",
@@ -994,7 +994,7 @@ describe("ui-state persistence round-trip", () => {
     // as if the fields were absent: pure defaults, no tabs.
     const inherited = parseUiState(
       Object.create({
-        version: 2,
+        version: 3,
         activeView: "history",
         sidebarVisible: false,
         sidebarWidth: 480,
@@ -1017,7 +1017,7 @@ describe("ui-state persistence round-trip", () => {
       huge.push(42, "", `f${i}.md`, `f${i}.md`);
     }
     const state = parseUiState({
-      version: 2,
+      version: 3,
       editorGroups: [
         { id: "left", tabs: huge, activeTab: "f0.md", size: 1 },
         { id: "right", tabs: ["too-late.md"], activeTab: "too-late.md", size: 1 },
@@ -1043,7 +1043,7 @@ describe("ui-state persistence round-trip", () => {
       }),
     );
     const state = parseUiState({
-      version: 2,
+      version: 3,
       editorGroups: rawGroups,
       activeEditorGroup: rawGroups[MAX_EDITOR_GROUPS].id,
     });
@@ -1065,7 +1065,7 @@ describe("ui-state persistence round-trip", () => {
 
     expect(
       parseUiState({
-        version: 2,
+        version: 3,
         editorGroups: rawGroups,
         activeEditorGroup: "missing",
       }),
@@ -1312,7 +1312,7 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     ]);
   });
 
-  // A collection tab's path encodes the folder path behind dohc://collection/.
+  // A collection tab's path encodes the folder path behind tab://collection/.
   // The projection speaks filesystem paths, so the tab must project the
   // DECODED folder and re-encode the result — treating the whole tab path as
   // a filesystem path matches no rename and strands the tab.

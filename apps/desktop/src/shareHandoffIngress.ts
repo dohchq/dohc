@@ -1,22 +1,14 @@
 import { isAbsolute, resolve } from "node:path";
-import { canonicalRelayUrl } from "./workspaces/syncCode";
+import {
+  DOHC_DEEP_LINK_SCHEME,
+  parseShareHandoffUrl,
+  type ShareHandoffIntent,
+} from "@dohc/workspace-contracts/deep-links";
 
-const SHARE_HANDOFF_SCHEME = "dohc";
-const SHARE_HANDOFF_URL_PATTERN =
-  /^([A-Za-z]+):\/\/([A-Za-z]+)\/([A-Za-z0-9_-]{43})\?relay=([^&#]+)$/u;
 const SHARE_HANDOFF_PROTOCOL_PATTERN = /^dohc:/iu;
 
-declare const shareHandoffCodeBrand: unique symbol;
-export type ShareHandoffCode = string & {
-  readonly [shareHandoffCodeBrand]: true;
-};
 export type ShareHandoffOfferResult = "stored" | "duplicate" | "replaced";
 export type ShareHandoffArgumentIntent = "plain" | "accepted" | "rejected";
-
-export interface ShareHandoffIntent {
-  readonly code: ShareHandoffCode;
-  readonly relayUrl: string;
-}
 
 export interface ShareHandoffIntentSnapshot {
   intent: ShareHandoffIntent | null;
@@ -53,36 +45,6 @@ export interface ProtocolRuntime {
   defaultApp?: boolean;
   execPath: string;
   argv: string[];
-}
-
-export function parseShareHandoffUrl(
-  rawArgument: string,
-): ShareHandoffIntent | null {
-  const match = SHARE_HANDOFF_URL_PATTERN.exec(rawArgument);
-  if (
-    match?.[0] !== rawArgument ||
-    match[1]?.toLowerCase() !== SHARE_HANDOFF_SCHEME ||
-    match[2]?.toLowerCase() !== "open" ||
-    match[3] === undefined ||
-    match[4] === undefined
-  ) {
-    return null;
-  }
-  let decodedRelayUrl: string;
-  try {
-    decodedRelayUrl = decodeURIComponent(match[4]);
-  } catch {
-    return null;
-  }
-  const relayUrl = canonicalRelayUrl(decodedRelayUrl);
-  if (
-    relayUrl === null ||
-    relayUrl !== decodedRelayUrl ||
-    encodeURIComponent(relayUrl) !== match[4]
-  ) {
-    return null;
-  }
-  return { code: match[3] as ShareHandoffCode, relayUrl };
 }
 
 export function classifyShareHandoffArguments(
@@ -176,10 +138,10 @@ export function registerShareHandoffProtocol(
     const appEntry = runtime.argv[1];
     if (!appEntry) return false;
     return registrar.setAsDefaultProtocolClient(
-      SHARE_HANDOFF_SCHEME,
+      DOHC_DEEP_LINK_SCHEME,
       runtime.execPath,
       [resolve(appEntry)],
     );
   }
-  return registrar.setAsDefaultProtocolClient(SHARE_HANDOFF_SCHEME);
+  return registrar.setAsDefaultProtocolClient(DOHC_DEEP_LINK_SCHEME);
 }

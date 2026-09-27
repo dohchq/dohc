@@ -562,7 +562,7 @@ export function SettingsDialog(props: {
                   aria-label="Zoom out"
                   disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
                   onClick={() => void stepZoomSetting("out")}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Minus size={14} strokeWidth={1.9} />
                 </button>
@@ -574,7 +574,7 @@ export function SettingsDialog(props: {
                   aria-label="Zoom in"
                   disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
                   onClick={() => void stepZoomSetting("in")}
-                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Plus size={14} strokeWidth={1.9} />
                 </button>
@@ -900,7 +900,7 @@ export function SettingsDialog(props: {
                 type="button"
                 aria-label="Open settings file"
                 onClick={() => void openSettingsFile()}
-                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Open
               </button>
@@ -914,7 +914,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetUserSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Reset user
               </button>
@@ -928,7 +928,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetWorkspaceSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Reset workspace
               </button>
@@ -998,7 +998,7 @@ export function SettingsDialog(props: {
                     data-testid="check-updates-button"
                     disabled={updateBusy !== null || updateState?.canCheck === false}
                     onClick={() => void checkForUpdates()}
-                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
                   >
                     <RefreshCw size={12} aria-hidden />
                     {updateBusy === "check" ? "Checking" : "Check"}
@@ -1067,8 +1067,8 @@ export function SettingsDialog(props: {
               onClick={() => setActiveSection(section.id)}
               className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                 activeSection === section.id
-                  ? "bg-line text-ink"
-                  : "text-muted hover:bg-panel-2 hover:text-ink"
+                  ? "bg-selected text-ink"
+                  : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >
               <section.Icon size={15} aria-hidden />
@@ -1102,7 +1102,7 @@ export function SettingsDialog(props: {
             type="button"
             aria-label="Close settings"
             onClick={props.onClose}
-            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
           >
             <X size={16} aria-hidden />
           </button>

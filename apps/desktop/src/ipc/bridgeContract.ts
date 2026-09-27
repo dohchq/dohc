@@ -5171,7 +5171,7 @@ const APP_VIEW_ID = z
   .refine((value) => parseAppViewId(value) !== null);
 
 export const WorkspaceUiState = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   // dohc's own views or a pinned app. The catch keeps a stored id that names
   // neither from failing the file.
   activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
@@ -5180,7 +5180,7 @@ export const WorkspaceUiState = z.object({
   editorGroups: WorkspaceEditorGroups,
   activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
   // The right-hand Chats panel. Optional fields degrade independently when a
-  // version-2 file is hand-edited or lacks a newer cosmetic setting.
+  // version-3 file is hand-edited or lacks a newer cosmetic setting.
   chatsVisible: z.boolean().optional(),
   chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
   // The catch keeps a foreign height from nulling an otherwise valid file.

@@ -144,7 +144,7 @@ export function AppsView(props: {
                   data-testid="sites-row"
                   data-root={app.root}
                   onClick={() => props.onOpenPath(siteTabPath(app.root))}
-                  className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 pr-10 text-left transition-colors hover:bg-panel-2"
+                  className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 pr-10 text-left transition-colors hover:bg-hover"
                 >
                   <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
                     {app.packagePath ? (

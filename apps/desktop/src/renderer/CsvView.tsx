@@ -63,7 +63,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
                   aria-label={`Delete column ${index + 1}`}
                   title="Delete column"
                   onClick={() => onDeleteColumn(index)}
-                  className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-line/60 hover:text-danger"
+                  className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-danger"
                 >
                   <Trash2 size={11} aria-hidden />
                 </button>
@@ -92,7 +92,7 @@ const CsvTableRow = memo(function CsvTableRow({
   onDeleteRow: (rowIndex: number) => void;
 }) {
   return (
-    <tr className="group transition-colors hover:bg-panel-2/60">
+    <tr className="group transition-colors hover:bg-hover">
       {!truncated ? (
         <td className="border-t border-line px-1 py-1 text-center">
           <button
@@ -101,7 +101,7 @@ const CsvTableRow = memo(function CsvTableRow({
             aria-label={`Delete row ${rowIndex}`}
             title="Delete row"
             onClick={() => onDeleteRow(rowIndex)}
-            className="grid size-5 place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/60 hover:text-danger focus:opacity-100 group-hover:opacity-100"
+            className="grid size-5 place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-hover hover:text-danger focus:opacity-100 group-hover:opacity-100"
           >
             <Trash2 size={11} aria-hidden />
           </button>
@@ -398,7 +398,7 @@ export function CsvView({
             <button
               type="button"
               onClick={addRow}
-              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
               data-testid="csv-add-row"
             >
               <Plus size={12} aria-hidden />
@@ -407,7 +407,7 @@ export function CsvView({
             <button
               type="button"
               onClick={addColumn}
-              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
               data-testid="csv-add-column"
             >
               <Plus size={12} aria-hidden />
@@ -465,7 +465,7 @@ export function CsvView({
               <button
                 type="button"
                 onClick={addRow}
-                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
                 data-testid="csv-empty-add-row"
               >
                 <Plus size={12} aria-hidden />
@@ -474,7 +474,7 @@ export function CsvView({
               <button
                 type="button"
                 onClick={addColumn}
-                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
                 data-testid="csv-empty-add-column"
               >
                 <Plus size={12} aria-hidden />

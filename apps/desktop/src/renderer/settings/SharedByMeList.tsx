@@ -225,7 +225,7 @@ export function SharedByMeList(props: {
               data-testid="shared-by-me-review"
               data-open-changes={waiting.count}
               onClick={() => setReviewProposalId(waiting.oldest.proposalId)}
-              className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
             >
               {waiting.count > 1
                 ? `Review changes (${waiting.count})`
@@ -237,7 +237,7 @@ export function SharedByMeList(props: {
               {share.selector && share.browserInvitationUrl && (
                 <button type="button" data-testid="shared-by-me-copy-invitation"
                   onClick={() => void copyInvitation(share)}
-                  className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink">
+                  className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink">
                   {copiedInvitationGrantId === share.grantId ? "Browser invitation copied" : "Copy browser invitation"}
                 </button>
               )}
@@ -249,7 +249,7 @@ export function SharedByMeList(props: {
                 type="button"
                 data-testid="shared-by-me-copy"
                 onClick={() => void copyCode(share)}
-                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 {copiedShareId === share.shareId ? (
                   <Check size={11} aria-hidden />
@@ -288,7 +288,7 @@ export function SharedByMeList(props: {
                     data-testid="shared-by-me-revoke"
                     disabled={busyShareId === share.shareId}
                     onClick={() => void revoke(share)}
-                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-panel-2 disabled:opacity-50"
+                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-hover disabled:opacity-50"
                   >
                     {busyShareId === share.shareId ? "Ending…" : "End share"}
                   </button>

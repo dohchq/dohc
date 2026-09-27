@@ -25,10 +25,11 @@ function DatasetApproval({ capability }: { capability: AppDatasetCapability }) {
   return <div data-testid="app-publication-capability" className="space-y-2">
     <p className="m-0">This app uses the Collection's approved actions. Its responses appear in the same Collection.</p>
     <dl className="m-0 space-y-1 text-[12px]">
-      <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link" || capability.linkReads?.some(read => read.operationId === operation.operationId))} /></dd></div>
       <div><dt className="inline font-medium text-ink">Helper actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "helper")} /></dd></div>
       <div><dt className="inline font-medium text-ink">Owner actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "owner")} /></dd></div>
     </dl>
+    {capability.linkReads?.length ? <p className="m-0 text-[12px]">Approved link reads: {capability.operations.filter(operation => capability.linkReads!.some(read => read.operationId === operation.operationId)).map(operation => `${operation.name} (${operation.fields?.map(field => field.name).join(", ")})`).join("; ")}. Unpublish to withdraw access.</p> : null}
     <p className="m-0 text-[12px]">Approving this app grants these actions. It does not change the Collection's rules.</p>
     <details className="text-[12px]"><summary className="cursor-pointer">Collection revision</summary>
       <p className="break-all font-mono">{capability.datasetId} · {capability.revision}</p>
@@ -85,6 +86,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const [reload, setReload] = useState(0);
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [reactivating, setReactivating] = useState(false);
+  const [linkReads, setLinkReads] = useState<NonNullable<AppDatasetCapability["linkReads"]>>([]);
   const [preparedLink, setPreparedLink] = useState("");
   const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | "launch" | null>(null);
   const [busyPublicationId, setBusyPublicationId] = useState<string | null>(null);
@@ -215,6 +217,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       const verified = verifiedPrepared(result);
       setPrepared(verified);
       setReactivating(false);
+      setLinkReads([]);
       setPreparedLink(link);
     } catch (error) {
       if (alive.current && mine === request.current) {
@@ -253,7 +256,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     const mine = ++request.current;
     setBusy("approve"); setError(null);
     try {
-      const result = await api.publishOwnerApp({ action: "approve", workspaceId: props.workspaceId, approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
+      const result = await api.publishOwnerApp({ action: "approve", workspaceId: props.workspaceId, approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest, ...(!prepared.local && !reactivating && prepared.capabilities.some(value => value.kind === "dataset") ? { linkReads } : {}) });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "published" || (result.local === true) !== (prepared.local === true)) throw new Error("dohc could not confirm publication. Reload the app publications.");
       candidate.current = null;
@@ -350,7 +353,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval key={capability.datasetId} capability={capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
             <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
             <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
               <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
@@ -359,6 +362,16 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
             <details className="text-[12px]"><summary className="cursor-pointer">Collection schema revision</summary><p className="break-all font-mono">{capability.schemaSha256}</p></details>
           </div>)}
+          {!prepared.local && !reactivating ? prepared.capabilities.filter(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.access === "helper" && operation.fields !== undefined)).map(capability => capability.kind === "dataset" ? <fieldset key={capability.datasetId} disabled={!!busy} className="space-y-2 border-0 p-0">
+            <legend className="text-[13px] font-medium text-ink">Allow people with the link to read</legend>
+            {capability.operations.filter(operation => operation.access === "helper" && operation.fields !== undefined).map(operation => <label key={operation.operationId} className="block text-[13px] text-ink">
+              <input type="checkbox" checked={linkReads.some(read => read.operationId === operation.operationId)} onChange={event => setLinkReads(previous => event.target.checked
+                ? [...previous, { operationId: operation.operationId, fieldIds: operation.fields!.map(field => field.fieldId) }]
+                : previous.filter(read => read.operationId !== operation.operationId))} /> {operation.name}
+              <span className="block text-[12px] text-muted">Fields: {operation.fields!.map(field => field.name).join(", ") || "None"}</span>
+            </label>)}
+            <p className="m-0 text-[12px] text-muted">Approved reads show current records and later changes. People with the link can use only the selected reads. Unpublish to withdraw access.</p>
+          </fieldset> : null) : null}
           <p className="m-0">The app can use external services and send them data it receives.</p>
           {prepared.local ? null : <p className="m-0">Unpublishing stops new access through dohc. It cannot remove copies sent elsewhere.</p>}
         </div>

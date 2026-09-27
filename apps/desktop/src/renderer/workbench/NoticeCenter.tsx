@@ -1163,7 +1163,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="workspace-shell-error-action"
                   onClick={() => props.onWorkspaceErrorAction?.(errorToast.id)}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   {errorToast.actionLabel}
                 </button>
@@ -1173,7 +1173,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="workspace-shell-error-retry"
                   onClick={() => props.onRetryWorkspaceError?.(errorToast.id)}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   Try again
                 </button>
@@ -1190,7 +1190,7 @@ export function NoticeCenter(props: {
                   type="button"
                   aria-label={errorToast.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
                   onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
                 >
                   <X size={12} aria-hidden />
                 </button>
@@ -1215,7 +1215,7 @@ export function NoticeCenter(props: {
                     onHideSentNoticeToast?.();
                     void openSentNotice(sentToast.notice);
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   Open
                 </button>
@@ -1225,7 +1225,7 @@ export function NoticeCenter(props: {
                   type="button"
                   aria-label="Close"
                   onClick={onHideSentNoticeToast}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
                 >
                   <X size={12} aria-hidden />
                 </button>
@@ -1250,7 +1250,7 @@ export function NoticeCenter(props: {
                     props.onHideAutomationFailureToast?.();
                     action.onClick();
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   {action.label}
                 </button>
@@ -1267,7 +1267,7 @@ export function NoticeCenter(props: {
                   type="button"
                   aria-label="Dismiss automation notice"
                   onClick={props.onHideAutomationFailureToast}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
                 >
                   <X size={12} aria-hidden />
                 </button>
@@ -1290,7 +1290,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="owner-live-delivery-toast-action"
                   onClick={liveDeliveryAction.onClick}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   {liveDeliveryAction.label}
                 </button>
@@ -1306,7 +1306,7 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label="Dismiss live editing notice"
                 onClick={() => setDismissedLiveDeliveryKey(liveDeliveryKey)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
               </button>
@@ -1328,7 +1328,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="owner-live-refusals-toast-action"
                   onClick={onOpenLiveDocuments}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   Live documents
                 </button>
@@ -1345,7 +1345,7 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label="Dismiss live editing refusals notice"
                 onClick={() => setDismissedRefusalsKey(refusalsKey)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
               </button>
@@ -1366,7 +1366,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="crash-report-toast-send"
                   onClick={props.onSendCrashReport}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
                   Send report
                 </button>
@@ -1383,7 +1383,7 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label="Close crash report notice"
                 onClick={() => setClosedCrashRevision(crashReport.revision)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
               </button>
@@ -1426,7 +1426,7 @@ export function NoticeCenter(props: {
                     setDismissedUpdateToastKey(readyUpdateKey);
                   }
                 }}
-                className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
               </button>
@@ -1468,7 +1468,7 @@ export function NoticeCenter(props: {
                   centerRef.current?.focus();
                   props.onReadAllSentNotices?.();
                 }}
-                className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
+                className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 Mark all read
               </button>
@@ -1542,7 +1542,7 @@ export function NoticeCenter(props: {
                           type="button"
                           disabled={action.disabled}
                           onClick={() => runLocalAction(action)}
-                          className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50`}
+                          className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50`}
                         >
                           {action.label}
                         </button>
@@ -1564,7 +1564,7 @@ export function NoticeCenter(props: {
                             focusPastRow(event.currentTarget);
                             notice.onDismiss?.();
                           }}
-                          className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                          className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
                         >
                           <X size={11} aria-hidden />
                         </button>
@@ -1645,7 +1645,7 @@ export function NoticeCenter(props: {
                                   aria-busy={running || undefined}
                                   disabled={runningKey !== null}
                                   onClick={runNow}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
                                 >
                                   {running ? "Starting…" : "Run now"}
                                 </button>
@@ -1656,7 +1656,7 @@ export function NoticeCenter(props: {
                                   data-testid={`sent-notice-${notice.noticeId}-open`}
                                   aria-busy={busy || undefined}
                                   onClick={openNotice}
-                                  className={`${runNow ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50`}
+                                  className={`${runNow ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50`}
                                 >
                                   {busy ? "Opening…" : notice.kind === "schedule-skipped" ? "Open automation" : "Open"}
                                 </button>
@@ -1670,7 +1670,7 @@ export function NoticeCenter(props: {
                                     focusPastRow(event.currentTarget);
                                     dismissNotice();
                                   }}
-                                  className={`${openNotice || runNow ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                                  className={`${openNotice || runNow ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
                                 >
                                   <X size={11} aria-hidden />
                                 </button>
@@ -1702,7 +1702,7 @@ export function NoticeCenter(props: {
                       type="button"
                       data-testid="sent-notices-more"
                       onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                     >
                       Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
                     </button>
@@ -1723,7 +1723,7 @@ export function NoticeCenter(props: {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((value) => !value)}
-        className="relative grid size-9 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-100 hover:bg-line/50 hover:text-ink"
+        className="relative grid size-9 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-100 hover:bg-hover hover:text-ink"
       >
         <Bell size={18} strokeWidth={1.9} aria-hidden />
         {count > 0 ? (

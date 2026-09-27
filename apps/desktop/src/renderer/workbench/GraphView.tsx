@@ -901,7 +901,7 @@ export function GraphView(props: {
             className={`ml-auto rounded-md border px-2 py-1 text-[10px] transition-colors ${
               includeChatMentions
                 ? "border-accent/50 bg-accent/10 text-accent"
-                : "border-line text-subtle hover:bg-line/40 hover:text-ink"
+                : "border-line text-subtle hover:bg-hover hover:text-ink"
             }`}
           >
             Chat mentions
@@ -914,7 +914,7 @@ export function GraphView(props: {
           aria-label="Refresh graph"
           title="Refresh graph"
           onClick={load}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -973,8 +973,8 @@ export function GraphView(props: {
                       }
                       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                         active
-                          ? "bg-line text-ink"
-                          : "text-muted hover:bg-panel-2 hover:text-ink"
+                          ? "bg-selected text-ink"
+                          : "text-muted hover:bg-hover hover:text-ink"
                       }`}
                     >
                       <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 font-mono text-[10px] text-subtle">

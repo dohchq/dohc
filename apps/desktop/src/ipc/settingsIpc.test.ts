@@ -19,7 +19,7 @@ import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
 const state = WorkspaceUiState.parse({
-  version: 2, activeView: "explorer", sidebarVisible: true, sidebarWidth: 320,
+  version: 3, activeView: "explorer", sidebarVisible: true, sidebarWidth: 320,
   editorGroups: [{ id: "main", tabs: [], activeTab: null, size: 1 }], activeEditorGroup: "main",
 });
 const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS };
