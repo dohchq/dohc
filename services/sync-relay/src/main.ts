@@ -426,6 +426,11 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 // more arrive or any host lists them.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 setInterval(() => {
+  try {
+    storage.purgeExpiredShareRemovals(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] share removal prune failed:", error);
+  }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", error);
   });

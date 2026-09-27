@@ -300,7 +300,7 @@ export function openSyncRelayStorage(
     }
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
-    return new SqliteSyncRelayStorage(
+    const storage = new SqliteSyncRelayStorage(
       db,
       {
         workspaceQuotaBytes,
@@ -315,6 +315,8 @@ export function openSyncRelayStorage(
       liveTickets as unknown as LiveTicketStoragePolicy | undefined,
       owner,
     );
+    storage.purgeExpiredShareRemovals(Date.now());
+    return storage;
   } catch (error) {
     try {
       if (owner) owner.close(); else db.close();
@@ -954,6 +956,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
     return shareRemovalStorage.removeShareAccess(this, input);
+  }
+
+  purgeExpiredShareRemovals(nowMs: number): void {
+    shareRemovalStorage.purgeExpiredShareRemovals(this, nowMs);
   }
 
   undoShareRemoval(input: Parameters<typeof shareRemovalStorage.undoShareRemoval>[1]) {

@@ -87,8 +87,10 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     expires_at_ms INTEGER NOT NULL,
     grants_json TEXT NOT NULL,
     credentials_json TEXT NOT NULL,
+    proposals_json TEXT NOT NULL,
     removed_grant_id TEXT,
     undone INTEGER NOT NULL DEFAULT 0 CHECK (undone IN (0, 1)),
+    voided INTEGER NOT NULL DEFAULT 0 CHECK (voided IN (0, 1)),
     FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_expiry ON sync_relay_share_removals(expires_at_ms);
@@ -899,7 +901,6 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
-
     db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,

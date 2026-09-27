@@ -8,6 +8,10 @@ import { revokeShareInTransaction, revokeShareGrantInTransaction } from "./share
 
 export const SHARE_REMOVAL_UNDO_MS = 10 * 60 * 1000;
 
+export function purgeExpiredShareRemovals(storage: StorageContext, nowMs: number): void {
+  storage.tx(() => storage.db.prepare("DELETE FROM sync_relay_share_removals WHERE expires_at_ms <= ?").run(nowMs));
+}
+
 export interface ShareRemovalInput {
   shareId: string;
   actorUserId: string;
@@ -24,19 +28,23 @@ function requireOwner(storage: StorageContext, shareId: string, userId: string) 
 
 export function removeShareAccess(storage: StorageContext, input: ShareRemovalInput):
   | Exclude<LinkGrantTransitionResult, { ok: true }>
-  | { ok: true; grant: SyncRelayShareGrantRow | null; undo: { undoId: string; expiresAtMs: number } } {
+  | { ok: true; grant: SyncRelayShareGrantRow | null; undo?: { undoId: string; expiresAtMs: number } } {
+  purgeExpiredShareRemovals(storage, input.nowMs);
   return storage.tx(() => {
     input.guard?.();
     requireOwner(storage, input.shareId, input.actorUserId);
-    storage.db.prepare("DELETE FROM sync_relay_share_removals WHERE expires_at_ms <= ?").run(input.nowMs);
     const before = storage.db.prepare(`SELECT grant_id, generation FROM sync_relay_share_grants
       WHERE share_id = ? AND status = 'active'`).all(input.shareId) as { grant_id: string; generation: number }[];
     const credentials = storage.db.prepare(`SELECT credential_id, grant_id FROM sync_relay_link_credentials
       WHERE retired_at_ms IS NULL AND grant_id IN (SELECT grant_id FROM sync_relay_share_grants WHERE share_id = ?)`)
       .all(input.shareId) as { credential_id: string; grant_id: string }[];
     if (!before.some(row => input.grantId === undefined || row.grant_id === input.grantId)) {
+      if (input.grantId === undefined) {
+        revokeShareInTransaction(storage, input.shareId, input.nowMs);
+        return {ok: true, grant: null};
+      }
       const prior = storage.db.prepare(`SELECT undo_id, expires_at_ms, grants_json FROM sync_relay_share_removals
-        WHERE share_id = ? AND owner_user_id = ? AND removed_grant_id IS ? AND undone = 0 AND expires_at_ms > ?
+        WHERE share_id = ? AND owner_user_id = ? AND removed_grant_id IS ? AND undone = 0 AND voided = 0 AND expires_at_ms > ?
         ORDER BY expires_at_ms DESC LIMIT 1`).get(input.shareId, input.actorUserId, input.grantId ?? null, input.nowMs) as
         {undo_id: string; expires_at_ms: number; grants_json: string} | undefined;
       if (!prior) throw notFound();
@@ -48,6 +56,10 @@ export function removeShareAccess(storage: StorageContext, input: ShareRemovalIn
       return {ok: true, grant: input.grantId ? storage.getShareGrant(input.grantId) : null,
         undo: {undoId: prior.undo_id, expiresAtMs: prior.expires_at_ms}};
     }
+    const proposals = input.grantId === undefined
+      ? storage.db.prepare("SELECT proposal_id FROM sync_relay_share_proposals WHERE share_id = ? AND state = 'open'")
+          .all(input.shareId).map(row => String(row.proposal_id))
+      : [];
     const result = input.grantId
       ? revokeShareGrantInTransaction(storage, { shareId: input.shareId, grantId: input.grantId,
           revokedAtMs: input.nowMs, expectedDependentGrantIds: input.expectedDependentGrantIds })
@@ -61,10 +73,11 @@ export function removeShareAccess(storage: StorageContext, input: ShareRemovalIn
     if (!grants.length) throw notFound();
     const undo = { undoId: randomUUID(), expiresAtMs: input.nowMs + SHARE_REMOVAL_UNDO_MS };
     storage.db.prepare(`INSERT INTO sync_relay_share_removals
-      (undo_id, share_id, owner_user_id, expires_at_ms, grants_json, credentials_json, removed_grant_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      (undo_id, share_id, owner_user_id, expires_at_ms, grants_json, credentials_json, removed_grant_id, proposals_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(undo.undoId, input.shareId, input.actorUserId, undo.expiresAtMs, JSON.stringify(grants),
-        JSON.stringify(credentials.filter(row => grants.some(grant => grant.grantId === row.grant_id))), input.grantId ?? null);
+        JSON.stringify(credentials.filter(row => grants.some(grant => grant.grantId === row.grant_id))), input.grantId ?? null,
+        JSON.stringify(proposals));
     return { ok: true, grant: "grant" in result ? result.grant : null, undo };
   });
 }
@@ -72,14 +85,19 @@ export function removeShareAccess(storage: StorageContext, input: ShareRemovalIn
 export function undoShareRemoval(storage: StorageContext, input: {
   shareId: string; actorUserId: string; undoId: string; nowMs: number;
 }): void {
+  purgeExpiredShareRemovals(storage, input.nowMs);
   storage.tx(() => {
     requireOwner(storage, input.shareId, input.actorUserId);
-    const receipt = storage.db.prepare(`SELECT expires_at_ms, grants_json, credentials_json, undone
+    const receipt = storage.db.prepare(`SELECT rowid, expires_at_ms, grants_json, credentials_json, proposals_json, undone, voided
       FROM sync_relay_share_removals WHERE undo_id = ? AND share_id = ? AND owner_user_id = ?`)
       .get(input.undoId, input.shareId, input.actorUserId) as
-      { expires_at_ms: number; grants_json: string; credentials_json: string; undone: number } | undefined;
+      { rowid: number; expires_at_ms: number; grants_json: string; credentials_json: string; proposals_json: string; undone: number; voided: number } | undefined;
     if (!receipt || input.nowMs >= receipt.expires_at_ms) {
       throw relayError("conflict", "The 10-minute Undo period has ended.");
+    }
+    if (receipt.voided || storage.db.prepare(`SELECT 1 FROM sync_relay_share_removals
+      WHERE share_id = ? AND rowid > ? AND removed_grant_id IS NULL`).get(input.shareId, receipt.rowid)) {
+      throw relayError("conflict", "Access changed after removal. Undo is no longer available.");
     }
     const grants = JSON.parse(receipt.grants_json) as { grantId: string; generation: number }[];
     const credentials = JSON.parse(receipt.credentials_json) as { credential_id: string; grant_id: string }[];
@@ -124,6 +142,10 @@ export function undoShareRemoval(storage: StorageContext, input: {
     for (const credential of credentials) storage.db.prepare(`UPDATE sync_relay_link_credentials
       SET retired_at_ms = NULL, generation = (SELECT generation FROM sync_relay_share_grants WHERE grant_id = ?)
       WHERE credential_id = ?`).run(credential.grant_id, credential.credential_id);
+    for (const proposalId of JSON.parse(receipt.proposals_json) as string[]) {
+      storage.db.prepare(`UPDATE sync_relay_share_proposals SET state = 'open', settled_at_ms = NULL
+        WHERE proposal_id = ? AND share_id = ? AND state = 'declined'`).run(proposalId, input.shareId);
+    }
     storage.db.prepare("UPDATE sync_relay_share_removals SET undone = 1 WHERE undo_id = ?").run(input.undoId);
   });
 }

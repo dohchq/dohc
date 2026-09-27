@@ -934,6 +934,7 @@ export interface SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
   undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
+  purgeExpiredShareRemovals(nowMs: number): void;
   listRemovedSharesForRecipient(userId: string, shareId?: string): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
