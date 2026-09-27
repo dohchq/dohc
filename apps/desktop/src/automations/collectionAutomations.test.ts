@@ -3660,6 +3660,81 @@ describe("Collection automations that wake your agent", () => {
     expect(claim).toMatchObject({ state: "failed", error: PERSONAL_NEEDS_ACCOUNT });
   });
 
+  describe("signed out, in a workspace proved never shared", () => {
+    const local = [
+      "  - id: local",
+      "    name: Ask and tell me",
+      "    when: {field-changed: Status}",
+      "    do: [{wake-agent: Plan, person: install-here}, {notify: Done, to: [install-here]}]",
+    ].join("\n");
+    const provedLocal: ReachRoster = { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] };
+
+    it("wakes this computer's agent and notifies its person by this computer's id for them", async () => {
+      const w = await world({ automations: { Tasks: local } });
+      w.setRoster(provedLocal);
+      const claim = w.claim("collection:Tasks#local", w.addRecord("Tasks", "one", { Status: "Done" }));
+      await w.executor.open();
+      await w.settledClaim(claim);
+
+      expect(claim.state).toBe("done");
+      expect(w.messages).toEqual([expect.objectContaining({ target: { kind: "agent" }, body: "Plan" })]);
+      expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["install-here"]);
+      const [run] = await w.executor.runs("collection:Tasks#local");
+      expect(run!.writes).toEqual([
+        { kind: "message", messageId: w.messages[0]!.messageId, name: "your agent" },
+        expect.objectContaining({ kind: "notice", name: "you" }),
+      ]);
+    });
+
+    it("refuses a step for another computer's id or an account, and starts no direct message", async () => {
+      const step = (id: string, action: string) => [
+        `  - id: ${id}`,
+        `    name: ${id}`,
+        "    when: {field-changed: Status}",
+        `    do: [${action}]`,
+      ].join("\n");
+      const w = await world({ automations: { Tasks: [
+        step("copied", "{wake-agent: Plan, person: install-elsewhere}"),
+        step("account", "{wake-agent: Plan, person: user-owner}"),
+        step("tell", "{notify: Done, to: [user-ana@dohc.test]}"),
+        step("dm", "{direct-message: Done, to: [install-here]}"),
+      ].join("\n") } });
+      w.setRoster(provedLocal);
+      const task = w.addRecord("Tasks", "one", { Status: "Done" });
+      const claims = ["copied", "account", "tell", "dm"].map((id) => w.claim(`collection:Tasks#${id}`, task));
+      await w.executor.open();
+      for (const claim of claims) await w.settledClaim(claim);
+
+      expect(claims.map((claim) => [claim.state, claim.error])).toEqual([
+        ["failed", PERSONAL_NEEDS_ACCOUNT],
+        ["failed", PERSONAL_NEEDS_ACCOUNT],
+        ["failed", "that person cannot view Tasks."],
+        ["failed", "There is no direct message with you yet. Start one first: automations never start one."],
+      ]);
+      expect(w.messages).toEqual([]);
+      expect(w.notices).toEqual([]);
+    });
+
+    it("keeps the same person after a sign-in, and stops once the workspace is no longer proved never shared", async () => {
+      const w = await world({ automations: { Tasks: local } });
+      w.setRoster({ ...provedLocal, ownerUserId: "user-owner" });
+      const task = w.addRecord("Tasks", "one", { Status: "Done" });
+      const signedIn = w.claim("collection:Tasks#local", task);
+      await w.executor.open();
+      await w.settledClaim(signedIn);
+      expect(signedIn.state).toBe("done");
+      expect(w.notices.map((notice) => notice.recipientUserId)).toEqual(["install-here"]);
+
+      w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+      const synced = w.claim("collection:Tasks#local", task);
+      w.executor.notifyClaimed();
+      await w.settledClaim(synced);
+      expect(synced).toMatchObject({ state: "failed", error: "This step acts as that person, and you can also edit Tasks." });
+      expect(w.messages).toHaveLength(1);
+      expect(w.notices).toHaveLength(1);
+    });
+  });
+
   it("stops when someone else can also edit the Collection, or the step names another person", async () => {
     const w = await world({ automations: { Tasks: [
       ask,

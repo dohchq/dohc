@@ -53,14 +53,17 @@ export function chatDirectoryOf(
   roster: Exclude<ReachRoster, { kind: "unknown" }>,
 ): ChatDirectory {
   const grants = roster.kind === "owner" ? roster.grants : [];
-  const ownerUserId = roster.kind === "owner" ? roster.ownerUserId : null;
-  const personName = (userId: string) => userId === ownerUserId
+  // This computer's person, by their account or, in a workspace proved never
+  // shared, by this computer's own id for them.
+  const isOwner = (userId: string) =>
+    roster.kind === "owner" && (userId === roster.ownerUserId || userId === roster.localPersonId);
+  const personName = (userId: string) => isOwner(userId)
     ? "you"
     : grants.find((grant) => grant.recipientUserId === userId && grant.recipientEmail)?.recipientEmail ?? "that person";
   return {
     person: personName,
     noticeRecipient(userId) {
-      if (userId === ownerUserId || grants.some((grant) => grant.recipientUserId === userId)) {
+      if (isOwner(userId) || grants.some((grant) => grant.recipientUserId === userId)) {
         return { name: personName(userId) };
       }
       return { problem: "dohc cannot find that person among the people this workspace is shared with. They may not have accepted your share yet." };

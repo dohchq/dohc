@@ -49,6 +49,19 @@ describe("where automations write", () => {
       });
     }
   });
+
+  it("names this computer's person by its own id for them only on a roster that proves nobody else had a part", () => {
+    const proved = chatDirectoryOf([], { kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
+    expect(proved.person("install-here")).toBe("you");
+    expect(proved.noticeRecipient("install-here")).toEqual({ name: "you" });
+    expect(proved.noticeRecipient("install-elsewhere")).toHaveProperty("problem");
+    expect(proved.directMessage("install-here")).toEqual({
+      problem: "There is no direct message with you yet. Start one first: automations never start one.",
+    });
+    const unproved = chatDirectoryOf([], { kind: "owner", ownerUserId: null, grants: [] });
+    expect(unproved.person("install-here")).toBe("that person");
+    expect(unproved.noticeRecipient("install-here")).toHaveProperty("problem");
+  });
 });
 
 describe("reading where automations write", () => {

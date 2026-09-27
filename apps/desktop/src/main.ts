@@ -3769,7 +3769,12 @@ function createCollectionAutomationsFor(
           : await chatWrites.sendMessage(place, { ...common, threadId: message.target.threadId });
       }),
     },
-    postNotice: (notice, signal) => noticeStore().postNotice({ workspaceId, ...notice, signal }),
+    // A notice to this computer's own id for its person stays here, even
+    // after a sign-in: the reach check allowed it as this computer's person.
+    postNotice: ({ recipientUserId, ...notice }, signal) => noticeStore().postNotice({
+      workspaceId, ...notice, signal,
+      ...(recipientUserId === localReactorFallbackId() ? { onlyHere: true } : { recipientUserId }),
+    }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
     groupHost: () => automationHostGeneration(findWorkspace(workspaceId), () => automationHosts.runsAt(workspaceId)),

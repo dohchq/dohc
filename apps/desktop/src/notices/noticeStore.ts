@@ -66,6 +66,10 @@ export interface PostNoticeInput {
   // Sends it to the owner of the workspace instead. From the owner's own
   // computer that is yourself; through a share, the relay finds the owner.
   toWorkspaceOwner?: true;
+  // Keeps the notice in this computer's own list whoever signs in, for this
+  // computer's person named by this computer's id for them. Takes neither
+  // recipientUserId nor toWorkspaceOwner.
+  onlyHere?: true;
   // Ends the post before it sends or queues, as when an automation run stops.
   signal?: AbortSignal;
 }
@@ -620,10 +624,10 @@ export function createNoticeStore(deps: {
     // A session that changes while the notice is placed is read again.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        const to: NoticeRecipient | null = input.toWorkspaceOwner
-          ? { toWorkspaceOwner: true }
+        const to: NoticeRecipient | null = input.onlyHere ? null
+          : input.toWorkspaceOwner ? { toWorkspaceOwner: true }
           : input.recipientUserId === undefined ? null : { recipientUserId: input.recipientUserId };
-        return await postOnce(to, content, input.signal);
+        return await postOnce(to, content, input.signal, input.onlyHere === true);
       } catch (error) {
         if (!(error instanceof SessionChanged)) throw error;
         if (attempt === 3) throw new NoticeNotSentError("Your server session changed. Try again.");
@@ -632,8 +636,9 @@ export function createNoticeStore(deps: {
   }
 
   // `to` is null for yourself.
-  async function postOnce(to: NoticeRecipient | null, content: NoticeContent, signal?: AbortSignal): Promise<void> {
-    const session = await deps.session();
+  async function postOnce(to: NoticeRecipient | null, content: NoticeContent, signal: AbortSignal | undefined, onlyHere: boolean): Promise<void> {
+    // A notice kept only here never reads the session, so a sign-in cannot send it anywhere else.
+    const session = onlyHere ? null : await deps.session();
     const reach = session?.reachFor(content.workspaceId) ?? null;
     const fields = {
       noticeId: content.noticeId,

@@ -359,7 +359,7 @@ function checkOwnerStep(
       return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "notify": {
-      if (step.person.userId === roster.ownerUserId) return ALLOWED;
+      if (step.person.userId === roster.ownerUserId || step.person.userId === roster.localPersonId) return ALLOWED;
       const person = people.find((candidate) => candidate.userId === step.person.userId);
       return person && reaches(person, collection.path, "view")
         ? ALLOWED
@@ -372,10 +372,13 @@ function checkOwnerStep(
     }
     case "personal": {
       // A personal step acts as its person, so it must name this computer's
-      // person. With no account known, dohc cannot tell who the step names,
-      // so it runs for nobody.
-      if (roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
-      if (step.person.userId !== roster.ownerUserId) {
+      // person: by their account, or by this computer's own id for them in a
+      // workspace nobody else ever had a part in. Naming anyone else with no
+      // account known, dohc cannot tell who the step names, so it runs for
+      // nobody.
+      const local = roster.localPersonId !== undefined && step.person.userId === roster.localPersonId;
+      if (!local && roster.ownerUserId === null) return stop(PERSONAL_NEEDS_ACCOUNT);
+      if (!local && step.person.userId !== roster.ownerUserId) {
         const person = people.find((candidate) => candidate.userId === step.person.userId);
         return stop(`This step acts as ${person?.email ?? step.person.name}, and you can also edit ${collection.name}.`);
       }
