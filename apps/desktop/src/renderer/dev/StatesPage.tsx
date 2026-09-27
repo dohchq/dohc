@@ -135,7 +135,7 @@ function notice(id: string, tone: "danger" | "success") {
   };
 }
 
-function DialogSpecimen() {
+function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
     // `contain: paint` makes this box the containing block of the frame's
@@ -152,9 +152,9 @@ function DialogSpecimen() {
           confirmLabel="Delete files"
           onCancel={noop}
           onConfirm={noop}
-          testId="states-dialog"
-          cancelTestId="states-dialog-cancel"
-          confirmTestId="states-dialog-confirm"
+          testId={`states-dialog-${props.theme}`}
+          cancelTestId={`states-dialog-cancel-${props.theme}`}
+          confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
             They move to the system trash, or this workspace's .dohc/trash if that fails, and you can
@@ -333,7 +333,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section title="Dialog">
-        <DialogSpecimen />
+        <DialogSpecimen theme={props.theme} />
       </Section>
     </section>
   );

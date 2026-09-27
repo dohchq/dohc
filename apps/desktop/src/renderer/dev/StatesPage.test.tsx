@@ -16,6 +16,7 @@ describe("states page", () => {
 
   it("renders both themes side by side and holds the document light while open", () => {
     vi.stubGlobal("dohcDesktop", {});
+    try {
     document.documentElement.dataset.theme = "dark";
     const { unmount } = render(<StatesPage />);
 
@@ -33,6 +34,8 @@ describe("states page", () => {
 
     unmount();
     expect(document.documentElement.dataset.theme).toBe("dark");
-    vi.unstubAllGlobals();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
