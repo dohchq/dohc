@@ -17,7 +17,7 @@ export type ShareRemoval = {
   // The Change the Undo makes: "Restored ana@example.com to Trip."
   restoredMessage: string;
   shareId: string;
-  undo: RelayShareUndoReceipt;
+  undo?: RelayShareUndoReceipt;
   // Runs after access is back, so a list that is still open reads it again.
   restored?: () => void;
 };
@@ -59,10 +59,15 @@ export function useShareRemovalNotices(input: {
       // removal came from must not land in another workspace's notices.
       const current = () => workspaceIdRef.current === removal.workspaceId;
       if (!current()) return;
+      const receipt = removal.undo;
+      if (!receipt) {
+        showSuccessNotice(removal.message);
+        return;
+      }
       let busy = false;
       const undo = async () => {
         if (!current() || busy) return;
-        if (Date.now() >= removal.undo.expiresAtMs) {
+        if (Date.now() >= receipt.expiresAtMs) {
           reportShellFailure({ message: SHARE_UNDO_EXPIRED });
           return;
         }
@@ -70,7 +75,7 @@ export function useShareRemovalNotices(input: {
         try {
           await bridge().undoRelayShare({
             shareId: removal.shareId,
-            undoId: removal.undo.undoId,
+            undoId: receipt.undoId,
           });
           if (!current()) return;
           showSuccessNotice(removal.restoredMessage);

@@ -26,6 +26,17 @@ function requireOwner(storage: StorageContext, shareId: string, userId: string) 
   if (!share || share.granterUserId !== userId || !storage.workspaceIsOwnedBy(share.workspaceId, userId)) throw notFound();
 }
 
+function hasLaterCoveringRemoval(storage: StorageContext, shareId: string, rowid: number, grantsJson: string): boolean {
+  return Boolean(storage.db.prepare(`SELECT 1 FROM sync_relay_share_removals later
+    WHERE later.share_id = ? AND later.rowid > ? AND (
+      later.removed_grant_id IS NULL OR EXISTS (
+        SELECT 1 FROM json_each(?) receipt_grant
+        JOIN sync_relay_share_grants g ON g.grant_id = json_extract(receipt_grant.value, '$.grantId')
+        WHERE g.grant_id = later.removed_grant_id OR g.parent_grant_id = later.removed_grant_id
+      )
+    )`).get(shareId, rowid, grantsJson));
+}
+
 export function removeShareAccess(storage: StorageContext, input: ShareRemovalInput):
   | Exclude<LinkGrantTransitionResult, { ok: true }>
   | { ok: true; grant: SyncRelayShareGrantRow | null; undo?: { undoId: string; expiresAtMs: number } } {
@@ -41,18 +52,23 @@ export function removeShareAccess(storage: StorageContext, input: ShareRemovalIn
     if (!before.some(row => input.grantId === undefined || row.grant_id === input.grantId)) {
       if (input.grantId === undefined) {
         revokeShareInTransaction(storage, input.shareId, input.nowMs);
-        return {ok: true, grant: null};
       }
-      const prior = storage.db.prepare(`SELECT undo_id, expires_at_ms, grants_json FROM sync_relay_share_removals
+      const candidates = storage.db.prepare(`SELECT rowid, undo_id, expires_at_ms, grants_json FROM sync_relay_share_removals
         WHERE share_id = ? AND owner_user_id = ? AND removed_grant_id IS ? AND undone = 0 AND voided = 0 AND expires_at_ms > ?
-        ORDER BY expires_at_ms DESC LIMIT 1`).get(input.shareId, input.actorUserId, input.grantId ?? null, input.nowMs) as
-        {undo_id: string; expires_at_ms: number; grants_json: string} | undefined;
-      if (!prior) throw notFound();
-      const expected = JSON.parse(prior.grants_json) as {grantId: string; generation: number}[];
-      if (!expected.every(row => {
-        const grant = storage.getShareGrant(row.grantId);
-        return grant?.status === "revoked" && grant.generation === row.generation;
-      })) throw notFound();
+        ORDER BY rowid DESC`).all(input.shareId, input.actorUserId, input.grantId ?? null, input.nowMs) as
+        {rowid: number; undo_id: string; expires_at_ms: number; grants_json: string}[];
+      const prior = candidates.find(candidate => {
+        if (hasLaterCoveringRemoval(storage, input.shareId, candidate.rowid, candidate.grants_json)) return false;
+        const expected = JSON.parse(candidate.grants_json) as {grantId: string; generation: number}[];
+        return expected.every(row => {
+          const grant = storage.getShareGrant(row.grantId);
+          return grant?.status === "revoked" && grant.generation === row.generation;
+        });
+      });
+      if (!prior) {
+        if (input.grantId === undefined) return {ok: true, grant: null};
+        throw notFound();
+      }
       return {ok: true, grant: input.grantId ? storage.getShareGrant(input.grantId) : null,
         undo: {undoId: prior.undo_id, expiresAtMs: prior.expires_at_ms}};
     }
@@ -95,8 +111,7 @@ export function undoShareRemoval(storage: StorageContext, input: {
     if (!receipt || input.nowMs >= receipt.expires_at_ms) {
       throw relayError("conflict", "The 10-minute Undo period has ended.");
     }
-    if (receipt.voided || storage.db.prepare(`SELECT 1 FROM sync_relay_share_removals
-      WHERE share_id = ? AND rowid > ? AND removed_grant_id IS NULL`).get(input.shareId, receipt.rowid)) {
+    if (receipt.voided || hasLaterCoveringRemoval(storage, input.shareId, receipt.rowid, receipt.grants_json)) {
       throw relayError("conflict", "Access changed after removal. Undo is no longer available.");
     }
     const grants = JSON.parse(receipt.grants_json) as { grantId: string; generation: number }[];

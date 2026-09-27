@@ -3118,7 +3118,7 @@ export function ChatsView(props: {
           workspaceId,
           shareId,
           undo: result.undo,
-          message: `Removed ${member} from ${group}.`,
+          message: result.undo ? `Removed ${member} from ${group}.` : `${member} no longer has access to ${group}.`,
           restoredMessage: `Restored ${member} to ${group}.`,
           restored: () => {
             if (token === liveToken.current) void refreshShares();

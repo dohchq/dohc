@@ -596,7 +596,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  it("marks a granted channel as shared and manages members through the share panel", async () => {
+  it.each([false, true])("manages members through the share panel (already ended: %s)", async alreadyEnded => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
       fileThreads: [],
@@ -615,7 +615,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       }),
     );
     bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
-    const undo = { undoId: "undo-1", expiresAtMs: 600_000 };
+    const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
     bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
     const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
     renderView(vi.fn(), vi.fn(), { shareRemovals });
@@ -641,7 +641,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       workspaceId: "workspace-a",
       shareId: "share-1",
       undo,
-      message: "Removed ana@example.com from team.",
+      message: alreadyEnded ? "ana@example.com no longer has access to team." : "Removed ana@example.com from team.",
       restoredMessage: "Restored ana@example.com to team.",
     });
 

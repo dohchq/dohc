@@ -119,7 +119,7 @@ export function SharedByMeList(props: {
         workspaceId,
         shareId,
         undo: result.undo,
-        message: `Ended ${subject}.`,
+        message: result.undo ? `Ended ${subject}.` : `The share of ${selectorLabel(share)} with ${recipientLabel(share)} has already ended.`,
         restoredMessage: `Restored ${subject}.`,
         restored: () => {
           if (listEpoch.isCurrent(epoch)) void refresh();

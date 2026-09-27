@@ -3362,13 +3362,13 @@ export const RelayShareUndoReceipt = z
 export type RelayShareUndoReceipt = z.infer<typeof RelayShareUndoReceipt>;
 
 export const RevokeRelayShareResult = z
-  .object({ undo: RelayShareUndoReceipt })
+  .object({ undo: RelayShareUndoReceipt.optional() })
   .strict();
 export type RevokeRelayShareResult = z.infer<typeof RevokeRelayShareResult>;
 
 export const RelayShareRevokeResponse = z.object({
   ok: z.literal(true),
-  undo: RelayShareUndoReceipt,
+  undo: RelayShareUndoReceipt.optional(),
 });
 
 export const UndoRelaySharePayload = z

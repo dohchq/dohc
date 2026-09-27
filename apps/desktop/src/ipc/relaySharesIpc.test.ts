@@ -652,10 +652,10 @@ describe("registered account share handlers", () => {
     expect(h.remote).not.toHaveBeenCalled();
   });
 
-  it("refuses a revoke answer without a receipt, because the notice would promise an Undo it cannot make", async () => {
+  it("accepts an already-ended share without an undo receipt", async () => {
     const h = harness();
     h.accountRequest.mockResolvedValue({ ok: true });
-    await expect(h.invoke(CHANNELS.revokeRelayShare, { shareId: "share" })).rejects.toThrow("sharing failed (500)");
+    await expect(h.invoke(CHANNELS.revokeRelayShare, { shareId: "share" })).resolves.toEqual({});
   });
 
   it("restores a removal through the account transport with the receipt's id", async () => {

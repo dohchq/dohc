@@ -46,6 +46,21 @@ afterEach(() => {
 });
 
 describe("SharedByMeList", () => {
+  it("reports an already-ended share without promising Undo", async () => {
+    const user = userEvent.setup();
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    bridgeMock.revokeRelayShare.mockResolvedValue({});
+    render(<SharedByMeList workspaceId="ws-1" shareRemovals={shareRemovals} />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledWith(expect.objectContaining({
+      undo: undefined,
+      message: "The share of docs with friend@dohc.test has already ended.",
+    })));
+    expect(shareRemovals.failed).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2));
+  });
+
   it("lists active shares and ends one on request", async () => {
     const user = userEvent.setup();
     render(<SharedByMeList workspaceId="ws-1" />);

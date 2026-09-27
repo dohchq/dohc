@@ -120,7 +120,7 @@ it("retries each removal with the same receipt and cannot replay an older Undo a
     storage.undoShareRemoval({...removal, undoId: first.undo.undoId});
     const grantId = path.includes("grants") ? "named" : "link";
     const next = storage.removeShareAccess({...removal, grantId}); expect(next.ok).toBe(true);
-    expect(() => storage.undoShareRemoval({...removal, undoId: first.undo.undoId})).toThrow("Access changed after Undo");
+    expect(() => storage.undoShareRemoval({...removal, undoId: first.undo.undoId})).toThrow("Access changed");
   }
 });
 
@@ -136,8 +136,70 @@ it("does not return a single-grant receipt for a no-op whole-share removal", asy
   expect(await response.json()).toEqual({ok: true, shareId: "s"});
   expect(context.db.prepare("SELECT undo_id FROM sync_relay_share_removals").all()).toEqual(receipts);
   for (const receipt of receipts) {
-    expect(() => storage.undoShareRemoval({...removal, undoId: String(receipt.undo_id)})).toThrow("Access changed");
+    expect(() => storage.undoShareRemoval({...removal, undoId: String(receipt.undo_id)})).not.toThrow();
   }
+});
+
+it("retries Stop sharing with the newest whole-share receipt without extending its expiry", async () => {
+  const {storage} = await fixture();
+  const first = storage.removeShareAccess(removal);
+  if (!first.ok || !first.undo) throw Error("removal failed");
+  storage.undoShareRemoval({...removal, undoId: first.undo.undoId});
+  const latest = storage.removeShareAccess(removal);
+  if (!latest.ok || !latest.undo) throw Error("removal failed");
+  const h = testHandler(storage, {nowMs: () => 4000});
+  const response = await h(request("owner", "/sync/shares/s/revoke", post()));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ok: true, shareId: "s", undo: latest.undo});
+  storage.undoShareRemoval({...removal, undoId: latest.undo.undoId, nowMs: 4000});
+  expect(storage.getShareGrant("named")?.status).toBe("active");
+});
+
+it.each(["expired", "voided", "changed"])("does not return a %s whole-share receipt", async state => {
+  const {storage} = await fixture();
+  const result = storage.removeShareAccess(removal);
+  if (!result.ok || !result.undo) throw Error("removal failed");
+  const context = storage as StorageContext;
+  if (state === "voided") context.tx(() => context.db.prepare(
+    "UPDATE sync_relay_share_removals SET voided = 1").run());
+  if (state === "changed") context.tx(() => context.db.prepare(
+    "UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = 'named'").run());
+  expect(storage.removeShareAccess({...removal, nowMs: state === "expired" ? result.undo.expiresAtMs : 4000}))
+    .toEqual({ok: true, grant: null});
+});
+
+it.each([false, true])("link removal permanently voids an earlier dependent receipt (undo link: %s)", async undoLink => {
+  const {storage} = await fixture();
+  const dependent = storage.removeShareAccess({...removal, grantId: "dependent"});
+  if (!dependent.ok || !dependent.undo) throw Error("removal failed");
+  const link = storage.removeShareAccess({...removal, grantId: "link"});
+  if (!link.ok || !link.undo) throw Error("removal failed");
+  if (undoLink) storage.undoShareRemoval({...removal, undoId: link.undo.undoId});
+  expect(() => storage.undoShareRemoval({...removal, undoId: dependent.undo!.undoId})).toThrow("Access changed");
+  expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
+  const context = storage as StorageContext;
+  expect(context.db.prepare("SELECT voided FROM sync_relay_share_removals WHERE undo_id = ?")
+    .get(dependent.undo.undoId)).toEqual({voided: 1});
+  context.tx(() => context.db.prepare("UPDATE sync_relay_share_removals SET voided = 0 WHERE undo_id = ?")
+    .run(dependent.undo!.undoId));
+  expect(() => storage.undoShareRemoval({...removal, undoId: dependent.undo!.undoId})).toThrow("Access changed");
+});
+
+it("declines open proposals and releases their blobs when stopping an already-empty share", async () => {
+  const {storage} = await fixture();
+  const sha256 = "c".repeat(64);
+  storage.putBlob({workspaceId: "w", sha256, content: Buffer.from("proposal"), createdAtMs: 1});
+  storage.insertShareProposal({proposalId: "open", shareId: "s", workspaceId: "w", proposedByUserId: "reader",
+    versionId: "version", submitId: "open", createdAtMs: 2,
+    ops: [{opIndex: 0, basedOnPath: null, basedOnObjectId: null, basedOnBlobSha256: null, operation: "write",
+      afterPath: "private/proposal.txt", afterBlobSha256: sha256, afterContentKind: "text", afterByteLength: 8, recordedAtMs: 2}]});
+  storage.removeShareAccess({...removal, grantId: "named"});
+  storage.removeShareAccess({...removal, grantId: "link"});
+  expect(storage.getShareProposal("open")?.state).toBe("open");
+  expect(await storage.collectUnreferencedBlobs("w", {nowMs: 4000})).toMatchObject({removed: 0});
+  storage.removeShareAccess({...removal, nowMs: 4000});
+  expect(storage.getShareProposal("open")).toMatchObject({state: "declined", settledAtMs: 4000});
+  expect(await storage.collectUnreferencedBlobs("w", {nowMs: 4001})).toMatchObject({removed: 1});
 });
 
 it("refuses a dependent Undo if the owner narrowed its parent link", async () => {

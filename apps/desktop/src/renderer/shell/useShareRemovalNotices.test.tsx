@@ -42,6 +42,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("useShareRemovalNotices", () => {
+  it("files an already-ended notice without an Undo action or deadline", () => {
+    const { result } = renderNotices();
+    act(() => result.current.notices.removed(removal({undo: undefined, message: "This share has already ended."})));
+    expect(result.current.shell.shellErrors).toHaveLength(1);
+    expect(result.current.shell.shellErrors[0]).toMatchObject({
+      tone: "success", message: "This share has already ended.", retry: null,
+    });
+    expect(result.current.shell.shellErrors[0]?.action).toBeUndefined();
+  });
+
   it("files a notice with Undo that states the 10 minutes and stays as a row after the toast closes", async () => {
     const restored = vi.fn();
     const { result } = renderNotices();
