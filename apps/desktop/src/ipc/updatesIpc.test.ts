@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerUpdatesIpcHandlers } from "./updatesIpc";
+import { createUpdateInstall, registerUpdatesIpcHandlers } from "./updatesIpc";
 import { CHANNELS } from "./channels";
 import { createExitRounds, createQuitGuard, type ExitRoundMessage } from "../quitGuard";
 import { startAutoUpdates, publicUpdateState, type AutoUpdateController } from "../updates/electronUpdater";
@@ -54,13 +54,17 @@ function harness() {
   const readController = vi.fn(() => controller);
   const approve = vi.spyOn(quitGuard, "approve");
   const revoke = vi.spyOn(quitGuard, "revoke");
+  const installUpdate = createUpdateInstall<typeof participant>({
+    currentUpdateState, exitRounds, quitGuard,
+    get autoUpdateController() { return readController(); },
+  });
   registerUpdatesIpcHandlers<Event>({
     registerHandler: (channel, handler) => {
       if (handlers.has(channel)) throw new Error(`duplicate channel: ${channel}`);
       handlers.set(channel, handler);
     },
     assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
-    currentUpdateState, exitRounds, quitGuard,
+    currentUpdateState, installUpdate,
     get autoUpdateController() { return readController(); },
   });
   const invoke = (channel: string, payload?: unknown, trusted = true) => {

@@ -2654,6 +2654,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_AUTOMATION_GROUP_COVERAGE_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 19,
+        id: "v2-sync-identity-claim-state",
+        sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch')); ALTER TABLE sync_identity ADD COLUMN claim_account_id TEXT;",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -2983,6 +2989,10 @@ mod tests {
                 "v2-automation-group-coverage",
                 "5b2247e5582d3fdb328eae4d4af88ae7c2e9be8acf0e2dd8aa6ccfa81d23afe8",
             ),
+            (
+                "v2-sync-identity-claim-state",
+                "3cf872e265017c043dd394e9a67c6a3108cec735d06c7cab6f89d00b164feaee",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3015,6 +3025,36 @@ mod tests {
         assert!(
             std::error::Error::source(&refused).is_some(),
             "the cause names the migration"
+        );
+    }
+
+    #[test]
+    fn relay_identity_claim_migration_preserves_existing_identity() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS.len() - 1;
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let identity: (String, String, String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT origin_id,replication_epoch,stream_identity,claim_state,claim_account_id FROM sync_identity WHERE workspace_id='ws'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            identity,
+            (
+                "origin".to_owned(),
+                "epoch".to_owned(),
+                "stream".to_owned(),
+                None,
+                None
+            )
+        );
+        assert!(
+            conn.execute("UPDATE sync_identity SET claim_state='unexpected'", [])
+                .is_err()
         );
     }
 

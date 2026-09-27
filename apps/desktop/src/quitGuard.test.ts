@@ -456,10 +456,22 @@ describe("quit guard", () => {
 // answer nothing while the user sees the unresponsive dialog over drafts that
 // were fully available.
 describe("workspace window registry", () => {
-  type FakeWindow = { id: string; destroyed: boolean };
+  type FakeWindow = { id: string; destroyed: boolean; crashed?: boolean };
+
+  it("asks only windows whose renderer still runs, and still lists a crashed one for the force path", () => {
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
+    const working: FakeWindow = { id: "working", destroyed: false };
+    const crashed: FakeWindow = { id: "crashed", destroyed: false, crashed: true };
+    const closed: FakeWindow = { id: "closed", destroyed: true };
+    registry.track(working);
+    registry.track(crashed);
+    registry.track(closed);
+    expect(registry.answering().map((entry) => entry.id)).toEqual(["working"]);
+    expect(registry.allLive().map((entry) => entry.id)).toEqual(["working", "crashed"]);
+  });
 
   it("lists every live workspace window for the force-quit path", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
     const first: FakeWindow = { id: "first", destroyed: false };
     const gone: FakeWindow = { id: "gone", destroyed: true };
     const second: FakeWindow = { id: "second", destroyed: false };
@@ -470,7 +482,7 @@ describe("workspace window registry", () => {
   });
 
   it("answers with a tracked workspace window, never another live window", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
     const workspace: FakeWindow = { id: "workspace", destroyed: false };
     const pdfExport: FakeWindow = { id: "pdf-export", destroyed: false };
     registry.track(workspace);
@@ -479,7 +491,7 @@ describe("workspace window registry", () => {
   });
 
   it("skips destroyed windows and forgets closed ones", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
     const closed: FakeWindow = { id: "old", destroyed: true };
     const open: FakeWindow = { id: "new", destroyed: false };
     registry.track(closed);

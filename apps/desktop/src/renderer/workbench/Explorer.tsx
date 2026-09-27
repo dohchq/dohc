@@ -317,8 +317,10 @@ const TreeRow = memo(function TreeRow(props: {
   selected: boolean;
   active: boolean;
   focused: boolean;
+  tabbable: boolean;
   dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
+  onRowFocus: (path: string) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
   onRowChevronClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
@@ -354,9 +356,10 @@ const TreeRow = memo(function TreeRow(props: {
         aria-setsize={row.setSize}
         aria-selected={props.selected}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
-        tabIndex={props.focused ? 0 : -1}
+        tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
         draggable
+        onFocus={() => props.onRowFocus(row.fullPath)}
         onClick={(event) => props.onRowClick(row.fullPath, event)}
         onContextMenu={(event) => props.onRowContextMenu(row.fullPath, event)}
         onDragStart={(event) => props.onRowDragStart(row.fullPath, event)}
@@ -670,6 +673,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
     return indexes;
   }, [renderItems]);
+
+  const tabbablePath = useMemo(() => {
+    if (focusedPath && renderIndexByPath.has(focusedPath)) return focusedPath;
+    for (const path of renderIndexByPath.keys()) {
+      if (selection.has(path)) return path;
+    }
+    return renderIndexByPath.keys().next().value ?? null;
+  }, [focusedPath, renderIndexByPath, selection]);
 
   const virtualized = renderItems.length > TREE_VIRTUALIZATION_THRESHOLD;
 
@@ -1488,7 +1499,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Keep the DOM proportional to the viewport. The full flattened row list
   // remains authoritative for keyboard navigation and range selection; only
-  // its fixed-height presentation is windowed. A focused row stays mounted
+  // its fixed-height presentation is windowed. The tabbable row stays mounted
   // outside the viewport so wheel scrolling never destroys the roving tab
   // stop or drops browser focus.
   const mountedIndexes = new Set<number>();
@@ -1501,9 +1512,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   for (let index = range.start; index < range.end; index += 1) {
     mountedIndexes.add(index);
   }
-  if (virtualized && focusedPath) {
-    const focusedIndex = renderIndexByPath.get(focusedPath);
-    if (focusedIndex !== undefined) mountedIndexes.add(focusedIndex);
+  if (virtualized && tabbablePath) {
+    const tabbableIndex = renderIndexByPath.get(tabbablePath);
+    if (tabbableIndex !== undefined) mountedIndexes.add(tabbableIndex);
   }
   if (virtualized && dragOriginPath) {
     const dragOriginIndex = renderIndexByPath.get(dragOriginPath);
@@ -1541,8 +1552,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           focused={focusedPath === row.fullPath}
+          tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewForRow(row)}
           registerRef={registerRef}
+          onRowFocus={setFocusedPath}
           onRowClick={onRowClick}
           onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}

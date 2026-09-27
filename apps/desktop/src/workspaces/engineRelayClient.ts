@@ -7,6 +7,8 @@ import {
   RelayUnauthorizedError,
   RelayUnreachableError,
   RelayWorkspaceUnavailableError,
+  RelayIdentityMissingError,
+  RelayClaimRefusedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
@@ -216,6 +218,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
 export class RelayConfiguredDaemonClientSource
   implements EngineDaemonClientSource
 {
+  readonly onClientChanged?: EngineDaemonClientSource["onClientChanged"];
   private readonly wrappers = new WeakMap<
     EngineDaemonClient,
     RelayConfiguredDaemonClient
@@ -224,7 +227,9 @@ export class RelayConfiguredDaemonClientSource
   constructor(
     private readonly source: EngineDaemonClientSource,
     private readonly routes: RelayTransportRouteGuard,
-  ) {}
+  ) {
+    if (source.onClientChanged) this.onClientChanged = source.onClientChanged.bind(source);
+  }
 
   currentClient(): EngineDaemonClient {
     const client = this.source.currentClient();
@@ -481,6 +486,23 @@ const SYNC_PASS_METHODS: ReadonlySet<string> = new Set([
 
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
+  const savedClaimRefusal = method === "sync.push" && error.message === "relay-claim-refused";
+  if (method === "sync.push" && error.wireCode === "IDENTITY_REQUIRED" && !savedClaimRefusal) {
+    throw new RelayIdentityMissingError();
+  }
+  if (method === "sync.claim" || savedClaimRefusal) {
+    const refusals: Readonly<Record<string, string>> = {
+      EPOCH_SUPERSEDED: "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue.",
+      IDENTITY_NOT_RECOGNIZED: "Sync stopped. The server does not recognize this workspace. Check your account and try again.",
+      STREAM_IDENTITY_MISMATCH: "Sync stopped. This workspace does not match the server's copy. Join that copy to continue.",
+      IDENTITY_REQUIRED: "Sync is not set up for this workspace. Try again.",
+    };
+    const refusal = refusals[error.wireCode];
+    if (refusal) throw new RelayClaimRefusedError(refusal);
+    if (error.wireCode === "WORKSPACE_UNAVAILABLE" && (error.message === "relay-workspace-unavailable" || savedClaimRefusal)) {
+      throw new RelayClaimRefusedError("Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.");
+    }
+  }
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
   if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
     if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
@@ -495,9 +517,8 @@ function translateRelayError(method: string, error: unknown): never {
   }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
-    // Only the sync pass names this cause today; the enable and join flows
-    // keep their own reading of an unavailable workspace.
-    if (SYNC_PASS_METHODS.has(method) && error.message === "relay-unreachable") {
+    // Claim setup must distinguish a network outage from a refused claim.
+    if ((SYNC_PASS_METHODS.has(method) || method === "sync.claim") && error.message === "relay-unreachable") {
       throw new RelayUnreachableError();
     }
     throw new RelayWorkspaceUnavailableError();
@@ -673,6 +694,7 @@ export class EngineRelayClient {
   bind(input: {
     workspaceId: string;
     rootPath: string;
+    accountId?: string;
     attachmentId?: symbol;
     shareMount?: true;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
@@ -697,6 +719,7 @@ export class EngineRelayClient {
     const workspaceKey = this.workspaceKey(workspace);
     this.boundWorkspaces.set(workspaceKey, workspace);
     const connectionKey = `${input.rootPath}\u0000${input.relay.token}`;
+    let accountChecked = false;
     const requestFor = async (
       targetWorkspace: EngineWorkspace,
       method: string,
@@ -713,6 +736,13 @@ export class EngineRelayClient {
             async ({ client, workspace: handle }) => {
               this.retainBoundWorkspace(workspaceKey, workspace);
               const requester = new WorkspaceDaemonRequester(client);
+              if (!accountChecked && input.accountId !== undefined) {
+                await requester.request("sync.resetClaimRefusal", {
+                  workspaceId: workspace.workspaceId,
+                  accountId: input.accountId,
+                }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
+                accountChecked = true;
+              }
               return await requester.request(method, params, {
                 workspace: handle,
                 deadlineMs: this.requestDeadlineMs,
@@ -771,7 +801,10 @@ export class EngineRelayClient {
       requester: typeof request,
     ): Promise<void> => {
       const result = resultRecord(
-        await requester("sync.claim", { workspaceId: workspace.workspaceId }),
+        await requester("sync.claim", {
+          workspaceId: workspace.workspaceId,
+          ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
+        }),
         "sync.claim",
       );
       if (!booleanField(result, "claimed", "sync.claim")) {
@@ -1271,10 +1304,23 @@ export class EngineRelayClient {
     });
   }
 
-  async closeAll(): Promise<void> {
+  async closeAll(options?: { accountChanged?: boolean }): Promise<void> {
     const results = await Promise.allSettled(
       [...this.boundWorkspaces.values()].map(async (workspace) => {
-        await this.closeWorkspace(workspace);
+        try {
+          if (options?.accountChanged) {
+            await runInKeyedLane(this.lanes, this.workspaceKey(workspace), async () => {
+              await this.sessions.run(workspace, async ({ client, workspace: handle }) => {
+                await new WorkspaceDaemonRequester(client).request(
+                  "sync.resetClaimRefusal", { workspaceId: workspace.workspaceId },
+                  { workspace: handle, deadlineMs: this.requestDeadlineMs },
+                );
+              });
+            });
+          }
+        } finally {
+          await this.closeWorkspace(workspace);
+        }
       }),
     );
     const failures = results.filter(

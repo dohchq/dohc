@@ -1,3 +1,4 @@
+import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 import { renderShowMarkdown, type ShowResult } from "@dohc/cli/render";
 import { CHATS_METHOD } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -15,6 +16,7 @@ describe("buildRunnerThreadContext", () => {
   let loopback: ChatsLoopbackEngine;
   let root: string;
   let store: ReturnType<typeof createLiveLinkedChatStore>;
+  let dispatchStore: ReturnType<typeof createLiveAgentDispatchStore>;
 
   beforeEach(async () => {
     root = await createTestScratch("dohc-runner-thread-context-");
@@ -33,6 +35,7 @@ describe("buildRunnerThreadContext", () => {
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    dispatchStore = createLiveAgentDispatchStore({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions);
     store = createLiveLinkedChatStore({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions);
   });
 
@@ -88,6 +91,7 @@ describe("buildRunnerThreadContext", () => {
     });
 
     const cliShowFixture: ShowResult = {
+      dispatch: { paused: null, lastRun: null },
       thread: {
         id: "th_1",
         title: "Launch review",
@@ -122,9 +126,21 @@ describe("buildRunnerThreadContext", () => {
     };
 
     await expect(buildRunnerThreadContext({
+      dispatchStore: dispatchStore.store,
       store,
       workspaceId: WORKSPACE_ID,
       threadId: "th_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
+    await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1" });
+    const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected run");
+    await dispatchStore.store.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    await dispatchStore.store.markFailureNotePosted(claim.run.runId);
+    cliShowFixture.dispatch.lastRun = { state: "failed", failureReason: "no-reply", exitCode: 0 };
+    await expect(buildRunnerThreadContext({
+      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1",
+    })).resolves.toBe(renderShowMarkdown(cliShowFixture));
+    await dispatchStore.store.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "th_1", paused: true, reason: "re-dispatch budget exceeded" });
+    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
   });
 });

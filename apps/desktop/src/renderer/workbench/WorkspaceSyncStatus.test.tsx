@@ -44,6 +44,16 @@ function syncState(
 }
 
 describe("sync status surface", () => {
+  it("names identity setup while keeping the existing sync state", () => {
+    const { rerender } = renderStatus({ syncStatus: { ...syncState("syncing"), claimingIdentity: true } });
+    expect(screen.getByTestId("sync-status").textContent).toBe("Setting up sync…");
+    expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("syncing");
+    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} />);
+    expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} />);
+    expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
+  });
+
   // edges-05: a pass in flight read "Saving…" beside a document that said
   // Saved. The files are on disk; only the sync is under way.
   it("calls a pass in flight syncing, never saving", () => {

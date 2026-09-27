@@ -252,6 +252,10 @@ fn seed_identity(store: &mut EngineStore, payload: &Value) {
 }
 
 fn seed_identity_with_kind(store: &mut EngineStore, op_kind: &str, payload: &Value) {
+    dohc_engine_sync::adopt_join_identity(
+        store, "ws", "local", "epoch-1", "stream-1", 1_000, &NoFaults,
+    )
+    .expect("server-issued identity");
     assert_eq!(
         journal_local_replication_op(
             store, "ws", "local", "epoch-1", "stream-1", op_kind, payload, 1_000, &NoFaults,
@@ -1433,6 +1437,27 @@ fn status_401_404_and_409_remain_distinct() {
                 })
                 .expect_err("planned status"),
             expected
+        );
+    }
+}
+
+#[test]
+fn only_body_coded_claim_404_is_a_refusal() {
+    for (body, expected) in [
+        (json!({}), RelayError::HttpStatus(404)),
+        (
+            json!({"code": "not_found"}),
+            RelayError::WorkspaceUnavailable,
+        ),
+    ] {
+        let server = FakeServer::start(move |_| TestResponse::json(404, body.clone()));
+        assert_eq!(
+            transport(&server).claim_workspace(ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            }),
+            Err(expected)
         );
     }
 }

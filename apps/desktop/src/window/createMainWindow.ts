@@ -237,6 +237,8 @@ export type WindowRole = "workspace" | "manager";
 
 export function createMainWindow(options?: {
   beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
+  // The renderer crashed too often to reload again.
+  afterRendererCrashLoop?: () => void;
   // The manager is a smaller window that renders only the workspace
   // manager. It keeps its own bounds so it never fights the main window.
   role?: WindowRole;
@@ -300,6 +302,7 @@ export function createMainWindow(options?: {
     options?.beforeRendererReload
       ? () => options.beforeRendererReload?.(window.webContents)
       : undefined,
+    options?.afterRendererCrashLoop,
   );
 
   // window.open is a pure deny with NO side effects: renderer content (file

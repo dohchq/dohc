@@ -470,9 +470,19 @@ const inboxResultSchema = z
     mentions: z.array(cliInboxMentionSchema),
   })
   .strict();
+const threadDispatchSchema = z.object({
+  paused: z.literal("budget").nullable(),
+  lastRun: z.object({
+    state: z.enum(["running", "completed", "failed"]),
+    failureReason: z.string().nullable(),
+    exitCode: z.number().int().nullable(),
+  }).strict().nullable(),
+}).strict();
+
 const showResultSchema = z
   .object({
     thread: cliShowThreadSchema,
+    dispatch: threadDispatchSchema,
     messages: z.array(cliShowMessageSchema),
   })
   .strict();
@@ -646,6 +656,7 @@ const chatResultSchema = z.discriminatedUnion("ok", [
     .object({
       ok: z.literal(true),
       thread: rawChatThreadSchema,
+      dispatch: threadDispatchSchema,
       messages: z.array(rawChatMessageSchema),
       projection: z
         .object({

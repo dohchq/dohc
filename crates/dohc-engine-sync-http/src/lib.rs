@@ -633,7 +633,7 @@ impl RelayTransport for HttpRelayTransport {
                 .post(&self.url("/sync/workspaces"))
                 .header("authorization", &self.authorization())
                 .send_json(body),
-            RequestContext::Workspace,
+            RequestContext::Claim,
         )?;
         Ok(ClaimResponse)
     }
@@ -996,6 +996,7 @@ impl HttpRelayTransport {
 
 #[derive(Debug, Clone, Copy)]
 enum RequestContext {
+    Claim,
     Workspace,
     Blob,
     Key,
@@ -1093,6 +1094,7 @@ fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> Rel
     match status {
         300..=399 => RelayError::BadRequest,
         403 => RelayError::Forbidden,
+        404 if matches!(context, RequestContext::Claim) => RelayError::HttpStatus(404),
         404 => unavailable(context),
         409 => RelayError::Conflict,
         413 => RelayError::PayloadTooLarge,
@@ -1164,9 +1166,10 @@ define_server_error_codes! {
 fn unavailable(context: RequestContext) -> RelayError {
     match context {
         RequestContext::Share => RelayError::ShareUnavailable,
-        RequestContext::Blob | RequestContext::Key | RequestContext::Workspace => {
-            RelayError::WorkspaceUnavailable
-        }
+        RequestContext::Blob
+        | RequestContext::Key
+        | RequestContext::Workspace
+        | RequestContext::Claim => RelayError::WorkspaceUnavailable,
     }
 }
 

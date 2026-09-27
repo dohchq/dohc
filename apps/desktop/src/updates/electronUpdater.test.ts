@@ -255,6 +255,89 @@ describe("electron updater actions", () => {
     });
   });
 
+  describe("awaitUpdate", () => {
+    const bounds = { verdictMs: 15_000, downloadMs: 300_000 };
+
+    it("checks now and resolves with the version once it downloads", async () => {
+      const updater = fakeUpdater();
+      updater.checkForUpdates.mockImplementationOnce(async () => {
+        updater.emit("checking-for-update");
+        updater.emit("update-available", { version: "1.2.4" });
+      });
+      const controller = (await startWith(updater))!;
+      const onDownloading = vi.fn();
+      const waiting = controller.awaitUpdate(bounds, onDownloading);
+      await vi.waitFor(() => expect(controller.state().status).toBe("available"));
+      expect(onDownloading).toHaveBeenCalledWith("1.2.4");
+      updater.emit("download-progress", { percent: 50 });
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(waiting).resolves.toBe("1.2.4");
+      expect(updater.checkForUpdates).toHaveBeenCalledOnce();
+      expect(onDownloading).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ["no update", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("update-not-available")],
+      ["offline", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("error", new Error("net::ERR_INTERNET_DISCONNECTED"))],
+      ["a failed download", (updater: ReturnType<typeof fakeUpdater>) => {
+        updater.emit("update-available", { version: "1.2.4" });
+        updater.emit("error", new Error("sha512 checksum mismatch"));
+      }],
+    ])("resolves null on %s", async (_name, answer) => {
+      const updater = fakeUpdater();
+      updater.checkForUpdates.mockImplementationOnce(async () => {
+        updater.emit("checking-for-update");
+        answer(updater);
+      });
+      const controller = (await startWith(updater))!;
+      await expect(controller.awaitUpdate(bounds)).resolves.toBeNull();
+    });
+
+    it("resolves at once with an update already downloaded", async () => {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(controller.awaitUpdate(bounds)).resolves.toBe("1.2.4");
+      expect(updater.checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it("joins a check that is already running", async () => {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      const waiting = controller.awaitUpdate(bounds);
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(waiting).resolves.toBe("1.2.4");
+      expect(updater.checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it("gives up on a silent feed at the verdict bound and on a stalled download at the download bound", async () => {
+      vi.useFakeTimers();
+      try {
+        const silent = fakeUpdater();
+        silent.checkForUpdates.mockImplementationOnce(async () => { silent.emit("checking-for-update"); });
+        const silentWait = (await startWith(silent))!.awaitUpdate(bounds);
+        await vi.advanceTimersByTimeAsync(bounds.verdictMs);
+        await expect(silentWait).resolves.toBeNull();
+
+        const stalled = fakeUpdater();
+        stalled.checkForUpdates.mockImplementationOnce(async () => {
+          stalled.emit("checking-for-update");
+          stalled.emit("update-available", { version: "1.2.4" });
+        });
+        let result: string | null | undefined;
+        void (await startWith(stalled))!.awaitUpdate(bounds).then((version) => { result = version; });
+        await vi.advanceTimersByTimeAsync(bounds.verdictMs);
+        expect(result).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(bounds.downloadMs - bounds.verdictMs);
+        expect(result).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it("stops scheduled checks when the controller is stopped", async () => {
     vi.useFakeTimers();
     try {

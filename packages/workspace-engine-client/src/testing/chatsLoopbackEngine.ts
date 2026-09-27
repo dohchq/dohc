@@ -595,6 +595,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
+    case CHATS_METHOD.dispatchLatestRunForThread:
     case CHATS_METHOD.dispatchGetThreadPauseState:
       return ["threadId"];
     case CHATS_METHOD.threadGetProjection: return ["threadId", "linkedFileAccess"];
@@ -884,6 +885,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.runIdForMessage(state, params);
       case CHATS_METHOD.dispatchRunRecordsForThread:
         return this.runRecordsForThread(state, workspace, params);
+      case CHATS_METHOD.dispatchLatestRunForThread: {
+        const threadId = requiredString(params, "threadId");
+        const run = [...state.runs.values()]
+          .filter((candidate) => candidate.threadId === threadId)
+          .sort((left, right) => right.startedAtMs - left.startedAtMs || compareText(right.runId, left.runId))[0];
+        return jsonResult(run ?? null);
+      }
       case CHATS_METHOD.dispatchGetRunRecord:
         return this.getRunRecord(state, params);
       case CHATS_METHOD.dispatchIsThreadPaused:

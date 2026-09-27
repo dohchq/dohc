@@ -27,10 +27,24 @@ export type UpdateCheckResult = {
   state: PublicUpdateState;
 };
 
+// How long a failing app waits for an update: first for the feed to answer,
+// then for an update it found to download.
+export type UpdateWaitBounds = {
+  verdictMs: number;
+  downloadMs: number;
+};
+
 export type AutoUpdateController = {
   state: () => UpdateState;
   publicState: () => PublicUpdateState;
   checkForUpdates: () => Promise<UpdateCheckResult>;
+  // Checks now, or joins the check already running. Resolves with the
+  // downloaded version, or null when none downloads within the bounds.
+  // onDownloading runs once, when the feed offers a version to download.
+  awaitUpdate: (
+    bounds: UpdateWaitBounds,
+    onDownloading?: (version: string) => void,
+  ) => Promise<string | null>;
   installUpdate: () => Promise<UpdateActionResult>;
   stop: () => void;
 };
@@ -74,7 +88,9 @@ export function updateFeedOverride(
   return env.DOHC_DESKTOP_MOCK_UPDATES === "1" ? url : null;
 }
 
-function shouldStartUpdates(
+// Whether this build runs an updater at all: packaged, or pointed at a mock
+// feed in development.
+export function updatesEnabled(
   env: NodeJS.ProcessEnv,
   isPackaged: boolean,
 ): boolean {
@@ -142,7 +158,7 @@ export async function startAutoUpdates(options: {
   importUpdater?: () => Promise<UpdaterModuleLike>;
 }): Promise<AutoUpdateController | null> {
   const env = options.env ?? process.env;
-  if (!shouldStartUpdates(env, options.isPackaged)) return null;
+  if (!updatesEnabled(env, options.isPackaged)) return null;
 
   const imported =
     options.importUpdater
@@ -168,9 +184,14 @@ export async function startAutoUpdates(options: {
       ? { ...base, message: installErrorMessage }
       : base;
   };
+  const waiters = new Set<() => void>();
+  const emit = (): void => {
+    options.onState?.(state, publicState());
+    for (const waiter of [...waiters]) waiter();
+  };
   const dispatch = (event: UpdateEvent): void => {
     state = transition(state, event);
-    options.onState?.(state, publicState());
+    emit();
   };
 
   autoUpdater.autoDownload = true;
@@ -197,7 +218,7 @@ export async function startAutoUpdates(options: {
   autoUpdater.on("update-not-available", () => {
     dispatch({ type: "not-available" });
     checkInFlight = false;
-    options.onState?.(state, publicState());
+    emit();
   });
   autoUpdater.on("download-progress", (progress) =>
     dispatch({ type: "progress", percent: boundedPercent(progress.percent) }),
@@ -206,13 +227,13 @@ export async function startAutoUpdates(options: {
     installErrorMessage = null;
     dispatch({ type: "downloaded", version: info.version });
     checkInFlight = false;
-    options.onState?.(state, publicState());
+    emit();
   });
   autoUpdater.on("error", (error) => {
     if (restartStaged && state.status === "ready") {
       restartStaged = false;
       installErrorMessage = INSTALL_RESTART_FAILURE;
-      options.onState?.(state, publicState());
+      emit();
       return;
     }
     checkInFlight = false;
@@ -278,7 +299,7 @@ export async function startAutoUpdates(options: {
     }
     restartStaged = true;
     installErrorMessage = null;
-    options.onState?.(state, publicState());
+    emit();
     try {
       autoUpdater.quitAndInstall(false, true);
       if (installErrorMessage) {
@@ -288,10 +309,43 @@ export async function startAutoUpdates(options: {
     } catch {
       restartStaged = false;
       installErrorMessage = INSTALL_RESTART_FAILURE;
-      options.onState?.(state, publicState());
+      emit();
       return { accepted: false, state: publicState() };
     }
   };
+
+  const awaitUpdate = (
+    bounds: UpdateWaitBounds,
+    onDownloading?: (version: string) => void,
+  ): Promise<string | null> =>
+    new Promise((resolve) => {
+      let downloading = false;
+      let done = false;
+      let timer = setTimeout(() => finish(null), bounds.verdictMs);
+      function finish(version: string | null): void {
+        done = true;
+        clearTimeout(timer);
+        waiters.delete(settle);
+        resolve(version);
+      }
+      function settle(): void {
+        if (done) return;
+        if (state.status === "ready") return finish(state.version);
+        if (stopped) return finish(null);
+        if (state.status === "available" || state.status === "downloading") {
+          // The feed offered an update: the download gets its own bound.
+          if (downloading) return;
+          downloading = true;
+          clearTimeout(timer);
+          timer = setTimeout(() => finish(null), bounds.downloadMs);
+          onDownloading?.(state.version);
+          return;
+        }
+        if (!checkInFlight && state.status !== "checking") finish(null);
+      }
+      waiters.add(settle);
+      void checkForUpdates().then(settle);
+    });
 
   const scheduleCheck = (delayMs: number): ReturnType<typeof setTimeout> => {
     const timeout = setTimeout(() => {
@@ -319,6 +373,7 @@ export async function startAutoUpdates(options: {
     state: () => state,
     publicState,
     checkForUpdates,
+    awaitUpdate,
     installUpdate,
     stop,
   };

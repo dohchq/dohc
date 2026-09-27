@@ -3,6 +3,9 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayUnreachableError,
+  RelayWorkspaceUnavailableError,
+  RelayIdentityMissingError,
+  RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,12 +19,14 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // runRelaySync invokes the engine's real callback (the closure under test in
 // relaySyncEngine.ts) and honors the commit-after-materialization contract,
 // exactly like the real capture implementation.
+const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
 const pullMock = vi.fn<RelaySyncOperations["pull"]>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
+    claim: claimMock,
     push: pushMock,
     pull: pullMock,
     recoverOrigin: recoverMock,
@@ -122,6 +127,7 @@ function engine(input: {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  claimMock.mockReset().mockResolvedValue(undefined);
   pushMock.mockReset();
   pullMock.mockReset();
   recoverMock.mockReset();
@@ -144,8 +150,129 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("claims again when an established engine reports a pending identity", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncFailure).toBeNull();
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+
+  it("claims before the first push and shares it across concurrent passes and push retries", async () => {
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    const claimed = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    claimMock.mockImplementation(async () => { entered.resolve(); await claimed.promise; });
+    const sync = engine({ capture: capture() });
+    const started = sync.start();
+    await Promise.race([entered.promise, started.then(() => { throw new Error("push skipped claim"); })]);
+    expect(sync.snapshot()).toMatchObject({ syncing: true, claimingIdentity: true });
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(pullMock).not.toHaveBeenCalled();
+    const concurrent = sync.retryNow({ countsAsAttempt: true });
+    pushMock.mockRejectedValueOnce(new Error("push interrupted"));
+    const failed = expect(started).rejects.toThrow("push interrupted");
+    claimed.resolve();
+    await failed;
+    await concurrent;
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledOnce();
+    expect(pushMock).toHaveBeenCalledTimes(4);
+    expect(sync.snapshot()).toMatchObject({ claimingIdentity: false, syncFailure: null });
+    await sync.stop();
+  });
+
+  it("retries a network failure during claim before allowing a push", async () => {
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new RelayUnreachableError());
+    const sync = engine({ capture: capture() });
+    await expect(sync.start()).rejects.toThrow("could not reach");
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncFailure?.cause).toBe("server-unreachable");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+  it("retries a local claim failure without calling it an account refusal", async () => {
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new RelayWorkspaceUnavailableError());
+    const sync = engine({ capture: capture() });
+    await expect(sync.start()).rejects.toThrow("unavailable");
+    expect(sync.snapshot().syncFailure?.cause).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+  it("automatically retries a generic failure from a bare claim 404", async () => {
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new Error("workspace operation failed"));
+    const sync = engine({ capture: capture() });
+    await expect(sync.start()).rejects.toThrow("workspace operation failed");
+    expect(sync.snapshot().syncFailure?.cause).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+  it("keeps a refused claim out of push and retries the claim on Try again", async () => {
+    const message = "Another account already claimed this workspace.";
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
+    const sync = engine({ capture: capture() });
+    await expect(sync.start()).rejects.toThrow(message);
+    expect(pushMock).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await sync.retryNow({ countsAsAttempt: false });
+    expect(claimMock).toHaveBeenCalledOnce();
+    expect(sync.snapshot()).toMatchObject({
+      claimingIdentity: false,
+      syncFailure: { cause: "claim-refused", detail: message, attempts: 1 },
+    });
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
+  });
+
+  it("restores a persisted claim refusal on restart and claims again only on Try again", async () => {
+    const message = "Another account already claimed this workspace.";
+    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+    claimMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
+    const first = engine({ capture: capture() });
+    await expect(first.start()).rejects.toThrow(message);
+    await first.stop();
+
+    // The reopened daemon returns the refusal saved with its sync identity.
+    pushMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
+    const restarted = engine({ capture: capture() });
+    await expect(restarted.start()).rejects.toThrow(message);
+    expect(restarted.snapshot().syncFailure).toMatchObject({ cause: "claim-refused", detail: message });
+    await restarted.retryNow({ countsAsAttempt: false });
+    expect(claimMock).toHaveBeenCalledOnce();
+    await restarted.retryNow({ countsAsAttempt: true });
+    expect(claimMock).toHaveBeenCalledTimes(2);
+    expect(restarted.snapshot().syncFailure).toBeNull();
+    await restarted.stop();
+  });
+
   it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
+      claim: claimMock,
       push: vi.fn(async () => ({
         pushed: 1,
         originsPushed: [], ownerAdmissionPending: [],
@@ -163,6 +290,7 @@ describe("relaySyncEngine", () => {
 
     await sync.start();
 
+    expect(operations.claim).not.toHaveBeenCalled();
     expect(operations.push).toHaveBeenCalledOnce();
     expect(operations.pull).toHaveBeenCalledOnce();
     expect(pushMock).not.toHaveBeenCalled();
@@ -173,6 +301,7 @@ describe("relaySyncEngine", () => {
 
   it("recovers injected origin divergence without crossing into TypeScript fallback", async () => {
     const operations: RelaySyncOperations = {
+      claim: claimMock,
       push: vi
         .fn()
         .mockRejectedValueOnce(new RelayOriginDivergedError())
@@ -756,6 +885,7 @@ describe("relaySyncEngine", () => {
     });
     await sync.start();
     // First pass: pull only. The relay log is untouched by this machine.
+    expect(claimMock).not.toHaveBeenCalled();
     expect(pullMock).toHaveBeenCalledTimes(1);
     expect(pushMock).not.toHaveBeenCalled();
 
@@ -764,6 +894,7 @@ describe("relaySyncEngine", () => {
     await vi.runAllTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(1);
     expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(claimMock).not.toHaveBeenCalled();
     expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
       pullMock.mock.invocationCallOrder[0]!,
     );
