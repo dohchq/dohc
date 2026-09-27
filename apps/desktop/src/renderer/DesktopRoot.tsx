@@ -1,5 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
   ShareHandoffStatus,
@@ -16,6 +16,12 @@ import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useSentNotices } from "./shell/useSentNotices";
+import { useStatesPageOpen } from "./dev/statesRoute";
+
+// Development only, and its own chunk: the app's bundle does not carry it.
+const LazyStatesPage = lazy(() =>
+  import("./dev/StatesPage").then((module) => ({ default: module.StatesPage })),
+);
 
 export function DesktopRoot() {
   const [loaded, setLoaded] = useState(false);
@@ -25,6 +31,7 @@ export function DesktopRoot() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const isManagerWindow = bridge().windowRole === "manager";
+  const statesPageOpen = useStatesPageOpen(bridge().devTools);
   const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
     null,
   );
@@ -205,6 +212,13 @@ export function DesktopRoot() {
     }
   }, [loaded]);
 
+  if (statesPageOpen) {
+    return (
+      <Suspense fallback={null}>
+        <LazyStatesPage />
+      </Suspense>
+    );
+  }
   if (!loaded) return null;
   if (loadError) {
     const loadDetailsText = errorDetails([

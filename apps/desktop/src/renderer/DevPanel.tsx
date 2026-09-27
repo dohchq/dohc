@@ -5,6 +5,7 @@ import { bridge } from "./bridge";
 import { rendererMarks } from "../performance/rendererMarks";
 import { applyAppearanceSettings, toggleTheme } from "./theme";
 import { IconButton } from "./ui/controls";
+import { openStatesPage } from "./dev/statesRoute";
 
 // Debug panel for working on the UI. Present only when main launched with
 // DOHC_DEV_TOOLS=1 in an unpackaged build: the preload reports the flag and
@@ -118,6 +119,7 @@ export function DevPanel(props: { workspaceId?: string }) {
 
           <Row label="Renderer">
             <Act onClick={() => run("Reload", () => bridge().reloadRenderer())}>Reload</Act>
+            <Act onClick={openStatesPage}>States</Act>
           </Row>
           <Row label="Reveal">
             {props.workspaceId ? (
