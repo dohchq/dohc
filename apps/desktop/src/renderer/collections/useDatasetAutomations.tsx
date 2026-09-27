@@ -75,7 +75,7 @@ export function useDatasetAutomations(props: {
     operations: new Set(dataset?.operations.flatMap((operation) => (operation.tableId === tableId ? [operation.name] : []))),
     tables: new Set(dataset?.tables.map((candidate) => candidate.name)),
     actions: (dataset?.operations ?? []).flatMap((operation) => operation.kind === "action"
-      ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: false }]
+      ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: operation.reversedBy !== undefined }]
       : []),
   }, [dataset, tableId]);
   const tableName = table?.name;

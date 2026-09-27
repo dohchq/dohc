@@ -584,10 +584,16 @@ async function applyEffect(
     // resumed run sends the same request, and a commit that landed before a
     // crash replays its receipt instead of running twice. A refusal commits
     // nothing, so Try again runs the action again under the same key.
-    const label = context.datasetRules.definition.operations.find((operation) => operation.operationId === effect.operationId)?.label ?? "The action";
+    const action = context.datasetRules.definition.operations.find((operation) => operation.operationId === effect.operationId);
+    const label = action?.label ?? "The action";
     const result = await send(() => invoke(host, context.context, effect.rules, effect.operationId, effect.input, keyOf(null, 0), signal));
     if ("refused" in result) throw new Error(`${label} refused this run: ${result.refused.message}`);
-    return [{ kind: "dataset-action", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, name: label, revision: result.value.revision }];
+    // The host commits a reversible action only with its undo, so Undo can run the reverse.
+    const landed = result.value.result;
+    const undo = action?.reversedBy !== undefined && landed !== null && typeof landed === "object" && !Array.isArray(landed) ? landed.undo : undefined;
+    const reverse = context.datasetRules.definition.operations.find((operation) => operation.name === action?.reversedBy && operation.kind === "action");
+    return [{ kind: "dataset-action", rules: effect.rules, operationId: effect.operationId, tableId: effect.tableId, name: label, revision: result.value.revision,
+      ...(undo === undefined || reverse === undefined ? {} : { undo, reverseOperationId: reverse.operationId }) }];
   }
   if (effect.kind === "dataset-create") {
     const values: JsonObject = Object.fromEntries(effect.values.map(({ fieldId, value }) => [fieldId, value]));
