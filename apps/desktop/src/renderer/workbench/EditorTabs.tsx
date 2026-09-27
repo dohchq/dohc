@@ -12,6 +12,7 @@ import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
   chatTabDefaultTitle,
+  editorTabTestId,
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -136,7 +137,7 @@ const Tab = memo(function Tab(props: {
       role="tab"
       tabIndex={0}
       aria-selected={props.active}
-      data-testid={`tab-${props.path}`}
+      data-testid={editorTabTestId(props.path)}
       data-active={props.active || undefined}
       title={tabTitle(props.path, props.label)}
       onKeyDown={(event) => {

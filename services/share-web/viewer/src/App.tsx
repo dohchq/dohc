@@ -1,3 +1,4 @@
+import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
 import { PublishedApps } from "./PublishedApps";
 import {
@@ -151,13 +152,7 @@ function isCurrentHandoffResponse(
 }
 
 export const dohcNavigation = {
-  urlForCode(code: string, relayUrl: string): string {
-    if (!HANDOFF_CODE.test(code)) throw new Error("invalid handoff code");
-    if (relayUrl.length === 0 || relayUrl.length > 2048) {
-      throw new Error("invalid handoff relay coordinate");
-    }
-    return `dohc://open/${code}?relay=${encodeURIComponent(relayUrl)}`;
-  },
+  urlForCode: buildShareHandoffUrl,
   openCode(code: string, relayUrl: string): void {
     location.assign(dohcNavigation.urlForCode(code, relayUrl));
   },
