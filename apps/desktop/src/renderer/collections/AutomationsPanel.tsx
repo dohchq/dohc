@@ -630,7 +630,7 @@ export function AutomationsPanel(props: {
     const reload = (event: { workspaceId: string }) => {
       if (event.workspaceId === workspaceId) void load();
     };
-    const offFailures = bridge().onAutomationFailuresChanged(reload);
+    const offFailures = bridge().onAutomationRunsChanged(reload);
     const offHolds = bridge().onAutomationHoldsChanged(reload);
     return () => {
       offFailures();
@@ -662,7 +662,12 @@ export function AutomationsPanel(props: {
     leave(props.onClose);
   }, [props.closeAsk]);
 
-  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, onError, onQueued: () => void load() });
+  const requestRetry = useCallback(
+    (target: { automationId: string; claimId: string }, startOver: boolean) =>
+      bridge().retryCollectionAutomation({ workspaceId, ...target, startOver }),
+    [workspaceId],
+  );
+  const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, request: requestRetry, onError, onQueued: () => void load() });
 
   /**
    * Saves `change` of the automations over the file the panel read. A file

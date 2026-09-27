@@ -1,16 +1,12 @@
-import type { AutomationFailureNotice } from "./bridgeContract";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
-import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import { createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
@@ -76,17 +72,6 @@ async function harness(shared = false) {
     createId: () => `run-${++nextRun}`, onRunEnded: ended,
   });
   cleanups.push(async () => { await integration.stopAll(); await authority.close(); });
-  const engineSessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
-  const receivedShareEngine = createReceivedShareEngineAccess({
-    sessions: () => engineSessions,
-    relayClient: () => { throw new Error("unused relay"); },
-    createStores: () => { throw new Error("unused stores"); },
-  });
-  const failure = { automationId: "automation-1", claimId: "claim-1", chainStopped: false, error: "Command failed", updatedAtMs: 10, generation: 3 };
-  const adapter = { listAutomationFailures: vi.fn<VersionedLiveAdapter["listAutomationFailures"]>(async () => ({ failures: [failure] })) };
-  const datasetFailures: AutomationFailureNotice[] = [];
-  const acknowledge = vi.fn(registry.acknowledgeAutomationFailure);
-  const notify = vi.fn((_id: string) => undefined);
   const requireWorkspace = vi.fn((id: string) => {
     const found = registry.find(id);
     if (!found) throw new Error("unknown workspace");
@@ -111,18 +96,12 @@ async function harness(shared = false) {
   const shareAccess = vi.fn((_view: unknown) => "view" as const);
   const config = vi.fn((_root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", rootPath], workspacePath: rootPath, home: rootPath }));
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
-  const routed: unknown[] = [];
-  let missingAdapter = false;
   const detection = vi.fn(async () => []);
   const registrations = createAgentRunsIpc({
     detectAgentTools: detection,
     registerHandler: (channel, handler) => { if (handlers.has(channel)) throw new Error("duplicate registration"); handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter: async (value, work) => { routed.push(value); return missingAdapter ? null : work(adapter); },
-    acknowledgeWorkspaceAutomationFailure: acknowledge, notifyAutomationFailuresChanged: notify,
-    automationNameOf: (_workspaceId, automationId) => automationId === "automation-1" ? "Stamp the finish date" : null,
-    datasetAutomationFailures: async () => datasetFailures,
+    withRendererWorkspaceOperation,
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
     requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
@@ -136,10 +115,8 @@ async function harness(shared = false) {
     },
     chatDispatchService: dispatch, assertWritableWorkspace: writable, openWorkspaceActivity: activity,
   });
-  registrations.registerAutomationFailures();
-  const groupSizes = [handlers.size];
   registrations.registerChatRunRecords();
-  groupSizes.push(handlers.size);
+  const groupSizes = [handlers.size];
   registrations.registerAgentRuns();
   groupSizes.push(handlers.size);
   const invoke = (channel: string, payload: unknown = { workspaceId: workspace.workspaceId }, value = sender) => Promise.resolve().then(() => {
@@ -149,9 +126,9 @@ async function harness(shared = false) {
   });
   return {
     workspace, registry, physical, sender, authority, renderers, events, integration,
-    ended, setAgentRun, failure, datasetFailures, adapter, acknowledge, notify, requireWorkspace, requireCapture,
+    ended, setAgentRun, requireWorkspace, requireCapture,
     ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
-    detection, handlers, groupSizes, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
+    detection, handlers, groupSizes, invoke,
     durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
     switchWorkspace: async () => {
       const other = { ...physical, workspaceId: "workspace-b", attachmentId: Symbol("other") };
@@ -161,23 +138,19 @@ async function harness(shared = false) {
 }
 
 const channels = [
-  CHANNELS.listAutomationFailures, CHANNELS.dismissAutomationFailure, CHANNELS.chatRunRecordsForThread,
+  CHANNELS.chatRunRecordsForThread,
   CHANNELS.detectAgentTools, CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
   CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.runnerSelfTest,
 ];
 const threadPayload = { workspaceId: "workspace-a", threadId: "thread-1" };
-const dismissPayload = { workspaceId: "workspace-a", automationId: "automation-1", generation: 99, datasetInstance: null };
-// An engine failure as the notices serve it: a document Collection's has no dataset instance.
-const served = (failure: object) => ({ ...failure, name: "Stamp the finish date", datasetInstance: null });
 
 describe("agent run IPC registrations", () => {
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
-    expect(h.groupSizes).toEqual([2, 3, 12]);
+    expect(h.groupSizes).toEqual([1, 10]);
     expect([...h.handlers.keys()]).toEqual(channels);
     for (const channel of channels) await expect(h.invoke(channel, null, new Sender(-1))).rejects.toThrow("untrusted");
     expect(h.requireWorkspace).not.toHaveBeenCalled();
-    expect(h.routed).toEqual([]);
   });
 
   it("detects tools only for the active workspace without starting a session", async () => {
@@ -191,96 +164,10 @@ describe("agent run IPC registrations", () => {
     expect(h.detection).toHaveBeenCalledOnce();
   });
 
-  it("rejects malformed payloads before workspace, session, or engine work", async () => {
+  it("rejects malformed payloads before workspace or session work", async () => {
     const h = await harness();
     for (const channel of channels) await expect(h.invoke(channel, null)).rejects.toThrow();
     expect(h.requireWorkspace).not.toHaveBeenCalled();
-    expect(h.routed).toEqual([]);
-  });
-
-  it("clamps acknowledgments, keeps them monotonic, and reveals later failures", async () => {
-    const h = await harness();
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure)] });
-    await h.invoke(CHANNELS.dismissAutomationFailure, dismissPayload);
-    expect(h.acknowledge).toHaveBeenCalledWith("workspace-a", "automation-1", 3);
-    expect(h.notify).toHaveBeenCalledWith("workspace-a");
-    await h.invoke(CHANNELS.dismissAutomationFailure, { ...dismissPayload, generation: 1 });
-    expect(h.registry.find("workspace-a")?.automationFailureAcks).toEqual({ "automation-1": 3 });
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [] });
-    h.failure.generation = 4;
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure)] });
-  });
-
-  it("lists a dataset automation's failures beside the engine's, and scopes each dismissal to its dataset instance", async () => {
-    const h = await harness();
-    const budget = JSON.stringify(["dataset-1", "epoch-1"]);
-    const dataset = { name: null, automationId: "collection:Budget#close", claimId: "claim-d", chainStopped: false, error: "Budget has no approved edit that changes Status.", updatedAtMs: 20, generation: 10, datasetInstance: budget };
-    h.datasetFailures.push(dataset);
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure), dataset] });
-    await h.invoke(CHANNELS.dismissAutomationFailure, { ...dismissPayload, automationId: dataset.automationId, generation: 10, datasetInstance: budget });
-    expect(h.acknowledge).toHaveBeenCalledWith("workspace-a", `${dataset.automationId}@${budget}`, 10);
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure)] });
-    // Budget is deleted and made again: its first failure counts from 1 under a new instance, and shows.
-    const remade = { ...dataset, claimId: "claim-e", generation: 1, datasetInstance: JSON.stringify(["dataset-2", "epoch-2"]) };
-    h.datasetFailures.splice(0, 1, remade);
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure), remade] });
-    // A dismissal still open on the old instance's notice changes nothing.
-    h.acknowledge.mockClear();
-    await h.invoke(CHANNELS.dismissAutomationFailure, { ...dismissPayload, automationId: dataset.automationId, generation: 10, datasetInstance: budget });
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [served(h.failure), remade] });
-  });
-
-  it("returns no notices without an engine but refuses dismissal", async () => {
-    const h = await harness();
-    h.setMissingAdapter();
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [] });
-    await expect(h.invoke(CHANNELS.dismissAutomationFailure, dismissPayload)).rejects.toThrow("The workspace engine is not running.");
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
-  });
-
-  it("does not acknowledge an automation absent from the engine", async () => {
-    const h = await harness();
-    h.adapter.listAutomationFailures.mockResolvedValue({ failures: [] });
-    await expect(h.invoke(CHANNELS.dismissAutomationFailure, dismissPayload)).resolves.toBeUndefined();
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
-  });
-
-  it("routes shared automation notices with their physical attachment", async () => {
-    const h = await harness(true);
-    await h.invoke(CHANNELS.listAutomationFailures);
-    expect(h.routed).toEqual([{
-      workspaceId: "workspace-a", rootPath: h.workspace.rootPath, attachmentId: h.physical.attachmentId, shareMount: true,
-    }]);
-  });
-
-  it.each([CHANNELS.listAutomationFailures, CHANNELS.dismissAutomationFailure])("rejects another renderer before %s engine access", async (channel) => {
-    const h = await harness();
-    await expect(h.invoke(channel, dismissPayload, new Sender(8))).rejects.toThrow();
-    expect(h.routed).toEqual([]);
-    expect(h.acknowledge).not.toHaveBeenCalled();
-  });
-
-  it.each(["renderer", "attachment"] as const)("refuses a held acknowledgment after %s retirement", async (retirement) => {
-    const h = await harness();
-    const reached = deferred<void>();
-    const release = deferred<void>();
-    h.adapter.listAutomationFailures.mockImplementation(async () => { reached.resolve(); await release.promise; return { failures: [h.failure] }; });
-    const pending = h.invoke(CHANNELS.dismissAutomationFailure, dismissPayload);
-    const rejected = expect(pending).rejects.toThrow();
-    let drained: Promise<void> | undefined;
-    try {
-      await reached.promise;
-      if (retirement === "renderer") await h.switchWorkspace();
-      else drained = h.authority.invalidate("workspace-a");
-    } finally {
-      release.resolve();
-      await Promise.all([rejected, drained]);
-    }
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
   });
 
   it("opens linked chats before reading run records and projects only public fields", async () => {
@@ -401,12 +288,10 @@ describe("agent run IPC registrations", () => {
     expect(h.dispatch.runnerSelfTest).toHaveBeenCalledWith("workspace-a");
   });
 
-  it("rejects malformed engine and dispatch results at their bridge schemas", async () => {
+  it("rejects malformed dispatch results at their bridge schemas", async () => {
     const h = await harness();
-    h.adapter.listAutomationFailures.mockResolvedValue({ failures: [{ ...h.failure, updatedAtMs: 0.5 }] });
     h.dispatch.dispatchStateForThread.mockResolvedValue({ liveRunId: null, pendingCount: -1, paused: false });
     h.dispatch.runnerSelfTest.mockResolvedValue({ ok: true, detail: "" });
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).rejects.toThrow();
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).rejects.toThrow();
     await expect(h.invoke(CHANNELS.runnerSelfTest)).rejects.toThrow();
   });

@@ -17,7 +17,13 @@ import { chatDirectoryOf, type AutomationChatMessage, type AutomationNotice, typ
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
-import { CollectionAutomations, type CollectionAutomationEngine, type PressSettled, type PressWaitReason } from "@dohc/automation-executor/collection-automations";
+import {
+  CollectionAutomations,
+  type AutomationFailureReport,
+  type CollectionAutomationEngine,
+  type PressSettled,
+  type PressWaitReason,
+} from "@dohc/automation-executor/collection-automations";
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import { DATASET_WAKE_NEEDS_BUTTON } from "@dohc/automation-executor/dataset-automation-plan";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
@@ -209,6 +215,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   // What automations post and notify.
   const messages: AutomationChatMessage[] = [];
   const notices: AutomationNotice[] = [];
+  const failureReports: AutomationFailureReport[] = [];
   const makeExecutor = () => executor = new CollectionAutomations({
     personName: (userId) => `Person ${userId}`,
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -240,7 +247,10 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
     cachedRoster: async () => roster,
     evaluator: options.evaluator ?? sharedEvaluator.forWorkspace("workspace"),
     store: createAutomationRunStore(root, resolveWorkspaceMetadataDir),
-    onFailuresChanged: wake,
+    onRunsChanged: wake,
+    reportFailure: async (report) => { failureReports.push(report); wake(); },
+    withdrawFailure: async () => undefined,
+    onSwitchedOff: () => undefined,
     onHoldsChanged: () => undefined,
     onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); wake(); },
@@ -268,7 +278,7 @@ async function world(options: { roster?: ReachRoster; hostOpen?: boolean; evalua
   });
   makeExecutor();
   return {
-    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices,
+    host, root, rules, create, edit, record, records, until, errors, opened, subscribed, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
     get executor() { return executor!; },
     claims: () => host.automations.claims(AUTOMATION),
     automationsChanged: () => automationsChanged,
@@ -420,7 +430,14 @@ describe("Collection automations on a dataset", () => {
     f.executor.rosterChanged();
     await f.until(() => f.claims()[0]?.state === "failed");
     expect(f.claims()[0]).toMatchObject({ error: sentence });
-    expect(await f.executor.datasetFailures()).toEqual([expect.objectContaining({ automationId: AUTOMATION, error: sentence, generation: 1, neverStarted: false })]);
+    // Its notice counts the failure per instance of the dataset, and it ran.
+    await f.until(() => f.failureReports.length === 1);
+    expect(f.failureReports).toEqual([{
+      failure: expect.objectContaining({ automationId: AUTOMATION, error: sentence, generation: 1, chainStopped: false, datasetInstance: expect.any(String) }),
+      name: expect.any(String),
+      startedBy: null,
+      replaces: null,
+    }]);
     await f.executor.dispose();
   });
 

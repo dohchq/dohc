@@ -121,7 +121,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
         formulaProblems: formulas.map(expressionProblem),
       };
     }),
-    onAutomationFailuresChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+    onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
       failureListeners.push(listener);
       return () => undefined;
     }),

@@ -13,7 +13,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
-  onAutomationFailuresChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
+  onAutomationRunsChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined) }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));

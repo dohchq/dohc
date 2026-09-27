@@ -58,7 +58,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, ReportedFailure, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -86,6 +86,7 @@ import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomat
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 import { chatNeedsOf, type ChatDirectory } from "./automationChat";
 import type { GroupMessagesSkipped } from "./groupMessagesNotice";
+import { automationFailureKey, type AutomationFailure, type ReportedRun } from "./automationFailedNotice";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
 // 0012). It keeps an index of every Collection's automations.yaml, keeps the
@@ -156,7 +157,7 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
   /** Each automation's newest failed claim, the one its failure notice offers to try again. */
-  listAutomationFailures(): Promise<{ failures: Array<{ automationId: string; claimId: string }> }>;
+  listAutomationFailures(): Promise<{ failures: Array<Omit<AutomationFailure, "datasetInstance">> }>;
   /** When Group messages last started nothing here for a reason a person can act on, by this computer's clock. */
   readAutomationGroupSkips(): Promise<{ aheadAtMs: number | null; lateAtMs: number | null }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
@@ -220,8 +221,11 @@ export interface CollectionAutomationsOptions {
   readText(relativePath: string): Promise<
     { text: string; truncated: false; contentHash: string } | { text: string; truncated: true; contentHash: null } | null
   >;
-  /** Replaces a text file whose content still hashes to `expectedContentHash`. */
-  writeText(relativePath: string, text: string, expectedContentHash: string): Promise<{ status: "written" | "conflict" }>;
+  /**
+   * Replaces a text file whose content still hashes to `expectedContentHash`,
+   * as the automation `automationId`, so History does not name a person.
+   */
+  writeText(relativePath: string, text: string, expectedContentHash: string, automationId: string): Promise<{ status: "written" | "conflict" }>;
   pathExists(relativePath: string): Promise<boolean>;
   /** Who can edit what in this workspace, listed again when stale, for a run's reach check. */
   roster(): Promise<ReachRoster>;
@@ -256,8 +260,22 @@ export interface CollectionAutomationsOptions {
   readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
   /** Sends one notice from this workspace. */
   postNotice: CollectionAutomationRunDependencies["postNotice"];
-  /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
-  onFailuresChanged(): void;
+  /** A claim settled failed, or a retry cleared one: run history re-reads. */
+  onRunsChanged(): void;
+  /**
+   * Sends the notice for an automation's newest failure on this computer,
+   * and takes back the notice for its failure `replaces` counted, if any.
+   * Rejects when the notice was not kept, so the failure is reported again.
+   */
+  reportFailure(report: AutomationFailureReport): Promise<void>;
+  /** Takes back the notice for a run that is no longer its automation's newest failure, as after Try again. */
+  withdrawFailure(failure: ReportedRun): Promise<void>;
+  /**
+   * An automation this computer last saved as on is off in the file it
+   * read now, even when the change came while dohc was closed. The switch
+   * the executor makes itself after repeated timeouts is not one.
+   */
+  onSwitchedOff(switched: AutomationSwitchedOff): void;
   /**
    * A step started or stopped waiting for a current editor, or a share
    * stopped a step or someone dismissed its notice: the reach notices re-read.
@@ -449,6 +467,27 @@ export interface CollectionAutomationButton {
   state: AutomationButtonState;
 }
 
+/** An automation's newest failure on this computer, for its notice. */
+export interface AutomationFailureReport {
+  failure: AutomationFailure;
+  /** The automation's name in its automations.yaml, when dohc can read it. */
+  name: string | null;
+  /** The person whose Group message started the run, when the claim names one. */
+  startedBy: string | null;
+  /** The earlier failure whose notice this one replaces, or null when none is up. */
+  replaces: ReportedRun | null;
+}
+
+/** An automation someone switched off, as the file this computer read says. */
+export interface AutomationSwitchedOff {
+  collectionPath: string;
+  /** The automation's id in its automations.yaml. */
+  id: string;
+  /** The engine automation id. */
+  automationId: string;
+  name: string;
+}
+
 export type CollectionAutomationRetry =
   // `press` is true for a button's run, whose window hears how it settles.
   | { status: "queued"; press: boolean }
@@ -603,6 +642,11 @@ export class CollectionAutomations {
   private readonly changing = new Set<string>();
   /** Presses this computer took, by press id, oldest first. */
   private readonly presses = new Map<string, RememberedPress>();
+  /** The switched-on automations this computer last saved, per Collection; undefined until read. */
+  private enabledSaved: Map<string, string[]> | null | undefined;
+  /** The pass sending failure notices, and whether another must follow it. */
+  private reportingFailures: Promise<void> | null = null;
+  private reportFailuresAgain = false;
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
   /**
@@ -672,6 +716,7 @@ export class CollectionAutomations {
       }
       await this.loadIndex();
       if (!current()) return;
+      await this.noteSwitches();
       this.noteEnabledSchedules(true);
       this.state = "open";
       this.waitingFor.clear();
@@ -683,6 +728,8 @@ export class CollectionAutomations {
         this.options.onAutomationsChanged();
         this.rosterChanged();
         this.options.onSchedulesChanged?.();
+        // Failures recorded while the workspace was closed, or before a crash.
+        this.reportFailures();
       },
       (error: unknown) => {
         // A later open tries again.
@@ -738,6 +785,7 @@ export class CollectionAutomations {
         }
       }
       await this.readNamedSchemas();
+      await this.noteSwitches();
       this.noteEnabledSchedules(false);
       await this.reconcile(false);
       // An edited or removed automation's held steps leave the notices.
@@ -765,7 +813,7 @@ export class CollectionAutomations {
       .then(() => {
         this.rosterChanged();
         this.notifyClaimed();
-        this.options.onFailuresChanged();
+        this.failuresChanged();
         // An approval can make a dataset's panel and field marks answer at last.
         this.options.onAutomationsChanged();
       })
@@ -785,6 +833,7 @@ export class CollectionAutomations {
       this.datasets.set(path, dataset);
       await this.readFile(path);
     }
+    await this.noteSwitches();
     await this.reconcile(false);
     this.publishHolds();
   }
@@ -1051,15 +1100,106 @@ export class CollectionAutomations {
   }
 
   /**
-   * Each dataset automation's newest failure, for the failure notices, while
-   * the dataset host is open. It does not open the host.
+   * A claim failed, a retry cleared one, or the engine inserted one failed:
+   * run history re-reads, and each new failure sends its notice.
    */
-  async datasetFailures(): Promise<DatasetAutomationFailure[]> {
+  failuresChanged(): void {
+    this.options.onRunsChanged();
+    this.reportFailures();
+  }
+
+  /** One pass at a time; a call during a pass runs one more after it. */
+  private reportFailures(): void {
+    if (this.state === "disposed") return;
+    if (this.reportingFailures) {
+      this.reportFailuresAgain = true;
+      return;
+    }
+    this.reportingFailures = (async () => {
+      do {
+        this.reportFailuresAgain = false;
+        await this.reportFailuresOnce();
+      } while (this.reportFailuresAgain && this.state !== "disposed");
+    })()
+      .catch((error: unknown) => this.options.onError("send automation failure notices", error))
+      .finally(() => {
+        this.reportingFailures = null;
+      });
+  }
+
+  /**
+   * Sends a notice for each automation whose newest failure here counts
+   * past the one this computer last sent, and takes back a notice whose run
+   * is no longer its automation's newest failure, as after Try again. What
+   * was sent is saved after each notice, so a crash sends a notice again,
+   * which the notice list takes once, and never skips one.
+   */
+  private async reportFailuresOnce(): Promise<void> {
+    const engine = await this.withLiveEngine((live) => live.listAutomationFailures());
+    if (engine === null) return;
+    // Null while the dataset host is closed: its failures are unknown, not gone.
+    const dataset = await this.datasetFailures();
+    const failures: AutomationFailure[] = [
+      ...engine.failures.map((failure) => ({ ...failure, datasetInstance: null })),
+      ...(dataset ?? []).map(({ neverStarted, ...failure }) => ({ ...failure, chainStopped: neverStarted })),
+    ];
+    const reported = new Map((await this.options.store.readReportedFailures()).map((entry) => [automationFailureKey(entry), entry]));
+    // A pass that outlived its executor saves nothing: the next executor
+    // reports from what was saved, and its notices are the same ones.
+    const commit = async (key: string, entry: ReportedFailure): Promise<boolean> => {
+      if (this.state === "disposed") return false;
+      reported.set(key, entry);
+      await this.options.store.saveReportedFailures([...reported.values()]);
+      return true;
+    };
+    for (const failure of failures) {
+      if (this.state === "disposed") return;
+      const key = automationFailureKey(failure);
+      const last = reported.get(key);
+      // The same run at the same count was sent. Another run, as the older
+      // failed run a retry of the newest leaves, is news.
+      if (last !== undefined && last.claimId === failure.claimId && failure.generation <= last.generation) continue;
+      try {
+        await this.options.reportFailure({
+          failure,
+          name: this.nameOf(failure.automationId),
+          startedBy: failure.datasetInstance === null ? await this.messageAuthorOf(failure) : null,
+          replaces: last?.open ? last : null,
+        });
+      } catch (error) {
+        // Unsaved, so the next pass sends it again.
+        this.options.onError(`send the notice for a failure of "${failure.automationId}"`, error);
+        continue;
+      }
+      const { automationId, datasetInstance, claimId, generation } = failure;
+      if (!(await commit(key, { automationId, datasetInstance, claimId, generation, open: true }))) return;
+    }
+    const newest = new Map(failures.map((failure) => [automationFailureKey(failure), failure.claimId]));
+    for (const [key, entry] of reported) {
+      if (this.state === "disposed") return;
+      if (!entry.open || newest.get(key) === entry.claimId || (entry.datasetInstance !== null && dataset === null)) continue;
+      await this.options.withdrawFailure(entry);
+      if (!(await commit(key, { ...entry, open: false }))) return;
+    }
+  }
+
+  /** The person whose Group message a failed claim ran for, or null for any other claim. */
+  private async messageAuthorOf(failure: AutomationFailure): Promise<string | null> {
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: failure.automationId }));
+    const claim = listed?.claims.find((candidate) => candidate.claimId === failure.claimId);
+    return claim?.change.kind === "message" ? claim.change.onBehalfOf : null;
+  }
+
+  /**
+   * Each dataset automation's newest failure, for the failure notices, while
+   * the dataset host is open, or null. It does not open the host.
+   */
+  private async datasetFailures(): Promise<DatasetAutomationFailure[] | null> {
     try {
-      return (await this.withLiveHost((host) => host.failures())) ?? [];
+      return await this.withLiveHost((host) => host.failures());
     } catch (error) {
       this.options.onError("list dataset automation failures", error);
-      return [];
+      return null;
     }
   }
 
@@ -1448,7 +1588,7 @@ export class CollectionAutomations {
     }
     if (press) watch?.(input.claimId, null);
     this.notifyClaimed();
-    this.options.onFailuresChanged();
+    this.failuresChanged();
     return { status: "queued", press };
   }
 
@@ -2034,8 +2174,40 @@ export class CollectionAutomations {
 
   private async readFile(collectionPath: string): Promise<void> {
     const parsed = await this.parsedFile(collectionPath);
+    // Read after the file, so the executor's own switch off, which changes
+    // the index at once, is not taken for a person's.
     if (parsed === undefined) this.files.delete(collectionPath);
     else this.files.set(collectionPath, parsed);
+  }
+
+  /**
+   * Compares each Collection's switched-on automations with the ones this
+   * computer last saved, reports each that is now off, and saves the new
+   * set. The first read of a workspace only saves. A Collection this read
+   * did not index, as a dataset whose host is closed, or whose file dohc
+   * cannot read, keeps its saved set, so its switch off still shows later.
+   */
+  private async noteSwitches(): Promise<void> {
+    this.enabledSaved ??= await this.options.store.readEnabledAutomations();
+    const saved = this.enabledSaved;
+    const next = new Map(saved ?? []);
+    let changed = saved === null;
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      const valid = indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : []));
+      const on = valid.filter((automation) => automation.enabled).map((automation) => automation.id);
+      const before = saved?.get(collectionPath);
+      for (const { id, name, enabled } of valid) {
+        if (enabled || !before?.includes(id)) continue;
+        this.options.onSwitchedOff({ collectionPath, id, automationId: collectionAutomationId(collectionPath, id), name });
+      }
+      if (before !== undefined && isDeepStrictEqual(before, on)) continue;
+      next.set(collectionPath, on);
+      changed = true;
+    }
+    if (!changed) return;
+    this.enabledSaved = next;
+    await this.options.store.saveEnabledAutomations(next);
   }
 
   private async parsedFile(collectionPath: string): Promise<IndexedFile | undefined> {
@@ -2567,7 +2739,7 @@ export class CollectionAutomations {
       }
       if (!answered) continue;
       this.owed.delete(id);
-      if (action.kind === "settle" && action.input.state === "failed") this.options.onFailuresChanged();
+      if (action.kind === "settle" && action.input.state === "failed") this.failuresChanged();
       if (action.kind === "settle") {
         await action.settled();
         if (isPress(held)) {
@@ -2925,13 +3097,19 @@ export class CollectionAutomations {
             : entry);
         const written = writeAutomationsFile(off(parsed.entries));
         if (stop.aborted) return null;
-        if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash)).status === "written") {
-          const automationId = collectionAutomationId(collectionPath, automation.id);
+        const automationId = collectionAutomationId(collectionPath, automation.id);
+        if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash, automationId)).status === "written") {
           this.timeouts.delete(automationId);
           await this.options.store.saveTimeouts(this.timeouts);
           const indexed = this.files.get(collectionPath);
           if (indexed?.file.status === "read") {
             this.files.set(collectionPath, { ...indexed, file: { status: "read", entries: off(indexed.file.entries) } });
+          }
+          // Its own switch off is no person's, so no notice names one.
+          const saved = this.enabledSaved?.get(collectionPath);
+          if (saved?.includes(automation.id)) {
+            this.enabledSaved!.set(collectionPath, saved.filter((id) => id !== automation.id));
+            await this.options.store.saveEnabledAutomations(this.enabledSaved!);
           }
           return `dohc switched off ${name} after ${TIMEOUTS_BEFORE_SWITCH_OFF} runs in a row took too long. Fix it, then switch it on again.`;
         }
