@@ -306,6 +306,13 @@ export function isVirtualTabPath(path: string | null): boolean {
   );
 }
 
+// Selectors are a public UI contract, independent of persisted tab identities.
+export function editorTabTestId(path: string): string {
+  return isVirtualTabPath(path)
+    ? `tab-dohc://${path.slice(INTERNAL_TAB_SCHEME.length)}`
+    : `tab-${path}`;
+}
+
 export interface WorkbenchTab {
   path: string;
 }

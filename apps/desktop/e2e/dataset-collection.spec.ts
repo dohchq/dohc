@@ -53,7 +53,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!;
     const table = dataset.tables[0]!;
-    const path = `tab://data-collection/${dataset.datasetId}/${table.tableId}`;
+    const path = `dohc://data-collection/${dataset.datasetId}/${table.tableId}`;
     await page.getByTestId(`tab-${path}`).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");

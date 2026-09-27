@@ -47,7 +47,7 @@ views:
     const folder = explorerRow(page, "tasks");
     await expect(folder).toHaveAttribute("data-collection", "true");
     await folder.click();
-    await expect(page.getByTestId("tab-tab://collection/tasks")).toBeVisible();
+    await expect(page.getByTestId("tab-dohc://collection/tasks")).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Open Launch plan" }),
     ).toBeVisible();
@@ -56,16 +56,16 @@ views:
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
-    await page.getByTestId("tab-tab://collection/tasks").click();
+    await page.getByTestId("tab-dohc://collection/tasks").click();
     await page.getByRole("button", { name: "Board", exact: true }).click();
     await folder.press("F2");
     const rename = page.getByRole("textbox", { name: "New name" });
     await rename.fill("jobs");
     await rename.press("Enter");
     await expect(explorerRow(page, "jobs")).toBeVisible();
-    const renamedTab = page.getByTestId("tab-tab://collection/jobs");
+    const renamedTab = page.getByTestId("tab-dohc://collection/jobs");
     await expect(renamedTab).toHaveAttribute("data-active", "true");
-    await expect(page.getByTestId("tab-tab://collection/tasks")).toHaveCount(0);
+    await expect(page.getByTestId("tab-dohc://collection/tasks")).toHaveCount(0);
     await expect(page.getByRole("list", { name: "Todo", exact: true })).toBeVisible();
     await explorerRow(page, "jobs").click();
     await expect(renamedTab).toHaveCount(1);

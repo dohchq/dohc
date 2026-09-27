@@ -8,7 +8,7 @@ import {
   readUiStateFile,
   writeUiStateFile,
 } from "./workspaceUiState";
-import { serializeUiState, defaultWorkbenchState, openTab, GRAPH_TAB_PATH } from "../renderer/workbench/workbenchState";
+import type { WorkspaceUiState } from "../ipc/bridgeContract";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
 import { createTestScratch } from "./testTemp";
@@ -24,7 +24,26 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-const STATE = serializeUiState(openTab(openTab(defaultWorkbenchState(), "notes/a.md"), GRAPH_TAB_PATH));
+const STATE: WorkspaceUiState = {
+  version: 3,
+  activeView: "explorer",
+  sidebarVisible: true,
+  sidebarWidth: 240,
+  editorGroups: [{
+    id: "primary",
+    tabs: ["notes/a.md", "tab://graph"],
+    activeTab: "tab://graph",
+    size: 1,
+  }],
+  activeEditorGroup: "primary",
+  chatsVisible: false,
+  chatsWidth: 320,
+  openEditorsHeight: 126,
+  expandedFolders: [],
+  pinned: [],
+  recentFiles: ["notes/a.md"],
+  collectionViews: {},
+};
 
 
 describe("ui-state file store", () => {
