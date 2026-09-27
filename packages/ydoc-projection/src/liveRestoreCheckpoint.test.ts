@@ -6,6 +6,8 @@ import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 import {yDocToMarkdown} from "./import-export.js";
 import {liveBaselineStoredBytes} from "./liveBaselineQuotaTestSupport.js";
 import {journalMetadataBytes, liveDeliveryBookkeepingBytes} from "./liveDeliveryQuotaTestSupport.js";
+import {liveJournalHistoryNamespace} from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
+import {appendValidatedLiveJournal} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
@@ -17,21 +19,35 @@ it("checkpoints exactly the 4095th real delivery including no-ops, restores its 
     const noop = Y.encodeStateAsUpdate(f.doc, Y.encodeStateVector(f.doc));
     expect([...noop]).toEqual([0, 0]);
     const stateCapture = vi.fn(() => {f.raw.exec("BEGIN IMMEDIATE"); f.raw.exec("ROLLBACK");});
-    for (let index = 0; index < 4095; index++) {
-      const input = f.capture(index === 0 ? changed : noop, `checkpoint-${index}`, f.actor, stateCapture);
+    const commit = (bytes: Uint8Array, index: number) => {
+      const input = f.capture(bytes, `checkpoint-${index}`, f.actor, stateCapture);
       expect(input.validation.kind).toBe("accepted");
       const committed = f.storage.commitLiveUpdateJournal(input);
       expect(committed.result).toMatchObject({kind: "accepted", replayed: false, receipt: {journalCursor: index + 1}});
-      if (index === 0) expect(committed.admitted!.metadata.firstSeen.length).toBeGreaterThan(0);
-      else expect(committed.admitted!.metadata.firstSeen).toEqual([]);
       if (committed.result.kind !== "accepted") throw Error(committed.result.kind);
       receipts.push(committed.result.receipt);
-      if (index === 4093) {
-        expect(stateCapture).not.toHaveBeenCalled();
-        expect(f.storage.readLiveUpdateJournalCut({document: f.document}))
-          .toMatchObject({kind: "cut", cut: {suffixCount: 4094, checkpoint: {cursor: null}}});
+      return committed.admitted!.metadata;
+    };
+    const opening = commit(changed, 0);
+    expect(opening.firstSeen.length).toBeGreaterThan(0);
+    // A real commit rereads its whole suffix, so 4095 of them take minutes. Seed the middle
+    // through the append that ends every real commit; the boundary commits stay real.
+    const template = f.capture(noop, "template");
+    f.context.tx(() => {
+      let prior = opening;
+      for (let index = 1; index < 4093; index++) {
+        prior = appendValidatedLiveJournal(f.context, {document: f.document, namespace: liveJournalHistoryNamespace(f.context),
+          host: template.host, current: {binding: template.metadata.binding, authority: template.expectedAuthority},
+          metadata: {deliveryId: `checkpoint-${index}`, updateDigest: template.metadata.updateDigest}, updateBytes: Uint8Array.from(noop),
+          receivedAtMs: template.receivedAtMs, firstSeen: [], checkpointBytes: null, checkpointDigest: null, priorMetadata: prior}).metadata;
+        receipts.push(prior.accepted.receipt);
       }
-    }
+    });
+    expect(commit(noop, 4093).firstSeen).toEqual([]);
+    expect(stateCapture).not.toHaveBeenCalled();
+    expect(f.storage.readLiveUpdateJournalCut({document: f.document}))
+      .toMatchObject({kind: "cut", cut: {suffixCount: 4094, checkpoint: {cursor: null}}});
+    expect(commit(noop, 4094).firstSeen).toEqual([]);
     expect(stateCapture).toHaveBeenCalledTimes(1);
     const cut = f.storage.readLiveUpdateJournalCut({document: f.document});
     expect(cut).toMatchObject({kind: "cut", cut: {highWater: 4095, checkpoint: {cursor: 4095}, suffixCount: 0, suffixBytes: 0}});
@@ -56,6 +72,7 @@ it("checkpoints exactly the 4095th real delivery including no-ops, restores its 
     const drain = f.open(), first = f.store.nextStopRestoreCut(drain);
     if (first.kind !== "bootstrap") throw Error(first.kind);
     f.store.acknowledgeStopRestoreBootstrap(drain, bootstrapAck(first.baseline));
+    // Each acknowledgement is its own durable transaction, which sets this test's timeout.
     for (const [index, receipt] of receipts.entries()) {
       f.store.acknowledgeStopRestoreApplication(drain, receipts[index - 1] ?? null, applicationAck(receipt, index + 1));
     }
@@ -82,4 +99,4 @@ it("checkpoints exactly the 4095th real delivery including no-ops, restores its 
     expect(f.journalRows()).toEqual(before);
     expect(resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy)).toEqual(resolveLiveRestorePoint(capture, policy));
   } finally {f.close();}
-}, 1_800_000);
+}, 180_000);
