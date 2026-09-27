@@ -27,10 +27,12 @@ import { hasGeneratedDatasetOperations } from "./datasetGenerator";
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
 /**
- * One automation run's authority on this computer's datasets: the owner's
- * operations, attributed to the automation. Only main creates one, through
- * the host, and the host object never leaves main. `depth` is the chain depth
- * its writes declare, one more than the claim that started the run.
+ * One automation run's authority on this computer's datasets: the automation
+ * caller, which the host holds to the owner's approved operations and which
+ * operation code sees as an automation, not the owner. Only main creates
+ * one, through the host, and the host object never leaves main. `depth` is
+ * the chain depth its writes declare, one more than the claim that started
+ * the run.
  */
 export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number }
 /** The owner's agent in a run an automation started: the owner's authority, at the run's chain depth. */
@@ -256,8 +258,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
         if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agentDepth } };
         if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
-        return { caller: { kind: "owner", userId: ownerId }, principalKey: automationKey(automation.automationId),
-          automation: { automationId: automation.automationId, depth: automation.depth } };
+        return { caller: { kind: "automation", automationId: automation.automationId }, principalKey: automationKey(automation.automationId),
+          chainDepth: automation.depth };
       },
       async compileOperations(source, sourcePath) {
         const compiled = await compile(source, sourcePath, lifetime.signal);
@@ -548,7 +550,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         /**
          * Claims a press by `pressedBy`, the account main pressed for. Every
          * person on this computer is the owner of its datasets, so the run
-         * acts with the owner's authority, which is theirs.
+         * uses the owner's approved operations, which are theirs, through the
+         * automation caller.
          */
         press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed {
           assertCurrent();
