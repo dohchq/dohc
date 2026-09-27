@@ -703,7 +703,7 @@ export function CloudLogin(props: {
                             type="button"
                             data-testid="cloud-copy-sync-code"
                             onClick={() => void copySyncCode()}
-                            className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-transparent px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                            className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-transparent px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                           >
                             {codeCopied ? (
                               <Check size={11} aria-hidden />

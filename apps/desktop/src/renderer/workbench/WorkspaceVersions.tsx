@@ -53,7 +53,7 @@ function versionName(
 }
 
 const MENU_ITEM_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
@@ -371,7 +371,7 @@ export function VersionMenu(props: {
         title={`You're working in the ${activeName} version`}
         disabled={busy !== null}
         onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
       >
         <Layers size={13} aria-hidden className="shrink-0" />
         <span data-testid="version-menu-active" className="min-w-0 truncate">
@@ -607,7 +607,7 @@ export function VersionMenu(props: {
                 type="button"
                 data-testid="version-switch-save-cancel"
                 onClick={() => setPendingSwitch(null)}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
               >
                 Cancel
               </button>
@@ -776,7 +776,7 @@ export function TryTaskDialog(props: {
             data-testid="try-task-cancel"
             disabled={busy}
             onClick={props.onClose}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
             Cancel
           </button>
@@ -1048,7 +1048,7 @@ export function VersionMergeDialog(props: {
                 type="button"
                 data-testid="version-merge-cancel"
                 onClick={finish}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
               >
                 Cancel
               </button>
@@ -1068,7 +1068,7 @@ export function VersionMergeDialog(props: {
               data-testid="version-merge-done"
               disabled={!canCloseExplicitly}
               onClick={finish}
-              className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               {stage.stage === "conflicts" ? "Finish later" : "Done"}
             </button>
@@ -1124,7 +1124,7 @@ function ConflictSidePane(props: {
                 type="button"
                 data-testid="version-conflict-side-show-more"
                 onClick={() => setWindows((shown) => shown + 1)}
-                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
               >
                 Show more
               </button>
@@ -1456,7 +1456,7 @@ function ConflictResolver(props: {
               data-testid="version-conflict-combine"
               disabled={busy}
               onClick={() => startCombine(combineSeed.text)}
-              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               Combine by hand instead…
             </button>
@@ -1504,7 +1504,7 @@ function ConflictResolver(props: {
                   data-testid="version-conflict-combine-cancel"
                   disabled={busy}
                   onClick={() => setCombined(null)}
-                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1829,7 +1829,7 @@ export function VersionComparePage(props: {
           title="Refresh comparison"
           disabled={state.status === "loading"}
           onClick={() => setRefreshNonce((nonce) => nonce + 1)}
-          className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md border border-line text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+          className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md border border-line text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -1918,7 +1918,7 @@ export function VersionComparePage(props: {
                   data-testid="version-compare-show-more"
                   disabled={loadingMore}
                   onClick={loadMore}
-                  className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                  className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
                 >
                   {loadingMore ? "Loading…" : "Show more files"}
                 </button>
@@ -2118,7 +2118,7 @@ export function ConflictReviewDialog(props: {
             type="button"
             data-testid="conflict-review-done"
             onClick={props.onClose}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
           >
             {anyOpen ? "Finish later" : "Done"}
           </button>

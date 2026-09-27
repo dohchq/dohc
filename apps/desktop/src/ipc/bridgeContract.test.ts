@@ -2131,7 +2131,7 @@ describe("settings IPC contract", () => {
 
 describe("workspace UI state IPC contract", () => {
   const validState = {
-    version: 2,
+    version: 3,
     activeView: "explorer",
     sidebarVisible: true,
     sidebarWidth: 320,
@@ -2248,7 +2248,7 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
   ])("rejects one %s path in several editor groups", (_label, path, alias) => {
     const result = WorkspaceUiState.safeParse({
       ...validState,

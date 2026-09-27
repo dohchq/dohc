@@ -655,3 +655,14 @@ describe("persistent dataset worker",()=>{
     });
   });
 });
+
+it("bounds each operation's SQL tables while retaining the full schema for recovery", async () => {
+  await fixture(async ({ open }) => {
+    const worker = await open({ schemaSql: schemaSql + " CREATE TABLE other(ROWID INTEGER PRIMARY KEY,value TEXT NOT NULL);", tables: ["items", "other"] });
+    const read = { ...operation(), readOnly: true, tables: ["items"], source: "globalThis.operations={run(ctx,input){return ctx.db.query(input.sql);}}" };
+    await expect(worker.prepare({ ...read, input: { sql: "SELECT * FROM other" } })).rejects.toThrow();
+    await expect(worker.prepare({ ...read, input: { sql: "SELECT * FROM items" } })).resolves.toMatchObject({ result: [] });
+    await expect(worker.prepare({ ...read, tables: ["items", "other"], input: { sql: "SELECT ROWID,value FROM other" } })).resolves.toMatchObject({ result: [] });
+    await expect(worker.prepare({ ...read, tables: ["missing"], input: {} })).rejects.toThrow("exceed");
+  });
+});

@@ -284,7 +284,7 @@ function Outcome({ person, result, undone, onOpenFile }: {
                 <button
                   type="button"
                   onClick={() => onOpenFile(file.path)}
-                  className="max-w-full truncate rounded-md px-1 text-left font-mono text-[12px] text-ink hover:bg-panel-2"
+                  className="max-w-full truncate rounded-md px-1 text-left font-mono text-[12px] text-ink hover:bg-hover"
                 >
                   {file.path}
                 </button>

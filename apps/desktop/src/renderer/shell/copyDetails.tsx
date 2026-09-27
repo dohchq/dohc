@@ -94,7 +94,7 @@ export function CopyDetailsButton(props: {
           aria-label={label}
           title={copied ? "Copied" : label}
           onClick={() => void copy(details())}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
         </button>

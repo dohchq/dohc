@@ -1,8 +1,7 @@
+import { parseShareHandoffUrl, type ShareHandoffIntent } from "@dohc/workspace-contracts/deep-links";
 import { describe, expect, it, vi } from "vitest";
 import {
   createShareHandoffIntentSlot,
-  parseShareHandoffUrl,
-  type ShareHandoffIntent,
 } from "./shareHandoffIngress";
 
 import { deferred } from "./testing/deferred";

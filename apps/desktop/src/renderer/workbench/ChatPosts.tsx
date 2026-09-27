@@ -118,7 +118,7 @@ export function PollOptions(props: {
               className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
-                  : "border-line text-ink enabled:hover:bg-panel-2 disabled:opacity-70"
+                  : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
               }`}
             >
               <span
@@ -389,7 +389,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -413,8 +413,8 @@ export function BookmarkAction(props: {
             }}
             className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
               props.active
-                ? "text-accent hover:bg-line/50"
-                : "text-subtle hover:bg-line/50 hover:text-ink"
+                ? "text-accent hover:bg-hover"
+                : "text-subtle hover:bg-hover hover:text-ink"
             }`}
           >
             <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />

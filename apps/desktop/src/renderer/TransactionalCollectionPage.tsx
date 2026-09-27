@@ -12,7 +12,7 @@ import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelation
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
-  display, initialValue, inputProblem, object, parsePage, supportsInput, supportsSort,
+  display, initialValue, inputProblem, isGeneratedRecordIdField, object, parsePage, supportsInput, supportsSort,
   type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField, type TransactionalPage, type TransactionalRow,
 } from "./transactionalCollectionModel";
 
@@ -123,7 +123,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const read = operations.find(operation => operation.kind === "read" && operation.readOnly);
   const create = operations.find(operation => operation.kind === "create" && !operation.readOnly);
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
-  const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId)) ?? [];
+  const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId) &&
+    !isGeneratedRecordIdField(field)) ?? [];
   const createFields = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
   const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
   const canCreate = create && createFields.every(canInput);
@@ -294,7 +295,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       </form>
       {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={disabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
       {hasManagement ? <details className="group relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }} onClick={event => { if (event.target instanceof Element && event.target.closest("button:not(:disabled)")) event.currentTarget.open = false; }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
-        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden">
+        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
           <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
         </summary>
         <div className="dohc-popover absolute right-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
@@ -324,7 +325,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <><FieldTypeIcon type={field.type} />{field.name}</>}
         {props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</span>
       </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
-      <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
+      <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
