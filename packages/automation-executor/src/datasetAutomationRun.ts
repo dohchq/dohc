@@ -61,9 +61,10 @@ import {
 // A button press's run reads its record as it is now, and formulas see the
 // person who pressed. It runs only the automation the press was checked
 // against, from the button that was pressed, in the table it was pressed
-// in. Its steps use the owner caller, as every run here does: this
-// computer's datasets are its person's own, so that authority is the
-// presser's.
+// in. Its steps use the automation caller, as every run here does. The host
+// holds that caller to the owner's approved operations, and this computer's
+// datasets are its person's own, so the run never does more than the
+// presser could.
 
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no longer read a field it used, so dohc stopped the rest of this run.";
@@ -163,7 +164,7 @@ function runRecordOf(row: Row, datasetId: string, table: DatasetTable, readable:
   return { id: String(row.id), path: datasetRecordKey(datasetId, table.tableId, row.id), values };
 }
 
-/** One invocation as this run's automation, with the owner caller. */
+/** One invocation as this run's automation, with the automation caller. */
 async function invoke(
   host: DatasetRunHost,
   context: DatasetAutomationContext,

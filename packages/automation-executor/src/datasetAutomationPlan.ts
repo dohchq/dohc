@@ -11,7 +11,8 @@ import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automatio
 // operations. A dataset changes only through them, so each step names one:
 // Set fields uses an edit whose fields cover the step's, Add record a create,
 // and Find a read with equality filters. At launch only operations dohc
-// generated can be steps, and each is called with the owner caller.
+// generated can be steps. Each is called with the automation caller, which
+// operation code sees as the automation, not the owner.
 //
 // The ⚡ panel pins the operation each step uses when it saves. It prefers a
 // reversible edit, then the operation with the fewest fields beyond the
