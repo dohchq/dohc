@@ -289,7 +289,7 @@ export function MentionText(props: {
           aria-label={`Open ${fileToken.path}${
             fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
           }`}
-          className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
+          className={`${className} cursor-pointer hover:bg-hover hover:text-ink`}
           title={fileToken.text}
           onClick={() =>
             props.onOpenPath?.(
@@ -338,7 +338,7 @@ const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 const TOOLBAR_BUTTON =
-  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
 const SINGLE_EMOJI = new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v");
 
 export interface ChatReactionControls {
@@ -510,7 +510,7 @@ export function MessageReactions(props: {
       className={
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
-          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-panel-2 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
       }
     >
       <SmilePlus size={16} aria-hidden />
@@ -562,7 +562,7 @@ export function MessageReactions(props: {
           </button>
         );
       })}
-      {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-panel-2" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
+      {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-hover" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
       </div>
       {choices.length === 0 ? <p className="m-0 p-2 text-[12px] text-muted">No matching emoji. Paste an emoji to use it.</p> : null}
     </div>
@@ -825,7 +825,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             New
           </span>
         ) : null}
-        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-panel/60">
+        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-hover">
           <span className="flex h-5 w-9 shrink-0 items-start justify-end">
             {continues ? (
               <time

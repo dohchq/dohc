@@ -48,7 +48,7 @@ export class EditorErrorBoundary extends Component<
         </p>
         <button
           type="button"
-          className="rounded-md border border-line bg-panel px-3 py-1.5 text-xs text-ink hover:bg-panel-2"
+          className="rounded-md border border-line bg-panel px-3 py-1.5 text-xs text-ink hover:bg-hover"
           onClick={() => this.setState({ failed: false })}
         >
           Render again

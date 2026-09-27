@@ -357,7 +357,7 @@ export function EngineMomentDiffPage({
                 ? "Restore this file to how it was before this change"
                 : "This change can't be restored directly"
           }
-          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Undo2 size={12} aria-hidden />
           {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
@@ -365,12 +365,12 @@ export function EngineMomentDiffPage({
         {!isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md") && <button
           type="button" data-testid="engine-diff-shared-restore" disabled={restoreBusy}
           onClick={() => setSharedRestoreOpen(true)}
-          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"
+          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
         >Restore shared file…</button>}
         {moment.namedAuthor ? <button
           type="button" data-testid="engine-diff-stop-and-restore" disabled={restoreBusy}
           onClick={() => moment.namedAuthor && onStopAndRestore(moment.namedAuthor)}
-          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"
+          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
         >Stop and restore…</button> : null}
         {undoMomentId ? (
           <button
@@ -378,7 +378,7 @@ export function EngineMomentDiffPage({
             data-testid="engine-diff-undo-restore"
             onClick={() => void undoRestore()}
             disabled={restoreBusy}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Undo2 size={12} aria-hidden />
             {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
@@ -389,7 +389,7 @@ export function EngineMomentDiffPage({
             type="button"
             data-testid="engine-diff-open-file"
             onClick={() => onOpenFile(moment.path)}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
           >
             <ExternalLink size={12} aria-hidden />
             Open file

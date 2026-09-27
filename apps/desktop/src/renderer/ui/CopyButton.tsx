@@ -35,7 +35,7 @@ export function CopyButton(props: {
       type="button"
       data-testid={props.testId}
       onClick={() => void copy()}
-      className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+      className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
     >
       {label}
     </button>

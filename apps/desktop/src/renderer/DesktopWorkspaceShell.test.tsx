@@ -14348,16 +14348,16 @@ describe("open editors", () => {
 
     await screen.findAllByTestId("tree-row");
     expect(screen.getByTestId("open-editors-header").className).toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("explorer-files-header").className).toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("open-editors-toggle").className).not.toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
     expect(screen.getByTestId("explorer-files-toggle").className).not.toContain(
-      "hover:bg-line/40",
+      "hover:bg-hover",
     );
   });
 
