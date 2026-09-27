@@ -43,8 +43,9 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
   const row = value as Record<string, unknown>;
   const versionError = fileVersionError(row.version, manifestPath);
   if (versionError) throw new Error(versionError);
-  if (Object.hasOwn(row, "backend")) {
-    throw new Error(`${manifestPath} cannot use backend. Use a dataset binding for app data.`);
+  const unknownKey = Object.keys(row).find(key => !["version", "entryPath", "inputs", "packageMap", "collection", "dataset"].includes(key));
+  if (unknownKey !== undefined) {
+    throw new Error(`${manifestPath} has an unknown key: ${unknownKey}. Remove it or correct its name.`);
   }
   if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
     throw new Error(`${manifestPath} must hold at most one of collection or dataset.`);

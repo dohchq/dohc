@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   parseFilesPolicy,
-  serializeFilesPolicy,
   parseVisibilityPolicy,
   policyGlobMatches,
   resolveEffectivePolicy,
@@ -21,10 +20,9 @@ function expectReject(result: PolicyParseResult<unknown>, pattern?: RegExp): voi
 }
 
 describe("workspace engine effective policy parsing", () => {
-  it("writes version 1 and reads current and missing versions", () => {
+  it("reads current and missing versions and refuses newer versions", () => {
     const rules = [{ path: "private/**", tracked: false }];
-    const text = serializeFilesPolicy(rules);
-    expect(text).toMatch(/^version = 1/);
+    const text = 'version = 1\n[[rule]]\npath = "private/**"\ntracked = false\n';
     expect(parseFilesPolicy(text)).toEqual({ ok: true, rules });
     expect(parseFilesPolicy(text.replace(/^version = 1\r?\n/, ""))).toEqual({ ok: true, rules });
     expect(parseFilesPolicy(text.replace("version = 1", "version = 2"))).toEqual({

@@ -42,7 +42,7 @@ function schema(storage: StorageContext, workspaceId: string, versionId: string,
   if (!row || row.blob_sha256 !== capability.schemaSha256 || row.content_kind !== "text") throw notFound();
   const blob = boundedBlob(storage,workspaceId,capability.schemaSha256,MAX_SCHEMA_BYTES);
   const parsed = parseCollectionSchema(new TextDecoder("utf-8", {fatal: true}).decode(blob));
-  const versionError = collectionVersionError(parsed.reasons, `${capability.collectionPath}/collection.yaml`);
+  const versionError = collectionVersionError(parsed.reasons, `${capability.collectionPath}/collection.yaml`, "sync service");
   if (versionError) throw badRequest(versionError);
   if (parsed.status !== "valid" || [...capability.allowedFields, ...capability.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw badRequest("Collection schema does not match approval.");
   return parsed.schema;

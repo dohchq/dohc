@@ -88,6 +88,8 @@ describe("Collection schema contract vectors", () => {
     expect(newer.schema.fields).toEqual([]);
     expect(collectionVersionError(newer.reasons, "tasks/collection.yaml"))
       .toBe("tasks/collection.yaml uses a newer version. Update dohc to read this file.");
+    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml", "sync service"))
+      .toBe("tasks/collection.yaml uses a newer version. Update the sync service to read this file.");
   });
   it.each(schemaVectors)("matches $name", ({ yaml, expected }) => {
     expect(() => parseCollectionSchema(yaml)).not.toThrow();

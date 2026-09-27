@@ -1391,7 +1391,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it.each([undefined, 1, 2])("dohc_detect_apps checks dohc.json version %s", async (version) => {
+  it.each([undefined, 1, 2, "1", 0, null])("dohc_detect_apps checks dohc.json version %s", async (version) => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "versioned"));
       await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
@@ -1403,6 +1403,10 @@ describe("mcp tools operate on allowed paths", () => {
       if (version === 2) {
         expect(app.diagnostics).toContainEqual({ severity: "error", code: "unsupported-version", path: "versioned/dohc.json",
           message: "versioned/dohc.json uses a newer version. Update dohc to read this file." });
+        expect(app.title).not.toBe("Declared title");
+      } else if (version !== undefined && version !== 1) {
+        expect(app.diagnostics).toContainEqual({ severity: "error", code: "invalid-version", path: "versioned/dohc.json",
+          message: "versioned/dohc.json has an invalid version. Set version to 1." });
         expect(app.title).not.toBe("Declared title");
       } else {
         expect(app.title).toBe("Declared title");

@@ -500,7 +500,7 @@ describe("round 1 of review", () => {
     const newer = `version: 2\n${SCHEMA_TWO}`;
     await upload(r, newer);
     const body = await expectCode(await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, newer)]), 403, "share_op_rejected");
-    expect(body).toMatchObject({ error: "trip/packing/collection.yaml uses a newer version. Update dohc to read this file." });
+    expect(body).toMatchObject({ error: "trip/packing/collection.yaml uses a newer version. Update the sync service to read this file." });
     expect(await r.owner.directMoments()).toEqual([]);
   });
   it("keeps the lane's origin and a named author out of the owner's own log", async () => {

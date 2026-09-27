@@ -101,9 +101,9 @@ export interface CollectionSchemaReason {
   path: string;
 }
 
-export function collectionVersionError(reasons: readonly CollectionSchemaReason[], file = COLLECTION_SCHEMA_FILENAME): string | null {
+export function collectionVersionError(reasons: readonly CollectionSchemaReason[], file = COLLECTION_SCHEMA_FILENAME, reader: "dohc" | "sync service" = "dohc"): string | null {
   if (reasons.some(reason => reason.code === "unsupported-version")) {
-    return `${file} uses a newer version. Update dohc to read this file.`;
+    return `${file} uses a newer version. Update ${reader === "sync service" ? "the sync service" : "dohc"} to read this file.`;
   }
   if (reasons.some(reason => reason.code === "invalid-version")) {
     return `${file} has an invalid version. Set version to 1.`;

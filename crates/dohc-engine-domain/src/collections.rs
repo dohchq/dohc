@@ -3857,6 +3857,12 @@ pub fn reconcile_collections_in_tx(
     let collection_schemas: HashMap<&str, &CollectionSchema> = parsed_schemas
         .iter()
         .filter(|(_, collection_path, _)| !collection_path.is_empty())
+        .filter(|(_, _, parsed)| {
+            !parsed
+                .reasons
+                .iter()
+                .any(|reason| reason.code == CollectionSchemaReasonCode::UnsupportedVersion)
+        })
         .map(|(_, collection_path, parsed)| (collection_path.as_str(), &parsed.schema))
         .collect();
     let records: Vec<&CollectionSnapshot> = snapshots
@@ -5913,6 +5919,15 @@ pub fn get_collection_record(
     else {
         return Ok(None);
     };
+    if collection
+        .reasons
+        .iter()
+        .any(|reason| reason.code == CollectionSchemaReasonCode::UnsupportedVersion)
+    {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection.yaml uses a newer version. Update dohc to read this file.",
+        });
+    }
     let record = load_collection_records(
         conn,
         workspace_id,

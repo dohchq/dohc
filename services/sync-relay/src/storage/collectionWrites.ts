@@ -343,7 +343,7 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
     const file = change.afterPath!.slice(change.afterPath!.lastIndexOf("/") + 1);
     if (file === COLLECTION_SCHEMA_FILE) {
       const parsed = parseCollectionSchema(text(change, MAX_COLLECTION_SCHEMA_BYTES));
-      const versionError = collectionVersionError(parsed.reasons, change.afterPath ?? undefined);
+      const versionError = collectionVersionError(parsed.reasons, change.afterPath ?? undefined, "sync service");
       if (versionError) throw refusal(versionError);
       if (parsed.status !== "valid") throw refusal(`${change.afterPath} is not a valid collection.yaml`);
     } else if (file === COLLECTION_AUTOMATIONS_FILE) {

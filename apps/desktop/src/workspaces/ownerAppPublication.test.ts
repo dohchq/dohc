@@ -33,14 +33,21 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json cannot use backend. Use a dataset binding for app data.");
+  await expect(h.prepare()).rejects.toThrow("app/app.publish.json has an unknown key: backend. Remove it or correct its name.");
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("app.publish.json paths", () => {
-  it.each([undefined, 1])("reads version %s and additive keys", (version) => {
-    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, title: "App" }));
+  it.each([undefined, 1])("reads version %s", (version) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
     expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
+  });
+
+  it.each([[undefined, "colection"], [1, "colection"], [1, ""]] as const)("rejects unknown keys before publishing version %s: %s", async (version, key) => {
+    const h = harness();
+    h.setDeclaration({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, [key]: {} });
+    await expect(h.prepare()).rejects.toThrow(`app/app.publish.json has an unknown key: ${key}.`);
+    expect(h.compile).not.toHaveBeenCalled();
   });
 
   it("refuses a newer version before interpreting fields", () => {
