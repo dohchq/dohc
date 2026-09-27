@@ -8,7 +8,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
-import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -151,6 +151,7 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import { createUpdateAfterFailure, type UpdateFailure } from "./updates/updateAfterFailure";
 import {
   createExitRounds,
   createQuitGuard,
@@ -571,6 +572,7 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
 }
 
 let autoUpdateController: AutoUpdateController | null = null;
+let autoUpdateStartup: Promise<AutoUpdateController | null> | null = null;
 
 // app.getAppPath() is unreliable here: when Electron is launched with a
 // direct script path (as the e2e harness does, and as a plain built binary
@@ -779,6 +781,7 @@ const desktopWindows = createDesktopWindows({
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
@@ -3838,6 +3841,33 @@ function currentUpdateState(): UpdateStateEvent {
   );
 }
 
+// Auto-updates: packaged builds use electron-builder's baked app-update.yml
+// feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+// Failures are absorbed — updates must never take the app down. Starting
+// twice returns the first start.
+function startUpdates(): Promise<AutoUpdateController | null> {
+  autoUpdateStartup ??= startAutoUpdates({
+    isPackaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    // A restart already staged has no install left to make — quitAndInstall
+    // started its own quit on the first call and has none left to start.
+    // Main makes it, so the fact lives here and not in a renderer module a
+    // reload would reset. The quit is already approved:
+    // the IPC handler approves before asking the controller.
+    quitForStagedRestart: () => app.quit(),
+    onState: (_state, state) => {
+      broadcastUpdateState(state);
+    },
+  })
+    .then((controller) => {
+      autoUpdateController = controller;
+      broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+      return controller;
+    })
+    .catch(() => null);
+  return autoUpdateStartup;
+}
+
 function broadcastUpdateState(state: PublicUpdateState): void {
   const payload = parseUpdateStateForIpc(state);
   if (!payload) return;
@@ -4295,11 +4325,25 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop,
         preloadArguments: devToolsPreloadArguments(devToolsGranted),
       }),
     ),
-    whenLoaded: (window) => new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", resolve);
+    whenLoaded: (window) => new Promise<boolean>((resolve) => {
+      const contents = window.webContents;
+      const settle = (loaded: boolean) => {
+        contents.off("did-finish-load", onLoad);
+        contents.off("did-fail-load", onFail);
+        resolve(loaded);
+      };
+      const onLoad = () => settle(true);
+      const onFail = (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+        // ERR_ABORTED (-3) is a load that another navigation replaced; that
+        // one still finishes or fails on its own.
+        if (isMainFrame && errorCode !== -3) settle(false);
+      };
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-fail-load", onFail);
     }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
@@ -4390,29 +4434,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },
-    startUpdates: () => {
-      // Auto-updates: packaged builds use electron-builder's baked app-update.yml
-      // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
-      // Failures are absorbed — updates must never take the app down.
-      void startAutoUpdates({
-        isPackaged: app.isPackaged,
-        currentVersion: app.getVersion(),
-        // A restart already staged has no install left to make — quitAndInstall
-        // started its own quit on the first call and has none left to start.
-        // Main makes it, so the fact lives here and not in a renderer module a
-        // reload would reset. The quit is already approved:
-        // the IPC handler approves before asking the controller.
-        quitForStagedRestart: () => app.quit(),
-        onState: (_state, state) => {
-          broadcastUpdateState(state);
-        },
-      })
-        .then((controller) => {
-          autoUpdateController = controller;
-          broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
-        })
-        .catch(() => undefined);
-    },
+    startUpdates: () => { void startUpdates(); },
+    updateAfterStartupFailure: () => updateAfterFailure("startup"),
+    updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
@@ -4574,7 +4598,7 @@ const senderWorkspaceAuthority = {
 // window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
 const exitRounds = createExitRounds<BrowserWindow>({
-  participants: () => workspaceWindows.allLive(),
+  participants: () => workspaceWindows.answering(),
   participantId: (window) => window.webContents.id,
   send: (window, message) => {
     if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
@@ -4619,6 +4643,56 @@ const quitGuard = createQuitGuard({
     app.quit();
   },
 });
+
+const installUpdate = createUpdateInstall<BrowserWindow>({
+  currentUpdateState, exitRounds, quitGuard,
+  get autoUpdateController() { return autoUpdateController; },
+});
+
+// A failing build checks the feed before it gives up, so a person on a bad
+// release can still reach the release that fixes it.
+const WINDOW_FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
+  "window-crash": "This dohc window keeps crashing.",
+  "window-load": "This dohc window could not load.",
+};
+const updateAfterFailure = createUpdateAfterFailure({
+  controller: startUpdates,
+  // Downloads can take minutes with nothing else on screen, so a native box
+  // says one is running. Closing it stops the wait.
+  showDownloading: async (failure: UpdateFailure, version, signal) => {
+    await dialog.showMessageBox({
+      type: "info",
+      message: failure === "startup" ? `Downloading update ${version}.` : WINDOW_FAILURE_MESSAGES[failure],
+      detail: failure === "startup"
+        ? "When it finishes, you can restart dohc on the new version."
+        : `dohc is downloading update ${version}. When it finishes, you can restart dohc on the new version.`,
+      buttons: [failure === "startup" ? "Quit" : "Not now"],
+      noLink: true,
+      signal,
+    });
+  },
+  confirmRestart: async (failure: UpdateFailure, version) => {
+    const startup = failure === "startup";
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: startup ? `Update ${version} is downloaded.` : WINDOW_FAILURE_MESSAGES[failure],
+      // A downloaded update also installs on quit (autoInstallOnAppQuit).
+      detail: startup
+        ? "Restart now to open dohc on the new version. If you quit, the update installs as dohc closes."
+        : `Update ${version} is downloaded. dohc closes and opens again on the new version.`,
+      buttons: ["Restart now", startup ? "Quit" : "Not now"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    return response === 0;
+  },
+  install: installUpdate,
+});
+
+function afterRendererCrashLoop(): void {
+  void updateAfterFailure("window-crash");
+}
 
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
@@ -5450,7 +5524,7 @@ function registerIpcHandlers(): void {
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: handleIpc,
-    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
+    assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });
 

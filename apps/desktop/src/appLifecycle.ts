@@ -23,6 +23,10 @@ interface LifecycleApp {
   on(event: "activate", listener: () => void): unknown;
 }
 
+// Starts updates when the first window never finishes loading, so a renderer
+// that hangs on load cannot keep a bad build from its fix.
+const UPDATE_START_FALLBACK_MS = 10_000;
+
 interface CliServer {
   close(): Promise<void>;
 }
@@ -36,7 +40,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   };
   windows: {
     create(): Window;
-    whenLoaded(window: Window): Promise<void>;
+    // Resolves true once the window finishes its first load, and false when
+    // its main frame fails to load.
+    whenLoaded(window: Window): Promise<boolean>;
     current(): Window | undefined;
     hasWorkspace(): boolean;
     hasAny(): boolean;
@@ -68,6 +74,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
     startUpdates(): void;
+    // Resolves true when the person chose to restart into a downloaded
+    // update, so the failed startup must not quit on its own.
+    updateAfterStartupFailure(): Promise<boolean>;
+    updateAfterWindowLoadFailure(): Promise<boolean>;
   };
   beforeQuit(event: QuitEvent): void;
   shutdown: {
@@ -89,6 +99,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   const pendingOpenPaths: string[] = [];
   let cliServer: CliServer | null = null;
   let cliServerStartup: Promise<CliServer | null> | null = null;
+  let updatesStarted = false;
+  let updatesFallback: ReturnType<typeof setTimeout> | undefined;
 
   // Register before acquiring the instance lock: a losing process also quits.
   app.on("will-quit", (event) => {
@@ -186,8 +198,23 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     const window = windows.create();
     const windowLoaded = windows.whenLoaded(window);
     bootstrap.markFirstWindow();
+    // Updates start once the window loads, whether or not the engine and the
+    // launch workspaces ever finish, so a bad build can still reach the build
+    // that fixes it. Waiting for the load keeps the updater's module load off
+    // the engine handshake. A window that fails to load checks for a fix, one
+    // that never loads starts updates after a delay, and a startup failure
+    // that comes first starts them itself.
+    updatesFallback = setTimeout(startUpdates, UPDATE_START_FALLBACK_MS);
+    updatesFallback.unref?.();
+    void windowLoaded.then((loaded) => {
+      startUpdates();
+      if (!loaded) void services.updateAfterWindowLoadFailure();
+    });
 
-    if (!(await engineStartup)) return;
+    if (!(await engineStartup)) {
+      await quitAfterStartupFailure();
+      return;
+    }
 
     cliServerStartup = services.startCli()
       .then(async (server) => {
@@ -211,7 +238,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     const pendingWorkspace = await flushPendingOpenPaths();
     const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
     workspaces.refreshNativeSurfaces();
-    void windowLoaded.then(() => {
+    void windowLoaded.then((loaded) => {
+      if (!loaded) return;
       if (activatedWorkspace) windows.activate(window, activatedWorkspace);
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.
@@ -219,6 +247,20 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     });
     bootstrapComplete = true;
     void services.warmCredentials().then(() => services.reconcileCloud());
+  }
+
+  // Startup failure uses the ordinary quit path so drafts can veto it. A
+  // window may already hold edits: local reads and the plain editor never
+  // wait for the engine.
+  async function quitAfterStartupFailure(): Promise<void> {
+    startUpdates();
+    if (!(await services.updateAfterStartupFailure())) app.quit();
+  }
+
+  function startUpdates(): void {
+    if (updatesStarted) return;
+    updatesStarted = true;
+    clearTimeout(updatesFallback);
     services.startUpdates();
   }
 
@@ -283,10 +325,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         dependencies.beforeQuit(event);
       });
 
-      const ready = app.whenReady().then(whenReady).catch((error: unknown) => {
+      const ready = app.whenReady().then(whenReady).catch(async (error: unknown) => {
         bootstrap.reportFailure(error);
-        // Startup failure uses the ordinary quit path so drafts can veto it.
-        app.quit();
+        await quitAfterStartupFailure();
       });
 
       app.on("window-all-closed", () => {

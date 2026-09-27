@@ -38,10 +38,15 @@ type WorkspaceWindowRegistry<W> = {
   // Every live workspace window. The force-quit path destroys them, so a
   // renderer that wakes cannot veto a decision the user already made.
   allLive(): readonly W[];
+  // The live windows whose renderer is running and can answer an exit
+  // round. A crashed renderer holds no drafts and cannot answer, so asking
+  // it would only put "dohc isn't responding" in front of the person.
+  answering(): readonly W[];
 };
 
 export function createWorkspaceWindowRegistry<W>(
   isDestroyed: (window: W) => boolean,
+  isRendererGone: (window: W) => boolean,
 ): WorkspaceWindowRegistry<W> {
   const windows = new Set<W>();
   return {
@@ -60,6 +65,9 @@ export function createWorkspaceWindowRegistry<W>(
     },
     allLive() {
       return [...windows].filter((window) => !isDestroyed(window));
+    },
+    answering() {
+      return [...windows].filter((window) => !isDestroyed(window) && !isRendererGone(window));
     },
   };
 }
