@@ -103,8 +103,11 @@ impl CaptureApplyProbe {
 #[cfg(feature = "harness")]
 struct CaptureApplyProbeInner {
     armed: std::sync::atomic::AtomicBool,
+    apply_blocked: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
+    open_wait_entered: tokio::sync::Semaphore,
+    open_ready: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     fence_armed: std::sync::atomic::AtomicBool,
     fence_entered: tokio::sync::Semaphore,
     fence_release: tokio::sync::Semaphore,
@@ -116,6 +119,7 @@ struct CaptureApplyProbeInner {
     gate_wait_armed: std::sync::atomic::AtomicBool,
     gate_wait_entered: tokio::sync::Semaphore,
     worker_armed: std::sync::atomic::AtomicBool,
+    worker_blocked: std::sync::atomic::AtomicBool,
     worker_entered: tokio::sync::Semaphore,
     worker_release: (Mutex<bool>, std::sync::Condvar),
     fail_before_worker_armed: std::sync::atomic::AtomicBool,
@@ -131,8 +135,11 @@ impl Default for CaptureApplyProbeInner {
     fn default() -> Self {
         Self {
             armed: std::sync::atomic::AtomicBool::new(false),
+            apply_blocked: std::sync::atomic::AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
+            open_wait_entered: tokio::sync::Semaphore::new(0),
+            open_ready: Mutex::new(None),
             fence_armed: std::sync::atomic::AtomicBool::new(false),
             fence_entered: tokio::sync::Semaphore::new(0),
             fence_release: tokio::sync::Semaphore::new(0),
@@ -144,6 +151,7 @@ impl Default for CaptureApplyProbeInner {
             gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
             gate_wait_entered: tokio::sync::Semaphore::new(0),
             worker_armed: std::sync::atomic::AtomicBool::new(false),
+            worker_blocked: std::sync::atomic::AtomicBool::new(false),
             worker_entered: tokio::sync::Semaphore::new(0),
             worker_release: (Mutex::new(false), std::sync::Condvar::new()),
             fail_before_worker_armed: std::sync::atomic::AtomicBool::new(false),
@@ -159,7 +167,13 @@ impl Default for CaptureApplyProbeInner {
 #[cfg(feature = "harness")]
 impl CaptureApplyProbe {
     pub fn pause_next_apply(&self) {
+        self.inner.apply_blocked.store(true, Ordering::Release);
         self.inner.armed.store(true, Ordering::Release);
+    }
+
+    /// True from arming until the apply passes the pause or is cancelled there.
+    pub fn is_apply_blocked(&self) -> bool {
+        self.inner.apply_blocked.load(Ordering::Acquire)
     }
 
     pub async fn wait_until_paused(&self) {
@@ -173,6 +187,27 @@ impl CaptureApplyProbe {
 
     pub fn release(&self) {
         self.inner.release.add_permits(1);
+    }
+
+    pub async fn wait_until_open_waiting(&self) {
+        self.inner
+            .open_wait_entered
+            .acquire()
+            .await
+            .expect("open readiness probe remains open")
+            .forget();
+    }
+
+    pub fn is_open_ready(&self) -> bool {
+        let open_ready = self
+            .inner
+            .open_ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *open_ready
+            .as_ref()
+            .expect("capture driver started")
+            .borrow()
     }
 
     pub fn pause_next_version_fence(&self) {
@@ -239,7 +274,13 @@ impl CaptureApplyProbe {
     /// the capture sink. The blocking release is deliberate: this seam proves
     /// the async driver can time out while its `done_rx` remains pending.
     pub fn pause_next_apply_worker(&self) {
+        self.inner.worker_blocked.store(true, Ordering::Release);
         self.inner.worker_armed.store(true, Ordering::Release);
+    }
+
+    /// True from arming until the worker passes the blocking pause.
+    pub fn is_apply_worker_blocked(&self) -> bool {
+        self.inner.worker_blocked.load(Ordering::Acquire)
     }
 
     pub async fn wait_until_apply_worker_paused(&self) {
@@ -320,6 +361,7 @@ impl CaptureApplyProbe {
                     .await
                     .expect("capture apply probe remains open")
                     .forget();
+                self.inner.apply_blocked.store(false, Ordering::Release);
             }
         }
     }
@@ -336,6 +378,7 @@ impl CaptureApplyProbe {
                         permit.expect("capture apply probe remains open").forget();
                     }
                 }
+                self.inner.apply_blocked.store(false, Ordering::Release);
             }
         }
     }
@@ -405,6 +448,7 @@ impl CaptureApplyProbe {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
             *released = false;
+            self.inner.worker_blocked.store(false, Ordering::Release);
         }
     }
 
@@ -956,6 +1000,14 @@ impl CaptureDriver {
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
         let (open_ready_tx, open_ready) = tokio::sync::watch::channel(false);
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &apply_probe {
+            *probe
+                .inner
+                .open_ready
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(open_ready.clone());
+        }
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let scan = ScanGauge::default();
@@ -1039,7 +1091,24 @@ impl CaptureDriver {
     pub(crate) async fn wait_for_open_ready(&self) {
         let mut open_ready = self.open_ready.clone();
         while !*open_ready.borrow() {
-            if open_ready.changed().await.is_err() {
+            let changed = open_ready.changed();
+            #[cfg(feature = "harness")]
+            let changed = async {
+                tokio::pin!(changed);
+                let mut observed = false;
+                std::future::poll_fn(|cx| {
+                    let result = std::future::Future::poll(changed.as_mut(), cx);
+                    if result.is_pending() && !observed {
+                        observed = true;
+                        if let Some(probe) = &self.apply_probe {
+                            probe.inner.open_wait_entered.add_permits(1);
+                        }
+                    }
+                    result
+                })
+                .await
+            };
+            if changed.await.is_err() {
                 return;
             }
         }
