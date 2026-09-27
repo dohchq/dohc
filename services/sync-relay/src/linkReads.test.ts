@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -57,7 +58,31 @@ const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-link-reads";
 const UNKNOWN_CAPABILITY = "z".repeat(43);
-const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found","code":"not_found"}';
+it("bounds storage work with the same rate refusal for every target after authentication", async () => {
+  const storage = await newStorage();
+  const h = handler(storage, {linkReadRateLimiter: new TokenBucketLimiter(1, 0.000001, 10),
+    appPublicationLimits: {maxFiles: 10, maxMetadataBytes: 16_384, maxBundleBytes: 4096}, appCollectionPolicy: {maxCreatesPerGrant: 10}});
+  const seeded = await seed(h);
+  expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
+  const limited = await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`));
+  expect(limited.status).toBe(429);
+  expect(await limited.json()).toEqual({ok: false, code: "link_read_rate_limited", error: "This link has reached its request limit. Try again later."});
+  const lookup = vi.spyOn(storage, "readCurrentFileState");
+  const publications = vi.spyOn(storage, "listLinkAppPublications");
+  const collection = vi.spyOn(storage, "authorizeLinkAppCollection");
+  for (const path of ["/sync/link/current", `/sync/link/blobs/${seeded.hiddenSha}`, `/sync/link/blobs/${sha256("missing")}`,
+    "/sync/link/app-publications", `/sync/link/app-publications/${"a".repeat(64)}/collection?authorityRevision=1&limit=5`]) {
+    const refused = await h(linkRequest(seeded.capability, path, {headers: {"x-dohc-link-profile-secret": "p".repeat(43)}}));
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({code: "link_read_rate_limited"});
+  }
+  expect(lookup).not.toHaveBeenCalled();
+  expect(publications).not.toHaveBeenCalled();
+  expect(collection).not.toHaveBeenCalled();
+  const refused = await h(linkRequest(UNKNOWN_CAPABILITY, `/sync/link/blobs/${seeded.sharedSha}`));
+  expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+});
+const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found"}';
 const EPOCH_1 = "epoch-1";
 const STREAM_1 = "stream-1";
 const EPOCH_2 = "epoch-2";
@@ -290,7 +315,7 @@ async function ownerLinkUsage(
 }
 
 async function capabilityRefusalBody(response: Response): Promise<string> {
-  expect(response.status).toBe(401);
+  expect(response.status).toBe(404);
   const body = await response.text();
   expect(body).toBe(LINK_REFUSAL_BODY);
   return body;
@@ -593,7 +618,7 @@ describe("relay capability reads", () => {
     ).toBe(200);
     const revoked = await revokedRead;
     expect(`${String(revoked.status)}:${await revoked.text()}`).toBe(
-      `401:${LINK_REFUSAL_BODY}`,
+      `404:${LINK_REFUSAL_BODY}`,
     );
     expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
 
@@ -651,7 +676,7 @@ describe("relay capability reads", () => {
     expect(revokedDuringSerialization).toBe(true);
     expect(
       `${String(refusedSerialization.status)}:${await refusedSerialization.text()}`,
-    ).toBe(`401:${LINK_REFUSAL_BODY}`);
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
 
     const fresh = await createLink(h, { paths: ["docs"], access: "view" });
     const current = await json(
@@ -714,7 +739,7 @@ describe("relay capability reads", () => {
     expect(limited.status).toBe(429);
     expect(await json(limited)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
     expect(cappedActivity.stats()).toEqual({ shares: 1, waiters: 1 });
@@ -1958,12 +1983,8 @@ describe("relay capability reads", () => {
         expect(exchange.grantId).toBe(seeded.grantId);
         capability = String(exchange.capabilityToken);
       } else if (failure === "throwing") {
-        expect(failed.status).toBe(500);
-        expect(await json(failed)).toEqual({
-          ok: false,
-          error: "internal error",
-          code: "internal_error",
-        });
+        expect(failed.status).toBe(503);
+        expect(await json(failed)).toEqual(linkRefusalBody("link_unavailable"));
       } else {
         expect(failed.status).toBe(404);
         expect(await failed.text()).toBe(LINK_REFUSAL_BODY);
@@ -2697,12 +2718,12 @@ describe("relay capability reads", () => {
     ["metadata", "/sync/link/share"],
     ["log", "/sync/link/log"],
     ["blob", `/sync/link/blobs/${sha256("missing")}`],
-  ])("answers an invalid capability on the %s route with the generic 401 refusal", async (_name, path) => {
+  ])("answers an invalid capability on the %s route with the generic 404 refusal", async (_name, path) => {
     const storage = await newStorage();
     const response = await handler(storage)(linkRequest(UNKNOWN_CAPABILITY, path));
 
     expect({ status: response.status, body: await response.text() }).toEqual({
-      status: 401,
+      status: 404,
       body: LINK_REFUSAL_BODY,
     });
   });
@@ -2769,15 +2790,15 @@ describe("relay capability reads", () => {
     expect(await linkBlob.arrayBuffer()).toEqual(await recipientBlob.arrayBuffer());
 
     const missingSha = sha256("missing");
-    const recipientMissing = await denialBytes(
+    await denialBytes(
       await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)),
     );
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${hiddenSha}`))),
-    ).toBe(recipientMissing);
+    ).toBe('404:{"ok":false,"error":"not found"}');
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
-    ).toBe(recipientMissing);
+    ).toBe('404:{"ok":false,"error":"not found"}');
   });
 
   it("applies an accountless overwrite through the viewer fold", async () => {
@@ -4585,7 +4606,7 @@ describe("relay capability reads", () => {
         racedMethod === "fetchLogPage"
           ? "/sync/link/log"
           : `/sync/link/blobs/${seeded.sharedSha}`;
-      expect((await h(linkRequest(seeded.capability, path))).status).toBe(401);
+      expect((await h(linkRequest(seeded.capability, path))).status).toBe(404);
     }
   });
 
@@ -4856,7 +4877,7 @@ describe("relay capability reads", () => {
     const limiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     const seeded = await seed(h);
-    expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(401);
+    expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(404);
     expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
     const limited = await h(linkRequest(seeded.capability, "/sync/link/share"));
     expect(limited.status).toBe(429);
@@ -4883,7 +4904,7 @@ describe("relay capability reads", () => {
     expect(pastCapabilityBound.status).toBe(429);
     expect(await json(pastCapabilityBound)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
   });
@@ -4919,7 +4940,7 @@ describe("relay capability reads", () => {
     expect(limitedBlob.status).toBe(429);
     expect(await json(limitedBlob)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
 
@@ -4928,7 +4949,7 @@ describe("relay capability reads", () => {
     expect(limitedLog.status).toBe(429);
     expect(await json(limitedLog)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
   });
@@ -5050,7 +5071,7 @@ describe("relay capability reads", () => {
           request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
         )
       ).status,
-    ).toBe(429);
+     ).toBe(404);
     const callsAfterPublicExhaustion = limiterCalls.map(
       (spy) => spy.mock.calls.length,
     );

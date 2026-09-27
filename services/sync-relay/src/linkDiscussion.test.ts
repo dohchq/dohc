@@ -1,3 +1,4 @@
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
@@ -2277,7 +2278,8 @@ describe("share discussion HTTP boundary", () => {
         PROFILE_A,
       ),
     );
-    expect(await genericRefusal(viewWrite)).toContain("404:");
+    expect(viewWrite.status).toBe(403);
+    expect(await viewWrite.json()).toEqual(linkRefusalBody("link_view_access"));
     expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
       rowsBefore,
     );
@@ -2575,9 +2577,7 @@ describe("share discussion HTTP boundary", () => {
         expect(response.status).toBe(400);
         expectPrivate(response);
         expect(await body(response)).toEqual({
-          ok: false,
-          error: "discussion message is invalid",
-          code: "bad_request",
+          ok: false, error: "discussion message is invalid", code: "bad_request",
         });
       }
       expect({
@@ -5638,7 +5638,7 @@ describe("share discussion HTTP boundary", () => {
     }
   });
 
-  it("keeps every non-state append result behind the generic accountless refusal", async () => {
+  it("preserves validated input errors and keeps unauthorized append results opaque", async () => {
     const test = await fixture();
     const baseline = await genericRefusal(
       await test.handler(
@@ -5655,7 +5655,6 @@ describe("share discussion HTTP boundary", () => {
       "not-authorized",
       "name-already-set",
       "idempotency-conflict",
-      "rate-limit",
       "workspace-quota",
     ] as const;
     for (const reason of nonStateReasons) {
@@ -5681,11 +5680,12 @@ describe("share discussion HTTP boundary", () => {
     );
     expect(invalidInput.status).toBe(400);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({
-      ok: false,
-      error: "discussion message is invalid",
-      code: "bad_request",
-    });
+    expect(await body(invalidInput)).toEqual({ok: false, error: "discussion message is invalid", code: "bad_request"});
+
+    test.storage.appendLinkDiscussionMessage = () => ({ok: false, reason: "rate-limit"});
+    const limited = await test.handler(trustedAppend(test.comment, {body: "wait", idempotencyKey: "rate-refusal"}));
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual(linkRefusalBody("link_read_rate_limited"));
 
     for (const state of ["blocked", "paused"] as const) {
       test.storage.appendLinkDiscussionMessage = () => ({
@@ -5842,11 +5842,7 @@ describe("share discussion HTTP boundary", () => {
     );
     expect(invalidInput.status).toBe(400);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({
-      ok: false,
-      error: "discussion message is invalid",
-      code: "bad_request",
-    });
+    expect(await body(invalidInput)).toEqual({ok: false, error: "discussion message is invalid", code: "bad_request"});
 
     await discussionStateRefusal(
       await test.handler(

@@ -1,5 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {createLinkLiveClient} from "./linkLiveClient";
+import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 const origin = "https://share.example.test", exchangeKey = "link-live-exchange-key-at-least-32-bytes";
 const discriminator = "abcdefghijkl", capabilityToken = "A".repeat(43), profileSecret = "B".repeat(43);
@@ -20,6 +21,22 @@ function fixture(fetchRelay = vi.fn(async (_request: Request) => Response.json({
     exchangeKey, limits, browserLimits, resolveMaterial, fetchRelay})};
 }
 afterEach(() => vi.restoreAllMocks());
+it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("preserves only the scoped relay refusal %s", async code => {
+  const body = linkRefusalBody(code), status = LINK_REFUSALS[code].status;
+  const f = fixture(vi.fn(async () => Response.json(body, {status})));
+  const response = await f.client.handle(request());
+  expect([response.status, await response.json()]).toEqual([status, body]);
+  for (const value of [{...body, workspaceId: "private"}, {...body, error: "private path"}]) {
+    const refused = await fixture(vi.fn(async () => Response.json(value, {status}))).client.handle(request());
+    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  }
+});
+
+it.each([401, 404, 429, 503])("keeps unverified relay failures opaque (%s)", async status => {
+  const f = fixture(vi.fn(async () => Response.json({ok: false, error: "private detail"}, {status})));
+  const response = await f.client.handle(request());
+  expect([response.status, await response.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+});
 it("derives private credentials from the selected cookie and exposes only object identity and limits", async () => {
   const f = fixture(), response = await f.client.handle(request());
   expect(response.status).toBe(200);

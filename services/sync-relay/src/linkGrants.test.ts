@@ -1,4 +1,5 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { timingSafeEqual } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -930,7 +931,7 @@ describe("owner link contract", () => {
           }),
         )
       ).status,
-    ).toBe(401);
+    ).toBe(404);
     const commentExchange = await json(
       await h(request(null, "/sync/link-exchange", jsonBody({ secret: commentSecret }))),
     );
@@ -3319,7 +3320,7 @@ describe("durable link usage inventory", () => {
       }),
     );
     expect([absentKey, wrongKey, wrongSecret, rateLimited].map((response) => response.status))
-      .toEqual([404, 404, 404, 429]);
+      .toEqual([404, 404, 404, 404]);
     expect(await ownerLinkInventoryRow(limited, grantId)).toMatchObject({
       lastUsedAtMs: null,
     });
@@ -5007,6 +5008,7 @@ describe("relay link grants", () => {
     );
     const capability = String(exchanged.capabilityToken);
     expect(limiter.allow(hmac(capability), 2_000)).toBe(true);
+    const replace = vi.spyOn(storage, "replaceLinkSession");
 
     const refused = await h(
       request(null, "/sync/link-refresh", {
@@ -5018,10 +5020,15 @@ describe("relay link grants", () => {
     expect(refused.status).toBe(429);
     expect(await json(refused)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
     expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+    storage.revokeShareGrant({shareId: "share-existing", grantId: String(created.grantId), revokedAtMs: 2_000});
+    const revoked = await h(request(null, "/sync/link-refresh", {method: "POST", headers: {authorization: `LinkCapability ${capability}`}}));
+    expect(revoked.status).toBe(404);
+    expect(await json(revoked)).toEqual({ok: false, error: "not found"});
   });
 
   it("spends refreshes from the grant read budget", async () => {
@@ -5058,7 +5065,7 @@ describe("relay link grants", () => {
     expect(refused.status).toBe(429);
     expect(await json(refused)).toEqual({
       ok: false,
-      error: "too many link reads",
+      error: "This link has reached its request limit. Try again later.",
       code: "link_read_rate_limited",
     });
   });
@@ -5113,7 +5120,7 @@ describe("relay link grants", () => {
       }),
     );
     expect(await denialBytes(missingKey)).toBe(
-      await denialBytes(await h(request(null, "/missing"))),
+      '404:{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5161,9 +5168,9 @@ describe("relay link grants", () => {
         },
       }),
     );
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5212,9 +5219,9 @@ describe("relay link grants", () => {
       }),
     );
 
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5262,9 +5269,9 @@ describe("relay link grants", () => {
     );
 
     expect(replaceLinkSessionInterceptions).toBe(1);
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5321,9 +5328,9 @@ describe("relay link grants", () => {
         },
       }),
     );
-    expect(refused.status).toBe(401);
+    expect(refused.status).toBe(404);
     expect(await refused.text()).toBe(
-      '{"ok":false,"error":"not found","code":"not_found"}',
+      '{"ok":false,"error":"not found"}',
     );
   });
 
@@ -5339,7 +5346,7 @@ describe("relay link grants", () => {
     });
     await seedFileShare(h);
     const created = await createLink(h);
-    const generic = await denialBytes(await h(request(null, "/missing")));
+    const generic = '404:{"ok":false,"error":"not found"}';
 
     const missing = await denialBytes(
       await h(
@@ -5537,7 +5544,7 @@ describe("relay link grants", () => {
     ).toBe(missing);
   });
 
-  it("returns the standard unexpected-error response when exchange storage fails", async () => {
+  it("keeps exchange storage failure details private and retryable", async () => {
     const storage = await newStorage();
     const throwingStorage = interceptStorage(storage, {
       findLinkGrantByCredentialHash: () => {
@@ -5554,12 +5561,8 @@ describe("relay link grants", () => {
           jsonBody({ secret: "g".repeat(43) }),
         ),
       );
-      expect(response.status).toBe(500);
-      expect(await json(response)).toEqual({
-        ok: false,
-        error: "internal error",
-        code: "internal_error",
-      });
+      expect(response.status).toBe(503);
+      expect(await json(response)).toEqual(linkRefusalBody("link_unavailable"));
       expect(errorSpy).toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();
@@ -5575,10 +5578,10 @@ describe("relay link grants", () => {
       ...jsonBody({secret:value}),headers:{"content-type":"application/json","x-dohc-relay-client-ip":"192.0.2.10"},
     }));
     for(let index=0;index<12;index++) expect((await exchange("z".repeat(43))).status).toBe(404);
-    expect((await exchange("z".repeat(43))).status).toBe(429);
+    expect((await exchange("z".repeat(43))).status).toBe(404);
     for(let index=0;index<100;index++) expect((await exchange(secret)).status).toBe(200);
     storage.revokeShareGrant({shareId:"share-existing",grantId:String(created.grantId),revokedAtMs:2_001});
-    expect((await exchange(secret)).status).toBe(429);
+    expect((await exchange(secret)).status).toBe(404);
     const otherRequest=request(null,"/sync/link-exchange",jsonBody({secret}));
     otherRequest.headers.set("x-dohc-relay-client-ip","192.0.2.11");
     const otherIp=await h(otherRequest);
@@ -5596,8 +5599,8 @@ describe("relay link grants", () => {
     const limitedResponse = await h(
       request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
     );
-    expect(limitedResponse.status).toBe(429);
-    expect(await limitedResponse.json()).toMatchObject({ok:false,code:"link_read_rate_limited"});
+    expect(limitedResponse.status).toBe(404);
+    expect(await limitedResponse.json()).toEqual({ok:false,error:"not found"});
     expect(counted.calls).toHaveLength(1);
 
     expect(limiter.allow("192.0.2.11", 2_000)).toBe(true);
@@ -5623,7 +5626,7 @@ describe("relay link grants", () => {
       input.headers.set("x-dohc-relay-client-ip","slow-network");return h(input);
     });
     try {
-      expect((await exchange("slow-network")).status).toBe(429);
+      expect((await exchange("slow-network")).status).toBe(404);
       expect((await exchange("other-network")).status).toBe(200);
     } finally {controller.abort();await Promise.all(pending);}
     expect((await exchange("slow-network")).status).toBe(200);
@@ -5766,7 +5769,7 @@ describe("explicit public Edit release", () => {
 
     const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined, newLinkBearer});
     const mintedBeforeClosure = newLinkBearer.mock.calls.length;
-    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(404);
     expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeClosure);
 
     const rotatedResponse = await enabled(request(OWNER, `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
@@ -5774,7 +5777,7 @@ describe("explicit public Edit release", () => {
     expect(rotatedResponse.status).toBe(200);
     const rotated = await json(rotatedResponse);
     const mintedBeforeStaleRenewal = newLinkBearer.mock.calls.length;
-    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(404);
     expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeStaleRenewal);
     const freshResponse = await enabled(exchangeRequest(linkSecret(rotated.url)));
     expect(freshResponse.status).toBe(200);

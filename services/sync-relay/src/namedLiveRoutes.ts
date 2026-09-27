@@ -17,6 +17,9 @@ import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameHo
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
+import {authorizeLinkShareAction} from "./shareAuthorization";
+import {createAccountlessPathProjection} from "./accountlessPathProjection";
+import {linkRefusal} from "./linkRefusal";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -58,7 +61,7 @@ interface LiveRouteOptions {
 type BrowserRouteOptions = LiveRouteOptions & {
   kind: "named" | "link";
   desktopBearer?: boolean;
-  sessions: { resolve(request: Request, discriminator: string): Promise<LiveBrowserContext | null> };
+  sessions: { resolve(request: Request, discriminator: string, access?: "read" | "edit"): Promise<LiveBrowserContext | null> };
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
 };
@@ -119,8 +122,21 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (!sessionId(discriminator)) return refusal();
         parseLiveUpdateIdentifier(objectId);
         const authenticated = new Request(request.url, { headers: credentials(request.headers), signal });
-        const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
+        const context = await options.sessions.resolve(authenticated, discriminator, "read"); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) return refusal();
+        if (context.kind === "link") {
+          const authority = authorizeLinkShareAction({storage, grantId: context.grantId, action: "read"});
+          if (!authority.ok) return refusal();
+          const path = storage.objectMoment({workspaceId: context.workspaceId, objectId: objectId as string,
+            versionId: authority.effectiveSelector.versionId ?? "main"})?.path;
+          if (!path || createAccountlessPathProjection(authority.effectiveSelector).projectPath(path) === null ||
+              storage.objectIdAtPathInVersion({workspaceId: context.workspaceId, versionId: authority.effectiveSelector.versionId ?? "main", path}) !== objectId) return refusal();
+          if (authority.effectiveSelector.access === "view") return linkRefusal("link_view_access");
+          if (authority.effectiveSelector.access === "comment") return linkRefusal("link_comment_access");
+          const binding = storage.resolveLiveObjectHostBinding(context, objectId as string);
+          if (binding.kind === "refused") return binding.reason === "host-unavailable" || binding.reason === "stale-document"
+            ? linkRefusal("link_live_unavailable") : refusal();
+        }
         const minted = await options.tickets.mint({ objectId }, context, signal); signal.throwIfAborted(); check();
         if (!minted) return refusal();
         const body = JSON.stringify(minted);

@@ -25,6 +25,17 @@ import {
   RETRY_INITIAL_MS,
   RETRY_MAX_MS,
 } from "./retry";
+import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+
+class VerifiedLinkRefusal extends Error {
+  constructor(message: string, readonly retryable: boolean) {super(message);}
+}
+async function readLinkRefusal(response: Response): Promise<VerifiedLinkRefusal | null> {
+  if (response.ok) return null;
+  const code = parseLinkRefusal(await response.clone().json().catch(() => null), response.status);
+  return code ? new VerifiedLinkRefusal(LINK_REFUSALS[code].error, response.status === 429 || response.status === 503) : null;
+}
+const refusalMessage = (error: unknown, fallback: string) => error instanceof VerifiedLinkRefusal ? error.message : fallback;
 
 const SESSION_HEADER = "x-dohc-link-session";
 const DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
@@ -70,16 +81,20 @@ async function boundedRequest(
 ): Promise<Response> {
   let delayMs = RETRY_INITIAL_MS;
   let waitedMs = 0;
+  let lastRefusal: VerifiedLinkRefusal | null = null;
   while (true) {
     if (signal.aborted) throw new Error("cancelled");
     try {
       const response = await request();
+      const refusal = await readLinkRefusal(response);
+      if (refusal && (!refusal.retryable || !shouldRetry(response))) throw refusal;
+      lastRefusal = refusal;
       if (!shouldRetry(response)) return response;
       await response.body?.cancel().catch(() => undefined);
     } catch (error: unknown) {
-      if (!retryThrownFailures || signal.aborted) throw error;
+      if (error instanceof VerifiedLinkRefusal || !retryThrownFailures || signal.aborted) throw error;
     }
-    if (waitedMs + delayMs > RETRY_BUDGET_MS) throw new Error("refused");
+    if (waitedMs + delayMs > RETRY_BUDGET_MS) throw lastRefusal ?? new Error("refused");
     await waitForRetry(delayMs, signal);
     waitedMs += delayMs;
     delayMs = Math.min(delayMs * 2, RETRY_MAX_MS);
@@ -135,6 +150,7 @@ async function followDiscussionActivity(
   signal: AbortSignal,
   isCurrent: () => boolean,
   apply: (activity: NonNullable<ReturnType<typeof parseDiscussionActivity>>) => boolean,
+  refused: (message: string | null) => void,
 ): Promise<ActivityFollowerResult> {
   let since = baselineRevision;
   let holdMs = 0;
@@ -163,6 +179,12 @@ async function followDiscussionActivity(
       await response.body?.cancel().catch(() => undefined);
       return "cancelled";
     }
+    const refusal = await readLinkRefusal(response);
+    if (!isCurrent() || signal.aborted) return "cancelled";
+    if (refusal) {
+      refused(refusal.message);
+      if (!refusal.retryable) return "stopped";
+    }
     if (response.status === 409 || response.status === 429 || response.status >= 500) {
       await response.body?.cancel().catch(() => undefined);
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
@@ -171,6 +193,7 @@ async function followDiscussionActivity(
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
+      refused(null);
       return "stopped";
     }
     let body: unknown;
@@ -178,7 +201,7 @@ async function followDiscussionActivity(
       body = await response.json();
     } catch (error: unknown) {
       if (!isCurrent() || signal.aborted) return "cancelled";
-      if (error instanceof SyntaxError) return "stopped";
+      if (error instanceof SyntaxError) {refused(null);return "stopped";}
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
       retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
       continue;
@@ -191,11 +214,13 @@ async function followDiscussionActivity(
       (activity.hasMore && activity.cursorRevision === since) ||
       !apply(activity)
     ) {
+      refused(null);
       return "stopped";
     }
     since = activity.cursorRevision;
     holdMs = activity.hasMore ? 0 : DISCUSSION_ACTIVITY_HOLD_MS;
     retryDelayMs = RETRY_INITIAL_MS;
+    refused(null);
   }
   return "cancelled";
 }
@@ -247,17 +272,19 @@ export function CommentsPanel(props: {
 }) {
   const [messages, setMessages] = useState<PublicDiscussionMessage[] | null>(null);
   const [loadState, setLoadState] = useState<InitialLoadState>("loading");
+  const [loadError, setLoadError] = useState("Comments didn't load.");
   const [loadStateSession, setLoadStateSession] = useState(props.session);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [earlierCursor, setEarlierCursor] = useState<string | null>(null);
   const [earlierPending, setEarlierPending] = useState(false);
-  const [earlierError, setEarlierError] = useState(false);
+  const [earlierError, setEarlierError] = useState<string | null>(null);
   const [body, setBody] = useState("");
   const [claimedName, setClaimedName] = useState("");
   const [nameLocked, setNameLocked] = useState(false);
   const [pending, setPending] = useState(false);
   const [composerState, setComposerState] = useState<ComposerState>("syncing");
-  const [submitError, setSubmitError] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [followerError, setFollowerError] = useState<string | null>(null);
   const [followerPhase, setFollowerPhase] = useState<FollowerPhase>("live");
   const sessionRef = useRef(props.session);
   const messagesRef = useRef<PublicDiscussionMessage[] | null>(null);
@@ -358,6 +385,7 @@ export function CommentsPanel(props: {
       controller.signal,
       isCurrent,
       (activity) => applyActivity(session, activity, recovering),
+      setFollowerError,
     ).then((result) => {
       if (result === "stopped" && isCurrent()) enterFollowerPhase("stopped");
     });
@@ -386,14 +414,15 @@ export function CommentsPanel(props: {
     setLoadStateSession(props.session);
     setEarlierCursor(null);
     setEarlierPending(false);
-    setEarlierError(false);
+    setEarlierError(null);
     setBody("");
     setClaimedName("");
     setNameLocked(false);
     setPending(false);
     setComposerState("syncing");
-    setSubmitError(false);
+    setSubmitError(null);
     setFollowerPhase("live");
+    setFollowerError(null);
     const isCurrent = () =>
       pageTokenRef.current === token && sessionRef.current === props.session;
     void loadDiscussionPage(props.session, null, controller.signal, isCurrent)
@@ -418,8 +447,11 @@ export function CommentsPanel(props: {
           false,
         );
       })
-      .catch(() => {
-        if (isCurrent() && !controller.signal.aborted) setLoadState("failed");
+      .catch((error: unknown) => {
+        if (isCurrent() && !controller.signal.aborted) {
+          setLoadError(refusalMessage(error, "Comments didn't load."));
+          setLoadState("failed");
+        }
       });
     return () => {
       pageTokenRef.current = null;
@@ -453,7 +485,7 @@ export function CommentsPanel(props: {
       !controller.signal.aborted;
     earlierPendingRef.current = true;
     setEarlierPending(true);
-    setEarlierError(false);
+    setEarlierError(null);
     try {
       const page = await loadDiscussionPage(
         session,
@@ -493,9 +525,9 @@ export function CommentsPanel(props: {
       hasEarlierHistoryRef.current = page.nextCursor !== null;
       setMessages(merged);
       setEarlierCursor(page.nextCursor);
-    } catch {
+    } catch (error: unknown) {
       if (isCurrent() && followerPhaseRef.current === "live") {
-        setEarlierError(true);
+        setEarlierError(refusalMessage(error, "Earlier comments didn't load."));
       }
     } finally {
       if (isCurrent()) {
@@ -514,6 +546,7 @@ export function CommentsPanel(props: {
     pageControllerRef.current = controller;
     pageTokenRef.current = token;
     enterFollowerPhase("recovering");
+    setFollowerError(null);
     const isCurrent = () =>
       pageTokenRef.current === token &&
       sessionRef.current === session &&
@@ -531,7 +564,7 @@ export function CommentsPanel(props: {
         setMessages(loaded.messages);
         setEarlierCursor(loaded.nextCursor);
         setEarlierPending(false);
-        setEarlierError(false);
+        setEarlierError(null);
         composerRevisionRef.current = Math.max(
           composerRevisionRef.current,
           loaded.activityRevision,
@@ -545,14 +578,17 @@ export function CommentsPanel(props: {
           true,
         );
       })
-      .catch(() => {
-        if (isCurrent()) enterFollowerPhase("stopped");
+      .catch((error: unknown) => {
+        if (isCurrent()) {
+          setFollowerError(refusalMessage(error, "Comments stopped updating."));
+          enterFollowerPhase("stopped");
+        }
       });
   };
 
   const editDraft = (field: "body" | "name", value: string) => {
     intentRef.current = null;
-    setSubmitError(false);
+    setSubmitError(null);
     if (field === "body") setBody(value);
     else setClaimedName(value);
   };
@@ -620,7 +656,7 @@ export function CommentsPanel(props: {
         if (recognizedState && resultState) {
           if (resultState.state === "limit-reached") {
             intentRef.current = null;
-            setSubmitError(false);
+            setSubmitError(null);
             setComposerState("limit-reached");
             return;
           }
@@ -630,13 +666,13 @@ export function CommentsPanel(props: {
               resultState.activityRevision,
             );
             intentRef.current = null;
-            setSubmitError(false);
+            setSubmitError(null);
             setComposerState((current) => {
               if (current === "limit-reached") return current;
               return resultState.state;
             });
           } else {
-            setSubmitError(true);
+            setSubmitError("The comment didn't post. Try again.");
           }
           return;
         }
@@ -656,13 +692,13 @@ export function CommentsPanel(props: {
           }
           intentRef.current = null;
           setBody("");
-          setSubmitError(false);
+          setSubmitError(null);
           return;
         }
       }
-      setSubmitError(true);
-    } catch {
-      if (isCurrent()) setSubmitError(true);
+      setSubmitError("The comment didn't post. Try again.");
+    } catch (error: unknown) {
+      if (isCurrent()) setSubmitError(refusalMessage(error, "The comment didn't post. Try again."));
     } finally {
       if (isCurrent()) {
         submitTokenRef.current = null;
@@ -688,7 +724,7 @@ export function CommentsPanel(props: {
             : nameInvalid === "empty"
               ? "This name has no visible characters. Type a name or clear the field."
               : submitError
-                ? "The comment didn't post. Try again."
+                ? submitError
                 : "";
   return (
     <aside className="comments-panel" aria-labelledby="comments-title">
@@ -701,7 +737,7 @@ export function CommentsPanel(props: {
       {currentLoadState === "ready" && earlierCursor !== null ? (
         <div>
           {earlierError ? (
-            <p className="comments-empty" role="status">Earlier comments didn't load.</p>
+            <p className="comments-empty" role="status">{earlierError}</p>
           ) : null}
           <div className="comment-submit-row">
             <button
@@ -718,7 +754,7 @@ export function CommentsPanel(props: {
         <p className="comments-empty">Loading comments…</p>
       ) : currentLoadState === "failed" ? (
         <div>
-          <p className="comments-empty">Comments didn't load.</p>
+          <p className="comments-empty">{loadError}</p>
           <div className="comment-submit-row">
             <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
               Try again
@@ -734,10 +770,13 @@ export function CommentsPanel(props: {
           ))}
         </ol>
       )}
+      {currentLoadState === "ready" && followerPhase === "live" && followerError ? (
+        <p className="comment-submit-status" role="status">{followerError}</p>
+      ) : null}
       {currentLoadState === "ready" && followerPhase !== "live" ? (
         <div>
           <p className="comment-submit-status" role="status">
-            Comments stopped updating.
+            {followerError ?? "Comments stopped updating."}
           </p>
           <div className="comment-submit-row">
             <button

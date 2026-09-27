@@ -1,6 +1,7 @@
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {RETRY_BUDGET_MS} from "./retry";
+import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.
 const RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -15,8 +16,9 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
     const removedResponse = response.status === 404;
-    if ([401, 403].includes(response.status)) throw new LiveAuthorityUnavailableError("Unavailable");
-    if ((response.status !== 200 && !removedResponse) || response.redirected || !response.body ||
+    const linkRefused = path.startsWith("/api/live/link-") && [403, 429, 503].includes(response.status);
+    if ([401, 403].includes(response.status) && !linkRefused) throw new LiveAuthorityUnavailableError("Unavailable");
+    if ((!linkRefused && !removedResponse && response.status !== 200) || response.redirected || !response.body ||
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw Error("Unavailable");
     const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
     let length = 0, text = "";
@@ -30,12 +32,17 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
         if (chunk.value.length > RESPONSE_BYTES - length) throw Error("Response too large");
         length += chunk.value.length; text += decoder.decode(chunk.value, {stream: true});
       }
-      const result: unknown = JSON.parse(text + decoder.decode());
+      const value: unknown = JSON.parse(text + decoder.decode());
       if (removedResponse) {
-        if (record(result) && result.code === "share_access_removed") throw new ShareAccessRemovedError();
+        if (record(value) && value.code === "share_access_removed") throw new ShareAccessRemovedError();
         throw new LiveAuthorityUnavailableError("Unavailable");
       }
-      return result;
+      if (linkRefused) {
+        const code = parseLinkRefusal(value, response.status);
+        if (!code && response.status === 503) throw Error("Unavailable");
+        throw new LiveAuthorityUnavailableError(code ? LINK_REFUSALS[code].error : "Unavailable");
+      }
+      return value;
     } finally {signal.removeEventListener("abort", cancel); await reader.cancel().catch(() => {}); reader.releaseLock();}
   } finally {await response.body?.cancel().catch(() => {});}
 }

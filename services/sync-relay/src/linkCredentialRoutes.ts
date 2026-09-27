@@ -113,7 +113,7 @@ export function createLinkCredentialRoutes(
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     const addressPending = exchangeAddressInFlight.get(ip) ?? 0;
     if (addressPending >= 16 || exchangesInFlight >= 64 || !exchangeAddressProbes.allow(ip, nowMs()) ||
-        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) return refused();
     exchangeAddressInFlight.set(ip, addressPending + 1);
     exchangesInFlight++;
     try {
@@ -211,7 +211,7 @@ export function createLinkCredentialRoutes(
         );
         return jsonResponse({ ok: true, ...exchange });
       } catch (error) {
-        if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) return refused();
+        if (error instanceof RelayError) return refused();
         throw error;
       }
     } finally {
@@ -229,12 +229,6 @@ export function createLinkCredentialRoutes(
     const refreshLinkKey = linkKey;
     const refreshedAtMs = nowMs();
     const current = requireRefreshableLinkSession(request, refreshedAtMs);
-    if (
-      !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
-      !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
-    ) {
-      throw relayError("link_read_rate_limited");
-    }
     const authorized = authorizeLinkShareAction({
       storage,
       grantId: current.session.grantId,
@@ -246,6 +240,12 @@ export function createLinkCredentialRoutes(
       (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
     ) {
       throw invalidLinkCapability();
+    }
+
+    if (!linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
+        !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)) {
+      if (current.session.expiresAtMs > refreshedAtMs) throw relayError("link_read_rate_limited");
+      return refused();
     }
 
     const capabilityToken = newLinkBearer();
@@ -297,6 +297,7 @@ export function createLinkCredentialRoutes(
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
+
       const code = newLinkHandoffCode();
       if (!LINK_SECRET_PATTERN.test(code)) return refused();
       const mintedAtMs = nowMs();
@@ -367,7 +368,7 @@ export function createLinkCredentialRoutes(
 
     const admittedAtMs = nowMs();
     if (!linkRedeemRateLimiter.allow(principalUserId, admittedAtMs)) {
-      throw relayError("link_read_rate_limited");
+      return refused();
     }
     const codeHash = hashLinkHandoffCode(code, linkKey);
     if (!storage.hasLinkHandoffCode(codeHash)) return refused();

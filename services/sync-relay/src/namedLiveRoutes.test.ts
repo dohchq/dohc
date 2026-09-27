@@ -204,6 +204,16 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
 }
 
+it.each(["view", "comment"] as const)("names %s access only for an in-scope ticket target", async access => {
+  const f = await fixture(limits, true);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
+  const selected = await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId});
+  expect(selected.status).toBe(403);
+  expect(await selected.json()).toMatchObject({code: access === "view" ? "link_view_access" : "link_comment_access"});
+  const hidden = await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: "hidden-object"});
+  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+});
+
 it.each(["link", "desktop", "owner"])("shares total connection capacity with the %s route", async kind => {
   const admission = createLiveConnectionAdmission(), routeLimits = {...limits, maxConnections: 1};
   const first = await fixture(routeLimits, false, undefined, false, false, admission);

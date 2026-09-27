@@ -17,31 +17,22 @@ import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
+import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+import {opaqueLinkRefusal as refused} from "./linkRefusal";
+import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
+export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, readRelayVersionRefusal } from "./relayVersion";
+import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
-export const SHARE_WEB_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
-  "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
-  "content-security-policy": SHARE_WEB_CSP,
-  "referrer-policy": "no-referrer",
-  "x-content-type-options": "nosniff",
-  "x-robots-tag": "noindex, nofollow, noarchive",
-  "cache-control": "private, no-store",
-});
 
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
-export const EXCHANGE_BUCKET_CAPACITY = 12;
-const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
-// Match the relay's global app admission budget. Valid link holders behind
-// one network do not share the malformed-request allowance.
+// Match the relay's global app admission budget.
 export const EXCHANGE_GLOBAL_BUCKET_CAPACITY = 2_400;
 const EXCHANGE_GLOBAL_REFILL_PER_SECOND = 40;
 const MAX_EXCHANGES_IN_FLIGHT = 64;
@@ -98,8 +89,8 @@ interface RelayCall {
   limiter?: ShareWebInFlightLimiter;
   /** Reads the whole relay body, up to the proxy limit, inside the deadline. */
   buffered?: boolean;
-  /** Refuses with this status when the session changed before the call answered. */
-  ifSessionChanged?: 404 | 409;
+  /** Refuses when the session changed before the call answered. */
+  ifSessionChanged?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
   ok?(relayResponse: Response, holdSlot: () => () => void): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
@@ -326,10 +317,6 @@ function jsonResponse(
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   return response(JSON.stringify(body), { status: init.status, headers });
-}
-
-function refused(status: 404 | 409 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
-  return jsonResponse(REFUSAL_VALUE, { status, headers });
 }
 
 function parseCookies(header: string | null): Map<string, string> {
@@ -853,11 +840,6 @@ export function createShareWebApplication({
     timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   }) : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
-  const exchangeRateLimiter = new TokenBucketLimiter(
-    EXCHANGE_BUCKET_CAPACITY,
-    EXCHANGE_REFILL_PER_SECOND,
-    EXCHANGE_MAX_IPS,
-  );
   const exchangeGlobalRateLimiter = new TokenBucketLimiter(EXCHANGE_GLOBAL_BUCKET_CAPACITY, EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1);
   const exchangeAddressProbes = new TokenBucketLimiter(600, 10, EXCHANGE_MAX_IPS);
   const exchangeAddressInFlight = new Map<string, number>();
@@ -948,7 +930,7 @@ export function createShareWebApplication({
         );
         try {
           const relayResponse = await fetchRelay(boundedRelay.request);
-          if (relayResponse.status === 401) return { status: "invalid" };
+          if (relayResponse.status === 404) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
             await relayResponse.json(),
@@ -1047,7 +1029,8 @@ export function createShareWebApplication({
 
   async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
     const refreshed = await refreshSession(browser);
-    if (!refreshed.ok) return refused(refreshed.status);
+    if (!refreshed.ok) return refreshed.status === 503
+      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
     const capabilityToken = browser.session.capabilityToken;
     const current = (): boolean =>
       sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
@@ -1060,11 +1043,11 @@ export function createShareWebApplication({
       return result;
     };
     const superseded = (): Response | null =>
-      call.ifSessionChanged && !current() ? refused(call.ifSessionChanged) : null;
+      call.ifSessionChanged && !current() ? refused() : null;
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
-    if (!release) return answer(refused(429));
+    if (!release) return answer(refused());
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;
@@ -1089,12 +1072,18 @@ export function createShareWebApplication({
     );
     try {
       let relayResponse = await fetchRelay(bounded.request);
-      // Eviction never waits on the body, which may be oversized or broken.
-      if (relayResponse.status === 401) {
+      // Only share metadata identifies the session itself; target refusals do not.
+      if (relayResponse.status === 404) {
+        if (call.path === "/sync/link/share") {
+          sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+        }
         const stale = superseded();
-        sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
         await relayResponse.body?.cancel().catch(() => undefined);
-        return stale ?? refused(404);
+        return stale ?? refused();
+      }
+      if (relayResponse.status >= 500) {
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1105,18 +1094,17 @@ export function createShareWebApplication({
       if (relayResponse.status === 200) {
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
-      const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
-      if (versionRefusal) {
-        await relayResponse.body?.cancel().catch(() => undefined);
-        return answer(jsonResponse(versionRefusal, { status: RELAY_VERSION_REFUSAL_STATUS }));
+      if ([403, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
+        const detail = parseLinkRefusal(value, relayResponse.status);
+        if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
+        const translated = await call.refusal?.(Response.json(value, {status: relayResponse.status}));
+        if (translated) return answer(translated);
       }
-      const translated = await call.refusal?.(relayResponse);
-      if (translated) return answer(translated);
       await relayResponse.body?.cancel().catch(() => undefined);
-      if (relayResponse.status === 429) return answer(refused(429));
-      return answer(refused(relayResponse.status >= 400 && relayResponse.status < 500 ? 404 : 503));
+      return answer(refused());
     } catch {
-      return superseded() ?? answer(refused(503));
+      return superseded() ?? answer(refused());
     } finally {
       bounded.dispose();
       if (!slotHeld) release();
@@ -1144,11 +1132,11 @@ export function createShareWebApplication({
         request.headers.get("sec-fetch-site") === "cross-site") return refused();
       const bearer = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,256})$/u.exec(request.headers.get("authorization") ?? "");
       const session = bearer && sessions.get(bearer[1]!, bearer[2]!, nowMs());
-      if (!session?.agentProfileSecret) return response(null, {status: 401, headers: {"www-authenticate": "Bearer"}});
+      if (!session?.agentProfileSecret) return refused();
       const discriminator = session.discriminator;
-      if (mcpRequests >= 64) return refused(429);
+      if (mcpRequests >= 64) return refused();
       const release = mcpLimiter.acquire(sessionKey(discriminator, bearer![2]!), session.grantId);
-      if (!release) return refused(429);
+      if (!release) return refused();
       mcpRequests++;
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(35_000)]);
       // Only server-held agent credentials cross into the shared link handlers.
@@ -1217,19 +1205,18 @@ export function createShareWebApplication({
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
       if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
-          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused(429);
+          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused();
       exchangeAddressInFlight.set(clientIp, addressPending + 1);
       exchangesInFlight++;
       try {
-        const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : refused(429);
         let secret: string | null = null;
         try {
           if (agent) {
             const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
             if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
           } else secret = await exchangeInput(request);
-        } catch {return malformed();}
-        if (!secret) return malformed();
+        } catch {return refused();}
+        if (!secret) return refused();
         try {
           const bounded = boundedRelayRequest(request.signal, relayUrl, "/sync/link-exchange", {
               method: "POST",
@@ -1246,10 +1233,8 @@ export function createShareWebApplication({
           try {
             const relayResponse = await fetchRelay(bounded.request);
             if (relayResponse.status !== 200) {
-              const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
               await relayResponse.body?.cancel().catch(() => undefined);
-              if (versionRefusal) return jsonResponse(versionRefusal, {status: RELAY_VERSION_REFUSAL_STATUS});
-              return refused(relayResponse.status === 429 ? 429 : 404);
+              return refused();
             }
             exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
           } finally {bounded.dispose();}
@@ -1310,7 +1295,7 @@ export function createShareWebApplication({
         exchangeKey: true,
         ok: async (relayResponse) => {
           const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-          if (!handoff) return refused(503);
+          if (!handoff) return refused();
           return jsonResponse({
             ok: true,
             code: handoff.code,
@@ -1377,8 +1362,8 @@ export function createShareWebApplication({
         holdMs,
         buffered: true,
         ...(isActivity
-          ? { limiter: activityHoldLimiter, ifSessionChanged: 409 }
-          : { ifSessionChanged: 404, refusal: discussionRefusal }),
+          ? { limiter: activityHoldLimiter, ifSessionChanged: true }
+          : { ifSessionChanged: true, refusal: discussionRefusal }),
       });
     }
 
@@ -1400,7 +1385,7 @@ export function createShareWebApplication({
           path: `/sync/link/log${search}`,
           holdMs: Number(hold),
           limiter: activityHoldLimiter,
-          ifSessionChanged: 409,
+          ifSessionChanged: true,
         });
       }
       const sha = pathname.slice("/api/view/blob/".length);
