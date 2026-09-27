@@ -44,6 +44,11 @@ function mainProcessSourceFiles(dir: string, found: string[] = []): string[] {
 }
 
 describe("main bundle config", () => {
+  it("starts Electron at the entry module, which loads the app's main module", () => {
+    expect(mainBuildEntries.main).toBe("src/entry.ts");
+    expect(mainBuildEntries.app).toBe("src/main.ts");
+  });
+
   it("emits the reusable database worker beside main", () => {
     expect(mainBuildEntries["workspace-database-worker"]).toBe(
       "src/workspaces/workspaceDatabaseThread.ts",

@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAppLifecycle } from "./appLifecycle";
+import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createQuitGuard } from "./quitGuard";
+import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
 import { createShareHandoffIntentSlot } from "./shareHandoffIngress";
 import { deferred } from "./testing/deferred";
 
@@ -92,6 +93,9 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       startUpdates: vi.fn(() => { log.push("updates"); }),
       updateAfterStartupFailure: vi.fn(async () => { log.push("update-check"); return false; }),
       updateAfterWindowLoadFailure: vi.fn(async () => { log.push("window-update-check"); return false; }),
+    },
+    launch: {
+      finished: vi.fn(() => { log.push("launch-finished"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -340,11 +344,93 @@ describe("desktop bootstrap", () => {
     guard.hold();
   });
 
+  it("finishes the launch once the app has run 30 s after its first window loaded", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS - 1);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+  });
+
+  it("finishes the launch at a clean quit before 30 s have passed", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    f.app.emit("will-quit", event());
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
+  });
+
+  it("finishes the launch when Windows ends the session, which emits no quit event", async () => {
+    const f = fixture();
+    await boot(f);
+    const early = new EventEmitter();
+    f.app.emit("browser-window-created", {}, early);
+    early.emit("query-session-end", { preventDefault: vi.fn() });
+    // query-session-end can still be cancelled; only session-end is final.
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    early.emit("session-end", {});
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    const later = new EventEmitter();
+    f.app.emit("browser-window-created", {}, later);
+    later.emit("session-end", {});
+    expect(f.dependencies.launch.finished).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the launch marker when the process dies within 30 s of its first window", async () => {
+    vi.useFakeTimers();
+    const files = new Map<string, string>();
+    const disk: MarkerFileSystem = {
+      readFileSync: (path) => { const content = files.get(path); if (content === undefined) throw new Error("missing"); return content; },
+      writeFileSync: (path, data) => { files.set(path, data); },
+      rmSync: (path) => { files.delete(path); },
+    };
+    const f = fixture((d) => { d.launch.finished = finishLaunch; });
+    beginLaunch("/profile/dohc-launch.json", "1.0.0", null, disk);
+    try {
+      await boot(f);
+      f.loaded.resolve(true);
+      await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS - 1);
+      // A crash or a native exit here runs no quit event and no timer, so the
+      // next launch reads this count.
+      expect(files.get("/profile/dohc-launch.json")).toBe(JSON.stringify({ version: "1.0.0", unfinished: 1 }));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(files.has("/profile/dohc-launch.json")).toBe(false);
+    } finally { finishLaunch(); }
+  });
+
+  it.each([true, false])("leaves the launch unfinished when the engine fails (window loaded: %s)", async (windowLoads) => {
+    const f = fixture();
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(false);
+    f.loaded.resolve(windowLoads);
+    await ready;
+    await vi.waitFor(() => expect(f.dependencies.services.startUpdates).toHaveBeenCalled());
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+  });
+
+  it("leaves the launch unfinished when the first window fails to load", async () => {
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(false);
+    await vi.waitFor(() => expect(f.dependencies.services.updateAfterWindowLoadFailure).toHaveBeenCalledOnce());
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+  });
+
   it("does not bootstrap or capture handoff intents in a losing process", async () => {
     const f = fixture((d) => { d.runtime.argv.push(handoffUrl); });
     f.app.lock = false;
     await f.lifecycle.start();
     expect(f.app.quit).toHaveBeenCalledOnce();
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     expect(f.app.whenReady).not.toHaveBeenCalled();
     expect(f.slot.pending()).toBeNull();
     expect(f.app.listenerCount("open-url")).toBe(0);

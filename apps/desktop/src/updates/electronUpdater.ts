@@ -88,7 +88,9 @@ export function updateFeedOverride(
   return env.DOHC_DESKTOP_MOCK_UPDATES === "1" ? url : null;
 }
 
-function shouldStartUpdates(
+// Whether this build runs an updater at all: packaged, or pointed at a mock
+// feed in development.
+export function updatesEnabled(
   env: NodeJS.ProcessEnv,
   isPackaged: boolean,
 ): boolean {
@@ -156,7 +158,7 @@ export async function startAutoUpdates(options: {
   importUpdater?: () => Promise<UpdaterModuleLike>;
 }): Promise<AutoUpdateController | null> {
   const env = options.env ?? process.env;
-  if (!shouldStartUpdates(env, options.isPackaged)) return null;
+  if (!updatesEnabled(env, options.isPackaged)) return null;
 
   const imported =
     options.importUpdater
