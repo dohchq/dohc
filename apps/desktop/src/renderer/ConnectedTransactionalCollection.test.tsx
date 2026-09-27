@@ -90,7 +90,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
   expect(history.getByText('"Original name"')).toBeTruthy();
   fireEvent.click(history.getByRole("button", { name: "Undo edit" }));
   await history.findByText("No saved operations on this page. Refresh to check for changes.");
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "invoke", workspaceId: "workspace-a", datasetPath: "data/dataset.json", revision: 1,
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "invoke", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), revision: 1,
     revisionSha256: current.revisionSha256, operationId: id(5), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
   expect(onNotice).toHaveBeenCalledWith("Reversed the edit");
   expect(onError).not.toHaveBeenCalled();
@@ -172,8 +172,8 @@ it("loads owner pending responses and requires confirmation before clearing a sa
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "reconcileAttempt")).toBe(false);
   fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear retry" }));
   await screen.findByText("No pending responses. Refresh to check for changes.");
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "pendingAttempts", workspaceId: "workspace-a", datasetPath: "data/dataset.json", limit: 50 });
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "reconcileAttempt", workspaceId: "workspace-a", datasetPath: "data/dataset.json", reference: "b".repeat(64), acknowledge: true });
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "pendingAttempts", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), limit: 50 });
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "reconcileAttempt", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), reference: "b".repeat(64), acknowledge: true });
   expect(onNotice).toHaveBeenCalledWith("Cleared the saved response's retry"); expect(onError).not.toHaveBeenCalled();
 });
 
@@ -220,7 +220,7 @@ it("cancels an unconfirmed response only after owner acknowledgement and reports
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "cancelAttempt")).toBe(false);
   fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel response" }));
   await screen.findByText("No pending responses. Refresh to check for changes.");
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "cancelAttempt", workspaceId: "workspace-a", datasetPath: "data/dataset.json", reference: "c".repeat(64), acknowledge: true });
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "cancelAttempt", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), reference: "c".repeat(64), acknowledge: true });
   expect(onNotice).toHaveBeenCalledWith("Cancelled the pending response");
 });
 
@@ -239,7 +239,7 @@ it("deletes an archived Collection with its reviewed cursor and updates the shel
   fireEvent.click(screen.getByRole("checkbox"));
   fireEvent.click(screen.getByRole("button", { name: "Delete Collection permanently" }));
   await screen.findByText("Collection deleted");
-  expect(backend.dataset).toHaveBeenCalledWith({ action: "delete", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expected: deletionPreview().cursor, reviewToken: "c".repeat(64), acknowledge: true });
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "delete", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), expected: deletionPreview().cursor, reviewToken: "c".repeat(64), acknowledge: true });
   expect(onLifecycleChanged).toHaveBeenCalledOnce(); expect(onNotice).toHaveBeenCalledWith("Collection deleted"); expect(onError).not.toHaveBeenCalled();
 });
 it.each([{ owner: false, offline: false }, { owner: true, offline: true }])("hides permanent delete for $owner owner and $offline offline", async ({ owner, offline }) => {

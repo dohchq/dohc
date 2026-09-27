@@ -100,8 +100,10 @@ it("restores absent source files after recovery so the recovered dataset has an 
 
 it("tells a recipient which source the owner must share", async () => {
   const f = fixture(); f.sources.clear(); f.workspace.shareView = { shareId: "shared" };
+  f.flushSourceCapture.mockRejectedValue(new Error("Capture unavailable"));
   await expect(f.handler("window", { action: "describe", workspaceId: "workspace", datasetPath: "private/dataset.json" }))
     .rejects.toThrow("Ask the owner to include its dataset.json file in this share.");
+  expect(f.flushSourceCapture).not.toHaveBeenCalled();
 });
 
 it("routes explicit cancellation to the current host and rejects stale completion", async () => {
@@ -276,7 +278,7 @@ it("waits for source capture before preparing authored Collection changes", asyn
     f.flushSourceCapture.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
     f.withAdapter.mockRejectedValue(new Error("source capture reached"));
     const request = action === "prepare" ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
-      : { workspaceId: "workspace", action, datasetPath: "data/dataset.json", descriptorPath: "data/dataset.json", migrationPath: "data/change.sql" };
+      : { workspaceId: "workspace", action, datasetPath: "data/dataset.json", migrationPath: "data/change.sql" };
     const pending = f.handler("window", request);
     const checked = expect(pending).rejects.toThrow("source capture reached");
     await vi.waitFor(() => expect(f.flushSourceCapture).toHaveBeenCalledOnce());
@@ -288,7 +290,7 @@ it("waits for source capture before preparing authored Collection changes", asyn
 });
 
 it("refuses source review after failed settlement or changed workspace authority", async () => {
-  const request = { workspaceId: "workspace", action: "prepareMigration", datasetPath: "data/dataset.json", descriptorPath: "data/dataset.json", migrationPath: "data/change.sql" };
+  const request = { workspaceId: "workspace", action: "prepareMigration", datasetPath: "data/dataset.json", migrationPath: "data/change.sql" };
   const failed = fixture();
   failed.flushSourceCapture.mockRejectedValue(new Error("capture not settled"));
   await expect(failed.handler("window", request)).rejects.toThrow("capture not settled");
@@ -301,4 +303,35 @@ it("refuses source review after failed settlement or changed workspace authority
   aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); });
   await expect(aborted.handler("window", request)).rejects.toThrow("review cancelled");
   expect(aborted.withAdapter).not.toHaveBeenCalled();
+});
+
+it.each([
+  { action: "describe" }, { action: "permissions" }, { action: "lifecycle" }, { action: "history" },
+  { action: "archive" }, { action: "restore" }, { action: "export" }, { action: "deletePreview" },
+  { action: "removeGrant", principalKey: "person" },
+  { action: "setGrant", grantId: "grant", grant: { revision: 1, revisionSha256: "a".repeat(64), operationIds: [datasetId], discover: true } },
+  { action: "pendingAttempts" }, { action: "prepareMigration", migrationPath: "data/change.sql" },
+  { action: "invoke", operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "pinned" },
+])("refuses $action when a selected path now names another Collection", async action => {
+  const f = fixture();
+  await f.handler("window", { action: "invoke", workspaceId: "workspace", datasetPath: "data/dataset.json", operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "before" });
+  f.sources.set("data/dataset.json", JSON.stringify({ datasetId: "00000000-0000-4000-8000-000000000099" }));
+  invalidateDatasetAddresses({ workspaceId: "workspace" });
+  await expect(f.handler("window", { ...action, workspaceId: "workspace", datasetPath: "data/dataset.json", expectedDatasetId: datasetId })).rejects.toThrow("This Collection moved. Reopen it.");
+  expect(f.host.invoke).toHaveBeenCalledTimes(1);
+});
+
+it("flushes and retries a missing address once after an agent moves its folder", async () => {
+  const f = fixture();
+  const request = { action: "invoke", workspaceId: "workspace", datasetPath: "data/dataset.json", operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "move" };
+  await f.handler("agent", request);
+  f.flushSourceCapture.mockImplementationOnce(async () => {
+    f.sources.set("moved/dataset.json", f.sources.get("data/dataset.json")!);
+    f.sources.delete("data/dataset.json");
+  });
+  await f.handler("agent", { ...request, datasetPath: "moved/dataset.json" });
+  expect(f.flushSourceCapture).toHaveBeenCalledTimes(1);
+  expect(f.host.invoke).toHaveBeenCalledTimes(2);
+  await expect(f.handler("agent", { ...request, datasetPath: "absent/dataset.json" })).rejects.toThrow("Collection reference broken");
+  expect(f.flushSourceCapture).toHaveBeenCalledTimes(2);
 });

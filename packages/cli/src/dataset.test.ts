@@ -99,7 +99,7 @@ describe("dataset CLI", () => {
     expect(await help("create")).toContain("Fields: workspaceId, definition");
     expect(await help("approve")).toContain("Fields: workspaceId, preparationId, revisionSha256");
     expect(await help("invoke")).toContain("same input and idempotencyKey");
-    expect(await help("export")).toContain("Fields: workspaceId, datasetPath, savePath Optional fields: overwrite");
+    expect(await help("export")).toContain("Fields: workspaceId, datasetPath, savePath Optional fields: expectedDatasetId, overwrite");
     expect(send).not.toHaveBeenCalled();
   });
   it("requires a chosen export destination and returns no private archive bytes", async () => {
@@ -121,4 +121,10 @@ it("requires an exact deletion review and explicit acknowledgment before transpo
   expect(send).not.toHaveBeenCalled();
   expect((await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send})).exitCode).toBe(0);
   expect(() => parseCliResult("dataset",{kind:"deleted",deleted:true,datasetId:id(1),records:[]})).toThrow();
+});
+
+it("accepts an expected Collection identity and derives migration source from its address", () => {
+  const request = { action: "prepareMigration", workspaceId: "workspace", datasetPath: "orders/dataset.json", expectedDatasetId: "00000000-0000-4000-8000-000000000001", migrationPath: "orders/change.sql" };
+  expect(DatasetRequest.parse(request)).toEqual(request);
+  expect(() => DatasetRequest.parse({ ...request, descriptorPath: "another/dataset.json" })).toThrow();
 });

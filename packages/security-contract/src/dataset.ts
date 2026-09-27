@@ -11,13 +11,8 @@ export const DATASET_MAX_TABLES = 64;
 export const DATASET_MAX_FIELDS = 128;
 export const DATASET_MAX_OPERATIONS = 128;
 
-/** A workspace-relative source address, never an authorization grant. */
-export function parseDatasetPath(value: unknown): string {
-  if (typeof value !== "string" || value.length > 1024 || (value !== "dataset.json" && !value.endsWith("/dataset.json"))) throw new Error("Use the workspace-relative dataset.json path.");
-  const checked = validateUserWritePath(value);
-  if (!checked.ok || checked.normalized !== value || classifyEngineFilePath(value).kind !== "tracked") throw new Error("Use the workspace-relative dataset.json path.");
-  return value;
-}
+export { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
+import { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
 
 export type DatasetColumnFieldType = "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "relation" | "attachment";
 export type DatasetFieldType = DatasetColumnFieldType | "button";
@@ -109,6 +104,7 @@ export interface AppDatasetBinding {
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
+  name: string;
   operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & { fields?: Array<{ fieldId: string; name: string }> }>;
 }
 /** Grant-filtered metadata for Collection controls and agent discovery. */
@@ -418,8 +414,8 @@ function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBindin
 }
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields", "linkReads"]);
-  const { operations: values, ...reference } = row;
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations", "name"], ["createFields", "linkReads"]);
+  const { operations: values, name, ...reference } = row;
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {
     const item = record(value, ["operationId", "name", "access", "readOnly"], ["fields"]);
@@ -434,7 +430,7 @@ export function parseAppDatasetCapability(value: unknown): AppDatasetCapability 
   unique(operations.map(operation => operation.operationId));
   unique(operations.map(operation => operation.name));
   if (operations.length !== binding.operationIds.length || operations.some(operation => !binding.operationIds.includes(operation.operationId))) fail();
-  return { ...binding, operationIds: [...binding.operationIds].sort(), operations };
+  return { ...binding, name: text(name), operationIds: [...binding.operationIds].sort(), operations };
 }
 
 /** Stable inventory ordering and fixed member ordering for definition hashing. */

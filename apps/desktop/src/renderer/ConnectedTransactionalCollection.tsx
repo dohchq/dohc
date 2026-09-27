@@ -48,9 +48,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   const addressInput = <T extends { datasetId: string },>(input: T) => {
-    const { datasetId: _, ...fields } = input;
-    return { ...fields, datasetPath };
+    const { datasetId: expectedDatasetId, ...fields } = input;
+    return { ...fields, datasetPath, expectedDatasetId };
   };
+  const describedId = useRef<string | undefined>(undefined);
   const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
@@ -75,9 +76,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     const sequence = ++request.current;
     setLoading(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetPath, action: "describe", ...(owner ? { includeArchived: true } : {}) });
+      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: describedId.current, action: "describe", ...(owner ? { includeArchived: true } : {}) });
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
+      describedId.current = result.dataset.datasetId;
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
@@ -128,7 +130,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
-    const result = await bridge().dataset({ action: "export", workspaceId, datasetPath });
+    const result = await bridge().dataset({ action: "export", workspaceId, datasetPath, expectedDatasetId: datasetId });
     signal.throwIfAborted();
     if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again.");
     return result.savedPath;
@@ -142,7 +144,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     if (restoreLock.current || !owner || copy?.offline) return;
     restoreLock.current = true; const sequence = request.current; setRestoring(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetPath, action: "restore" });
+      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "restore" });
       if (sequence !== request.current) return;
       if (result.kind !== "lifecycle-updated" || result.archived) throw Error("dohc could not confirm the restore. Refresh the Collection.");
       setRestoring(false); onLifecycleChanged?.(); await refresh();
@@ -216,7 +218,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       const target = dataset.tables.find(table => table.tableId === relation.tableId);
       const read = dataset.operations.find(operation => operation.tableId === relation.tableId && operation.kind === "read" && operation.readOnly && operation.fieldIds.includes(relation.fieldId));
       if (!target || !read) throw Error("This related Collection has no permitted read action.");
-      const response = await bridge().dataset({ action: "invoke", workspaceId, datasetPath, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
+      const response = await bridge().dataset({ action: "invoke", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
         operationId: read.operationId, input: { limit: 20, search: input.search }, idempotencyKey: crypto.randomUUID() });
       signal.throwIfAborted();
       if (response.kind !== "invoked") throw Error("dohc could not read related records. Try again.");
@@ -260,14 +262,14 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       onReviewSource={() => { setViewingHistory(false); setHistoryRestore(undefined); setReviewingSchema(true); }}
       onLoadRevision={async (revisionSha256, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, revisionSha256 });
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256 });
         signal.throwIfAborted();
         if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
         return result;
       }}
       onRestoreRevision={async (targetRevisionSha256, changedRevisionSha256, signal) => {
         signal.throwIfAborted(); const sequence = request.current;
-        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetPath,
+        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetPath, expectedDatasetId: datasetId,
           revision: dataset.revision, revisionSha256: dataset.revisionSha256, targetRevisionSha256, changedRevisionSha256 });
         signal.throwIfAborted(); if (sequence !== request.current) return;
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this reversal. Refresh History.");
@@ -308,7 +310,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
+        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
         signal.throwIfAborted();
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this field change. Try again.");
         return result;
@@ -326,12 +328,12 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
         signal.throwIfAborted();
         if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
       }} />}
-    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} onError={onError}
+    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} datasetPath={datasetPath} onError={onError}
       onLoadPreview={loadMigrationPreview}
       onClose={() => { setReviewingSchema(false); setHistoryRestore(undefined); }}
       onPrepare={async (input, signal) => {
         signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), action: "prepareMigration" });
+        const result = await bridge().dataset({ ...addressInput(input), datasetPath: input.datasetPath, action: "prepareMigration" });
         signal.throwIfAborted();
         if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this change. Try again.");
         return result;
@@ -358,7 +360,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       onLoadSource={async signal => {
         signal.throwIfAborted();
         const sequence = request.current;
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, revisionSha256: dataset.revisionSha256 });
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256: dataset.revisionSha256 });
         signal.throwIfAborted();
         if (sequence !== request.current) throw Error("The Collection changed. Review its current rules again.");
         if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
@@ -367,7 +369,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       onPrepareChoices={async (input, signal) => {
         signal.throwIfAborted();
         const sequence = request.current;
-        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetPath,
+        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetPath, expectedDatasetId: datasetId,
           revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId });
         signal.throwIfAborted();
         if (sequence !== request.current) throw Error("The Collection changed. Prepare the choices again.");

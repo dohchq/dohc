@@ -1,3 +1,4 @@
+import { parseDatasetPath } from "./datasetPath";
 import type { CollectionValue } from "./collection";
 
 type DocumentCollectionRef = { kind: "document"; path: string };
@@ -113,8 +114,7 @@ function ref(input: unknown): CollectionRef {
   }
   if (kind === "transactional") {
     const row = exact(input, ["kind", "datasetPath", "tableId"]);
-    const datasetPath = text(row.datasetPath, 1024);
-    if ((datasetPath !== "dataset.json" && !datasetPath.endsWith("/dataset.json")) || /[\\:%]/u.test(datasetPath) || datasetPath.split("/").some(part => !part || part === "." || part === ".." || part.toLowerCase() === ".dohc")) fail();
+    const datasetPath = parseDatasetPath(row.datasetPath);
     return { kind, datasetPath, tableId: uuid(row.tableId) };
   }
   fail();

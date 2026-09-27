@@ -582,6 +582,7 @@ Use describe to find approved operation IDs.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `includeArchived`: `boolean`
 
 Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }`.
@@ -592,6 +593,7 @@ List saved operations, with values to undo edits.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
@@ -603,6 +605,7 @@ Show the saved source of one past revision.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revisionSha256`: `SHA-256 hex`. Required.
 
 Returns `{ kind: "history-revision", revision, schemaSql, operationSource }`.
@@ -615,6 +618,7 @@ Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `hist
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
@@ -628,6 +632,7 @@ List app bindings and explicit data grants.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `after`: `string`
 - `limit`: `integer`
 
@@ -641,6 +646,7 @@ grant names revision, revisionSha256, operationIds, and discover.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
 
@@ -654,6 +660,7 @@ Set `principalKey` to `permissions[].principal` from `permissions`.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `principalKey`: `string`. Required.
 
 Returns `{ kind: "grant-updated" }`.
@@ -664,6 +671,7 @@ Show a Collection's archive state and its apps.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `after`: `string`
 - `limit`: `integer`
 
@@ -675,6 +683,7 @@ Stop a Collection's operations and keep its records.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 
 Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 
@@ -684,6 +693,7 @@ Restore an archived Collection under its rules.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 
 Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 
@@ -695,6 +705,7 @@ The result lists affected apps and holds what delete needs.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `after`: `string`
 - `limit`: `integer`
 
@@ -708,6 +719,7 @@ Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewTok
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `expected`: `{ workspaceId: string, datasetId: UUID, hostEpoch: string, approvedRevisionHash: SHA-256 hex, revision: integer, digest: SHA-256 hex }`. Required.
 - `reviewToken`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
@@ -720,6 +732,7 @@ List pending responses that still hold a retry.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `after`: `integer`
 - `limit`: `integer`
 
@@ -733,6 +746,7 @@ Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `reference`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
 
@@ -746,6 +760,7 @@ Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `reference`: `SHA-256 hex`. Required.
 - `acknowledge`: `true`. Required.
 
@@ -759,6 +774,7 @@ savePath is an absolute path ending in .dohc-recovery. Set overwrite to true to 
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `savePath`: `string`. Required.
 - `overwrite`: `boolean`
 
@@ -808,6 +824,7 @@ bytesBase64 holds the file as base64. Retry an uncertain upload with the same id
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `fieldId`: `UUID`. Required.
@@ -824,6 +841,7 @@ Read an uploaded file.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `fileId`: `string`. Required.
@@ -837,6 +855,7 @@ Create a form app that adds records to a Collection.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `tableId`: `UUID`. Required.
@@ -856,6 +875,7 @@ Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `tableId`: `UUID`. Required.
@@ -911,7 +931,7 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
-- `descriptorPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `migrationPath`: `string`. Required.
 
 Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
@@ -935,6 +955,7 @@ change.kind is one of renameCollection, renameTable, renameField, changeField, a
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
@@ -971,6 +992,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
 - `operationId`: `UUID`. Required.
 - `revision`: `integer`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.

@@ -8,7 +8,7 @@ const workspace = { workspaceId: z.string().min(1).max(128) };
 const datasetPath = z.string().min(1).max(1024).describe("Workspace-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference.").superRefine((value, context) => {
   try { parseDatasetPath(value); } catch { context.addIssue({ code: "custom", message: "Use the workspace-relative dataset.json path." }); }
 });
-const selection = { ...workspace, datasetPath };
+const selection = { ...workspace, datasetPath, expectedDatasetId: identity.describe("The datasetId returned by describe. Refuse the request if the path now names another Collection.").optional() };
 const pinned = { ...selection, revision: z.number().int().positive(), revisionSha256: sha256 };
 const file = z.unknown().transform((value, context) => {
   try { return parseAppBackendFile(value); }
@@ -107,7 +107,7 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
   z.object({ ...pinned, action: z.literal("prepareHistoryRestore"), targetRevisionSha256: sha256, changedRevisionSha256: sha256 }).strict(),
-  z.object({ ...selection, action: z.literal("prepareMigration"), descriptorPath: z.string().min(1).max(1024), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...selection, action: z.literal("prepareMigration"), migrationPath: z.string().min(1).max(1024) }).strict(),
   z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
   z.object({ ...workspace, action: z.literal("approveMigration"), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
@@ -146,8 +146,9 @@ export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: 
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {
   try {
-    const { datasetPath: path, ...metadata } = value as Record<string, unknown>;
-    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : parseDatasetPath(path) };
+    const { datasetPath: path, datasetAddressStatus, ...metadata } = value as Record<string, unknown>;
+    const status = z.enum(["available", "missing", "ambiguous"]).optional().parse(datasetAddressStatus);
+    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : parseDatasetPath(path), ...(status ? { datasetAddressStatus: status } : {}) };
   }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });

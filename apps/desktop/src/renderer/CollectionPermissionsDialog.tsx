@@ -23,7 +23,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const alive = useRef(true), request = useRef(0), locked = useRef(false);
-  const target = { workspaceId, datasetPath };
+  const target = { workspaceId, datasetPath, expectedDatasetId: dataset.datasetId };
   const actions = dataset.operations.filter(operation => operation.access !== "owner");
   async function load(after?: string) {
     if (!alive.current || locked.current) return;

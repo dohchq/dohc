@@ -11,7 +11,7 @@ import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalD
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
-import { addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
+import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
 
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -56,15 +56,24 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           current();
           invalidateDatasetAddresses({ workspaceId: request.workspaceId });
         }
-        const datasetId = await dependencies.withAdapter(operation.workspace, adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal)).catch(error => {
+        const resolve = () => dependencies.withAdapter(operation.workspace, adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
+        const datasetId = await resolve().catch(async error => {
           current();
-          if (shareViewIsPresent(operation.workspace.shareView) && error instanceof Error && error.message.startsWith("Collection reference broken:")) {
+          if (!(error instanceof DatasetAddressUnavailableError) || request.action === "prepareMigration" || shareViewIsPresent(operation.workspace.shareView)) throw error;
+          await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+          current();
+          invalidateDatasetAddresses({ workspaceId: request.workspaceId });
+          return resolve();
+        }).catch(error => {
+          current();
+          if (shareViewIsPresent(operation.workspace.shareView) && error instanceof DatasetAddressUnavailableError) {
             throw new Error(`Collection source unavailable: ${request.datasetPath}. Ask the owner to include its dataset.json file in this share.`);
           }
           throw error;
         });
         current();
-        const { datasetPath: _, ...fields } = request;
+        if (request.expectedDatasetId && request.expectedDatasetId !== datasetId) throw new Error("This Collection moved. Reopen it.");
+        const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
         input = { ...fields, datasetId };
       } else input = request;
       const addressPage = async (page: { datasets: import("@dohc/security-contract/dataset").DatasetDescription[]; nextCursor: string | null }) => {
@@ -328,7 +337,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
       }
       if (input.action === "prepareMigration") {
-        const prepared = await prepareMigration(input);
+        if (request.action !== "prepareMigration") throw new Error("This Collection review changed. Prepare it again.");
+        const prepared = await prepareMigration({ ...input, descriptorPath: request.datasetPath });
         current();
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
       }

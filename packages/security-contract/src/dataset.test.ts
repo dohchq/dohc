@@ -102,6 +102,8 @@ describe("dataset publication binding", () => {
       { operationId: id(5), name: "submit", access: "link", readOnly: false },
       { operationId: id(6), name: "list", access: "helper", readOnly: true },
     ]);
+    expect(capability.name).toBe(approved.definition.name);
+    expect(() => verifyAppDatasetCapability({ ...capability, name: "Another Collection" }, approved)).toThrow();
     expect(capability).not.toHaveProperty("definition");
     expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
     requested.operationIds.push(id(7));

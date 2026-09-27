@@ -21,27 +21,39 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
   return <>{operations.map((operation, index) => <span key={operation.name}>{index ? ", " : ""}<span className="font-mono">{operation.name}</span> ({operation.readOnly ? "reads only" : "changes data"})</span>)}</>;
 }
 
-function DatasetApproval({ capability, workspaceId }: { capability: AppDatasetCapability; workspaceId: string }) {
-  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null } | null>(null);
+function DatasetApproval({ capability, workspaceId, reportError }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError }) {
+  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "failed" | "available" } | null>(null);
+  const [reload, setReload] = useState(0);
+  const report = useRef(reportError);
+  report.current = reportError;
   useEffect(() => {
     let current = true;
+    setAddress(null);
     void (async () => {
       let after: string | undefined;
+      const seen = new Set<string>();
       do {
         const page = await bridge().dataset({ action: "list", workspaceId, after, includeArchived: true });
         if (!current) return;
-        if (page.kind !== "list") throw Error("Collection address unavailable");
+        if (page.kind !== "list") throw Error("dohc could not find this Collection.");
         const dataset = page.datasets.find(value => value.datasetId === capability.datasetId);
-        if (dataset) { setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath }); return; }
+        if (dataset) { setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath, status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing") }); return; }
         after = page.nextCursor ?? undefined;
+        if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
+        if (after) seen.add(after);
       } while (after);
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null });
-    })().catch(() => { if (current) setAddress({ workspaceId, datasetId: capability.datasetId, path: null }); });
+      if (current) setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
+    })().catch(error => {
+      if (!current) return;
+      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
+      report.current("dohc could not find this Collection.", error, () => { if (current) setReload(value => value + 1); });
+    });
     return () => { current = false; };
-  }, [workspaceId, capability.datasetId]);
-  const path = address?.workspaceId === workspaceId && address.datasetId === capability.datasetId ? address.path : undefined;
+  }, [workspaceId, capability.datasetId, reload]);
+  const found = address?.workspaceId === workspaceId && address.datasetId === capability.datasetId ? address : null;
   return <div data-testid="app-publication-capability" className="space-y-2">
-    <p className="m-0 break-all font-mono text-[12px]">{path === undefined ? "Finding Collection…" : path ?? "Collection source missing. Restore its dataset.json file."}</p>
+    <p className="m-0 font-medium">{capability.name}</p>
+    <p className="m-0 break-all font-mono text-[12px]">{!found ? "Finding Collection…" : found.path ?? (found.status === "ambiguous" ? "Multiple dataset.json files name this Collection. Remove the duplicate file." : found.status === "missing" ? "Collection source missing. Restore its dataset.json file." : "Collection path unavailable")}</p>
     <p className="m-0">This app uses the Collection's approved actions. Its responses appear in the same Collection.</p>
     <dl className="m-0 space-y-1 text-[12px]">
       <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link" || capability.linkReads?.some(read => read.operationId === operation.operationId))} /></dd></div>
@@ -372,7 +384,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
             <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
             <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
               <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
@@ -414,7 +426,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
                   <div className="min-w-0 text-[12px] text-muted">
                     <p className="m-0">{publication.active ? "Approved on this device" : "Inactive on this device"} · <span className="font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</span></p>
                     {publication.active ? null : <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>}
-                    <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval workspaceId={props.workspaceId} capability={publication.datasetCapability} /></details>
+                    <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval reportError={reportError} workspaceId={props.workspaceId} capability={publication.datasetCapability} /></details>
                   </div>
                   {publication.active ? <div className="flex shrink-0 flex-col gap-2"><SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton>
                     <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void withdraw(publication, true)}>Remove approval</SecondaryButton></div> : null}
@@ -444,7 +456,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
                       <p className="mb-0 break-words">Shown in the app: {publication.collectionCapability.readFields.join(", ") || "None"}</p>
                       <p className="mb-0">People with this share can read every response file and all its fields.</p>
                     </details> : publication.datasetCapability ? null : <p className="mb-0 mt-1">No collection access</p>}
-                    {publication.datasetCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Collection access details unavailable.</p> : publication.datasetCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval workspaceId={props.workspaceId} capability={publication.datasetCapability} /><p className="mb-0">Open the Collection to view and manage its records.</p></details> : null}
+                    {publication.datasetCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Collection access details unavailable.</p> : publication.datasetCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval reportError={reportError} workspaceId={props.workspaceId} capability={publication.datasetCapability} /><p className="mb-0">Open the Collection to view and manage its records.</p></details> : null}
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-2">
                     {publication.collectionCapability ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Revoke collection access ${publication.publicationId}`} onClick={() => setPendingRevoke(publication)}>{busy === "revokeCollection" && busyPublicationId === publication.publicationId ? "Revoking…" : "Revoke collection access"}</SecondaryButton> : null}

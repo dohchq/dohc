@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import { parseDatasetPath, type DatasetDescription } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
-export type ResolvedDatasetRequest<T = DatasetRequest> = T extends { datasetPath: string } ? Omit<T, "datasetPath"> & { datasetId: string } : T;
+export type ResolvedDatasetRequest<T = DatasetRequest> = T extends { datasetPath: string } ? Omit<T, "datasetPath" | "expectedDatasetId"> & { datasetId: string } : T;
 type Adapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
+export class DatasetAddressUnavailableError extends Error {
+  constructor(path: string) { super(`Collection reference broken: ${path}. Choose its current dataset.json path.`); }
+}
 type Address = { sha256: string; datasetId: string | null };
 // Content hashes come from the current authorized engine listing, never from the caller.
 const identities = new Map<string, string | null>();
@@ -37,6 +40,7 @@ async function readAddresses(adapter: Adapter, workspaceId: string, versionId: s
   signal.throwIfAborted();
   const result = new Map<string, Address>();
   const changed = files.filter(file => {
+    if (file.hasYdocMarker) { result.set(file.path, { sha256: file.sha256, datasetId: null }); return false; }
     if (identities.has(file.sha256)) { result.set(file.path, { sha256: file.sha256, datasetId: identities.get(file.sha256)! }); return false; }
     if (file.byteLength !== null && file.byteLength > maxBytes) { result.set(file.path, { sha256: file.sha256, datasetId: null }); return false; }
     return true;
@@ -46,9 +50,9 @@ async function readAddresses(adapter: Adapter, workspaceId: string, versionId: s
     const metadata = await adapter.captureSourceMetadata({ workspaceId, versionId, paths, bounds: { maxInputFiles: 128, maxInputBytes: maxBytes * 128 }, signal });
     const captured = await adapter.hydrateCapturedSources(metadata, signal);
     signal.throwIfAborted();
-    if (metadata.workspaceId !== workspaceId || metadata.versionId !== versionId || captured.length !== paths.length) throw Error("Collection source capture changed. Refresh Collections.");
+    if (metadata.workspaceId !== workspaceId || metadata.versionId !== versionId || captured.length !== paths.length) throw Error("The Collection files changed. Refresh Collections.");
     for (const file of captured) {
-      if (!paths.includes(file.path) || createHash("sha256").update(file.bytes).digest("hex") !== file.sha256) throw Error("Collection source capture changed. Refresh Collections.");
+      if (!paths.includes(file.path) || createHash("sha256").update(file.bytes).digest("hex") !== file.sha256) throw Error("The Collection files changed. Refresh Collections.");
       let datasetId: string | null = null;
       try {
         const definition: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes));
@@ -69,8 +73,8 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
   const catalog = await addresses(adapter, workspaceId, versionId, signal);
   signal.throwIfAborted();
   const id = catalog.get(path)?.datasetId;
-  if (!id) throw Error(`Collection reference broken: ${path}. Choose its current dataset.json path.`);
-  if ([...catalog.values()].filter(value => value.datasetId === id).length !== 1) throw Error(`Collection address ambiguous: ${path}. Multiple dataset.json files contain the same dataset ID. Remove the duplicate descriptor.`);
+  if (!id) throw new DatasetAddressUnavailableError(path);
+  if ([...catalog.values()].filter(value => value.datasetId === id).length !== 1) throw Error(`Collection address ambiguous: ${path}. Multiple dataset.json files name this Collection. Remove the duplicate file.`);
   return id;
 }
 
@@ -82,5 +86,5 @@ export async function addressDatasets(adapter: Adapter, workspaceId: string, dat
   for (const [path, value] of catalog) {
     if (value.datasetId) paths.set(value.datasetId, paths.has(value.datasetId) ? null : path);
   }
-  return datasets.map(dataset => ({ ...dataset, datasetPath: paths.get(dataset.datasetId) ?? null }));
+  return datasets.map(dataset => ({ ...dataset, datasetPath: paths.get(dataset.datasetId) ?? null, datasetAddressStatus: paths.get(dataset.datasetId) === null ? "ambiguous" as const : paths.has(dataset.datasetId) ? "available" as const : "missing" as const }));
 }

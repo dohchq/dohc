@@ -123,7 +123,7 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
       if (count.kind !== "invoked" || JSON.stringify(count.result) !== JSON.stringify([{ count: rowCount }])) throw Error("The fixture row count differs.");
       return { elapsedMs: performance.now() - started, head };
     }, { selection, operationId: id(7), countOperationId: id(8), rowCount });
-    const checkpoint = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "prepareMigration", descriptorPath: "performance/dataset.json", migrationPath: "performance/checkpoint.sql" }), { workspaceId, datasetPath: "performance/dataset.json" });
+    const checkpoint = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "prepareMigration", migrationPath: "performance/checkpoint.sql" }), { workspaceId, datasetPath: "performance/dataset.json" });
     if (checkpoint.kind !== "migration-prepared") throw Error("Expected a fixture checkpoint candidate.");
     const migrated = await page.evaluate(input => window.dohcDesktop!.dataset({ ...input, action: "approveMigration" }), { workspaceId, preparationId: checkpoint.preparationId, revisionSha256: checkpoint.revision.revisionSha256, approvalDigest: checkpoint.approvalDigest });
     if (migrated.kind !== "migrated") throw Error("Expected a fixture checkpoint.");

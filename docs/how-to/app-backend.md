@@ -183,7 +183,7 @@ Choose **Review source change** to review the corresponding rule and schema edit
 For custom schema or rule changes, prepare the new dataset descriptor and a migration SQL file:
 
 ```sh
-dohc dataset prepareMigration '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","descriptorPath":"fundraiser/dataset.json","migrationPath":"fundraiser/migration.sql"}'
+dohc dataset prepareMigration '{"workspaceId":"WORKSPACE_ID","datasetPath":"fundraiser/dataset.json","migrationPath":"fundraiser/migration.sql"}'
 ```
 
 Preparation runs the migration against a saved copy and validates its schema and constraints.

@@ -13,7 +13,7 @@ it("shows affected apps before archiving and confirms the reverse path", async (
   expect(await screen.findByText("public-form")).toBeTruthy(); expect(screen.getByText(/Restore it from Archived collections/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Archive Collection" }));
   await waitFor(() => expect(p.onChanged).toHaveBeenCalledOnce());
-  expect(backend.dataset).toHaveBeenLastCalledWith({ workspaceId: "workspace", datasetPath: "data/dataset.json", action: "archive" }); expect(p.onClose).toHaveBeenCalledOnce();
+  expect(backend.dataset).toHaveBeenLastCalledWith({ workspaceId: "workspace", datasetPath: "data/dataset.json", expectedDatasetId: "dataset", action: "archive" }); expect(p.onClose).toHaveBeenCalledOnce();
 });
 it("does not repaint or close a new workspace when an earlier archive acknowledgement arrives", async () => {
   const pending = deferred<unknown>(); backend.dataset.mockImplementation(async input => input.action === "archive" ? pending.promise : { kind: "lifecycle", archived: false, generation: 0, reason: "", apps: [], nextCursor: null });

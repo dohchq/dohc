@@ -23,6 +23,6 @@ it("grants only selected shareable actions from the displayed revision to a work
   fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
   fireEvent.click(screen.getByRole("checkbox", { name: /Read orders/ }));
   fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith({ workspaceId: "w", datasetPath: "data/dataset.json", action: "setGrant", grantId: "grant",
+  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith({ workspaceId: "w", datasetPath: "data/dataset.json", expectedDatasetId: id(1), action: "setGrant", grantId: "grant",
     grant: { revision: 2, revisionSha256: "a".repeat(64), operationIds: [id(2)], discover: true } }));
 });

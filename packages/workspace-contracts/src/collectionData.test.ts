@@ -92,3 +92,7 @@ describe("Collection data requests", () => {
     expect(parsed).toEqual(action());
   });
 });
+
+it.each([".git/dataset.json", "node_modules/dataset.json", ".dohc./dataset.json", "DOHC~1/dataset.json", "shared-with-me/dataset.json", ".env/dataset.json", "data/.. /dataset.json"])("rejects unsafe transactional paths with the shared validator: %s", datasetPath => {
+  expect(() => parseCollectionRef({ kind: "transactional", datasetPath, tableId: "00000000-0000-4000-8000-000000000001" })).toThrow();
+});
