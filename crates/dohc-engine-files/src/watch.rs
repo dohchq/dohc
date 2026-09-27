@@ -35,7 +35,7 @@ pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 /// thread to attach the OS watch before giving up. `notify` offers no
 /// cancellable attach primitive, so a startup that never signals ready would
 /// otherwise hang the caller (a workspace open) forever.
-pub const WATCH_STARTUP_DEADLINE: Duration = Duration::from_secs(60);
+pub const WATCH_STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 /// Bounded retry count for re-attaching the OS watch after the backend
 /// reports an error (including the watched root itself being replaced).
 const WATCH_REATTACH_ATTEMPTS: usize = 3;
@@ -228,6 +228,17 @@ impl NativeWatcher {
         handle: FilesHandle,
         token: CancellationToken,
     ) -> Result<WatchStart, FilesError> {
+        Self::start_within(root, handle, token, WATCH_STARTUP_DEADLINE).await
+    }
+
+    /// [`Self::start`] with a caller-chosen attach deadline, for tests that
+    /// must not fail on a slow attach under load.
+    pub async fn start_within(
+        root: PathBuf,
+        handle: FilesHandle,
+        token: CancellationToken,
+        startup_deadline: Duration,
+    ) -> Result<WatchStart, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
         let state = Arc::new(WatchState::default());
@@ -255,7 +266,7 @@ impl NativeWatcher {
             worker: Some(worker),
         };
         if let Err(err) = await_ready_with_deadline(
-            WATCH_STARTUP_DEADLINE,
+            startup_deadline,
             ready_rx,
             &mut watcher.worker,
             &watcher.stop_tx,

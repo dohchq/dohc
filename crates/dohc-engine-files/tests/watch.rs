@@ -163,10 +163,12 @@ async fn continuous_event_stream_flushes_while_writer_is_active() {
             .await
             .expect("actor");
     let handle = actor.handle();
-    let ready = NativeWatcher::start(
+    // A hang guard, not a bound: attach can be slow on a loaded machine.
+    let ready = NativeWatcher::start_within(
         ws.path().to_path_buf(),
         handle.clone(),
         CancellationToken::new(),
+        Duration::from_secs(60),
     )
     .await
     .expect("watch start");
