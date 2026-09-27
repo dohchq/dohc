@@ -1,3 +1,5 @@
+import { useDismiss } from "../ui/useDismiss";
+import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
@@ -134,7 +136,7 @@ const Tab = memo(function Tab(props: {
     <div
       ref={ref}
       role="tab"
-      tabIndex={0}
+      tabIndex={props.active ? 0 : -1}
       aria-selected={props.active}
       data-testid={`tab-${props.path}`}
       data-active={props.active || undefined}
@@ -199,6 +201,7 @@ const Tab = memo(function Tab(props: {
       <button
         type="button"
         aria-label={`Close ${name}`}
+        tabIndex={-1}
         // Don't let a press on the close button arm the drag above.
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
@@ -681,6 +684,15 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // starts at the pane's left edge, so a tab's offsetLeft is its content
   // position and offsetLeft minus scrollLeft its distance from that edge.
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const listTrigger = useRef<HTMLButtonElement>(null);
+  useDismiss({ open: listOpen, container: frameRef, trigger: listTrigger, onClose: () => setListOpen(false) });
+  useFocusSurface(frameRef, () => frameRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
+  useLayoutEffect(() => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.matches('[role="tab"]') && frameRef.current?.contains(focused)) {
+      focusSurface(frameRef.current.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
+    }
+  }, [props.activeTab]);
   // VS Code wheel behavior: a vertical wheel over the strip scrolls it
   // horizontally. Native listener because React registers `wheel` passive,
   // so preventDefault (needed once we consume the gesture) is a no-op there.
@@ -839,6 +851,23 @@ export const EditorTabs = memo(function EditorTabs(props: {
       <div
         ref={stripRef}
         role="tablist"
+        onKeyDown={(event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || target.getAttribute("role") !== "tab") return;
+          const tabs = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]')];
+          const index = tabs.indexOf(target);
+          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+            : event.key === "ArrowRight" ? (index + 1) % tabs.length
+            : event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length : null;
+          if (next !== null && props.tabs[next]) {
+            event.preventDefault();
+            tabs[next]?.focus({ preventScroll: true });
+            props.onActivate(props.groupId, props.tabs[next].path);
+          } else if (event.key === "Delete" && props.tabs[index]) {
+            event.preventDefault();
+            props.onClose(props.groupId, props.tabs[index].path);
+          }
+        }}
         aria-label={`Editor group ${props.groupNumber} tabs`}
         className="dohc-tab-strip flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
       >
@@ -980,6 +1009,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           data-testid="tabs-overflow"
           aria-label={`All tabs in editor group ${props.groupNumber}`}
           title={`All tabs in editor group ${props.groupNumber}`}
+          ref={listTrigger}
           aria-expanded={listOpen}
           onClick={() => setListOpen((open) => !open)}
           className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"

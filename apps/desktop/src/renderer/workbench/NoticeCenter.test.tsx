@@ -606,6 +606,7 @@ describe("notice center", () => {
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
     rerender(noticeElement(barProps(true)));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle")));
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = screen.getByTestId("notice-shell-error-1");

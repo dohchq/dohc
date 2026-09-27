@@ -1,3 +1,4 @@
+import { useFocusSurface } from "../ui/focusReturn";
 import { SectionLabel } from "../ui/controls";
 import { basenameOf, dirnameOf } from "../path";
 import {
@@ -493,6 +494,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
+  const renameFocus = useRef<{ from: string; to: string } | null>(null);
+  useFocusSurface(fileTreeRef, () => {
+    const paths = renameFocus.current;
+    return paths ? rowRefs.current.get(paths.to) ?? rowRefs.current.get(paths.from) : null;
+  });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
   const [virtualRange, setVirtualRange] = useState<VirtualRange>({
@@ -1460,6 +1466,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   function finishEdit(commit: boolean): void {
     if (editDone.current || !editing) return;
     editDone.current = true;
+    if (editing.mode === "rename") {
+      const typed = commit ? resolveTypedPath(editValue, dirnameOf(editing.path)) : null;
+      renameFocus.current = {
+        from: editing.path,
+        to: typed ? (editing.isFolder ? typed : withMarkdownDefault(typed)) : editing.path,
+      };
+    }
     if (!commit || editValue.trim() === "") {
       setEditing(null);
       return;
@@ -1573,6 +1586,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     <>
       <nav
         ref={fileTreeRef}
+        tabIndex={-1}
+        data-focus-surface="tree"
         data-testid="file-tree"
         aria-label="Files"
         onKeyDown={onTreeKeyDown}

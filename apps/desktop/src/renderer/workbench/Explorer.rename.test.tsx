@@ -109,3 +109,39 @@ describe("Explorer rename", () => {
     );
   });
 });
+
+it.each(["Enter", "Escape"])("returns to the tree row after rename %s", async (key) => {
+  render(<Explorer {...explorerProps()} />);
+  const row = screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")!;
+  row.focus();
+  fireEvent.click(row);
+  fireEvent.keyDown(row, { key: "F2" });
+  const input = await screen.findByTestId("tree-edit-input");
+  expect(document.activeElement).toBe(input);
+  fireEvent.keyDown(input, { key });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")));
+});
+it("follows the renamed row through its optimistic path change", async () => {
+  render(<Explorer {...explorerProps()} />);
+  await renameTo("hello.m", "renamed.md");
+  await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"));
+});
+it("keeps the clicked destination when rename ends by blur", async () => {
+  render(<><button>Elsewhere</button><Explorer {...explorerProps()} /></>);
+  const row = screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")!;
+  fireEvent.click(row);
+  fireEvent.keyDown(row, { key: "F2" });
+  await screen.findByTestId("tree-edit-input");
+  screen.getByText("Elsewhere").focus();
+  await waitFor(() => expect(screen.queryByTestId("tree-edit-input")).toBeNull());
+  expect(document.activeElement).toBe(screen.getByText("Elsewhere"));
+});
+
+it("returns to the original row when a rename fails", async () => {
+  moveWorkspacePath.mockRejectedValueOnce(new Error("Rename failed"));
+  const props = explorerProps();
+  render(<Explorer {...props} />);
+  await renameTo("hello.m", "renamed.md");
+  await waitFor(() => expect(props.onError).toHaveBeenCalled());
+  await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("hello.m"));
+});

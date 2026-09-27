@@ -1,3 +1,4 @@
+import { useFocusReturn } from "./ui/focusReturn";
 import { useRequestSequence } from "./useRequestSequence";
 import { useEffect, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
@@ -67,6 +68,7 @@ export function DocumentMenu(props: {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  useFocusReturn(open, menuRef, () => triggerRef.current);
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Every attempt gets a number, and only the newest one may speak. A
   // clipboard write settles after the click that started it, so its outcome
@@ -87,15 +89,9 @@ export function DocumentMenu(props: {
     // arm never exists. Nothing can arm one while the menu is closed either,
     // which is why this is the only cleanup the timer needs — including at
     // unmount, where this cleanup also runs.
-    //
-    // Focus goes back to the trigger on every close path (Escape, outside
-    // pointer-down, post-feedback auto-close): the menu div unmounts and
-    // focus would fall to document.body, breaking the WAI-ARIA menu-button
-    // contract. Mirrors PageIdentity's emoji picker (phase 2).
     return () => {
       attempts.next();
       if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
-      triggerRef.current?.focus();
     };
   }, [open]);
 

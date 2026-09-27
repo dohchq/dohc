@@ -1,5 +1,6 @@
 import { PanelRight } from "lucide-react";
 import { useRef, type ReactNode } from "react";
+import { useFocusReturn } from "../ui/focusReturn";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import {
   CHATS_MAX_WIDTH,
@@ -33,6 +34,7 @@ export function ChatsPanel(props: {
   children: ReactNode;
 }) {
   const panelRef = useRef<HTMLElement>(null);
+  useFocusReturn(true, panelRef);
   const dragRight = useRef<number | null>(null);
   const resize = useCommitOnRelease(props.onWidthChange);
   const width = resize.previewValue ?? props.width;
@@ -40,6 +42,8 @@ export function ChatsPanel(props: {
   return (
     <aside
       ref={panelRef}
+      tabIndex={-1}
+      data-focus-surface="panel"
       data-testid="chats-panel"
       aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"

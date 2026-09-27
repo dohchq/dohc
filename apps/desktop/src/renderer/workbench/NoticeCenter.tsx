@@ -1,3 +1,4 @@
+import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
@@ -421,6 +422,10 @@ export function NoticeCenter(props: {
   const [open, setOpen] = useState(false);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
+  const toastsRef = useRef<HTMLDivElement>(null);
+  useFocusReturn(open, centerRef, () => toggleRef.current);
+  useFocusSurface(toastsRef, () => toggleRef.current);
+  useFocusSurface(centerRef, () => centerRef.current);
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
   }, [open]);
@@ -1147,7 +1152,7 @@ export function NoticeCenter(props: {
           Notices hides it — every row is in the panel, and a toast must never
           sit over it. */}
       {open ? null : (
-        <div data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
+        <div ref={toastsRef} data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <div
               data-testid={errorToast.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
@@ -1438,6 +1443,7 @@ export function NoticeCenter(props: {
       {open ? (
         <div
           ref={centerRef}
+          data-focus-surface="notices"
           data-testid="notice-center"
           role="dialog"
           aria-label="Notices"
