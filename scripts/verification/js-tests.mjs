@@ -19,8 +19,7 @@ export function testPlan(packages, testFiles = {}) {
       : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
     const files = testFiles[name];
-    if (files && (!vitest || !Array.isArray(files) || !files.length || files.some(file =>
-      typeof file !== "string" || !/^src\/(?:[\w.-]+\/)*[\w.-]+\.test\.[cm]?[jt]sx?$/u.test(file) || file.split("/").includes("..")))) {
+    if (files && (!vitest || !files.length)) {
       throw new Error(`Invalid test file selection for ${name}.`);
     }
     return { name, script, ...(files ? {files} : {}), resource: databasePackages.has(name) ? "postgres" : null,

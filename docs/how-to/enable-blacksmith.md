@@ -72,8 +72,9 @@ Record elapsed time, billed cost, peak memory, and disk use for each gate.
 The first Linux cloud run remains a launch check; local verification cannot establish its runtime or cost.
 
 Run the first benchmark on `main`, then repeat it to measure cache reuse.
-GitHub lets PRs restore caches from their base branch and the default branch.
+PRs can restore caches from their base branch and the default branch.
 Caches created by a PR cannot warm unrelated PRs.
+Confirm that a warm PR run restores the `main` cache before budgeting for reuse.
 Repeat the `main` benchmark after dependency or Rust toolchain changes when the shared cache needs refreshing.
 Keep the separate JavaScript and Rust cache keys. Their build outputs differ.
 
@@ -91,8 +92,9 @@ At the $50 alert, compare the month's projected spend with the $100 budget.
 If projected spending exceeds the budget, reduce unnecessary reruns or follow the shutdown procedure below.
 Continue required verification locally while cloud execution is off.
 
-At $0.008 per minute, 950 PRs with ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
-Combined minutes include both jobs, even when they run in parallel.
+At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
+Count both test jobs across every run on each PR, including cancelled runs.
+The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
 Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
 The free allowance is shared across the organization; check its remaining balance before including it in the budget.
 An 8-vCPU runner costs twice as much per minute. Choose it only after comparing cost per passing run.

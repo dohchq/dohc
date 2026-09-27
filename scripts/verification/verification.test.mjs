@@ -18,6 +18,7 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {}}), ["xvfb-run", ["-a", direct[0], ...direct[1]]]);
   for (const platform of ["win32", "darwin"]) assert.deepEqual(desktopProofCommand(args, {platform, env: {}}), direct);
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {DISPLAY: ":99"}}), direct);
+  assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {

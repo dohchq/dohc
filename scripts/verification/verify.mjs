@@ -15,7 +15,7 @@ import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-p
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
   const command = [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]];
-  return platform === "linux" && !env.DISPLAY
+  return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
     ? ["xvfb-run", ["-a", command[0], ...command[1]]]
     : command;
 }
