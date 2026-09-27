@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
 import { SidePanel } from "../workbench/SidePanel";
 import { ChatsPanel } from "../workbench/ChatsPanel";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function Workspace({ name }: { name: string }) {
   const root = useRef<HTMLDivElement>(null);
@@ -108,6 +113,114 @@ it("preserves removal recovery when focusout leaves the same active element", as
   child.focus();
   fireEvent.focusOut(child, { relatedTarget: null });
   expect(document.activeElement).toBe(child);
+  view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByTestId("surface"));
+});
+
+it("forgets a blank-area pointer click before the surface content closes later", async () => {
+  const user = userEvent.setup();
+  function Surface({ show }: { show: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current?.querySelector("button"));
+    return <section ref={root}>
+      {show && <div><button>Transient</button></div>}
+      <button>Return target</button>
+      <div data-testid="blank">Blank area</div>
+    </section>;
+  }
+  const view = render(<Surface show />);
+  await user.click(screen.getByText("Transient"));
+  await user.click(screen.getByTestId("blank"));
+  expect(document.activeElement).toBe(document.body);
+  view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
+it("shares removal tracking and ignores contenteditable typing and sibling tree updates", async () => {
+  const callbacks = vi.fn();
+  const NativeObserver = MutationObserver;
+  const observers = vi.fn(function (callback: MutationCallback) {
+    return new NativeObserver((records, observer) => {
+      callbacks();
+      callback(records, observer);
+    });
+  });
+  vi.stubGlobal("MutationObserver", observers);
+  const listeners = vi.spyOn(document, "addEventListener");
+  const user = userEvent.setup();
+  function Editor() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1} data-testid="editor">
+      <div data-testid="editor-content"><div role="textbox" contentEditable suppressContentEditableWarning /></div>
+    </section>;
+  }
+  function Shell({ label }: { label: string }) {
+    const root = useRef<HTMLDivElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <div ref={root} tabIndex={-1} data-focus-surface="workspace">
+      <Editor /><aside data-testid="tree" />{label}
+    </div>;
+  }
+  const view = render(<Shell label="first" />);
+  const focusListenerCount = () => listeners.mock.calls.filter(([type]) => type === "focusin" || type === "focusout").length;
+  expect(focusListenerCount()).toBe(2);
+  expect(observers).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("textbox"));
+  view.rerender(<Shell label="second" />);
+  expect(focusListenerCount()).toBe(2);
+  await act(async () => {});
+  callbacks.mockClear();
+  await user.keyboard("Writing in the editor");
+  screen.getByRole("textbox").append(document.createElement("p"));
+  screen.getByTestId("tree").append(document.createElement("div"));
+  await act(async () => {});
+  expect(screen.getByRole("textbox").textContent).toBe("Writing in the editor");
+  expect(callbacks).not.toHaveBeenCalled();
+
+  screen.getByTestId("editor-content").remove();
+  await act(async () => {});
+  expect(callbacks).toHaveBeenCalledTimes(1);
+  expect(document.activeElement).toBe(screen.getByTestId("editor"));
+
+  screen.getByTestId("editor").blur();
+  screen.getByTestId("editor").append(document.createElement("div"));
+  await act(async () => {});
+  expect(callbacks).toHaveBeenCalledTimes(1);
+});
+
+it("registers a surface whose container mounts after its owner", async () => {
+  function Surface({ open }: { open: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return open ? <section ref={root} tabIndex={-1} data-testid="surface"><button>Transient</button></section> : null;
+  }
+  const view = render(<Surface open={false} />);
+  view.rerender(<Surface open />);
+  const child = screen.getByText("Transient");
+  child.focus();
+  child.remove();
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByTestId("surface"));
+});
+
+it("keeps removal memory when a new surface registers in the same commit", async () => {
+  function ChildSurface() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} />;
+  }
+  function Surface({ show }: { show: boolean }) {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1} data-testid="surface">
+      {show ? <button>Transient</button> : <ChildSurface />}
+    </section>;
+  }
+  const view = render(<Surface show />);
+  screen.getByText("Transient").focus();
   view.rerender(<Surface show={false} />);
   await act(async () => {});
   expect(document.activeElement).toBe(screen.getByTestId("surface"));

@@ -4,6 +4,7 @@
 // files" fetches the next page with the continuation, and the count copy
 // never states a number that could be under the truth.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useRef } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -686,10 +687,11 @@ describe("VersionComparePage paging", () => {
 });
 
 it("returns focus after the Versions backdrop closes a descendant-only menu", async () => {
+  const user = userEvent.setup();
   function Shell() {
     const root = useRef<HTMLDivElement>(null);
-    useFocusSurface(root, () => root.current);
-    return <div ref={root} tabIndex={-1} data-focus-surface="workspace" data-testid="workspace">
+    useFocusSurface(root, () => root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'));
+    return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
       <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} />
     </div>;
@@ -697,11 +699,14 @@ it("returns focus after the Versions backdrop closes a descendant-only menu", as
   render(<Shell />);
   await settle();
   const trigger = screen.getByTestId("version-menu-button");
-  trigger.focus();
-  fireEvent.click(trigger);
+  await user.click(trigger);
   expect(document.activeElement).toBe(screen.getAllByTestId("version-item")[0]);
-  fireEvent.click(screen.getByTestId("version-menu").previousElementSibling!);
+  const backdrop = screen.getByTestId("version-menu").previousElementSibling!;
+  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
+  expect(document.activeElement).toBe(document.body);
+  expect(screen.queryByTestId("version-menu")).not.toBeNull();
+  await user.pointer({ keys: "[/MouseLeft]" });
   await settle();
   expect(screen.queryByTestId("version-menu")).toBeNull();
-  expect(document.activeElement).toBe(screen.getByTestId("workspace"));
+  expect(document.activeElement).toBe(trigger);
 });

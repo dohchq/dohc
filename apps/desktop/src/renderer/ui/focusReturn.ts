@@ -69,41 +69,112 @@ export function useFocusSurface(
 ): void {
   const latest = useRef(target);
   latest.current = target;
-  const focused = useRef<HTMLElement | null>(null);
-  const surfaces = useRef<HTMLElement[]>([]);
   useLayoutEffect(() => {
-    const element = container.current;
-    if (!element) return;
-    const restoreRemovedFocus = () => {
-      if (!focused.current || focused.current.isConnected || document.activeElement !== document.body) return;
-      focused.current = null;
-      const nearest = surfaces.current;
-      queueMicrotask(() => {
-        if (element.isConnected && document.activeElement === document.body) {
-          focusSurface(latest.current(), ...nearest, element.dataset.focusSurface === "workspace" ? null : element);
-        }
-      });
-    };
-    const remember = (event: FocusEvent) => {
-      focused.current = event.target instanceof HTMLElement ? event.target : null;
-      surfaces.current = focused.current ? ancestors(focused.current) : [];
-    };
-    const forget = (event: FocusEvent) => {
-      if (event.target instanceof HTMLElement && event.target.isConnected && document.activeElement !== event.target) {
-        focused.current = null;
-        surfaces.current = [];
+    const tracker = surfaceTracker ??= createSurfaceTracker();
+    const registration = { container, target: () => latest.current() };
+    tracker.registrations.add(registration);
+    if (document.activeElement !== document.body) tracker.remember(document.activeElement);
+    return () => {
+      tracker.registrations.delete(registration);
+      if (tracker.registrations.size === 0) {
+        tracker.dispose();
+        surfaceTracker = null;
       }
     };
-    // Descendants can remove focus without rendering the surface's owner.
-    const observer = new MutationObserver(restoreRemovedFocus);
-    observer.observe(element, { childList: true, subtree: true });
-    restoreRemovedFocus();
-    element.addEventListener("focusin", remember);
-    element.addEventListener("focusout", forget);
-    return () => {
-      observer.disconnect();
-      element.removeEventListener("focusin", remember);
-      element.removeEventListener("focusout", forget);
-    };
-  });
+  }, [container]);
+}
+
+type SurfaceRegistration = { container: RefObject<HTMLElement | null>; target: FocusTarget };
+let surfaceTracker: ReturnType<typeof createSurfaceTracker> | null = null;
+
+function createSurfaceTracker() {
+  const registrations = new Set<SurfaceRegistration>();
+  let remembered: {
+    element: HTMLElement;
+    surfaces: HTMLElement[];
+    owners: { registration: SurfaceRegistration; element: HTMLElement }[];
+  } | null = null;
+  let pointerDown = false;
+  let blurredByPointer = false;
+  let completion: ReturnType<typeof setTimeout> | undefined;
+  const forget = () => {
+    remembered = null;
+    blurredByPointer = false;
+    observer.disconnect();
+  };
+  const restoreRemovedFocus = () => {
+    const memory = remembered;
+    if (!memory || memory.element.isConnected) return;
+    observer.disconnect();
+    queueMicrotask(() => {
+      if (remembered !== memory) return;
+      forget();
+      if (document.activeElement !== document.body) return;
+      const owner = memory.owners.find(({ registration, element }) =>
+        registrations.has(registration) && registration.container.current === element && element.isConnected);
+      if (owner) {
+        focusSurface(owner.registration.target(), ...memory.surfaces,
+          owner.element.dataset.focusSurface === "workspace" ? null : owner.element);
+      }
+    });
+  };
+  const observer = new MutationObserver(restoreRemovedFocus);
+  const remember = (active: Element | null) => {
+    forget();
+    if (!(active instanceof HTMLElement) || active === document.body) return;
+    const owners: NonNullable<typeof remembered>["owners"] = [];
+    for (let element: HTMLElement | null = active; element; element = element.parentElement) {
+      for (const registration of registrations) {
+        if (registration.container.current === element) owners.push({ registration, element });
+      }
+    }
+    if (owners.length === 0) return;
+    remembered = { element: active, surfaces: ancestors(active), owners };
+    // Watch removal of the focused node or an ancestor, never edits inside it.
+    for (let parent = active.parentNode; parent; parent = parent.parentNode) {
+      observer.observe(parent, { childList: true });
+    }
+  };
+  const onFocusIn = (event: FocusEvent) => remember(event.target instanceof Element ? event.target : null);
+  const onFocusOut = (event: FocusEvent) => {
+    if (event.target !== remembered?.element || !remembered.element.isConnected || document.activeElement === event.target) return;
+    if (event.relatedTarget === null && pointerDown) blurredByPointer = true;
+    else forget();
+  };
+  const finishPointer = () => {
+    pointerDown = false;
+    clearTimeout(completion);
+    if (!blurredByPointer) return;
+    // Click handlers can remove the blurred item. A blank-space click must forget it.
+    completion = setTimeout(() => {
+      if (!blurredByPointer) return;
+      if (remembered?.element.isConnected) forget();
+      else restoreRemovedFocus();
+    }, 0);
+  };
+  const onPointerDown = () => {
+    clearTimeout(completion);
+    if (blurredByPointer) forget();
+    pointerDown = true;
+  };
+  document.addEventListener("focusin", onFocusIn, true);
+  document.addEventListener("focusout", onFocusOut, true);
+  document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("pointerup", finishPointer, true);
+  document.addEventListener("pointercancel", finishPointer, true);
+  document.addEventListener("click", finishPointer, true);
+  return {
+    registrations,
+    remember,
+    dispose() {
+      forget();
+      clearTimeout(completion);
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("focusout", onFocusOut, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointerup", finishPointer, true);
+      document.removeEventListener("pointercancel", finishPointer, true);
+      document.removeEventListener("click", finishPointer, true);
+    },
+  };
 }

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -816,12 +817,12 @@ describe("EditorTabs overlay scrollbar", () => {
   });
 });
 
-function KeyboardTabs() {
+function KeyboardTabs({ focusableSurface = true }: { focusableSurface?: boolean } = {}) {
   const [paths, setPaths] = useState(tabs);
   const [active, setActive] = useState("a.md");
   const surface = useRef<HTMLElement>(null);
   useFocusSurface(surface, () => surface.current);
-  return <section ref={surface} tabIndex={-1} data-focus-surface="editor" data-active="true" data-testid="editor-surface">
+  return <section ref={surface} tabIndex={focusableSurface ? -1 : undefined} data-focus-surface="editor" data-active="true" data-testid="editor-surface">
     <EditorTabs groupId="left" groupNumber={1} tabs={paths} activeTab={active}
       activeTabDirty={false} recoveryPaths={new Set<string>()}
       onActivate={(_group, path) => setActive(path)}
@@ -875,5 +876,19 @@ it("returns from the tab overflow menu on selection and Escape", async () => {
   const next = screen.getByRole("menuitem", { name: "a.md" });
   next.focus();
   fireEvent.keyDown(next, { key: "Escape" });
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+it("returns from the tab overflow menu after a pointer click on its backdrop", async () => {
+  const user = userEvent.setup();
+  render(<KeyboardTabs focusableSurface={false} />);
+  const trigger = screen.getByTestId("tabs-overflow");
+  await user.click(trigger);
+  screen.getByRole("menuitem", { name: "b.md" }).focus();
+  const backdrop = screen.getByTestId("tabs-overflow-menu").previousElementSibling!;
+  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
+  expect(document.activeElement).toBe(document.body);
+  await user.pointer({ keys: "[/MouseLeft]" });
+  expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(trigger));
 });
