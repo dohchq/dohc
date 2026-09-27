@@ -3940,6 +3940,15 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     .await;
     assert_eq!(claim["run"]["runId"], json!("run"));
     assert!(claim["run"].get("endedAtMs").is_none());
+    let latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(latest, claim["run"]);
     let open = call(
         &transport,
         &handle,

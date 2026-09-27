@@ -6656,10 +6656,10 @@ fn local_replication_coordinate(
 ) -> Result<(String, i64), DomainError> {
     tx.execute(
         "INSERT OR IGNORE INTO sync_identity \
-         (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+         (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms, claim_state) \
          VALUES (?1, 'origin_' || lower(hex(randomblob(16))), \
                  'epoch_' || lower(hex(randomblob(16))), \
-                 'stream_' || lower(hex(randomblob(16))), ?2)",
+                 'stream_' || lower(hex(randomblob(16))), ?2, 'pending')",
         params![workspace_id, now_ms],
     )
     .map_err(DomainError::sql_persist)?;

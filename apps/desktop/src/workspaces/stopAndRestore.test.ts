@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { collectionAutomationId, definitionHash } from "../automations/automationPlan";
+import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
 import { restoreDirectWrites, type DirectWriteFile, type StopAndRestoreDependencies } from "./stopAndRestore";
 
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";

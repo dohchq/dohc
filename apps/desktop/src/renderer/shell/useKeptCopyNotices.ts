@@ -42,7 +42,7 @@ export function useKeptCopyNotices(input: {
     try {
       const { keptCopies, more } = await bridge().listKeptCopies({ workspaceId });
       if (!reads.isCurrent(request)) return;
-      latest.current.show(keptCopies.filter((copy) => copy.path !== "").map((copy) => ({
+      latest.current.show(keptCopies.map((copy) => ({
         id: copy.id,
         message: keptCopyMessage(copy.path),
         save: () => save(copy),

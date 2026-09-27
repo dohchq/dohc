@@ -166,7 +166,7 @@ export type WatcherStatusResult =
 
 /**
  * A file dohc moved aside while it saved, because another program changed
- * it meanwhile. It waits at a hidden name beside `path` until
+ * it meanwhile. It waits in the engine's staging directory until
  * `keptCopies.save` moves it to a visible copy.
  */
 export type KeptCopy = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList]["keptCopies"][number];

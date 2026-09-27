@@ -16,7 +16,7 @@ function check(ok, label) {
 }
 
 // --- build outputs ---------------------------------------------------------
-for (const output of ["dist/main/main.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
+for (const output of ["dist/main/main.js", "dist/main/app.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
   check(existsSync(join(desktopDir, output)), `build output exists: ${output}`);
 }
 for (const worker of ["workspace-database-worker", "document-projection-worker"]) {

@@ -1,4 +1,4 @@
-import type { AutomationChatMessage } from "./automationChat";
+import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 
 // A personal step that wakes its person's agent (item 6, section 4). The
 // dispatch scan wakes the agent only for a person's own messages, so an

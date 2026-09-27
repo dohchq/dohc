@@ -26,6 +26,7 @@ import {
   moveWorkspacePath,
   queryDatabase,
   readChange,
+  readChat,
   readWorkspaceFile,
   safeResolve,
   searchWorkspaceFiles,
@@ -2833,4 +2834,15 @@ describe("raw file writes preserve live documents", () => {
       expect((await lstat(join(ctx.root, "alias.txt"))).isSymbolicLink()).toBe(true);
     });
   });
+});
+
+it.each([null, "budget"] as const)("returns structured chat dispatch state: %s", async (paused) => {
+  const response = {
+    ok: true, thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
+    messages: [], projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
+    dispatch: { paused, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } },
+  };
+  const request = vi.fn(async () => response);
+  expect(await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" })).toEqual(response);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "chat", args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" } }));
 });

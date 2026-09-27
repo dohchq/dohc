@@ -34,7 +34,7 @@ export function SettingRow(props: {
           <button
             type="button"
             onClick={props.onReset}
-            className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-ink"
+            className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:bg-hover hover:text-ink"
           >
             Reset
           </button>

@@ -261,7 +261,7 @@ test("the gate stamps the tree it read, at every step boundary", () => {
 
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     assert.deepEqual(commands.filter((cmd) => /^(?:nextest|test|build) /u.test(cmd)), [
-      "nextest run --locked --workspace",
+      "nextest run --locked --workspace --no-fail-fast",
       "test --locked --workspace --doc",
       "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
     ]);

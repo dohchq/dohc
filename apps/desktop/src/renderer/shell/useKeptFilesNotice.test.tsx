@@ -52,3 +52,12 @@ it("keeps dismissal for the same copies and reports newly recovered files", () =
   expect(again.result.current.shell.shellErrors).toHaveLength(1);
   expect(again.result.current.shell.shellErrors[0].seen).toBe(false);
 });
+
+it("keeps an adopted copy without its original path accessible through the recovery folder", () => {
+  const path = ".dohc/engine/displaced/6a6f62.0";
+  const h = mount("orphan-recovery", [["", path]]);
+  const row = h.result.current.shell.shellErrors[0]!;
+  expect(row.details).toEqual([["Copy", path]]);
+  act(() => h.result.current.shell.runShellErrorAction(row.id));
+  expect(h.openFolder).toHaveBeenCalledOnce();
+});

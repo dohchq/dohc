@@ -204,7 +204,10 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | --- | --- |
 | `bg-bg` | Document paper. The lightest surface; editors, inputs, popover tiles |
 | `bg-panel` | Sidebars, cards, menus. One step down from paper |
-| `bg-panel-2` | Insets, hover fills, status/title bars, two steps down |
+| `bg-panel-2` | Insets, status/title bars, two steps down |
+| `hover:bg-hover` | Hover fill, using ink alpha in both themes |
+| `bg-selected` | Selected-row fill, using ink alpha in both themes |
+| `bg-scrim` | Modal overlay dim |
 | `border-line` | Every hairline. 1px, no exceptions |
 | `text-ink` | Primary text |
 | `text-muted` | Secondary text (labels, inactive items) |
@@ -214,7 +217,7 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | `bg-match` / `text-match` | Find-match highlight ONLY. Never decoration |
 | `text-success` / `warning` / `danger` | State semantics only |
 
-Rules: no raw hex anywhere in TSX; no Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`) except the existing `bg-black/20` overlay dim.
+Rules: no raw hex anywhere in TSX; no Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`); use `bg-scrim` for modal overlays.
 
 ### Type scale
 
@@ -257,13 +260,13 @@ The canonical implementations live in `apps/desktop/src/renderer/ui/controls.tsx
 
 Primary button: `rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50`
 
-Secondary button: `rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink`
+Secondary button: `rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink`
 
-Ghost icon button (toolbars, row affordances): `grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`
+Ghost icon button (toolbars, row affordances): `grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`). No `outline-none`: the global `:focus-visible` accent ring must stay for keyboard users. `focus:border-ink` alone is too subtle. Only opt out where a ring would clip (rounded overflow-hidden popovers) AND the frame provides an equivalent (e.g. the command palette's `focus-within:border-ink` row).
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active `bg-line text-ink` · selected-not-active `bg-line/60 text-ink` · rest `text-muted hover:bg-panel-2 hover:text-ink` (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
+List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active `bg-selected text-ink` · selected-not-active `bg-selected/85 text-ink` · rest `text-muted hover:bg-hover hover:text-ink` (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
 
 Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal cards: `rounded-xl p-5` + `dohc-elevated`)
 

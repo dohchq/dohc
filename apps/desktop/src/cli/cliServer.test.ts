@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
+import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
@@ -895,6 +896,7 @@ describe("CLI socket server", () => {
       ...context,
       ...scopedWorkspace,
       store: scopedStore,
+      dispatchStore: createLiveAgentDispatchStore(scopedWorkspace, sessions!).store,
       async fileObjectIdForPath(path) {
         return path === "scoped.md" ? "object_scoped" : null;
       },
@@ -1450,6 +1452,27 @@ describe("CLI socket server", () => {
         origin: { attribution: agent },
       },
     ]);
+  });
+
+  it("resolves document CLI paths from the caller's folder and refuses workspace escapes", async () => {
+    const cwd = join(workspaceRoot, "notes");
+    await mkdir(cwd);
+    const paths: string[] = [];
+    context.documents = {
+      async read(path) { paths.push(path); return { path, markdown: "Live text" }; },
+      async edit({ path }) { paths.push(path); return { path, changed: true }; },
+      async create({ path }) { paths.push(path); return { path }; },
+    };
+    for (const verb of ["read", "edit", "create"]) {
+      for (const path of ["plan.md", "../root.md", join(cwd, "absolute.md"), "../../outside.md", "../.dohc/private.md"]) {
+        const result = await executeCli({
+          argv: ["document", verb, path, ...(verb === "read" ? [] : ["--text", "Body"])], cwd,
+          request: (request) => invoke(request.verb, request.args),
+        });
+        expect(result.exitCode, result.stderr).toBe(path.includes("outside") || path.includes("private") ? 1 : 0);
+      }
+    }
+    expect(paths).toEqual(Array.from({ length: 3 }, () => ["notes/plan.md", "root.md", "notes/absolute.md"]).flat());
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
@@ -2469,6 +2492,40 @@ describe("CLI socket server", () => {
     });
     expect(agentPost.group.kind).toBe("agent");
     expect(agentPost.title).toBe("Agent task");
+  });
+
+  it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {
+    await seedDispatchThread("thread-dispatch");
+    const show = () => invoke("show", { cwd: workspaceRoot, actor: "agent", target: "th_dispatch", peek: true });
+    const chat = () => invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: "thread-dispatch" });
+    const before = await show();
+    expect(before.dispatch).toEqual({ paused: null, lastRun: null });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: true, reason: "re-dispatch budget exceeded" });
+    expect(await show()).toMatchObject({ dispatch: { paused: "budget", lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: "budget", lastRun: null } });
+    await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: false });
+    expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected run");
+    expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
+    await dispatchStore.failRun({ runId: claim.run.runId, reason: "runner failed to start", exitCode: 7 });
+    const dispatch = { paused: null, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } };
+    expect(await show()).toMatchObject({ dispatch, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2" });
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!next) throw new Error("Expected next run");
+    await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
+    expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
+    await dispatchStore.markFailureNotePosted(next.run.runId);
+    const noReply = { paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 } };
+    expect(await show()).toMatchObject({ dispatch: noReply, messages: before.messages });
+    expect(await chat()).toMatchObject({ ok: true, dispatch: noReply });
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, next.run.runId)).toEqual([]);
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {
@@ -3899,18 +3956,23 @@ describe("CLI socket server", () => {
     });
     expect(threadOnly).toEqual({ threadIds: [opened.threadId] });
 
+    const pauseRead = vi.spyOn(dispatchStore, "getThreadDispatchPauseState");
+    const runRead = vi.spyOn(dispatchStore, "latestRunForThread");
     const exported = await invoke("export", {
       cwd: workspaceRoot,
       actor: "human",
       scope: { kind: "thread", thread: opened.threadId },
       outDir: "exports",
     });
+    expect(pauseRead).not.toHaveBeenCalled();
+    expect(runRead).not.toHaveBeenCalled();
     expect(exported.files).toHaveLength(1);
     expect(exported.files[0]?.threadId).toBe(opened.threadId);
     const markdown = await readFile(exported.files[0]!.path, "utf8");
     expect(markdown).toContain(
       `<!-- exported from dohc chat thread ${opened.threadId} at 2026-07-10T04:05:06.000Z -->`,
     );
+    expect(markdown).not.toContain("dispatch:");
     expect(markdown).toContain("# Search and export");
     expect(markdown).toContain(`thread: ${opened.threadId} · #general`);
     expect(markdown).toContain("The stable blockId is our unique Needle");

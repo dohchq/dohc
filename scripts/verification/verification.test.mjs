@@ -380,6 +380,8 @@ test("verification selects packages and proofs and prepares the engine after Rus
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
+    ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"],
+    ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
     ["pr", null, null, "packages/fixture/src/index.ts"],
     ["pr", null, null, "packages/mcp/src/index.ts"],
@@ -461,7 +463,9 @@ test("verification selects packages and proofs and prepares the engine after Rus
           }
           if(args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
             mkdirSync(dirname(enginePath),{recursive:true});writeFileSync(enginePath,'workspace engine');chmodSync(enginePath,0o755);
-            if(process.env.FIXTURE_FAULT==='source')writeFileSync(join(repoRoot,'apps/desktop/.env.local'),'VITE_CHANGED=during-Rust');
+            if(['source','rust-source'].includes(process.env.FIXTURE_FAULT))writeFileSync(join(repoRoot,'apps/desktop/.env.local'),'VITE_CHANGED=during-Rust');
+            if(process.env.FIXTURE_FAULT==='rust-cancel')process.emit('SIGTERM');
+            if(['rust','rust-and-js','rust-source','rust-cancel'].includes(process.env.FIXTURE_FAULT))throw Error('fixture Rust failed');
             return {stdout:'fixture Rust'};
           }
           if(args[0]==='tools/rust-engine-program/require-ci-pass-verdict.mjs') {
@@ -478,6 +482,7 @@ test("verification selects packages and proofs and prepares the engine after Rus
           }
           if(command==='pnpm' && args[0]==='run') {
             assert.ok(['typecheck','test:repo'].includes(args[1]));
+            if(args[1]==='typecheck' && ['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))throw Error('fixture JS failed');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
@@ -568,18 +573,29 @@ test("verification selects packages and proofs and prepares the engine after Rus
         const {verify}=await import('./scripts/verification/verify.mjs');
         try {
           await verify(process.argv.slice(1));
+        }
+        catch(error) {console.error(error.message);process.exitCode ||= 1;}
+        finally {
           const output='.agent-artifacts/verification';
           writeFileSync('.dohc-dev/report.json',readFileSync(output+'/'+readdirSync(output)[0]+'/result.json'));
         }
-        catch(error) {console.error(error.message);process.exitCode=1;}
       `, ...args], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env,
         NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
+      const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
       if (fault) {
-        assert.equal(result.status, 1, result.stderr);
+        assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
+        assert.equal(report.verdict, "FAIL");
+        assert.ok(report.steps.every(step => ["PASS", "FAIL"].includes(step.verdict)));
+        if (fault === "rust-and-js") assert.match(report.rustError, /fixture Rust failed/);
         const messages = {
           source: /Source changed during verification/,
+          "rust-source": /Source changed during verification/,
+          "rust-cancel": /Verification interrupted by SIGTERM/,
+          rust: /fixture Rust failed/,
+          "rust-and-js": /fixture JS failed/,
+          js: /fixture JS failed/,
           "rust-verdict": /fixture Rust verdict rejected/,
           "cargo-version": /Install cargo-deny .* to match the workflow/,
           "accounts-skipped": /Account browser verification did not complete without failures or skips/,
@@ -587,12 +603,26 @@ test("verification selects packages and proofs and prepares the engine after Rus
           "onboarding-missing": /did not pass both persistence and self-host onboarding proofs/,
         };
         assert.match(result.stderr, messages[fault]);
-        const browserFault = ["accounts-skipped", "desktop-skipped", "onboarding-missing"].includes(fault);
-        assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), browserFault);
-        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), browserFault);
+        const ranJs = js && ["rust", "rust-verdict", "rust-and-js", "js", "accounts-skipped", "desktop-skipped", "onboarding-missing"].includes(fault);
+        assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), ranJs);
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), ranJs);
+        assert.equal(report.steps.some(step => step.name === "typecheck"), ranJs);
+        if (["rust", "rust-verdict", "rust-and-js"].includes(fault)) {
+          const failedStep = fault === "rust-verdict" ? "rust-verdict" : "rust";
+          assert.equal(report.steps.find(step => step.name === failedStep).verdict, "FAIL");
+          if (js) {
+            const typecheck = report.steps.find(step => step.name === "typecheck");
+            assert.equal(typecheck.verdict, fault === "rust-and-js" ? "FAIL" : "PASS");
+            assert.ok(report.steps.findIndex(step => step.name === failedStep) < report.steps.indexOf(typecheck));
+            if (fault !== "rust-and-js") assert.equal(report.steps.find(step => step.name === "tests").verdict, "PASS");
+          }
+        }
+        if (fault === "js") {
+          assert.equal(report.steps.find(step => step.name === "typecheck").verdict, "FAIL");
+          assert.equal(report.steps.some(step => step.name === "rust"), false);
+        }
       } else {
         assert.equal(result.status, 0, result.stderr);
-        const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
         assert.deepEqual(report.steps.map(({name})=>name), [
           ...(mode === "pr" ? ["install"] : []),
           "app-backend-runtime",

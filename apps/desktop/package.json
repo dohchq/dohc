@@ -79,6 +79,7 @@
   "dependencies": {
     "@dohc/app-browser": "workspace:*",
     "@dohc/app-backend-runtime": "workspace:*",
+    "@dohc/automation-executor": "workspace:*",
     "@dohc/cli": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",

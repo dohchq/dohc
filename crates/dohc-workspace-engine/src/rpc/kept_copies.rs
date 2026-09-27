@@ -39,6 +39,12 @@ impl EngineService {
                 .list_kept_displacements(open.workspace_id.clone()),
         )
         .await?;
+        // Orphans have no path to save beside. The recovery-folder notice
+        // exposes them through watcher.status; they must not consume this page.
+        let kept: Vec<_> = kept
+            .into_iter()
+            .filter(|row| !row.target_path.is_empty())
+            .collect();
         let rows: Vec<Value> = kept
             .iter()
             .take(KEPT_COPIES_LIST_LIMIT)

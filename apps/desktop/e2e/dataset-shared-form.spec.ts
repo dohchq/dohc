@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
@@ -133,13 +134,60 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     const online = await page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
     if (online.kind !== "invoked") throw Error("Expected authoritative Collection data.");
     expect(JSON.stringify(online.result)).toContain("Shared browser participant");
+    // Publish a dashboard against the same authoritative Collection, with an explicit read approval.
+    const appRoot = "registrations-form", manifestPath = join(workspace.rootPath, appRoot, "app.publish.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { dataset: import("@dohc/security-contract/dataset").AppDatasetBinding };
+    const read = dataset.operations.find(operation => operation.kind === "read")!;
+    manifest.dataset.operationIds = [read.operationId];
+    delete manifest.dataset.createFields;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(workspace.rootPath, appRoot, "frontend.js"), `
+      const output = document.createElement('pre'), refresh = document.createElement('button');
+      refresh.textContent = 'Refresh records'; document.body.append(refresh, output);
+      let port;
+      function load() { port.postMessage({id:crypto.randomUUID(),op:'backend.invoke',operation:${JSON.stringify(read.name)},idempotencyKey:crypto.randomUUID(),input:{limit:50}}); }
+      addEventListener('message', event => {
+        if (port || event.source !== parent || event.data?.kind !== 'dohc-app-channel') return;
+        port = event.ports[0]; port.onmessage = ({data}) => { output.textContent = data.ok ? JSON.stringify(data.value.result) : 'Access withdrawn'; };
+        port.start(); refresh.onclick = load; load();
+      });
+    `);
+    const publications = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "list", ...input }), { workspaceId, appRoot });
+    if (publications.kind !== "listed") throw Error("Expected publications.");
+    for (const item of publications.publications.filter(item => item.active)) await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "withdraw", ...input }),
+      { workspaceId, publicationId: item.publicationId, expectedAuthorityRevision: item.authorityRevision });
+    const original = publications.publications[0]!;
+    const dashboard = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "prepare", ...input }),
+      { workspaceId, appRoot, shareId: original.shareId, grantId: original.grantId });
+    if (dashboard.kind !== "prepared") throw Error("Expected dashboard review.");
+    const publishedDashboard = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "approve", ...input }),
+      { workspaceId, approvalId: dashboard.approvalId, candidateDigest: dashboard.candidateDigest, linkReads: [{ operationId: read.operationId, fieldIds: read.fieldIds }] });
+    if (publishedDashboard.kind !== "published") throw Error("Expected dashboard publication.");
+    const reader = await shared.browser.newPage();
+    await reader.goto(linkUrl);
+    await reader.getByRole("button", { name: "Open app", exact: true }).click();
+    const dashboardFrame = reader.frameLocator("iframe");
+    await expect(dashboardFrame.locator("pre")).toContainText("Shared browser participant");
+    const createOperation = dataset.operations.find(operation => operation.kind === "create")!;
+    const nameField = table.fields.find(field => field.name === "Name")!;
+    await page.evaluate(async input => window.dohcDesktop!.dataset(input), { ...request, operationId: createOperation.operationId,
+      input: { values: { [nameField.fieldId]: "Added after publication" } }, idempotencyKey: randomUUID() });
+    await dashboardFrame.getByRole("button", { name: "Refresh records" }).click();
+    await expect(dashboardFrame.locator("pre")).toContainText("Added after publication");
+    await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "withdraw", ...input }),
+      { workspaceId, publicationId: publishedDashboard.publicationId, expectedAuthorityRevision: publishedDashboard.authorityRevision });
+    await dashboardFrame.getByRole("button", { name: "Refresh records" }).click();
+    await expect(dashboardFrame.locator("pre")).toHaveText("Access withdrawn");
+    await reader.close();
+    const current = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { ...request, idempotencyKey: randomUUID() });
+    if (current.kind !== "invoked") throw Error("Expected current Collection data.");
     await relay.stop(); relay = null;
     const offline = await page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
-    expect(offline).toMatchObject({ kind: "invoked", result: online.result, copy: { offline: true } });
+    expect(offline).toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     await desktop.close(); desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const reopened = await desktop.page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
-    expect(reopened).toMatchObject({ kind: "invoked", result: online.result, copy: { offline: true } });
+    expect(reopened).toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
     await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetId: dataset.datasetId,

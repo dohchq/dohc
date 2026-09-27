@@ -132,7 +132,7 @@ async function harness() {
     warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => ({}),
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
     listWorkspaces: () => [workspace], setWorkspaceSharedChannels: writeChannels,
-    relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
+    relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined, claim: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
     sharesChanged: () => undefined,
@@ -294,6 +294,7 @@ describe("registered direct message boundaries", () => {
       } as unknown as WorkspaceEngineCapture,
       onChange: () => undefined,
       operations: {
+        claim: async () => undefined,
         push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
         pull: workspacePull,
         recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },

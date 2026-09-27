@@ -225,6 +225,7 @@ export const CHANNELS = {
   noticesChanged: "desktop:notices-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
+  chatDispatchNotices: "desktop:chat-dispatch-notices",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
@@ -243,6 +244,7 @@ export const CHANNELS = {
   automationShareImpact: "desktop:automation-share-impact",
   automationHoldsChanged: "desktop:automation-holds-changed",
   listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  findDatasetCollection: "desktop:find-dataset-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.

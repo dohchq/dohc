@@ -315,7 +315,7 @@ export function AgentsMcpSettings(props: {
           onClick={() => void toggle()}
           className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
             enabled
-              ? "border border-line bg-transparent text-muted hover:bg-panel-2 hover:text-ink"
+              ? "border border-line bg-transparent text-muted hover:bg-hover hover:text-ink"
               : "bg-accent text-bg hover:opacity-90"
           } disabled:opacity-50`}
         >
@@ -332,7 +332,7 @@ export function AgentsMcpSettings(props: {
           <button
             type="button"
             onClick={retryRefresh}
-            className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+            className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink"
           >
             Retry
           </button>
@@ -346,7 +346,7 @@ export function AgentsMcpSettings(props: {
             type="button"
             disabled={!config || "unavailable" in config}
             onClick={() => void copyConfig()}
-            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
             {copied ? "Copied" : "Copy"}

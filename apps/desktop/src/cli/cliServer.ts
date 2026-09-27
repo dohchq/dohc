@@ -1,3 +1,4 @@
+import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
   cliRequestSchema,
@@ -13,8 +14,7 @@ import {
   type CliResultByVerb,
   type CliShowMessage,
 } from "@dohc/cli/protocol";
-import { renderShowMarkdown } from "@dohc/cli/render";
-import { formatMessageHandle } from "@dohc/cli/thread-markdown";
+import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import {
   createLocalChangeAuthor,
   validateUserMaterializePath,
@@ -827,12 +827,12 @@ async function threadCounts(
   };
 }
 
-async function buildShowResult(
+async function buildThreadContent(
   context: CliWorkspaceContext,
   loaded: LoadedThread,
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
-): Promise<CliResultByVerb["show"]> {
+): Promise<Omit<CliResultByVerb["show"], "dispatch">> {
   const decisions = await context.store.listThreadDecisions(
     context.workspaceId,
     loaded.thread.id,
@@ -868,6 +868,18 @@ async function buildShowResult(
       ...counts,
     },
     messages,
+  };
+}
+
+async function buildShowResult(
+  context: CliWorkspaceContext,
+  loaded: LoadedThread,
+  allMessages: readonly ChatMessage[],
+  rootMessage?: ChatMessage,
+): Promise<CliResultByVerb["show"]> {
+  return {
+    ...await buildThreadContent(context, loaded, allMessages, rootMessage),
+    dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, loaded.thread.id),
   };
 }
 
@@ -929,6 +941,13 @@ async function workspaceRelativePath(
     canonical = unresolved;
   }
   return relative(root, canonical).split(sep).join("/");
+}
+
+async function documentPath(context: CliWorkspaceContext, cwd: string, path: string): Promise<string> {
+  const root = await realpath(context.rootPath);
+  const folder = await realpath(cwd);
+  // The document port checks the target's authority. Keep missing paths for create.
+  return relative(root, resolve(folder, path)).split(sep).join("/");
 }
 
 async function resolveAttachments(
@@ -1974,6 +1993,7 @@ async function dispatch(
         return {
           ok: true as const,
           thread: rawChatThread(thread),
+          dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, thread.id),
           messages: messages.map((message) => rawChatMessage(message, decisionByMessage.get(message.id))),
           projection: {
             path: projection.path,
@@ -2199,7 +2219,8 @@ async function dispatch(
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserReadPath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       try {
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
@@ -2240,7 +2261,8 @@ async function dispatch(
           reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
         };
       }
-      const validated = validateUserWritePath(request.args.path);
+      const resolvedPath = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserWritePath(resolvedPath);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       const path = validated.normalized;
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
@@ -2276,7 +2298,8 @@ async function dispatch(
         };
       }
       // A new file, so the stricter materialization rules apply.
-      const validated = validateUserMaterializePath(request.args.path, { platform: process.platform });
+      const path = await documentPath(context, request.args.cwd, request.args.path);
+      const validated = validateUserMaterializePath(path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
         return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };
@@ -2772,13 +2795,13 @@ async function dispatch(
           workspaceId: context.workspaceId,
           threadId: thread.thread.id,
         });
-        const result = await buildShowResult(context, thread, messages);
+        const result = await buildThreadContent(context, thread, messages);
         const channelDir = join(outputRoot, safePathSegment(thread.group.slug));
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
         const path = join(channelDir, `${safePathSegment(publicThreadId)}.md`);
         const provenance = `<!-- exported from dohc chat thread ${publicThreadId} at ${exportedAt} -->`;
-        await writeFile(path, `${provenance}\n${renderShowMarkdown(result)}`, "utf8");
+        await writeFile(path, `${provenance}\n${renderThreadMarkdown(result)}`, "utf8");
         files.push({ threadId: publicThreadId, path });
       }
       return { files };

@@ -107,6 +107,10 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   show: "moment",
 };
 
+const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
+  read: "documentRead", edit: "documentEdit", create: "documentCreate",
+};
+
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
@@ -369,13 +373,13 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "chat" ? name : command === "history" ? HISTORY_RESULTS[name] : undefined;
+  const socketVerb = command === "chat" ? name : command === "history" ? HISTORY_RESULTS[name] : command === "document" ? DOCUMENT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
-    // A history refusal exits with its reason instead of printing it.
+    // History and document refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => command !== "history" || branch.properties?.ok?.const !== false);
+      .filter((branch) => (command !== "history" && command !== "document") || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.`;
   }
@@ -412,6 +416,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "dataset") checkCovered(name, Object.keys(command.verbs), Object.keys(DATASET_RESULTS));
   if (name === "app") checkCovered(name, Object.keys(command.verbs), [...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)]);
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
+  if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
   return [
     `### \`dohc ${name}\``,

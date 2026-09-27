@@ -43,4 +43,11 @@ describe("an automation in plain words", () => {
       do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: null } }], records: null, operation: null }],
     })))).toBe("When Status, Owner or Due changes, clear Done on");
   });
+
+  it("names the action a button runs", () => {
+    expect(sentenceText(automationSentence(automation({
+      when: { kind: "button", field: "Mark paid", table: "Invoices" },
+      do: [{ kind: "invoke", operation: "invoices.markPaid", input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }],
+    })))).toBe("When someone clicks Mark paid, run invoices.markPaid");
+  });
 });

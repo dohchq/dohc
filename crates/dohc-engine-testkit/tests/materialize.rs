@@ -3687,6 +3687,10 @@ fn windows_recovery_finishes_a_returned_readonly_link_without_keeping_a_copy() {
 
 #[cfg(windows)]
 #[test]
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "Windows-only test restores writable permissions for cleanup"
+)]
 fn windows_staging_and_failed_return_preserve_attributes() {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     let sc = Scratch::new("windows-attributes");

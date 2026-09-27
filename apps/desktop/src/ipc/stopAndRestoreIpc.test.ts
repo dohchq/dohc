@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import type { CollectionAutomations } from "../automations/collectionAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import {

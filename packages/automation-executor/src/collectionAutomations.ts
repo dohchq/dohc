@@ -1,0 +1,2981 @@
+import { createHash } from "node:crypto";
+import { posix } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import {
+  parseAutomationsFile,
+  writeAutomationsFile,
+  type Automation,
+  type AutomationDiagnostic,
+  type AutomationEntry,
+  type AutomationScheduleTrigger,
+  type AutomationsFileParseResult,
+} from "@dohc/workspace-contracts/automations";
+import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
+import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import type {
+  DatasetAutomationClaim,
+  DatasetAutomationFailure,
+  DatasetAutomationSubscription,
+  DatasetPressed,
+  DatasetPressInput,
+  DatasetRememberedPress,
+} from "@dohc/app-backend-runtime/dataset-automation-claims";
+import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
+import type { WatcherEvent } from "@dohc/workspace-core";
+import {
+  isInvalidInputRefusal,
+  type AutomationClaim,
+  type AutomationClaimSummary,
+  type AutomationGroupRelayRecord,
+  type AutomationReleaseGroupsResult,
+  type AutomationWatchGroupsParams,
+  type VersionedLiveAdapter,
+} from "@dohc/workspace-engine-client";
+import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
+import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
+import {
+  collectionAutomationId,
+  COLLECTION_AUTOMATION_PREFIX,
+  datasetSubscriptionFor,
+  definitionDigest,
+  definitionHash,
+  fieldWritesOf,
+  fieldsNamedBy,
+  parseCollectionAutomationId,
+  reachStepsOf,
+  scheduleHash,
+  stepsInOrder,
+  subscriptionFor,
+  unsupportedReason,
+} from "./automationPlan";
+import {
+  checkAutomationReach,
+  reachStepId,
+  shareImpactOf,
+  type ReachCollection,
+  type ReachRoster,
+  type ReachDatasetGrants,
+  type ReachShare,
+  type ReachStep,
+} from "./automationReach";
+import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
+import {
+  runCollectionAutomation,
+  runsForClaim,
+  UNDONE_RUN_ERROR,
+  sendsMessages,
+  RECORD_NOT_FOUND,
+  UNREADABLE_RUN_ERROR,
+  type AutomationChatDependencies,
+  type CollectionAutomationReads,
+  type CollectionAutomationRunDependencies,
+  type CollectionAutomationRunOutcome,
+} from "./collectionAutomationRun";
+import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
+import {
+  datasetAutomationProblem,
+  datasetFieldWritesOf,
+  datasetOperationsOf,
+  datasetReachSteps,
+  datasetTableNamed,
+  pinDatasetOperations,
+  type DatasetRecordId,
+} from "./datasetAutomationPlan";
+import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import { datasetUndoRulesChanged, DATASET_UNDO_RULES_CHANGED, undoDatasetAutomationRuns, type DatasetUndoHost } from "./datasetAutomationUndo";
+import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
+import { chatNeedsOf, type ChatDirectory } from "./automationChat";
+import type { GroupMessagesSkipped } from "./groupMessagesNotice";
+
+// The Collection automation executor for one open workspace (ADR 0008, ADR
+// 0012). It keeps an index of every Collection's automations.yaml, keeps the
+// engine's subscriptions in step with the automations that can run, and
+// drains the engine's claims in the "collection:" namespace one at a time.
+// The engine's `automation.claimed` event is only the wake-up: the claim
+// table is the transport, so a claim made while this computer was away
+// drains on the next open.
+//
+// Every claim the drain takes ends one of three ways: it runs and settles,
+// it settles failed, or it waits and goes back to the engine at the end of
+// the drain. Until the engine takes the settle or the release, the executor
+// keeps the claim and tries again on its next drain, without running it.
+//
+// A dataset Collection's claims come from its dataset host's ledger instead,
+// where the host claims each commit it makes (ADR 0011), and each press of
+// one of its buttons (pressDataset). The drain takes
+// engine claims first, then dataset claims, one at a time, and treats both
+// the same way; a dataset run's steps go through the dataset's approved
+// operations (datasetAutomationRun.ts). The executor uses the dataset host
+// only while something else has it open, as the Collections list does, or
+// when a person asks about a dataset's automations. A workspace whose
+// datasets nobody uses never opens it for automations.
+
+export const AUTOMATIONS_FILE_NAME = "automations.yaml";
+const DATASET_FILE_NAME = "dataset.json";
+const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
+const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
+
+const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
+// A workspace that synced before, or that has no record of whether it did,
+// runs schedules and Group triggers only once it syncs and its relay names
+// a computer.
+const SCHEDULES_NEED_SYNC = "Turn on sync to run this workspace's schedules.";
+const GROUP_MESSAGES_NEED_SYNC = "Turn on sync so Group messages start this automation.";
+// After the deadline, a run's writes stop at their next check. A write
+// still running after this long is not settled at all, so nothing can land
+// after the claim settles; the engine's recovery requeues the claim.
+const DEADLINE_GRACE_MS = 30_000;
+// Runs that time out this many times in a row switch their automation off.
+export const TIMEOUTS_BEFORE_SWITCH_OFF = 3;
+// A claim the evaluator had no room for runs again after this long, if
+// nothing else wakes the drain first.
+const BUSY_RETRY_MS = 2_000;
+// The engine bounds a settle error at 4096 bytes; stay well under it.
+const MAX_SETTLE_ERROR_CHARS = 1000;
+
+/** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
+type AutomationPressResult = Awaited<ReturnType<VersionedLiveAdapter["pressAutomation"]>>;
+
+type AutomationClaimScheduleResult = Awaited<ReturnType<VersionedLiveAdapter["claimAutomationSchedule"]>>;
+type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
+
+export interface CollectionAutomationEngine extends CollectionAutomationReads {
+  listCollections(): Promise<CollectionListResult>;
+  /** Records under a path. */
+  subscribeAutomation(input: RecordSubscription): Promise<unknown>;
+  unsubscribeAutomation(input: { automationId: string; path: string }): Promise<unknown>;
+  /**
+   * Stops every Group subscription here from claiming, and answers what the
+   * next host needs with the generation whose handover this computer last took.
+   */
+  releaseAutomationGroups(): Promise<AutomationReleaseGroupsResult>;
+  /** Sets every Group subscription this computer watches, taking a new host generation's handover. */
+  watchAutomationGroups(input: AutomationWatchGroupsParams): Promise<{ needsHandover: boolean }>;
+  claimNextAutomation(input: { automationIdPrefix: string }): Promise<AutomationClaim | null>;
+  settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
+  retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
+  listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
+  /** Each automation's newest failed claim, the one its failure notice offers to try again. */
+  listAutomationFailures(): Promise<{ failures: Array<{ automationId: string; claimId: string }> }>;
+  /** When Group messages last started nothing here for a reason a person can act on, by this computer's clock. */
+  readAutomationGroupSkips(): Promise<{ aheadAtMs: number | null; lateAtMs: number | null }>;
+  /** Hands a running claim this computer holds back to pending, without counting an attempt. */
+  releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
+  /** Claims a schedule's due times and moves its mark, in one transaction. */
+  claimAutomationSchedule(input: {
+    automationId: string;
+    scheduleHash: string;
+    run: number[];
+    throughMs: number;
+  }): Promise<AutomationClaimScheduleResult>;
+  listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
+  /** Claims Run now from a skipped-run notice; a repeat answers the same claim. */
+  runAutomationNow(input: { automationId: string; noticeId: string }): Promise<unknown>;
+  pressAutomation(input: { pressId: string; automationId: string; recordId: string; pressedBy: string }): Promise<AutomationPressResult>;
+}
+
+/** An enabled schedule this executor can run. */
+export interface ScheduledAutomation {
+  automationId: string;
+  name: string;
+  trigger: AutomationScheduleTrigger;
+  scheduleHash: string;
+  /**
+   * When this executor saw the schedule added or switched on, or null when
+   * it was already on as the executor opened. Nothing before it runs.
+   */
+  enabledSince: number | null;
+}
+
+/** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
+export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
+  /** Each approved, unarchived dataset's rules. */
+  datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> };
+  subscribe(datasetId: string, subscription: DatasetAutomationSubscription): void;
+  unsubscribe(datasetId: string, automationId: string): void;
+  subscriptions(): Array<DatasetAutomationSubscription & { datasetId: string }>;
+  next(): DatasetAutomationClaim | null;
+  settle(started: DatasetAutomationClaim, outcome: SettleInput): unknown;
+  /** Hands a started claim back to pending, without counting its attempt. */
+  release(started: DatasetAutomationClaim): void;
+  retry(claimId: string): unknown;
+  /** One automation's newest claims, newest first. */
+  claims(automationId: string): DatasetAutomationClaim[];
+  /** One of an automation's claims however old, or null. */
+  claim(automationId: string, claimId: string): DatasetAutomationClaim | null;
+  failures(): DatasetAutomationFailure[];
+  /** Throws why the host cannot take a press of this button, as `press` would. */
+  assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">): void;
+  /** Records a press by `pressedBy` and answers the claim that runs it. */
+  press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string }): DatasetPressed;
+  /** A press the ledger remembers, with its claim, or null. */
+  pressed(pressId: string): DatasetRememberedPress | null;
+}
+
+export interface CollectionAutomationsOptions {
+  /** Engine adapter runner; resolves null when the engine is unavailable. */
+  withEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null>;
+  withRecordWrites: CollectionAutomationRunDependencies["withRecordWrites"];
+  /** A workspace text file, or null when it does not exist. */
+  readText(relativePath: string): Promise<
+    { text: string; truncated: false; contentHash: string } | { text: string; truncated: true; contentHash: null } | null
+  >;
+  /** Replaces a text file whose content still hashes to `expectedContentHash`. */
+  writeText(relativePath: string, text: string, expectedContentHash: string): Promise<{ status: "written" | "conflict" }>;
+  pathExists(relativePath: string): Promise<boolean>;
+  /** Who can edit what in this workspace, listed again when stale, for a run's reach check. */
+  roster(): Promise<ReachRoster>;
+  /** What the roster says now, without listing again, for showing reach. */
+  cachedRoster(): Promise<ReachRoster>;
+  evaluator: AutomationFormulaEvaluator;
+  store: AutomationRunStore;
+  /** Where automations post and send direct messages, and the writer they use. */
+  chat: AutomationChatDependencies;
+  /**
+   * The automation host generation this computer runs at, from its last
+   * host read: 0 for a workspace that never synced, null when it is not the
+   * host. Only the host watches Groups, so the engine claims each Group
+   * message on one computer (ADR 0012).
+   */
+  groupHost(): Promise<number | null>;
+  /**
+   * The relay's last release or take over, read at this host generation,
+   * with the handover when a release left it for this computer. Throws when
+   * the relay does not answer.
+   */
+  groupRelayRecord(generation: number): Promise<AutomationGroupRelayRecord>;
+  /**
+   * An enabled Group trigger asks the host module, as a schedule does, to
+   * record this computer as the host when the relay names none. Resolves at
+   * once when a host is named, or after the read that learns one.
+   */
+  requestHost(): Promise<unknown>;
+  /** Tells the owner, once a day, that Group messages started no automations here, and why. */
+  groupMessagesSkipped(reason: GroupMessagesSkipped, atMs: number): Promise<void>;
+  /** A message's whole body, for a claim that carried it truncated. */
+  readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
+  /** Sends one notice from this workspace. */
+  postNotice: CollectionAutomationRunDependencies["postNotice"];
+  /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
+  onFailuresChanged(): void;
+  /**
+   * A step started or stopped waiting for a current editor, or a share
+   * stopped a step or someone dismissed its notice: the reach notices re-read.
+   */
+  onHoldsChanged(): void;
+  /**
+   * The automations dohc read from the workspace changed, or a step's reach
+   * verdict did: the ⚡ field marks re-read.
+   */
+  onAutomationsChanged(): void;
+  /** The index was read again, so the schedules this executor can run may differ. */
+  onSchedulesChanged?(): void;
+  /** Whether some computer can run the workspace's schedules and Group triggers. True unless set. */
+  hostCanRun?(): Promise<boolean>;
+  /** The name a formula's `person` shows for the person who pressed a button. */
+  personName(userId: string): string;
+  /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
+  mayRetryPress(pressedBy: string | null): Promise<boolean>;
+  /** The engine took a press's settle. */
+  onPressSettled(event: PressSettled): void;
+  /** A press's run went back to wait. */
+  onPressWaiting(event: { claimId: string; reason: PressWaitReason }): void;
+  /**
+   * Holds off a handover while a relayed press's run writes: null when this
+   * computer no longer runs the workspace's automations or a handover began.
+   * Unset, relayed presses run with no hold.
+   */
+  holdForHost?(): (() => void) | null;
+  onError(context: string, error: unknown): void;
+  /**
+   * This workspace's dataset host, while it is open; resolves null when it is
+   * not. With `open`, opens it first: only for what a person asked for.
+   */
+  withDatasetHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open: boolean): Promise<T | null>;
+  nowMs?: () => number;
+  /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
+  deadline?: (abort: () => void) => () => void;
+}
+
+type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
+/**
+ * A dataset Collection's approved rules, whether dohc generated its
+ * operations, and its data grants, as the reach check reads them.
+ */
+type IndexedDataset = { definition: DatasetDefinition; generated: boolean; grants: ReachDatasetGrants };
+
+/** One step's reach as the ⚡ panel shows it. */
+export type CollectionAutomationStepReach =
+  | { verdict: "allowed" }
+  | { verdict: "stopped"; reason: string }
+  // Allowed now, but stopped before under the same definition: it waits
+  // for a current editor to confirm it with `seq`. `target` is the
+  // destination the step reaches.
+  | { verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: CollectionAutomationHold["action"] };
+
+/** One automation as the ⚡ panel reads it. */
+export type CollectionAutomationSummary =
+  | {
+      valid: true;
+      /** The engine automation id, for its runs and Try again. */
+      automationId: string;
+      automation: Automation;
+      definitionHash: string;
+      /**
+       * Why dohc does not run it now, or null: a trigger or step dohc cannot
+       * run yet, or a field its Collection does not have.
+       */
+      cannotRun: string | null;
+      /** Each step's reach in step order, or why dohc cannot check who can edit yet. */
+      reach: { kind: "checked"; steps: CollectionAutomationStepReach[] } | { kind: "waiting"; reason: string };
+      /** Its newest run on this computer, or null when it has not run here. */
+      lastRun: { state: AutomationClaimSummary["state"]; atMs: number } | null;
+    }
+  | { valid: false; id: string | null; name: string | null; diagnostics: AutomationDiagnostic[] };
+
+export type CollectionAutomationsFile =
+  | { status: "missing" }
+  | { status: "unreadable"; diagnostic: AutomationDiagnostic }
+  | { status: "read"; contentHash: string | null; automations: CollectionAutomationSummary[] };
+
+/** One field that switched-on automations set, with their names in file order. */
+export interface CollectionFieldMark {
+  field: string;
+  automations: string[];
+}
+
+/** A Collection a step can reach, or why it cannot, for the builder. */
+export interface CollectionAutomationTarget {
+  path: string;
+  name: string;
+  stopped: string | null;
+}
+
+/**
+ * A step whose reach changed, for its notice: one that waits for a current
+ * editor to allow it, or one a narrower share stopped.
+ */
+export interface CollectionAutomationHold {
+  automationId: string;
+  automationName: string;
+  definitionHash: string;
+  /** The step's identity (reachStepId). */
+  step: string;
+  seq: number;
+  /** The Collection the automation belongs to, and the one the step reaches. */
+  collection: string;
+  /** A Collection, a Group, or a direct message. */
+  target: string;
+  action: "change" | "find" | "post" | "notify" | "wake" | "read";
+  /** A person a formula named: the hold is theirs, not the step's. */
+  recipient?: string;
+  /** The editor whose reach stopped the step. */
+  stoppedFor: string | null;
+}
+
+/**
+ * Steps waiting for a current editor, steps a narrower share stopped, and
+ * whether dohc could read which steps were allowed.
+ */
+export interface CollectionAutomationHolds {
+  holds: CollectionAutomationHold[];
+  stops: CollectionAutomationStop[];
+  /** reach.json cannot be read, so every automation waits until someone resets the holds. */
+  unreadable: boolean;
+}
+
+export const UNREADABLE_REACH =
+  "dohc cannot read which automation steps were allowed, so every automation waits. Reset holds in Notices to allow each step again.";
+/** A switched-on step a share stopped: the same facts as a hold. */
+export type CollectionAutomationStop = CollectionAutomationHold;
+
+/** A step a share would stop, for the share dialog to say before the share is made. */
+export interface CollectionAutomationShareStop {
+  automationId: string;
+  automationName: string;
+  /** The full path of the Collection the automation belongs to. */
+  collectionPath: string;
+  /** The destination the step reaches, by the name the UI shows. */
+  target: string;
+  action: CollectionAutomationHold["action"];
+}
+
+export interface CollectionAutomationRun {
+  claimId: string;
+  state: AutomationClaimSummary["state"];
+  error: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  /** What the run's effects did on this computer, oldest first. */
+  writes: RunWrite[];
+  /** The run began under another version of the automation. */
+  definitionChanged: boolean;
+  /** The chain depth cap stopped it before it ran, so Try again cannot run it. */
+  chainStopped: boolean;
+  /** A person undid what it changed. */
+  undone: boolean;
+}
+
+/**
+ * How a press's run ended. `skipped` did nothing: its record, or its
+ * automation, was gone or off. `ended` is a run that ended before dohc
+ * could say which: a press sent again after its run record was trimmed.
+ */
+export interface PressSettled {
+  claimId: string;
+  outcome: "done" | "skipped" | "failed" | "ended";
+  error: string | null;
+}
+
+/** What a press answers: its run's claim, how the run ended if it has, or busy. */
+export type CollectionAutomationPress =
+  | { busy: true }
+  | { busy: false; claimId: string; settled: Omit<PressSettled, "claimId"> | null };
+
+/** A press this computer took, so the same press sent again finds its claim whatever changed since. */
+interface RememberedPress {
+  collectionPath: string;
+  field: string;
+  recordId: string;
+  pressedBy: string;
+  automationId: string;
+}
+// Presses remembered for a resend after a lost reply; the oldest go first.
+const REMEMBERED_PRESSES = 500;
+
+/** One Button field in a Collection, and what its button shows. */
+export interface CollectionAutomationButton {
+  field: string;
+  state: AutomationButtonState;
+}
+
+export type CollectionAutomationRetry =
+  // `press` is true for a button's run, whose window hears how it settles.
+  | { status: "queued"; press: boolean }
+  // The automation changed since the run began. Running it again starts
+  // from the beginning and can repeat what it already did, so the person
+  // must choose that. `repeatsMessages` says the confirmation must also say
+  // that messages it sent may be sent again.
+  | { status: "definition-changed"; repeatsMessages: boolean }
+  // The run failed so long ago that dohc dropped its progress. Running it
+  // again starts from the beginning, and the person must choose that too.
+  | { status: "progress-gone"; repeatsMessages: boolean }
+  | { status: "refused"; reason: string };
+
+export type CollectionAutomationUndo =
+  | ({ status: "undone" } & CollectionAutomationUndone)
+  | { status: "refused"; reason: string };
+
+const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
+
+/**
+ * What runs did, oldest first. A record a run created before it stopped
+ * has no write yet, so it is listed from `created`, once.
+ */
+function writesOf(runs: readonly StoredRun[]): RunWrite[] {
+  const writes = runs.flatMap((run) => run.applied.flatMap((effect) => effect.writes));
+  const listed = new Set(writes.flatMap((write) => (write.kind === "created" ? [write.recordId] : [])));
+  for (const run of runs) {
+    for (const created of run.created) {
+      if (listed.has(created.recordId)) continue;
+      listed.add(created.recordId);
+      writes.push({ kind: "created", recordId: created.recordId, path: created.path });
+    }
+  }
+  return writes;
+}
+
+function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = message.trim().slice(0, MAX_SETTLE_ERROR_CHARS);
+  return bounded.length > 0 ? bounded : "The automation failed.";
+}
+
+function startDeadline(abort: () => void): () => void {
+  const timer = setTimeout(abort, AUTOMATION_RUN_DEADLINE_MS);
+  return () => clearTimeout(timer);
+}
+
+/** Whether any step wakes its person's agent. */
+function wakesAgent(automation: Automation): boolean {
+  const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
+    step.kind === "wake-agent" || (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
+  return walk(automation.do);
+}
+
+// A relayed press's engine id: the relay's id and the definition hash the
+// presser saw. The relay mints UUIDs, so the first "." ends it.
+function relayedPressId(pressId: string, hash: string): string {
+  return `${pressId}.${hash}`;
+}
+
+/** The definition a relayed press's claim is bound to, or null for any other claim. */
+function boundDefinition(claim: Pick<AutomationClaim, "trigger" | "change">): string | null {
+  if (claim.change.kind !== "button" || !("key" in claim.trigger)) return null;
+  return /^press:[^.]+\.([0-9a-f]{16})$/u.exec(claim.trigger.key)?.[1] ?? null;
+}
+
+function collectionNamed(path: string): ReachCollection {
+  return { path, name: path.split("/").at(-1) ?? path };
+}
+
+type OwnedAutomation = { automationId: string; collectionPath: string; automation: Automation };
+
+type SettleInput = { state: "done" } | { state: "failed"; error: string };
+/** A claim this computer holds, from the ledger that made it. */
+type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "dataset"; claim: DatasetAutomationClaim };
+
+/** Whether a held claim runs a button's press, whose window hears how it runs. */
+function isPress(held: HeldClaim): boolean {
+  return held.source === "engine" ? held.claim.change.kind === "button" : held.claim.fact?.kind === "button";
+}
+
+/** A dataset record's primary key from the JSON a window sends, or null when it is not one. */
+function datasetRecordIdOf(text: string): DatasetRecordId | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)) ? value : null;
+}
+/** One automation's run history and the failure its notice offers, whichever ledger holds its claims. */
+type ClaimHistory = {
+  claims: Array<Pick<AutomationClaimSummary, "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"> & { error?: string | null }>;
+  failure: string | null;
+};
+/** What a released claim waits for; later drains pass it by until that clears. */
+type WaitReason = "roster" | "held" | "busy" | "session";
+export type PressWaitReason = WaitReason;
+/**
+ * What the engine must hear about a claim this computer holds: hand it back
+ * to wait, or settle it. `settled` runs once the engine takes the settle.
+ */
+type ClaimAction =
+  | { kind: "release"; waitsFor?: WaitReason }
+  | { kind: "settle"; input: SettleInput; outcome: Exclude<PressSettled["outcome"], "ended">; settled: () => Promise<void> };
+// Run history shows this many runs, and their failures keep what Try again needs.
+const RESUMABLE_FAILURES = 20;
+
+export class CollectionAutomations {
+  /** Every Collection the engine lists, and those a watcher batch added. */
+  private collections = new Set<string>();
+  /** Collections that hold an automations.yaml, with what it says. */
+  private readonly files = new Map<string, IndexedFile>();
+  /**
+   * The field names of each Collection with a collection.yaml that an
+   * automation names, or "unreadable" when that file is not YAML dohc can
+   * read as a schema. A Collection without one, such as a dataset, is not
+   * listed.
+   */
+  private readonly schemaFields = new Map<string, ReadonlySet<string> | "unreadable">();
+  /** Dataset Collections, with their approved rules. Only when dohc can run dataset automations. */
+  private readonly datasets = new Map<string, IndexedDataset>();
+  /** The engine subscriptions this computer holds, by engine automation id. */
+  private subscribed = new Map<string, StoredSubscription>();
+  /** Each step's last reach verdict. */
+  private readonly verdicts = new Map<string, StoredReachVerdict>();
+  /** Orders verdicts and confirmations; it only rises. */
+  private verdictSeq = 0;
+  /**
+   * Claims this computer holds whose release or settle the engine has not
+   * taken yet. Each drain tries these first, and never runs them again.
+   */
+  private readonly owed = new Map<string, { held: HeldClaim; action: ClaimAction }>();
+  /**
+   * Claims handed back to wait, with what they wait for. A drain that the
+   * engine serves one of them passes it by until that reason clears, so a
+   * waiting claim costs nothing but its release.
+   */
+  private readonly waitingFor = new Map<string, WaitReason>();
+  /** The held and stopped steps the notices last showed. */
+  private publishedHolds: string[] = [];
+  /**
+   * The saved verdicts could not be read. No step can be treated as seen
+   * before, so every run waits until someone resets the holds.
+   */
+  private verdictsUnreadable = false;
+  /**
+   * Claims a Try again or an Undo is changing. The drain leaves them, and
+   * neither starts while the other runs.
+   */
+  private readonly changing = new Set<string>();
+  /** Presses this computer took, by press id, oldest first. */
+  private readonly presses = new Map<string, RememberedPress>();
+  /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
+  private timeouts = new Map<string, number>();
+  /**
+   * The Groups and direct messages automations post to, as the last roster
+   * found them. Reach reads it; a run reads its own.
+   */
+  private chat: ChatDirectory | null = null;
+  /** The Groups Group-message automations watch, found for their subscriptions. */
+  private groups: ChatDirectory | null = null;
+  /** Whether this computer was the automation host at the last reconcile, so it watches Groups. */
+  private groupTriggersHere = false;
+  /**
+   * The engine may hold other Group subscriptions than `subscribed` lists:
+   * at open, or after a watch or release whose answer was lost. Until one
+   * lands, a reconcile sends the whole set again.
+   */
+  private groupSubscriptionsUncertain = true;
+  /** The host generation the engine last took Group subscriptions at, from this executor. */
+  private watchedGeneration: number | null = null;
+  /** The relay did not answer for a new generation's Group handover: the next sync pull asks again. */
+  private handoverUnread = false;
+  // The newest Group message skip of each kind the owner was told about.
+  private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
+  /** Serializes index loads and subscription reconciles. */
+  private chain: Promise<void> = Promise.resolve();
+  /** Serializes reach verdict updates. */
+  private verdictChain: Promise<unknown> = Promise.resolve();
+  private opened: Promise<void> | null = null;
+  private state: "closed" | "open" | "paused" | "disposed" = "closed";
+  /** Rises at each pause and close, so an open that began before one stops. */
+  private generation = 0;
+  /** Whether the workspace had opened its automations when the engine restart began. */
+  private reopenAfterRestart = false;
+  private draining: Promise<void> | null = null;
+  private redrain = false;
+  private busyTimer: ReturnType<typeof setTimeout> | null = null;
+  private runAbort = new AbortController();
+  private readonly nowMs: () => number;
+  // Each enabled schedule's switch-on time, as the index last read them.
+  private enabledSince = new Map<string, number | null>();
+
+  constructor(private readonly options: CollectionAutomationsOptions) {
+    this.nowMs = options.nowMs ?? Date.now;
+  }
+
+  /**
+   * Reads every Collection's automations, subscribes the ones that can run,
+   * and drains once: claims made while the workspace was closed have no
+   * other wake-up. Safe to call on every workspace activity open.
+   */
+  open(): Promise<void> {
+    if (this.state === "disposed" || this.state === "paused") return Promise.resolve();
+    const generation = this.generation;
+    const current = () => generation === this.generation;
+    this.opened ??= this.enqueue(async () => {
+      const subscriptions = await this.options.store.readSubscriptions();
+      const { verdicts, unreadable } = await this.options.store.readReachVerdicts();
+      const timeouts = await this.options.store.readTimeouts();
+      if (!current()) return;
+      this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
+      this.groupSubscriptionsUncertain = true;
+      this.timeouts = timeouts;
+      this.verdictsUnreadable = unreadable;
+      for (const verdict of verdicts) {
+        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.userId), verdict);
+        this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
+      }
+      await this.loadIndex();
+      if (!current()) return;
+      this.noteEnabledSchedules(true);
+      this.state = "open";
+      this.waitingFor.clear();
+      await this.reconcile(true);
+      this.publishHolds();
+    }).then(
+      () => {
+        if (!current()) return;
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
+        this.options.onSchedulesChanged?.();
+      },
+      (error: unknown) => {
+        // A later open tries again.
+        if (current()) this.opened = null;
+        this.options.onError("open Collection automations", error);
+      },
+    );
+    return this.opened;
+  }
+
+  /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
+  handleWatcherEvents(events: readonly WatcherEvent[]): void {
+    this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]));
+  }
+
+  /**
+   * Files a relay pull wrote. A pull writes the owner's files itself, and
+   * need not leave a watcher batch, so a collaborator's direct change to a
+   * Collection's automations or schema (ADR 0013) is read from here.
+   */
+  handlePulledPaths(paths: readonly string[]): void {
+    this.rereadFoldersOf(paths);
+  }
+
+  private rereadFoldersOf(paths: readonly (string | undefined)[]): void {
+    const folders = new Set<string>();
+    for (const path of paths) {
+      if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
+      const folder = posix.dirname(path);
+      if (folder !== ".") folders.add(folder);
+    }
+    if (folders.size === 0 || this.opened === null) return;
+    void this.enqueue(async () => {
+      let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
+      for (const folder of folders) {
+        this.schemaFields.delete(folder);
+        this.datasets.delete(folder);
+        if (await this.options.pathExists(`${folder}/collection.yaml`)) {
+          this.collections.add(folder);
+          await this.readFile(folder);
+          continue;
+        }
+        this.collections.delete(folder);
+        // A new automations.yaml beside a dataset is a reason to open its host.
+        const open = await this.options.pathExists(`${folder}/${DATASET_FILE_NAME}`) &&
+          await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`);
+        const dataset = (await (datasets ??= this.datasetFolders(open)))?.get(folder);
+        if (dataset === undefined) {
+          this.files.delete(folder);
+        } else {
+          this.datasets.set(folder, dataset);
+          await this.readFile(folder);
+        }
+      }
+      await this.readNamedSchemas();
+      this.noteEnabledSchedules(false);
+      await this.reconcile(false);
+      // An edited or removed automation's held steps leave the notices.
+      this.publishHolds();
+    })
+      // A new or changed step gets its verdict now, while the people who
+      // could have written it can still edit the Collection.
+      .then(() => {
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
+        this.options.onSchedulesChanged?.();
+      })
+      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+  }
+
+  /**
+   * The dataset host opened, or a dataset's approved rules changed: an
+   * approval, a migration, a restore, or an archive. Sources change before
+   * approval, so the watcher alone cannot tell. Re-index every dataset
+   * Collection, reconcile, and drain what the host's ledger holds.
+   */
+  datasetsChanged(): void {
+    if (this.opened === null) return;
+    void this.enqueue(() => this.indexDatasets(false))
+      .then(() => {
+        this.rosterChanged();
+        this.notifyClaimed();
+        this.options.onFailuresChanged();
+        // An approval can make a dataset's panel and field marks answer at last.
+        this.options.onAutomationsChanged();
+      })
+      .catch((error: unknown) => this.options.onError("reload dataset automations", error));
+  }
+
+  private async indexDatasets(open: boolean): Promise<void> {
+    const folders = await this.datasetFolders(open);
+    if (folders === null) return;
+    for (const path of this.datasets.keys()) {
+      if (folders.has(path)) continue;
+      this.datasets.delete(path);
+      this.files.delete(path);
+    }
+    for (const [path, dataset] of folders) {
+      if (this.collections.has(path)) continue;
+      this.datasets.set(path, dataset);
+      await this.readFile(path);
+    }
+    await this.reconcile(false);
+    this.publishHolds();
+  }
+
+  /** The wake-up: a claim event landed, a retry queued a claim, or a reconcile registered work. */
+  notifyClaimed(): void {
+    if (this.state !== "open") return;
+    if (this.draining) {
+      this.redrain = true;
+      return;
+    }
+    this.draining = this.drain().finally(() => {
+      this.draining = null;
+      if (this.redrain && this.state === "open") {
+        this.redrain = false;
+        this.notifyClaimed();
+      }
+    });
+  }
+
+  /**
+   * The roster or the automations changed: record every step's verdict,
+   * then drain, so claims waiting to check who can edit run now.
+   */
+  rosterChanged(): void {
+    if (this.state !== "open") return;
+    void this.options.cachedRoster()
+      .then((roster) => roster.kind === "unknown" ? undefined : this.recordVerdicts(roster, this.everyAutomation()))
+      .catch((error: unknown) => this.options.onError("check who can edit automations", error))
+      .finally(() => this.clearWaits("roster", "held"));
+  }
+
+  /** The signed-in session changed: runs that waited to post under one try again. */
+  sessionChanged(): void {
+    if (this.state !== "open") return;
+    this.clearWaits("session");
+  }
+
+  /**
+   * Whether this computer is the automation host may have changed: watch
+   * or release Groups to match.
+   */
+  hostChanged(): void {
+    if (this.opened === null) return;
+    void this.enqueue(() => this.reconcile(false))
+      .catch((error: unknown) => this.options.onError("update Group subscriptions for the automation host", error));
+  }
+
+  /** A sync pull reached the relay: a Group handover it could not read before is asked for again. */
+  relayAnswered(): void {
+    if (this.handoverUnread) this.hostChanged();
+  }
+
+  /**
+   * Before this computer hands the workspace's automations to another one:
+   * the engine stops every Group subscription in the workspace, including
+   * one this computer lost track of, so no message it stores after that
+   * claims here, and answers the Group handover for the release. Resolves
+   * null when the executor has not opened, the owner called the handover
+   * off, or the engine did not answer; the handover then waits and tries
+   * again. A message claimed here before still runs here, as a claimed
+   * schedule does.
+   */
+  async releaseGroupSubscriptions(stillHandingOver: () => boolean): Promise<AutomationReleaseGroupsResult | null> {
+    await this.opened;
+    if (this.state !== "open") return null;
+    let released = null as AutomationReleaseGroupsResult | null;
+    try {
+      await this.enqueue(async () => {
+        // Called off while this waited in line: keep them.
+        if (stillHandingOver()) released = await this.releaseEngineGroups();
+      });
+    } catch (error) {
+      this.options.onError("stop Group subscriptions before a handover", error);
+      return null;
+    }
+    return released;
+  }
+
+  /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
+  pauseForEngineRestart(): void {
+    if (this.state === "disposed" || this.state === "paused") return;
+    this.generation += 1;
+    this.reopenAfterRestart = this.opened !== null;
+    this.stopRuns();
+    // Claims owed a release or settle keep it: the replacement engine still
+    // holds them as running, and the first drain after it answers sends it.
+    this.state = "paused";
+  }
+
+  /** The replacement engine answers: subscribe again and drain, if the workspace had opened. */
+  resumeAfterEngineRestart(): void {
+    if (this.state !== "paused") return;
+    this.state = "closed";
+    this.opened = null;
+    if (this.reopenAfterRestart) void this.open();
+  }
+
+  /**
+   * Workspace close. Claims this computer holds go back to the engine, and
+   * subscriptions stay, so changes made at the next open claim at once.
+   */
+  async dispose(): Promise<void> {
+    if (this.state === "disposed") return;
+    this.generation += 1;
+    this.stopRuns();
+    // Disposed before the drain ends, so it starts no further drain that
+    // could take a claim again after it is handed back.
+    this.state = "disposed";
+    await Promise.allSettled([this.draining]);
+    await this.payOwed(false);
+    await Promise.allSettled([this.chain, this.verdictChain]);
+  }
+
+  /**
+   * The end of a background run: claims this computer holds go back, and a
+   * later open starts again. Its schedules are unknown until then.
+   */
+  async close(): Promise<void> {
+    if (this.state !== "open") return;
+    this.generation += 1;
+    this.stopRuns();
+    await Promise.allSettled([this.draining]);
+    await this.payOwed(false);
+    if (this.state === "open") this.state = "closed";
+    this.opened = null;
+    await Promise.allSettled([this.chain, this.verdictChain]);
+  }
+
+  /** Resolves once no drain is running or queued. */
+  async idle(): Promise<void> {
+    while (this.draining) await this.draining;
+  }
+
+  /** The enabled schedules this executor can run, or null until it has opened. */
+  schedules(): ScheduledAutomation[] | null {
+    if (this.state !== "open") return null;
+    const schedules: ScheduledAutomation[] = [];
+    for (const { automationId, automation } of this.everyAutomation()) {
+      if (automation.enabled && automation.when.kind === "schedule") {
+        schedules.push({
+          automationId,
+          name: automation.name,
+          trigger: automation.when,
+          scheduleHash: scheduleHash(automation.when),
+          enabledSince: this.enabledSince.get(automationId) ?? null,
+        });
+      }
+    }
+    return schedules;
+  }
+
+  /**
+   * Run now from a skipped-run notice, after this computer's dismissal was
+   * the notice's first. False while the engine is not answering.
+   */
+  async runNow(automationId: string, noticeId: string): Promise<boolean> {
+    const ran = await this.withLiveEngine((engine) => engine.runAutomationNow({ automationId, noticeId }));
+    if (ran === null) return false;
+    this.notifyClaimed();
+    return true;
+  }
+
+  /** Every schedule's mark in this workspace, or null while the engine is not answering. */
+  async scheduleMarks(): Promise<AutomationScheduleMark[] | null> {
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationScheduleMarks());
+    return listed?.marks ?? null;
+  }
+
+  /**
+   * Claims a schedule's due times and moves its mark. Returns the mark after
+   * the step, or null while the engine is not answering. New claims drain
+   * at once, because the engine's announcement can drop.
+   */
+  async claimSchedule(input: {
+    automationId: string;
+    scheduleHash: string;
+    run: number[];
+    throughMs: number;
+  }): Promise<AutomationScheduleMark | null> {
+    const claimed = await this.withLiveEngine((engine) => engine.claimAutomationSchedule(input));
+    if (claimed === null) return null;
+    if (claimed.claims.length > 0) this.notifyClaimed();
+    return claimed.mark;
+  }
+
+  /** Whether any Collection has an automation dohc can run, switched on or not. */
+  hasAutomations(): boolean {
+    return this.everyAutomation().length > 0;
+  }
+
+  /** The automations in one Collection's file, with why each can or cannot run. */
+  async automationsIn(collectionPath: string): Promise<CollectionAutomationsFile> {
+    await this.ready();
+    // A file change the watcher or a panel write already queued lands first.
+    await this.chain;
+    const maybeDataset = () => !this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
+      this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
+    // A dataset whose host is not open yet: a person is looking at it, so open it.
+    if (await maybeDataset()) await this.enqueue(() => this.indexDatasets(true));
+    // A dataset whose rules are not approved is not in the index.
+    const unapproved = await maybeDataset();
+    const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
+    if (!indexed) return { status: "missing" };
+    if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
+    const unsupported = (automation: Automation) =>
+      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
+    const roster = await this.options.cachedRoster();
+    const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
+    const collection = collectionNamed(collectionPath);
+    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
+      ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
+      : []);
+    // Without a roster, the reason is the same for every step: dohc cannot
+    // check who can edit the Collection yet.
+    const [waiting] = roster.kind === "unknown"
+      ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
+      : [];
+    if (roster.kind !== "unknown") await this.recordVerdicts(roster, runnable);
+    // One engine read per automation, together; the newest claim comes first.
+    const lastRuns = new Map(await Promise.all(indexed.file.entries.flatMap((entry) => entry.status === "valid"
+      ? [collectionAutomationId(collectionPath, entry.automation.id)]
+      : []).map(async (automationId) => {
+      const listed = await this.claimHistory(automationId, false);
+      const [newest] = listed?.claims ?? [];
+      return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
+    })));
+    const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
+      if (entry.status === "invalid") {
+        return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
+      }
+      const { automation } = entry;
+      const automationId = collectionAutomationId(collectionPath, automation.id);
+      const hash = definitionHash(automation);
+      const cannotRun = unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun ? null
+        : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
+        : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
+        : null);
+      const summary = {
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun,
+        lastRun: lastRuns.get(automationId) ?? null,
+      };
+      if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
+      if (roster.kind === "unknown") {
+        return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
+      }
+      const reachSteps = this.reachSteps(collectionPath, automation);
+      const steps = checkAutomationReach(roster, {
+        id: automation.id, collection, codeFiles: [], steps: reachSteps,
+      }).map((reach, step): CollectionAutomationStepReach => {
+        if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
+        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)));
+        const reached = reachSteps[step] ? reachDestination(reachSteps[step]) : null;
+        return stored?.verdict === "held" && reached
+          ? {
+              verdict: "held", step: stored.step, stoppedFor: stored.stoppedFor, seq: stored.seq,
+              ...reached,
+            }
+          : { verdict: "allowed" };
+      });
+      return { ...summary, reach: { kind: "checked", steps } };
+    });
+    return { status: "read", contentHash: indexed.contentHash, automations };
+  }
+
+  /**
+   * Each dataset automation's newest failure, for the failure notices, while
+   * the dataset host is open. It does not open the host.
+   */
+  async datasetFailures(): Promise<DatasetAutomationFailure[]> {
+    try {
+      return (await this.withLiveHost((host) => host.failures())) ?? [];
+    } catch (error) {
+      this.options.onError("list dataset automation failures", error);
+      return [];
+    }
+  }
+
+  /**
+   * The automations the ⚡ panel saves, with each dataset step pinned to the
+   * approved operation it prefers (datasetAutomationPlan.ts). Only a step
+   * the file does not already hold is pinned: one a person built or changed
+   * in the builder. A switch, a rename, a copy, or an edit elsewhere leaves
+   * what each existing step does alone.
+   */
+  async pinOperations(collectionPath: string, automations: readonly Automation[], saved: readonly Automation[]): Promise<Automation[]> {
+    await this.ready();
+    await this.openDataset(collectionPath);
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined) return [...automations];
+    const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
+    return automations.map((automation) => pinDatasetOperations(automation, dataset, (step) => held.has(JSON.stringify(step))));
+  }
+
+  /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
+  holdState(): CollectionAutomationHolds {
+    return { holds: this.holds(), stops: this.stops(), unreadable: this.verdictsUnreadable };
+  }
+
+  /**
+   * Starts the verdicts again after they could not be read: every step the
+   * roster allows now is held for Allow, and every other is stopped.
+   */
+  async resetHolds(): Promise<"reset" | "roster-unknown"> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    if (roster.kind === "unknown") return "roster-unknown";
+    await this.loadChat(roster);
+    await this.updateVerdicts(() => {
+      this.verdicts.clear();
+      for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+        const collection = collectionNamed(collectionPath);
+        const hash = definitionHash(automation);
+        const steps = this.reachSteps(collectionPath, automation);
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+          const step = reachStepId(steps[index]!, index);
+          this.verdicts.set(reachVerdictKey(automationId, hash, step), {
+            automationId, definitionHash: hash, step,
+            ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
+            seq: ++this.verdictSeq,
+          });
+        });
+      }
+      this.verdictsUnreadable = false;
+    }, true);
+    this.clearWaits("held");
+    return "reset";
+  }
+
+  /** Where the verdicts are saved, for a person to look at. */
+  reachVerdictsPath(): Promise<string> {
+    return this.options.store.reachVerdictsPath();
+  }
+
+  /**
+   * The Collections a step in this Collection's automations can add or
+   * change records in, for the builder's picker: every Collection the
+   * engine lists, with why the reach check (ADR 0012) stops a step there,
+   * or null.
+   */
+  async targetsFor(collectionPath: string): Promise<CollectionAutomationTarget[]> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    const collection = collectionNamed(collectionPath);
+    return [...this.collections].sort().map((path) => {
+      const target = collectionNamed(path);
+      const [reach] = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }],
+      });
+      return { path, name: target.name, stopped: reach && !reach.allowed ? reach.reason : null };
+    });
+  }
+
+  /** The name an automation has in its Collection's automations.yaml now, for History; null when it has none. */
+  async nameForHistory(automationId: string): Promise<string | null> {
+    const id = parseCollectionAutomationId(automationId);
+    if (id === null) return null;
+    const indexed = this.files.get(id.collectionPath) ?? await this.parsedFile(id.collectionPath);
+    if (indexed?.file.status !== "read") return null;
+    for (const entry of indexed.file.entries) {
+      if (entry.status === "valid" && entry.automation.id === id.id) return entry.automation.name;
+      if (entry.status === "invalid" && entry.id === id.id) return entry.name;
+    }
+    return null;
+  }
+
+  /** Every step that waits for a current editor to allow it, one per step. */
+  holds(): CollectionAutomationHold[] {
+    return this.stepsWhere((verdict) => verdict.verdict === "held");
+  }
+
+  /**
+   * Every switched-on step a narrower share stopped whose notice nobody
+   * dismissed, one per step.
+   */
+  stops(): CollectionAutomationStop[] {
+    return this.stepsWhere((verdict, automation) =>
+      automation.enabled && verdict.verdict === "stopped" && verdict.narrowed === true);
+  }
+
+  /**
+   * Someone dismissed the notice for these stopped steps. Each names the
+   * verdict they saw by `seq`, so a step that stopped again since keeps its
+   * notice.
+   */
+  async dismissStops(seen: ReadonlyArray<{ automationId: string; definitionHash: string; step: string; seq: number }>): Promise<void> {
+    await this.updateVerdicts(() => {
+      for (const { automationId, definitionHash: hash, step, seq } of seen) {
+        const key = reachVerdictKey(automationId, hash, step);
+        const stored = this.verdicts.get(key);
+        if (stored?.verdict !== "stopped" || stored.narrowed !== true || stored.seq !== seq) continue;
+        const { narrowed: _dismissed, ...kept } = stored;
+        this.verdicts.set(key, { ...kept, seq: ++this.verdictSeq });
+      }
+    });
+  }
+
+  /**
+   * The switched-on steps that can run now and would stop if this share
+   * were made, for the share dialog. Only the owner's computer makes
+   * shares, so any other roster stops nothing.
+   */
+  async shareImpact(share: ReachShare): Promise<CollectionAutomationShareStop[]> {
+    await this.ready();
+    const writable = this.writableCollections();
+    const automations: OwnedAutomation[] = [];
+    for (const owned of this.everyAutomation()) {
+      if (owned.automation.enabled && (await this.canRun(owned.automationId, owned.collectionPath, owned.automation, writable))) {
+        automations.push(owned);
+      }
+    }
+    const reach = automations.map(({ automationId, collectionPath, automation }) => {
+      const collection = collectionNamed(collectionPath);
+      return { id: automationId, collection, codeFiles: [], steps: this.reachSteps(collectionPath, automation) };
+    });
+    const stopped = shareImpactOf(await this.options.roster(), share, reach);
+    return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
+      const index = reach.findIndex((candidate) => candidate.id === automationId);
+      const owner = automations[index];
+      const reached = reach[index]?.steps[step];
+      const target = reached ? reachDestination(reached) : null;
+      if (!owner || !target) return [];
+      return [{
+        automationId,
+        automationName: owner.automation.name,
+        collectionPath: owner.collectionPath,
+        ...target,
+      }];
+    });
+  }
+
+  /** The steps whose stored verdict matches, with what their notice names. */
+  private stepsWhere(matches: (verdict: StoredReachVerdict, automation: Automation) => boolean): CollectionAutomationHold[] {
+    const steps: CollectionAutomationHold[] = [];
+    for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+      const hash = definitionHash(automation);
+      const collection = collectionNamed(collectionPath);
+      this.reachSteps(collectionPath, automation).forEach((reach, index) => {
+        const step = reachStepId(reach, index);
+        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
+        if (!stored || !matches(stored, automation)) return;
+        const held = reachDestination(reach);
+        if (held === null) return;
+        steps.push({
+          automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
+          collection: collection.name, ...held, stoppedFor: stored.stoppedFor,
+        });
+      });
+      for (const stored of this.verdicts.values()) {
+        if (stored.automationId !== automationId || stored.definitionHash !== hash || !stored.recipient || stored.verdict !== "held" || !matches(stored, automation)) continue;
+        steps.push({
+          automationId, automationName: automation.name, definitionHash: hash, step: stored.step, seq: stored.seq,
+          collection: collection.name, target: stored.recipient.name, action: stored.recipient.action,
+          recipient: stored.recipient.userId, stoppedFor: stored.stoppedFor,
+        });
+      }
+    }
+    return steps;
+  }
+
+  /**
+   * The fields in one Collection that switched-on automations set, from any
+   * Collection's automations. Before the workspace opens its automations
+   * there are none; `onAutomationsChanged` says when to ask again.
+   */
+  async fieldMarks(collectionPath: string): Promise<CollectionFieldMark[]> {
+    if (this.opened === null) return [];
+    await this.opened;
+    // A mark says a run writes the field, so it passes the checks a run
+    // makes before it writes.
+    const writable = this.writableCollections();
+    if (!(await writable(collectionPath))) return [];
+    return await this.marksOf(writable, ({ collectionPath: home, automation }) =>
+      fieldWritesOf(automation).flatMap((write) => ((write.collection ?? home) === collectionPath ? [write.field] : [])));
+  }
+
+  /**
+   * The fields in one table of a dataset Collection that its switched-on
+   * automations set. A dataset's automations change only its own records,
+   * so only its own automations.yaml marks them.
+   */
+  async datasetFieldMarks(datasetId: string, table: string): Promise<CollectionFieldMark[]> {
+    if (this.opened === null) return [];
+    await this.opened;
+    const home = await this.datasetFolder(datasetId);
+    const dataset = home === null ? undefined : this.datasets.get(home);
+    if (dataset === undefined) return [];
+    return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) => collectionPath !== home ? [] :
+      datasetFieldWritesOf(automation, dataset).flatMap((write) => (write.table === table ? [write.field] : [])));
+  }
+
+  /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
+  private async marksOf(
+    writable: (path: string) => Promise<boolean>,
+    fieldsOf: (owned: OwnedAutomation) => string[],
+  ): Promise<CollectionFieldMark[]> {
+    const marks = new Map<string, Map<string, string>>();
+    for (const owned of this.everyAutomation()) {
+      const { automationId, collectionPath, automation } = owned;
+      if (!automation.enabled) continue;
+      const fields = fieldsOf(owned);
+      if (fields.length === 0 || !(await this.canRun(automationId, collectionPath, automation, writable))) continue;
+      for (const field of fields) {
+        const names = marks.get(field) ?? new Map<string, string>();
+        names.set(automationId, automation.name);
+        marks.set(field, names);
+      }
+    }
+    return [...marks].map(([field, names]) => ({ field, automations: [...names.values()] }));
+  }
+
+  /**
+   * The name an automation has in its Collection's file now, even while the
+   * entry cannot be read, or null when the file no longer has it.
+   */
+  automationName(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    const indexed = parsed ? this.files.get(parsed.collectionPath) : undefined;
+    if (!parsed || indexed?.file.status !== "read") return null;
+    for (const entry of indexed.file.entries) {
+      const [id, name] = entry.status === "valid" ? [entry.automation.id, entry.automation.name] : [entry.id, entry.name];
+      if (id === parsed.id && name !== null) return name;
+    }
+    return null;
+  }
+
+  /**
+   * A current editor allows a held step. `seq` names the hold they saw, so
+   * a verdict that changed since does not take their answer.
+   */
+  async confirmReach(input: {
+    automationId: string;
+    definitionHash: string;
+    step: string;
+    seq: number;
+    recipient?: string;
+  }): Promise<"confirmed" | "changed"> {
+    await this.ready();
+    const confirmed = await this.updateVerdicts(() => {
+      if (this.verdictsUnreadable) return false;
+      const key = reachVerdictKey(input.automationId, input.definitionHash, input.step, input.recipient);
+      const stored = this.verdicts.get(key);
+      if (stored?.verdict !== "held" || stored.seq !== input.seq) return false;
+      this.verdicts.set(key, { ...stored, verdict: "allowed", stoppedFor: null, seq: ++this.verdictSeq });
+      return true;
+    });
+    if (!confirmed) return "changed";
+    this.clearWaits("held");
+    return "confirmed";
+  }
+
+  /** One automation's newest runs on this computer, newest first. */
+  async runs(automationId: string, limit = 20): Promise<CollectionAutomationRun[]> {
+    const listed = await this.claimHistory(automationId, false);
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    const parsed = parseCollectionAutomationId(automationId);
+    const automation = parsed ? this.definitionFor(parsed) : null;
+    const hash = automation ? definitionHash(automation) : null;
+    const runs: CollectionAutomationRun[] = [];
+    // Only the runs shown are read.
+    for (const claim of listed.claims.slice(0, limit)) {
+      // Oldest first. A run a person started over under a newer definition
+      // still changed records, so its writes stay in the list.
+      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+        .sort((left, right) => left.startedAtMs - right.startedAtMs);
+      const live = stored.filter((run) => !run.superseded);
+      runs.push({
+        claimId: claim.claimId,
+        state: claim.state,
+        error: claim.error ?? null,
+        createdAtMs: claim.createdAtMs,
+        updatedAtMs: claim.updatedAtMs,
+        writes: writesOf(stored),
+        definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
+        // The engine's rule: a chain stop is inserted failed and never served.
+        chainStopped: claim.state === "failed" && claim.attempts === 0,
+        undone: stored.length > 0 && stored.every((run) => run.undo === "done"),
+      });
+    }
+    return runs;
+  }
+
+  /**
+   * Try again for a failed claim. The caller contract: after the engine
+   * queues the claim, this wakes the drain and asks the failure notices to
+   * re-read, because the engine's own wake-up event can be dropped and a
+   * repeated retry sends none. `startOver` confirms running a changed
+   * automation, or a run whose progress is gone, from the beginning. For a
+   * press, `watch` runs before the drain wakes, so the window that asked
+   * hears how the run settles.
+   */
+  async retry(
+    input: { automationId: string; claimId: string; startOver: boolean },
+    watch?: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationRetry> {
+    await this.ready();
+    const parsed = parseCollectionAutomationId(input.automationId);
+    const automation = parsed ? this.definitionFor(parsed) : null;
+    if (parsed === null || automation === null) {
+      return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
+    }
+    if (!automation.enabled) {
+      return { status: "refused", reason: `"${automation.name}" is switched off. Switch it on, then try again.` };
+    }
+    const cannotRun = this.cannotRun(parsed.collectionPath, automation);
+    if (cannotRun !== null) return { status: "refused", reason: cannotRun };
+    // The guard is taken before the first read and held to the end, so an
+    // Undo of the same run cannot start between this check and the retry.
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
+    this.changing.add(input.claimId);
+    let press = false;
+    try {
+      let pressedBy: string | null | undefined;
+      const known = this.datasets.has(parsed.collectionPath)
+        ? await this.withLiveHost((ledger) => {
+          const claim = ledger.claim(input.automationId, input.claimId);
+          if (claim?.fact?.kind === "button") pressedBy = datasetPresser(claim);
+          return claim !== null;
+        })
+        : await this.withLiveEngine(async (engine) => {
+          const listedClaim = (await engine.listAutomationClaims({ automationId: input.automationId })).claims.find((claim) => claim.claimId === input.claimId);
+          if (listedClaim?.change.kind === "button") pressedBy = listedClaim.change.onBehalfOf;
+          return listedClaim !== undefined;
+        });
+      if (known === null) throw new Error("The workspace engine is not running.");
+      // Without its run history, dohc cannot tell what the run already did.
+      if (!known) {
+        return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+      }
+      press = pressedBy !== undefined;
+      if (press && !(await this.options.mayRetryPress(pressedBy ?? null))) {
+        return { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." };
+      }
+      const runs = await runsForClaim(this.options.store, input, automation);
+      if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
+      // An undone run's keys and record ids are spent, so it cannot run again.
+      if (runs.undo) return { status: "refused", reason: UNDONE_RUN_ERROR };
+      const progressGone = runs.done === null && runs.current?.compacted === true;
+      const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
+      if (startsOver && !input.startOver) {
+        // Either version may have sent messages that a new run sends again.
+        const earlier = runs.current ?? runs.changedSince;
+        const repeatsMessages = sendsMessages(automation) ||
+          (earlier?.applied.some((effect) => effect.writes.some((write) => (write.kind === "message" || write.kind === "notice"))) ?? false);
+        return { status: progressGone ? "progress-gone" : "definition-changed", repeatsMessages };
+      }
+      this.waitingFor.delete(input.claimId);
+      const retried = this.datasets.has(parsed.collectionPath)
+        ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
+        : await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
+      if (retried === null) throw new Error("The workspace engine is not running.");
+      if (startsOver) {
+        const hash = definitionHash(automation);
+        for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
+          if (run.superseded || (!progressGone && run.definitionHash === hash)) continue;
+          await this.options.store.save({ ...run, superseded: true, updatedAtMs: this.nowMs() });
+        }
+      }
+    } finally {
+      this.changing.delete(input.claimId);
+    }
+    if (press) watch?.(input.claimId, null);
+    this.notifyClaimed();
+    this.options.onFailuresChanged();
+    return { status: "queued", press };
+  }
+
+  /**
+   * What each Button field shows in one Collection. A button is ready when
+   * one switched-on automation uses it, dohc can run that automation, and
+   * no step is stopped or waits for an editor to allow it. States read the
+   * roster the last listing left, so showing a Collection never waits on
+   * the relay. A roster dohc cannot read yet does not stop a press: the
+   * run checks reach again before it writes, and waits for the roster.
+   */
+  async buttons(collectionPath: string, fields: readonly string[]): Promise<CollectionAutomationButton[]> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    const buttons: CollectionAutomationButton[] = [];
+    for (const field of fields) buttons.push({ field, state: await this.buttonState(collectionPath, field, roster) });
+    return buttons;
+  }
+
+  /**
+   * Presses a ready button on one record. `pressedBy` is the person main
+   * checked; the run acts for them. A press sent again with its `pressId`
+   * answers the same claim, even if the button or record changed since: only
+   * a new press is checked. `busy` when the button runs on the record for
+   * someone else. `watch` gets an unsettled claim, and why it waits, before
+   * the drain wakes, so the pressing window hears how the run settles.
+   */
+  async press(
+    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+    /** Checks a new press the way the caller must, such as that the field is still a button. */
+    checkNew: () => Promise<void> = async () => undefined,
+  ): Promise<CollectionAutomationPress> {
+    await this.ready();
+    const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
+    let automationId: string;
+    if (remembered) {
+      if (remembered.collectionPath !== input.collectionPath || remembered.field !== input.field ||
+        remembered.recordId !== input.recordId || remembered.pressedBy !== input.pressedBy) {
+        throw new Error("This press id already names another press.");
+      }
+      automationId = remembered.automationId;
+    } else {
+      await checkNew();
+      const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster());
+      if (state.kind !== "ready") throw new Error(state.reason);
+      automationId = state.automationId;
+    }
+    const pressed = await this.withLiveEngine(async (engine) => {
+      if (!remembered) {
+        try {
+          await engine.getCollectionRecord({ collectionPath: input.collectionPath, recordId: input.recordId, historyLimit: 1 });
+        } catch (error) {
+          if (error instanceof Error && error.message === RECORD_NOT_FOUND) {
+            throw new Error(`This record is no longer in ${collectionNamed(input.collectionPath).name}.`);
+          }
+          throw error;
+        }
+      }
+      return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy });
+    });
+    if (pressed === null) throw new Error("The workspace engine is not running.");
+    if (pressed.busy) return { busy: true };
+    const { claim } = pressed;
+    this.presses.delete(input.pressId);
+    this.presses.set(input.pressId, { collectionPath: input.collectionPath, field: input.field, recordId: input.recordId, pressedBy: input.pressedBy, automationId });
+    if (this.presses.size > REMEMBERED_PRESSES) this.presses.delete(this.presses.keys().next().value!);
+    return await this.answerPress(claim, watch);
+  }
+
+  /**
+   * How a press's claim stands: how its run ended, or, while it has not,
+   * the window watches it and the drain wakes, since a ledger's wake-up
+   * event can be dropped.
+   */
+  private async answerPress(
+    claim: Pick<AutomationClaimSummary, "automationId" | "claimId" | "state"> & { error?: string | null },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationPress> {
+    if (claim.state === "failed") return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    watch(claim.claimId, this.waitingFor.get(claim.claimId) ?? null);
+    this.notifyClaimed();
+    return { busy: false, claimId: claim.claimId, settled: null };
+  }
+
+  /**
+   * What each Button field shows in a dataset Collection, in order, by its
+   * table's name. `description` is the dataset as its host describes it to
+   * the person asking, so the access is theirs.
+   */
+  async datasetButtons(
+    datasetId: string,
+    buttons: ReadonlyArray<{ field: string; table: string }>,
+    description: DatasetDescription,
+  ): Promise<AutomationButtonState[]> {
+    await this.ready();
+    const collectionPath = await this.datasetFolder(datasetId);
+    const roster = await this.options.cachedRoster();
+    const states: AutomationButtonState[] = [];
+    for (const button of buttons) {
+      states.push(collectionPath === null
+        ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
+        : (await this.datasetButton(collectionPath, button, description, roster)).state);
+    }
+    return states;
+  }
+
+  /**
+   * Presses a ready button on one record of a dataset Collection, as
+   * `press` does in a document Collection. `recordId` is the record's
+   * primary key as JSON, and the record must be in the table now. The press
+   * claims in the dataset host's ledger, bound to the automation it was
+   * checked against. The ledger keeps each press 30 days with what it asked
+   * for, so the same press sent again answers its claim whatever changed
+   * since, a renamed button included; only a new press is checked.
+   */
+  async pressDataset(
+    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string },
+    description: DatasetDescription,
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<CollectionAutomationPress> {
+    await this.ready();
+    const collectionPath = await this.datasetFolder(input.datasetId);
+    if (collectionPath === null) throw new Error(DATASET_NOT_APPROVED);
+    const recordId = datasetRecordIdOf(input.recordId);
+    if (recordId === null) throw new Error(`This record is not in ${input.table}.`);
+    const request = createHash("sha256")
+      .update(JSON.stringify(["dohc-dataset-press-v1", input.datasetId, input.table, input.field, recordId, input.pressedBy])).digest("hex");
+    const known = await this.withLiveHost((ledger) => ({ press: ledger.pressed(input.pressId) }), true);
+    if (known === null) throw new Error("The workspace's dataset host is not open.");
+    if (known.press !== null) {
+      const { claim } = known.press;
+      if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy) throw new Error("This press id already names another press.");
+      return await this.answerPress(claim, watch);
+    }
+    const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster());
+    if (!("checked" in button)) throw new Error(button.state.reason);
+    const { datasetId, tableId, fieldId, automation } = button.checked;
+    const pressed = await this.withLiveHost(async (ledger) => {
+      // A dataset that moved to a server says so before anything reads it.
+      ledger.assertPressable(datasetId, { tableId, fieldId });
+      // Operations someone wrote are not read for dohc's own checks; the run
+      // passes the record's id, and the operation it invokes finds the record.
+      if (ledger.generated(datasetId) && !(await datasetRecordExists(ledger, datasetId, automation, recordId))) {
+        throw new Error(`This record is no longer in ${input.table}.`);
+      }
+      return ledger.press(datasetId, {
+        pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
+        tableId, fieldId, recordId, pressedBy: input.pressedBy,
+      });
+    }, true);
+    if (pressed === null) throw new Error("The workspace's dataset host is not open.");
+    if (pressed.kind === "busy") return { busy: true };
+    return await this.answerPress(pressed.claim, watch);
+  }
+
+  /**
+   * One dataset button's state, and for a ready one, the automation and the
+   * table and field ids it was checked with. Access comes first: the host
+   * must let the person write the button's table and use every operation a
+   * run of its automation calls, the reads the run makes as the owner
+   * included, and a person who cannot learns nothing about the automation.
+   * The rest is as for a document Collection's button.
+   */
+  private async datasetButton(
+    collectionPath: string,
+    button: { field: string; table: string | null },
+    description: DatasetDescription,
+    roster: ReachRoster,
+  ): Promise<
+    | { state: Exclude<AutomationButtonState, { kind: "ready" }> }
+    | { state: Extract<AutomationButtonState, { kind: "ready" }>; checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string } }
+  > {
+    const disabled = (reason: string) => ({ state: { kind: "disabled" as const, reason } });
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined) return disabled(DATASET_NOT_APPROVED);
+    const { definition } = dataset;
+    const table = datasetTableNamed(definition, button.table);
+    // A description of another dataset grants nothing here.
+    if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
+      return disabled(noAccessReason(table?.name ?? button.table ?? definition.name));
+    }
+    const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
+    if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
+    // A dataset that moved to a server lists its buttons with the reason a press would get.
+    const unpressable = await this.withLiveHost((host) => {
+      try {
+        host.assertPressable(definition.datasetId, { tableId: table.tableId, fieldId: field.fieldId });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    if (unpressable) return disabled(unpressable);
+    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, button.field,
+      (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
+    if (resolved.kind === "state") return { state: resolved.state };
+    const { automation } = resolved;
+    if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, dataset))) return disabled(noAccessReason(table.name));
+    const state = await this.runnableButtonState(collectionPath, automation, roster);
+    return state.kind === "ready"
+      ? { state, checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId } }
+      : { state };
+  }
+
+  /**
+   * The folder of the dataset Collection with this id, which holds its
+   * automations.yaml, for the ⚡ panel. Or why dohc cannot run its automations.
+   */
+  async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
+    await this.ready();
+    const collectionPath = await this.datasetFolder(datasetId);
+    return collectionPath === null ? { status: "cannot-run", reason: DATASET_NOT_APPROVED } : { status: "found", collectionPath };
+  }
+
+  /**
+   * The folder of the dataset Collection with this id, or null when no
+   * approved dataset has it. A person is asking about it, so a dataset the
+   * index lacks opens its host to be indexed.
+   */
+  private async datasetFolder(datasetId: string): Promise<string | null> {
+    const find = () => [...this.datasets].find(([, dataset]) => dataset.definition.datasetId === datasetId)?.[0] ?? null;
+    if (find() === null) await this.enqueue(() => this.indexDatasets(true));
+    return find();
+  }
+
+  /** A dataset Collection the index lacks, whose host may not be open yet: a person is asking about it, so open it. */
+  private async openDataset(collectionPath: string): Promise<void> {
+    if (!this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
+      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
+      await this.enqueue(() => this.indexDatasets(true));
+    }
+  }
+
+  /**
+   * A press the engine already has, after a restart or once this computer
+   * forgot it. The engine keeps presses 30 days, keyed `press:<press id>`,
+   * but answers only by automation, so each automation this button could
+   * name, switched on or not, is asked. The press it finds is checked
+   * against this one before anything joins it. A press whose automation
+   * left the file is not found, and is checked as new.
+   */
+  private async pressInEngine(input: { collectionPath: string; field: string; pressId: string }): Promise<RememberedPress | null> {
+    const file = this.files.get(input.collectionPath)?.file;
+    if (file?.status !== "read") return null;
+    const ids = file.entries.flatMap((entry) => {
+      if (entry.status === "valid") {
+        const { when, id } = entry.automation;
+        return when.kind === "button" && when.field === input.field && when.table === null ? [id] : [];
+      }
+      return entry.id !== null && namesButton(entry.raw, input.field) ? [entry.id] : [];
+    });
+    const key = `press:${input.pressId}`;
+    for (const id of new Set(ids)) {
+      const automationId = collectionAutomationId(input.collectionPath, id);
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      const claim = listed.claims.find((candidate) => "key" in candidate.trigger && candidate.trigger.key === key);
+      if (claim === undefined) continue;
+      if (claim.change.kind !== "button" || claim.recordId === null || claim.change.onBehalfOf === null) {
+        throw new Error("This press id already names another press.");
+      }
+      return { collectionPath: claim.collectionPath, field: input.field, recordId: claim.recordId, pressedBy: claim.change.onBehalfOf, automationId };
+    }
+    return null;
+  }
+
+  /**
+   * Whether a done claim's run changed anything. A run that wrote keeps its
+   * record until run history trims it. A run that stopped before it had a
+   * plan, as when its record left, saved none, and neither did a trimmed
+   * one, so without a record the run only ended.
+   */
+  private async doneOutcome(claim: Pick<AutomationClaimSummary, "automationId" | "claimId">): Promise<"done" | "ended"> {
+    const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
+    return runs.some((run) => !run.superseded && run.outcome?.state === "done") ? "done" : "ended";
+  }
+
+  /**
+   * A press from a shared view that the relay carried here: `automationId`
+   * names the automation the recipient saw, and `pressedBy` is the user the
+   * relay verified. It runs as a press on this computer, checked the same
+   * way, unless the button now runs another automation. Answers the press
+   * and the button's field, for the notice a failure sends.
+   */
+  async pressRelayed(
+    input: { automationId: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
+    watch: (claimId: string, waiting: PressWaitReason | null) => void,
+  ): Promise<{ pressed: CollectionAutomationPress; field: string | null }> {
+    await this.ready();
+    const id = parseCollectionAutomationId(input.automationId);
+    const automation = id ? this.definitionFor(id) : null;
+    if (id === null || automation === null || automation.when.kind !== "button" || automation.when.table !== null) {
+      throw new Error("This button no longer runs an automation in its Collection.");
+    }
+    const field = automation.when.field;
+    // The press runs only the automation the person saw when they pressed.
+    if (definitionHash(automation) !== input.definitionHash) throw new Error(changedSincePressed(field));
+    const resolved = resolveButton(this.files.get(id.collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(id.collectionPath).name);
+    if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
+      throw new Error(`${field} now runs another automation. Press it again.`);
+    }
+    // The engine's press id carries that definition, so the claim stays
+    // bound to it through a restart; the run refuses any other.
+    const pressId = relayedPressId(input.pressId, input.definitionHash);
+    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy }, watch);
+    return { pressed, field };
+  }
+
+  /**
+   * The claim the engine already holds for a relayed press, found without
+   * making one, or null when it holds none. A host that restarted resumes a
+   * press only through this; one with no claim goes back to the relay first.
+   */
+  async relayedClaim(input: { automationId: string; definitionHash: string; pressId: string }): Promise<{
+    claimId: string;
+    settled: Omit<PressSettled, "claimId"> | null;
+  } | null> {
+    const key = `press:${relayedPressId(input.pressId, input.definitionHash)}`;
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    const claim = listed.claims.find((candidate) => "key" in candidate.trigger && candidate.trigger.key === key);
+    if (!claim) return null;
+    if (claim.state === "failed") return { claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "done") return { claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    return { claimId: claim.claimId, settled: null };
+  }
+
+  private async buttonState(
+    collectionPath: string,
+    field: string,
+    roster: ReachRoster,
+  ): Promise<AutomationButtonState> {
+    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(collectionPath).name);
+    return resolved.kind === "state" ? resolved.state : await this.runnableButtonState(collectionPath, resolved.automation, roster);
+  }
+
+  /**
+   * The state of a button whose one automation is resolved: ready unless
+   * dohc cannot run the automation, or a step is stopped or waits for an
+   * editor to allow it. A dataset field formulas cannot see is hidden from
+   * them, and stops nothing.
+   */
+  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster): Promise<AutomationButtonState> {
+    const unsupported = this.cannotRun(collectionPath, automation);
+    if (unsupported !== null) return { kind: "disabled", reason: unsupported };
+    const automationId = collectionAutomationId(collectionPath, automation.id);
+    if (roster.kind === "unknown") return { kind: "ready", automationId };
+    const steps = this.reachSteps(collectionPath, automation);
+    for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: [], steps }).entries()) {
+      if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason };
+    }
+    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }])) {
+      return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.` };
+    }
+    return { kind: "ready", automationId };
+  }
+
+  /**
+   * Undo for a finished run: its fields go back where no one changed them
+   * since. In a document Collection the records it added move to the trash
+   * through `trash`; in a dataset each reversible edit goes back through its
+   * approved edit as the person on this computer, and added records stay.
+   */
+  async undo(
+    input: { automationId: string; claimId: string },
+    trash: (path: string) => Promise<void>,
+    // Stop and restore undoes only the runs under these definitions.
+    definitionHashes?: ReadonlySet<string>,
+  ): Promise<CollectionAutomationUndo> {
+    await this.ready();
+    const parsed = parseCollectionAutomationId(input.automationId);
+    const dataset = parsed !== null && this.datasets.has(parsed.collectionPath);
+    // Held from before the first read to the end, like Try again's.
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
+    this.changing.add(input.claimId);
+    try {
+      const claims = dataset
+        ? await this.withLiveHost((host) => host.claims(input.automationId), true)
+        : (await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId })))?.claims ?? null;
+      if (claims === null) throw new Error("The workspace engine is not running.");
+      const claim = claims.find((candidate) => candidate.claimId === input.claimId);
+      if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
+      if (claim.state !== "done" && claim.state !== "failed") {
+        return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
+      }
+      const stored = await this.options.store.runsOf(input.automationId, input.claimId);
+      const { unreadable } = stored;
+      const runs = definitionHashes
+        ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
+        : stored.runs;
+      if (unreadable) {
+        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
+      }
+      if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
+        return { status: "refused", reason: "You already undid this run." };
+      }
+      // Every run of the claim changed records, one a person started over
+      // under a newer definition too. One whose Undo stopped part way is
+      // undone again: what is already back stays as it is.
+      const pending = runs.filter((run) => run.undo !== "done");
+      // A dataset edit goes back only under the rules it ran under, so a
+      // rules change refuses before anything below is saved or sent. Dataset
+      // Undo reads every run of the claim, those saved undone too, so a retry
+      // after only some were saved done sends the same requests as before and
+      // replays their receipts instead of writing again.
+      if (dataset) {
+        const changed = await this.withLiveHost((host) => datasetUndoRulesChanged(host, runs), true);
+        if (changed === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
+        if (changed) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
+      }
+      // Saved before anything is reversed, so no run resumes over what this
+      // puts back, even if it stops part way.
+      for (const run of pending) {
+        if (run.undo === null) await this.options.store.save({ ...run, undo: "started", updatedAtMs: this.nowMs() });
+      }
+      const undone = dataset
+        ? await this.withLiveHost((host) => undoDatasetAutomationRuns(host, input.claimId, runs, async (request) => {
+          // Kept with the claim's newest run, whichever runs are saved undone.
+          const newest = runs.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+          await this.options.store.recordUndoRequest(newest, request);
+          newest.undoRequests.push(request);
+        }, this.runAbort.signal), true)
+        : await undoCollectionAutomationRuns({
+          withReads: (work) => this.withLiveEngine(work),
+          withRecordWrites: this.options.withRecordWrites,
+          trash,
+        }, pending, this.runAbort.signal);
+      if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
+      for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
+      return { status: "undone", ...undone };
+    } finally {
+      this.changing.delete(input.claimId);
+    }
+  }
+
+  /**
+   * Stop and restore: undoes every finished run in this computer's run
+   * history under one of these definitions, as Undo on each would, newest
+   * first as run history lists them, so each field goes back in turn. A
+   * claim's runs under other definitions stay. `left` counts the runs Undo
+   * refused, such as one still running.
+   */
+  async undoRunsOf(
+    definitions: ReadonlyArray<{ automationId: string; definitionHash: string }>,
+    trash: (path: string) => Promise<void>,
+  ): Promise<{ undone: number; left: number }> {
+    const hashes = new Map<string, Set<string>>();
+    for (const { automationId, definitionHash: hash } of definitions) {
+      hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
+    }
+    const result = { undone: 0, left: 0 };
+    for (const [automationId, wanted] of hashes) {
+      // A dataset's runs are in its host's ledger, which may not be open yet.
+      const parsed = parseCollectionAutomationId(automationId);
+      if (parsed !== null) await this.openDataset(parsed.collectionPath);
+      const listed = await this.claimHistory(automationId, false);
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      for (const claim of listed.claims) {
+        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+          .filter((run) => wanted.has(run.definitionHash));
+        if (runs.length === 0 || runs.every((run) => run.undo === "done")) continue;
+        const undone = await this.undo({ automationId, claimId: claim.claimId }, trash, wanted);
+        result[undone.status === "undone" ? "undone" : "left"] += 1;
+      }
+    }
+    return result;
+  }
+
+  /** The name an engine automation id's automation has in its file, or null. */
+  nameOf(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    return parsed ? (this.definitionFor(parsed)?.name ?? null) : null;
+  }
+
+  /** Waits for the open that reads the index. Only the workspace's own open starts one. */
+  private async ready(): Promise<void> {
+    if (this.opened === null) throw new Error("dohc is still opening this workspace's automations. Try again in a moment.");
+    await this.opened;
+  }
+
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const next = this.chain.then(async () => {
+      if (this.state !== "disposed") await work();
+    });
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  private withLiveEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null> {
+    if (this.state === "disposed" || this.state === "paused") return Promise.resolve(null);
+    return this.options.withEngine(work);
+  }
+
+  /** The dataset host, only while the executor runs. With `open`, opens it for what a person asked. */
+  private withLiveHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open = false): Promise<T | null> {
+    if (this.state === "disposed" || this.state === "paused") return Promise.resolve(null);
+    return this.options.withDatasetHost(work, open);
+  }
+
+  /** One automation's run history, and optionally the failure its notice offers, from the ledger that holds its claims. */
+  private async claimHistory(automationId: string, withFailure: boolean): Promise<ClaimHistory | null> {
+    const id = parseCollectionAutomationId(automationId);
+    const failureOf = (failures: ReadonlyArray<{ automationId: string; claimId: string }>) =>
+      failures.find((failure) => failure.automationId === automationId)?.claimId ?? null;
+    if (id !== null && this.datasets.has(id.collectionPath)) {
+      return await this.withLiveHost((ledger) => ({
+        claims: ledger.claims(automationId),
+        failure: withFailure ? failureOf(ledger.failures()) : null,
+      }));
+    }
+    return await this.withLiveEngine(async (engine) => ({
+      claims: (await engine.listAutomationClaims({ automationId })).claims,
+      failure: withFailure ? failureOf((await engine.listAutomationFailures()).failures) : null,
+    }));
+  }
+
+  private stopRuns(): void {
+    this.runAbort.abort();
+    this.runAbort = new AbortController();
+    if (this.busyTimer) clearTimeout(this.busyTimer);
+    this.busyTimer = null;
+  }
+
+  private async loadIndex(): Promise<void> {
+    const listed = await this.options.withEngine((engine) => engine.listCollections());
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    this.collections = new Set(listed.collections.map((collection) => collection.path));
+    this.files.clear();
+    this.schemaFields.clear();
+    this.datasets.clear();
+    for (const path of this.collections) await this.readFile(path);
+    for (const [path, definition] of (await this.datasetFolders()) ?? []) {
+      if (this.collections.has(path)) continue;
+      this.datasets.set(path, definition);
+      await this.readFile(path);
+    }
+    await this.readNamedSchemas();
+  }
+
+  /** Reads the field names of every Collection an automation names that the index lacks. */
+  private async readNamedSchemas(): Promise<void> {
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      for (const entry of indexed.file.entries) {
+        if (entry.status !== "valid") continue;
+        for (const { collection } of fieldsNamedBy(entry.automation, collectionPath)) {
+          if (this.schemaFields.has(collection)) continue;
+          const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
+          if (read === null) continue;
+          const parsed = read.truncated ? null : parseCollectionSchema(read.text);
+          // A degraded schema still lists the fields it could read; a file
+          // that is not a schema at all lists none.
+          const unreadable = parsed === null ||
+            parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping");
+          this.schemaFields.set(
+            collection,
+            unreadable ? "unreadable" : new Set(parsed.schema.fields.map((field) => field.name)),
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Why dohc does not run an automation now, or null. A field its
+   * Collection does not have keeps it off until someone fixes the file or
+   * the Collection: a write would add a field nobody defined.
+   */
+  private cannotRun(collectionPath: string, automation: Automation): string | null {
+    const unsupported = this.unsupportedIn(collectionPath, automation);
+    if (unsupported !== null) return unsupported;
+    for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
+      const fields = this.schemaFields.get(collection);
+      if (fields === "unreadable") {
+        return `dohc cannot read the fields of ${collectionNamed(collection).name}. Fix ${collection}/${COLLECTION_SCHEMA_FILENAME} to run this automation.`;
+      }
+      if (fields && !fields.has(field)) return `${field} is not a field in ${collectionNamed(collection).name}.`;
+    }
+    return null;
+  }
+
+  private async readFile(collectionPath: string): Promise<void> {
+    const parsed = await this.parsedFile(collectionPath);
+    if (parsed === undefined) this.files.delete(collectionPath);
+    else this.files.set(collectionPath, parsed);
+  }
+
+  private async parsedFile(collectionPath: string): Promise<IndexedFile | undefined> {
+    const read = await this.options.readText(`${collectionPath}/${AUTOMATIONS_FILE_NAME}`);
+    if (read === null) return undefined;
+    return {
+      file: read.truncated
+        ? { status: "unreadable", diagnostic: { code: "file-too-large", path: "" } }
+        : parseAutomationsFile(read.text),
+      contentHash: read.contentHash,
+    };
+  }
+
+  /**
+   * Each dataset Collection folder, with its approved rules. Null when dohc
+   * cannot run dataset automations, or the workspace has no dataset host. A
+   * dataset's descriptor sits beside its schema, in its Collection's folder.
+   * A dataset store that cannot open, or a dataset whose rules cannot be
+   * read, is reported and left out, so document automations still run.
+   */
+  private async datasetFolders(open = false): Promise<Map<string, IndexedDataset> | null> {
+    let listed: Awaited<ReturnType<DatasetAutomationHost["datasets"]>> | null;
+    try {
+      listed = await this.withLiveHost((host) => host.datasets(), open);
+    } catch (error) {
+      this.options.onError("open this workspace's dataset store", error);
+      return null;
+    }
+    if (listed === null) return null;
+    for (const { datasetId, error } of listed.failures) this.options.onError(`read dataset ${datasetId}'s rules`, error);
+    const folders = new Map<string, IndexedDataset>();
+    for (const definition of listed.definitions) {
+      const folder = posix.dirname(definition.schemaPath);
+      if (folder === ".") continue;
+      const read = await this.options.readText(`${folder}/${DATASET_FILE_NAME}`);
+      let described: unknown = null;
+      try {
+        described = read === null || read.truncated ? null : JSON.parse(read.text);
+      } catch {
+        // A descriptor that is not JSON names no dataset.
+      }
+      if (typeof described !== "object" || described === null || !("datasetId" in described) || described.datasetId !== definition.datasetId) continue;
+      // Only a dataset with automations needs its operation source and grants read.
+      const checked = await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`)
+        ? await this.withLiveHost((host) => ({ generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }))
+          .catch((error: unknown) => {
+            this.options.onError(`read dataset ${definition.datasetId}'s operations`, error);
+            return null;
+          })
+        : null;
+      folders.set(folder, { definition, generated: checked?.generated ?? false, grants: checked?.grants ?? { workspaceId: "", grants: [] } });
+    }
+    return folders;
+  }
+
+  /** Why dohc cannot run an automation in this indexed Collection yet, or null. */
+  private unsupportedIn(collectionPath: string, automation: Automation): string | null {
+    const dataset = this.datasets.get(collectionPath);
+    if (dataset === undefined) return unsupportedReason(automation);
+    const subscription = datasetSubscriptionFor(automation, dataset.definition);
+    return subscription !== null && "problem" in subscription ? subscription.problem : datasetAutomationProblem(automation, dataset);
+  }
+
+  /** The Collections each step reaches, for the reach check. */
+  private reachSteps(collectionPath: string, automation: Automation) {
+    const collection = collectionNamed(collectionPath);
+    const dataset = this.datasets.get(collectionPath);
+    return dataset !== undefined
+      ? datasetReachSteps(automation, collection, dataset, dataset.grants, this.chat)
+      : reachStepsOf(automation, collection, collectionNamed, this.chat);
+  }
+
+  private definitionFor(id: { collectionPath: string; id: string }): Automation | null {
+    const indexed = this.files.get(id.collectionPath);
+    if (indexed?.file.status !== "read") return null;
+    const entry = indexed.file.entries.find(
+      (candidate): candidate is Extract<AutomationEntry, { status: "valid" }> =>
+        candidate.status === "valid" && candidate.automation.id === id.id,
+    );
+    return entry?.automation ?? null;
+  }
+
+  /**
+   * Whether a run may write records in a Collection: this index knows it,
+   * and it keeps its records in documents, not a dataset. Each answer is
+   * kept for the one question it serves.
+   */
+  private writableCollections(): (path: string) => Promise<boolean> {
+    const datasets = new Map<string, Promise<boolean>>();
+    return async (path) => {
+      if (!this.collections.has(path)) return false;
+      const known = datasets.get(path) ?? this.options.pathExists(`${path}/dataset.json`);
+      datasets.set(path, known);
+      return !(await known);
+    };
+  }
+
+  /**
+   * Whether a run would get past the checks it makes before its first write,
+   * as far as this computer knows now: no step's saved reach verdict is
+   * stopped or held, and `writable` accepts every Collection a step names.
+   * Verdicts are saved at every roster listing, and a change to one raises
+   * `onAutomationsChanged`.
+   */
+  private async canRun(
+    automationId: string,
+    collectionPath: string,
+    automation: Automation,
+    writable: (path: string) => Promise<boolean>,
+  ): Promise<boolean> {
+    // Saved verdicts dohc cannot read hold every run until someone resets them.
+    if (this.verdictsUnreadable) return false;
+    const hash = definitionHash(automation);
+    const steps = this.reachSteps(collectionPath, automation);
+    for (const [index, reach] of steps.entries()) {
+      const step = reachStepId(reach, index);
+      // A stopped step fails the run, and a held one waits for a current editor.
+      const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
+      if (verdict === "stopped" || verdict === "held") return false;
+      if ("collection" in reach && !this.datasets.has(reach.collection.path) && !(await writable(reach.collection.path))) return false;
+    }
+    return true;
+  }
+
+  // Records when each schedule was added or switched on, at the index read
+  // that saw it, so a quick switch off and on between steps still counts.
+  private noteEnabledSchedules(opening: boolean): void {
+    const now = this.nowMs();
+    const next = new Map<string, number | null>();
+    for (const { automationId, automation } of this.everyAutomation()) {
+      if (!automation.enabled || automation.when.kind !== "schedule") continue;
+      const known = this.enabledSince.get(automationId);
+      next.set(automationId, known !== undefined ? known : opening ? null : now);
+    }
+    this.enabledSince = next;
+  }
+
+  /** Every automation dohc can run, whether or not it is switched on. */
+  private everyAutomation(): OwnedAutomation[] {
+    const automations: OwnedAutomation[] = [];
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      for (const entry of indexed.file.entries) {
+        if (entry.status !== "valid" || this.cannotRun(collectionPath, entry.automation) !== null) continue;
+        const automationId = collectionAutomationId(collectionPath, entry.automation.id);
+        automations.push({ automationId, collectionPath, automation: entry.automation });
+      }
+    }
+    return automations;
+  }
+
+  private desiredSubscriptions(): Map<string, StoredSubscription> {
+    const desired = new Map<string, StoredSubscription>();
+    for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+      if (!automation.enabled || this.datasets.has(collectionPath)) continue;
+      const trigger = automation.when;
+      if (trigger.kind === "group-message") {
+        if (!this.groupTriggersHere) continue;
+        const group = this.groups?.group(trigger.group);
+        if (!group || "problem" in group) continue;
+        desired.set(automationId, {
+          automationId, groupId: group.channelId, ...(trigger.startsWith !== null ? { startsWith: trigger.startsWith } : {}),
+        });
+        continue;
+      }
+      const subscription = subscriptionFor(trigger);
+      if (subscription !== null) desired.set(automationId, { automationId, path: collectionPath, ...subscription });
+    }
+    return desired;
+  }
+
+  private desiredDatasetSubscriptions(): Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }> {
+    const desired = new Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }>();
+    for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+      const definition = this.datasets.get(collectionPath)?.definition;
+      if (definition === undefined || !automation.enabled) continue;
+      // A button claims when pressed, so it watches nothing.
+      const watched = datasetSubscriptionFor(automation, definition);
+      if (watched === null || "problem" in watched) continue;
+      desired.set(automationId, { datasetId: definition.datasetId, subscription: { automationId, ...watched, definitionHash: definitionDigest(automation) } });
+    }
+    return desired;
+  }
+
+  /** Whether the executor wants the ledger that served this claim to keep claiming for its automation. */
+  private isSubscribed(held: HeldClaim): boolean {
+    return held.source === "engine"
+      ? this.desiredSubscriptions().has(held.claim.automationId)
+      : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId === held.claim.datasetId;
+  }
+
+  /** Why a Group-message automation's Group cannot start it, or null. */
+  private groupProblem(automation: Automation): string | null {
+    if (automation.when.kind !== "group-message") return null;
+    const group = this.groups?.group(automation.when.group);
+    return group && "problem" in group ? group.problem : null;
+  }
+
+  /** Finds each Group a Group-message automation names, for its subscription. */
+  private async loadGroups(): Promise<void> {
+    const groups = new Set(this.everyAutomation().flatMap(({ automation }) =>
+      automation.when.kind === "group-message" ? [automation.when.group] : []));
+    if (groups.size === 0) return;
+    try {
+      // Only Groups are read, so no roster is needed.
+      const directory = await this.options.chat.directory(
+        { kind: "owner", ownerUserId: null, grants: [] }, { groups, people: new Set() });
+      if (directory) this.groups = directory;
+    } catch (error) {
+      this.options.onError("find the Groups automations watch", error);
+    }
+  }
+
+  /**
+   * Runs `update` on the verdicts in order and saves them when it changed
+   * any. A step that starts or stops waiting for a current editor raises
+   * the hold notices once.
+   */
+  private updateVerdicts<T>(update: () => T, save = false): Promise<T> {
+    const next = this.verdictChain.then(async () => {
+      const before = this.verdictSeq;
+      const result = update();
+      // Nothing overwrites a file dohc could not read until someone resets it.
+      if (!this.verdictsUnreadable && (save || this.verdictSeq !== before)) {
+        // An edited automation starts its verdicts again, so the old
+        // definition's go.
+        const hashes = new Map(this.everyAutomation().map(({ automationId, automation }) => [automationId, definitionHash(automation)]));
+        for (const [key, verdict] of this.verdicts) {
+          const hash = hashes.get(verdict.automationId);
+          if (hash !== undefined && hash !== verdict.definitionHash) this.verdicts.delete(key);
+        }
+        await this.options.store.saveReachVerdicts([...this.verdicts.values()]);
+        // A step that stops, waits, or runs again changes which fields its
+        // automation sets.
+        this.options.onAutomationsChanged();
+      }
+      this.publishHolds();
+      return result;
+    });
+    this.verdictChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Raises the reach notices when the held or stopped steps differ from what they last showed. */
+  private publishHolds(): void {
+    const shown = this.verdictsUnreadable
+      ? ["unreadable"]
+      : [
+          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq}`),
+          ...this.stops().map((stop) => `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`),
+        ].sort();
+    if (isDeepStrictEqual(shown, this.publishedHolds)) return;
+    this.publishedHolds = shown;
+    this.options.onHoldsChanged();
+  }
+
+  /** What held these waiting claims cleared: the next drain runs them. */
+  private clearWaits(...reasons: WaitReason[]): void {
+    for (const [claimId, reason] of [...this.waitingFor]) {
+      if (reasons.includes(reason)) this.waitingFor.delete(claimId);
+    }
+    this.notifyClaimed();
+  }
+
+  /**
+   * Records each step's verdict under the roster. Returns whether any step
+   * of these automations is held. A step that starts to wait raises its
+   * notice once.
+   */
+  private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations: readonly OwnedAutomation[]): Promise<boolean> {
+    await this.loadChat(roster);
+    return await this.updateVerdicts(() => {
+      // Without the saved verdicts every step waits.
+      if (this.verdictsUnreadable) return automations.length > 0;
+      let held = false;
+      for (const { automationId, collectionPath, automation } of automations) {
+        const collection = collectionNamed(collectionPath);
+        const hash = definitionHash(automation);
+        const steps = this.reachSteps(collectionPath, automation);
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, index) => {
+          const step = reachStepId(steps[index]!, index);
+          const key = reachVerdictKey(automationId, hash, step);
+          const previous = this.verdicts.get(key);
+          const next = nextReachVerdict(previous, reach, automation.enabled);
+          if (next.verdict === "held") held = true;
+          if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor && previous.narrowed === next.narrowed) return;
+          this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
+        });
+      }
+      return held;
+    });
+  }
+
+  /**
+   * Diffs the automations that can run against the engine's subscriptions.
+   * `all` subscribes every one again, which heals a subscription the engine
+   * lost; subscribing replaces a pair's filter, so it is safe to repeat.
+   */
+  private async reconcile(all: boolean): Promise<void> {
+    await this.loadGroups();
+    // Asked first, so a computer the relay names no host for yet claims it
+    // before this decides, and does not drop its Group subscriptions only
+    // to add them again. Once a host is named this waits for nothing.
+    if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
+      await this.options.requestHost();
+    }
+    // Only a computer the relay names watches Groups.
+    const generation = await this.options.groupHost();
+    this.groupTriggersHere = generation !== null;
+    const desired = this.desiredSubscriptions();
+    let changed = false;
+    for (const [automationId, subscription] of [...this.subscribed]) {
+      if (isGroupSubscription(subscription)) continue;
+      // A subscription to another path goes; the same path is replaced in place.
+      const wanted = desired.get(automationId);
+      if (wanted && !isGroupSubscription(wanted) && wanted.path === subscription.path) continue;
+      const removed = await this.withLiveEngine((engine) =>
+        engine.unsubscribeAutomation({ automationId, path: subscription.path }),
+      );
+      // Engine unavailable: keep the entry so the next reconcile retries it.
+      if (removed === null) continue;
+      this.subscribed.delete(automationId);
+      changed = true;
+    }
+    for (const [automationId, subscription] of desired) {
+      if (isGroupSubscription(subscription)) continue;
+      if (!all && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
+      const subscribed = await this.withLiveEngine((engine) => engine.subscribeAutomation(subscription));
+      if (subscribed === null) continue;
+      this.subscribed.set(automationId, subscription);
+      changed = true;
+    }
+    if (changed) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    await this.reconcileGroups(generation, [...desired.values()].filter(isGroupSubscription), all);
+    await this.reconcileDatasets(all);
+  }
+
+  /**
+   * Off the host, the engine's Group subscriptions stop; on it, the engine
+   * watches exactly the Groups the automations watch, taking a new host
+   * generation's handover first. The engine is asked only when its set may
+   * differ from the one wanted.
+   */
+  private async reconcileGroups(generation: number | null, wanted: GroupSubscription[], all: boolean): Promise<void> {
+    const tracked = [...this.subscribed.values()].filter(isGroupSubscription);
+    if (generation === null) {
+      if (all || this.groupSubscriptionsUncertain || tracked.length > 0) await this.releaseEngineGroups();
+      return;
+    }
+    const byAutomation = (left: GroupSubscription, right: GroupSubscription) => left.automationId.localeCompare(right.automationId);
+    const same = isDeepStrictEqual([...tracked].sort(byAutomation), [...wanted].sort(byAutomation));
+    if (all || this.groupSubscriptionsUncertain || !same || this.watchedGeneration !== generation) {
+      await this.watchEngineGroups(generation, wanted);
+    }
+  }
+
+  /**
+   * The engine watches exactly these Groups at this host generation. A new
+   * generation first needs the relay's record: the engine changes nothing
+   * until it arrives, then takes a handover left here and claims each
+   * stored message no host decided, in one write.
+   */
+  private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
+    // A watch may land even when its answer is lost.
+    this.groupSubscriptionsUncertain = true;
+    const input = {
+      generation,
+      subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
+        startsWith === undefined ? { automationId, groupId } : { automationId, groupId, startsWith }),
+    };
+    let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
+    if (answer?.needsHandover) {
+      let relay: AutomationGroupRelayRecord;
+      try {
+        relay = await this.options.groupRelayRecord(generation);
+      } catch (error) {
+        // Nothing changed in the engine. The next sync pull asks again.
+        this.handoverUnread = true;
+        this.options.onError("read the Group handover", error);
+        return;
+      }
+      this.handoverUnread = false;
+      answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, relay }));
+    }
+    if (answer === null || answer.needsHandover) return;
+    for (const [automationId, subscription] of [...this.subscribed]) {
+      if (isGroupSubscription(subscription)) this.subscribed.delete(automationId);
+    }
+    for (const subscription of wanted) this.subscribed.set(subscription.automationId, subscription);
+    this.watchedGeneration = generation;
+    this.groupSubscriptionsUncertain = false;
+    await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    // A replay can skip a message too.
+    void this.groupMessagesArrived();
+  }
+
+  /**
+   * Group messages may have reached this computer. While it runs Group
+   * triggers, a message that started nothing because it was dated ahead of
+   * this computer's clock, or arrived after the coverage floor passed it,
+   * reaches the owner as one notice a day.
+   */
+  async groupMessagesArrived(): Promise<void> {
+    if (this.watchedGeneration === null) return;
+    let skips: Awaited<ReturnType<CollectionAutomationEngine["readAutomationGroupSkips"]>> | null;
+    try {
+      skips = await this.withLiveEngine((engine) => engine.readAutomationGroupSkips());
+    } catch (error) {
+      this.options.onError("read which Group messages started nothing", error);
+      return;
+    }
+    if (skips === null) return;
+    const newest: Array<[GroupMessagesSkipped, number | null]> = [["ahead", skips.aheadAtMs], ["late", skips.lateAtMs]];
+    for (const [reason, atMs] of newest) {
+      if (atMs === null || atMs <= this.groupSkipsTold[reason]) continue;
+      try {
+        await this.options.groupMessagesSkipped(reason, atMs);
+        this.groupSkipsTold[reason] = Math.max(this.groupSkipsTold[reason], atMs);
+      } catch (error) {
+        this.options.onError("tell the owner which Group messages started nothing", error);
+      }
+    }
+  }
+
+  /**
+   * Stops every Group subscription the engine holds for this workspace,
+   * tracked or not, in one engine write. Answers the Group handover, or null
+   * when the engine did not answer.
+   */
+  private async releaseEngineGroups(): Promise<AutomationReleaseGroupsResult | null> {
+    // The release may land even when its answer is lost.
+    this.groupSubscriptionsUncertain = true;
+    const released = await this.withLiveEngine((engine) => engine.releaseAutomationGroups());
+    if (released === null) return null;
+    const tracked = [...this.subscribed].filter(([, subscription]) => isGroupSubscription(subscription));
+    for (const [automationId] of tracked) this.subscribed.delete(automationId);
+    this.watchedGeneration = null;
+    this.groupSubscriptionsUncertain = false;
+    if (tracked.length > 0) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    return released;
+  }
+
+  /** The same diff against the dataset ledger, which keeps its own subscriptions. */
+  private async reconcileDatasets(all: boolean): Promise<void> {
+    const desired = this.desiredDatasetSubscriptions();
+    // A dataset store that cannot open stops only dataset automations.
+    await this.withLiveHost((ledger) => {
+      for (const { datasetId, ...current } of ledger.subscriptions()) {
+        if (!current.automationId.startsWith(COLLECTION_AUTOMATION_PREFIX)) continue;
+        const wanted = desired.get(current.automationId);
+        if (wanted?.datasetId === datasetId) {
+          if (!all && isDeepStrictEqual(current, wanted.subscription)) desired.delete(current.automationId);
+          continue;
+        }
+        ledger.unsubscribe(datasetId, current.automationId);
+      }
+      for (const { datasetId, subscription } of desired.values()) ledger.subscribe(datasetId, subscription);
+    }).catch((error: unknown) => this.options.onError("update dataset automation subscriptions", error));
+  }
+
+  private async drain(): Promise<void> {
+    // This drain's lifetime: a pause or close aborts it, and nothing it
+    // started writes or settles after that.
+    const stop = this.runAbort.signal;
+    const release: HeldClaim[] = [];
+    try {
+      // What the ledgers have not heard yet goes first.
+      await this.payOwed(true);
+      while (!stop.aborted) {
+        const held = await this.nextClaim();
+        if (held === null) return;
+        const { claimId } = held.claim;
+        // From here this drain owns the claim: it settles, waits, or is left
+        // to its ledger's recovery. One that still waits goes straight back.
+        const action = stop.aborted || this.waitingFor.has(claimId)
+          ? { kind: "release" as const }
+          : await this.execute(held, stop);
+        if (action === null) continue;
+        // Released at the end, so this drain does not take the claim again.
+        if (action.kind === "release") {
+          release.push(held);
+          if (action.waitsFor) {
+            this.waitingFor.set(claimId, action.waitsFor);
+            if (isPress(held)) this.options.onPressWaiting({ claimId, reason: action.waitsFor });
+          }
+          continue;
+        }
+        this.waitingFor.delete(claimId);
+        this.owed.set(claimId, { held, action });
+        if (!stop.aborted) await this.payOwed(true, claimId);
+      }
+    } catch (error) {
+      this.options.onError("drain Collection automation claims", error);
+    } finally {
+      for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
+      if (!stop.aborted) await this.payOwed(true);
+    }
+  }
+
+  /** The engine's oldest pending claim, else the dataset ledger's. */
+  private async nextClaim(): Promise<HeldClaim | null> {
+    const claim = await this.withLiveEngine((engine) => engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }));
+    if (claim !== null) return { source: "engine", claim };
+    const dataset = await this.withLiveHost((ledger) => ledger.next());
+    return dataset === null ? null : { source: "dataset", claim: dataset };
+  }
+
+  /**
+   * Sends each owed release and settle, or only the one for `claimId`. The
+   * claim stays owed while the engine gives no answer. When the engine
+   * refuses and its claim list shows the claim no longer running, its
+   * recovery took the claim back, so nothing is owed and nothing settled.
+   */
+  private async payOwed(live: boolean, claimId?: string): Promise<void> {
+    for (const [id, { held, action }] of [...this.owed]) {
+      if (claimId !== undefined && id !== claimId) continue;
+      let answered: boolean;
+      try {
+        answered = (await this.answer(held, action, live)) === true;
+      } catch (error) {
+        // The dataset ledger refuses only an attempt that is no longer current.
+        if ((held.source === "dataset" || isInvalidInputRefusal(error)) && (await this.stillRunning(held, live)) === false) {
+          this.owed.delete(id);
+          this.waitingFor.delete(id);
+        } else {
+          this.options.onError(`${action.kind} automation claim "${id}"`, error);
+        }
+        continue;
+      }
+      if (!answered) continue;
+      this.owed.delete(id);
+      if (action.kind === "settle" && action.input.state === "failed") this.options.onFailuresChanged();
+      if (action.kind === "settle") {
+        await action.settled();
+        if (isPress(held)) {
+          this.options.onPressSettled({
+            claimId: id,
+            outcome: action.outcome,
+            error: action.input.state === "failed" ? errorText(action.input.error) : null,
+          });
+        }
+      }
+    }
+  }
+
+  /** Tells the claim's ledger to release or settle it. Null when that ledger is unavailable. */
+  private answer(held: HeldClaim, action: ClaimAction, live: boolean): Promise<true | null> {
+    const settle: SettleInput | null = action.kind === "release" ? null
+      : action.input.state === "failed" ? { state: "failed", error: errorText(action.input.error) } : { state: "done" };
+    if (held.source === "dataset") {
+      return this.withLedger(live, (ledger) => {
+        if (settle === null) ledger.release(held.claim);
+        else ledger.settle(held.claim, settle);
+        return true as const;
+      });
+    }
+    const claimId = held.claim.claimId;
+    return this.withEngineAt(live, async (engine) => {
+      if (settle === null) await engine.releaseAutomationClaim({ claimId });
+      else await engine.settleAutomationClaim(settle.state === "failed" ? { claimId, state: "failed", error: settle.error } : { claimId, state: "done" });
+      return true as const;
+    });
+  }
+
+  /** The engine, or at close any engine still answering. */
+  private withEngineAt<T>(live: boolean, work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null> {
+    return live ? this.withLiveEngine(work) : this.options.withEngine(work);
+  }
+
+  /** The dataset ledger, or at close any ledger still open. */
+  private withLedger<T>(live: boolean, work: (ledger: DatasetAutomationHost) => T | Promise<T>): Promise<T | null> {
+    return live ? this.withLiveHost(work) : this.options.withDatasetHost(work, false);
+  }
+
+  /** Whether the claim's ledger still holds this attempt as running, or null when it cannot say. */
+  private async stillRunning(held: HeldClaim, live: boolean): Promise<boolean | null> {
+    const { automationId, claimId } = held.claim;
+    try {
+      if (held.source === "dataset") {
+        const listed = await this.withLedger(live, (ledger) => ledger.claims(automationId));
+        const found = listed?.find((candidate) => candidate.claimId === claimId);
+        return found === undefined ? null : found.state === "running" && found.attempts === held.claim.attempts;
+      }
+      const listed = await this.withEngineAt(live, (engine) => engine.listAutomationClaims({ automationId }));
+      const found = listed?.claims.find((candidate) => candidate.claimId === claimId);
+      return found === undefined ? null : found.state === "running";
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Runs one claim this drain holds, and says what the engine must hear.
+   * Null leaves the claim running for the engine's recovery: a write that
+   * outlived the deadline may still land.
+   */
+  private async execute(held: HeldClaim, stop: AbortSignal): Promise<ClaimAction | null> {
+    try {
+      return await this.executeHeld(held, stop);
+    } catch (error) {
+      this.options.onError(`run automation claim "${held.claim.claimId}"`, error);
+      return { kind: "release" };
+    }
+  }
+
+  private async executeHeld(held: HeldClaim, stop: AbortSignal): Promise<ClaimAction | null> {
+    const release = { kind: "release" } as const;
+    const { claim } = held;
+    if (this.changing.has(claim.claimId)) return release;
+    const id = parseCollectionAutomationId(claim.automationId);
+    // The definition is read before the roster: a pull that lands while the
+    // roster lists cannot bring a step from an editor the roster lacks.
+    const automation = id ? this.definitionFor(id) : null;
+    const definition = id ? this.datasets.get(id.collectionPath)?.definition : undefined;
+    // An engine claim's change is in a document Collection, and not in a
+    // Collection inside this one, which the subscription's path also covers.
+    // A dataset claim's change is in the dataset this Collection keeps.
+    const inCollection = id !== null && (held.source === "engine"
+      ? definition === undefined && held.claim.collectionPath === id.collectionPath
+      : definition?.datasetId === held.claim.datasetId);
+    if (id === null || automation === null || !automation.enabled || !inCollection) {
+      // The automation is gone or off, so its subscription is stale.
+      if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
+      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: async () => undefined };
+    }
+    // A relayed press runs only the automation its presser saw.
+    const bound = held.source === "engine" ? boundDefinition(held.claim) : null;
+    if (bound !== null && bound !== definitionHash(automation) && automation.when.kind === "button") {
+      return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+    }
+    // A claim this version cannot run, or that names a field its Collection
+    // lacks, fails with the reason the panel shows, so it reaches the failure
+    // notice and Try again runs it once that is fixed.
+    const unsupported = this.cannotRun(id.collectionPath, automation);
+    if (unsupported !== null) {
+      return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+    }
+    // Every step needs the roster, even one inside the Collection: someone
+    // with Edit on the file alone is an editor who cannot edit its records.
+    const roster = await this.options.roster();
+    if (stop.aborted) return release;
+    if (roster.kind === "unknown") {
+      // A step that acts as you needs to know who you are now; waiting could
+      // mean waiting for a sign-in, so it fails with the reason instead.
+      if (wakesAgent(automation)) {
+        const collection = collectionNamed(id.collectionPath);
+        const steps = this.reachSteps(id.collectionPath, automation);
+        const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps })
+          .find((reach) => !reach.allowed);
+        const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      }
+      return { kind: "release", waitsFor: "roster" };
+    }
+    const stepHeld = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
+    // A step that reach allows only because an editor left waits for a
+    // current editor to confirm it.
+    if (stop.aborted) return release;
+    if (stepHeld) return { kind: "release", waitsFor: "held" };
+    // A relayed press runs only on the computer that still runs the
+    // workspace's automations, and holds off a handover while its run
+    // writes, new or resumed after a restart. After a handover it runs
+    // nowhere. A claim that waits never gets here, so it holds nothing.
+    let hostHold: (() => void) | undefined;
+    if (held.source === "engine" && boundDefinition(held.claim) !== null && this.options.holdForHost) {
+      const taken = this.options.holdForHost();
+      if (taken === null) {
+        return {
+          kind: "settle",
+          input: { state: "failed", error: "This workspace's automations moved to another computer before this press ran." },
+          outcome: "failed",
+          settled: () => this.pruneRuns(claim.automationId),
+        };
+      }
+      hostHold = taken;
+    }
+    const collection = collectionNamed(id.collectionPath);
+    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => held.source === "engine"
+      ? runCollectionAutomation(this.runDependencies(), { claim: held.claim, automation, collection, roster, signal, stopped: stop })
+      : runDatasetAutomation({ ...this.runDependencies(), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
+        { claim: held.claim, automation, collection, roster, signal, stopped: stop }), hostHold);
+    if (outcome === null) return null;
+    // A pause or close stopped the run; its progress is saved, and the next
+    // drain resumes it.
+    if (stop.aborted) return release;
+    switch (outcome.kind) {
+      case "wait":
+        // A synced workspace with no session waits for one: a post written
+        // now would reach nobody.
+        if (outcome.reason === "session") return { kind: "release", waitsFor: "session" };
+        if (outcome.reason === "held") return { kind: "release", waitsFor: "held" };
+        if (outcome.reason === "roster") return { kind: "release", waitsFor: "roster" };
+        if (outcome.reason !== "busy") return release;
+        this.scheduleBusyRetry();
+        return { kind: "release", waitsFor: "busy" };
+      case "done":
+      case "skipped":
+        await this.countTimeout(claim.automationId, false);
+        return { kind: "settle", input: { state: "done" }, outcome: outcome.kind, settled: () => this.markSettled(claim, automation) };
+      case "failed-before":
+        // Its run was counted when it failed.
+        return { kind: "settle", input: { state: "failed", error: outcome.error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      case "failed": {
+        let error = outcome.error;
+        if (await this.countTimeout(claim.automationId, outcome.timedOut) >= TIMEOUTS_BEFORE_SWITCH_OFF) {
+          const note = await this.switchOff(id.collectionPath, automation, stop);
+          if (note === null) return release;
+          error = `${error} ${note}`;
+        }
+        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.pruneRuns(claim.automationId) };
+      }
+    }
+  }
+
+  /**
+   * Counts a run that timed out, or clears the count, and returns it. The
+   * count stays until the automation is switched off.
+   */
+  private async countTimeout(automationId: string, timedOut: boolean): Promise<number> {
+    const count = timedOut ? (this.timeouts.get(automationId) ?? 0) + 1 : 0;
+    if (count === (this.timeouts.get(automationId) ?? 0)) return count;
+    if (count === 0) this.timeouts.delete(automationId);
+    else this.timeouts.set(automationId, count);
+    await this.options.store.saveTimeouts(this.timeouts);
+    return count;
+  }
+
+  /** The engine has the claim as done, so its saved run can leave run history in time. */
+  private async markSettled(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation): Promise<void> {
+    try {
+      const runs = await runsForClaim(this.options.store, claim, automation);
+      if (!runs.unreadable && runs.done && !runs.done.settled) {
+        await this.options.store.save({ ...runs.done, settled: true });
+      }
+    } catch (error) {
+      this.options.onError(`record automation claim "${claim.claimId}" as done`, error);
+    }
+    await this.pruneRuns(claim.automationId);
+  }
+
+  /**
+   * Trims the automation's saved runs. A failed run keeps what Try again
+   * needs while run history shows its claim among the newest, or while its
+   * failure notice offers it.
+   */
+  private async pruneRuns(automationId: string): Promise<void> {
+    try {
+      await this.options.store.prune(automationId, async () => {
+        const read = await this.claimHistory(automationId, true);
+        if (read === null) return null;
+        return new Set([
+          ...read.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
+          ...(read.failure === null ? [] : [read.failure]),
+        ]);
+      });
+    } catch (error) {
+      this.options.onError(`prune runs of "${automationId}"`, error);
+    }
+  }
+
+  /**
+   * The run, with a deadline that aborts the signal every write receives.
+   * The claim settles only after the run has returned, so no write lands
+   * after it. Null when the executor stopped, or when a write outlived the
+   * deadline's grace: the claim stays running for the engine's recovery.
+   */
+  private async runWithDeadline(
+    claimId: string,
+    stopped: AbortSignal,
+    runClaim: (signal: AbortSignal) => Promise<CollectionAutomationRunOutcome>,
+    /** Called once the run's writes have really stopped. */
+    onStopped?: () => void,
+  ): Promise<CollectionAutomationRunOutcome | null> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    let started = false;
+    stopped.addEventListener("abort", abort, { once: true });
+    const cancelDeadline = (this.options.deadline ?? startDeadline)(abort);
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const outlived = new Promise<"outlived">((resolve) => {
+      controller.signal.addEventListener("abort", () => {
+        grace = setTimeout(() => resolve("outlived"), DEADLINE_GRACE_MS);
+      }, { once: true });
+    });
+    try {
+      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome => ({
+        kind: "failed",
+        error: errorText(error),
+        timedOut: controller.signal.aborted,
+      }));
+      // The hold ends only when the run's writes have really stopped, even
+      // after the deadline's grace, or a close, gave up waiting for them.
+      started = true;
+      void run.finally(() => onStopped?.());
+      const outcome = await Promise.race([run, outlived]);
+      if (outcome === "outlived") {
+        this.options.onError(`run automation claim "${claimId}"`, new Error("A write did not stop after the deadline."));
+        return null;
+      }
+      return outcome;
+    } finally {
+      cancelDeadline();
+      clearTimeout(grace);
+      stopped.removeEventListener("abort", abort);
+      if (!started) onStopped?.();
+    }
+  }
+
+  /**
+   * Keeps each formula-named person's verdict under the roster, as
+   * recordVerdicts does for steps. A person an editor's leaving allowed
+   * waits for Allow.
+   */
+  private async recipientVerdicts(input: Parameters<CollectionAutomationRunDependencies["recipientVerdicts"]>[0]) {
+    return await this.updateVerdicts(() => input.recipients.map(({ step: ordinal, userId, name, action, reach }) => {
+      const step = String(ordinal);
+      // Without the saved verdicts every step waits.
+      if (this.verdictsUnreadable) return "held" as const;
+      const key = reachVerdictKey(input.automationId, input.definitionHash, step, userId);
+      const previous = this.verdicts.get(key);
+      const next = nextReachVerdict(previous, reach, true);
+      if (previous?.verdict !== next.verdict || previous.stoppedFor !== next.stoppedFor) {
+        this.verdicts.set(key, {
+          automationId: input.automationId, definitionHash: input.definitionHash, step,
+          recipient: { userId, name, action }, ...next, seq: ++this.verdictSeq,
+        });
+      }
+      return next.verdict;
+    }));
+  }
+
+  /** Finds where automations post again, when any automation does. */
+  private async loadChat(roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<void> {
+    if (!this.everyAutomation().some(({ automation }) => sendsMessages(automation) || automation.when.kind === "group-message")) return;
+    try {
+      const sending = this.everyAutomation().map(({ automation }) => automation)
+      .filter((automation) => sendsMessages(automation) || automation.when.kind === "group-message");
+      this.chat = (await this.options.chat.directory(roster, chatNeedsOf(sending))) ?? this.chat;
+    } catch (error) {
+      this.options.onError("read where automations post", error);
+    }
+  }
+
+  private runDependencies(): CollectionAutomationRunDependencies {
+    return {
+      withReads: (work) => this.withLiveEngine(work),
+      withRecordWrites: this.options.withRecordWrites,
+      isCollection: (path) => this.collections.has(path),
+      isDatasetCollection: (path) => this.options.pathExists(`${path}/dataset.json`),
+      personName: this.options.personName,
+      evaluator: this.options.evaluator,
+      store: this.options.store,
+      nowMs: this.nowMs,
+      chat: this.options.chat,
+      readMessageBody: this.options.readMessageBody,
+      recipientVerdicts: (input) => this.recipientVerdicts(input),
+      postNotice: this.options.postNotice,
+    };
+  }
+
+  private scheduleBusyRetry(): void {
+    if (this.busyTimer) return;
+    this.busyTimer = setTimeout(() => {
+      this.busyTimer = null;
+      this.clearWaits("busy");
+    }, BUSY_RETRY_MS);
+    this.busyTimer.unref?.();
+  }
+
+  /**
+   * Writes `enabled: false` for an automation whose runs keep timing out,
+   * so it cannot hold the workspace's drain. The index takes the change at
+   * once, so a claim already waiting does not run it again. Returns the
+   * sentence the failure notice adds, or null when a pause or close stopped
+   * the run before the write.
+   */
+  private async switchOff(collectionPath: string, automation: Automation, stop: AbortSignal): Promise<string | null> {
+    const path = `${collectionPath}/${AUTOMATIONS_FILE_NAME}`;
+    const name = `"${automation.name}"`;
+    try {
+      const read = await this.options.readText(path);
+      const parsed = read && !read.truncated ? parseAutomationsFile(read.text) : null;
+      if (read && !read.truncated && parsed?.status === "read") {
+        const off = (entries: readonly AutomationEntry[]) => entries.map((entry): AutomationEntry =>
+          entry.status === "valid" && entry.automation.id === automation.id
+            ? { status: "valid", automation: { ...entry.automation, enabled: false } }
+            : entry);
+        const written = writeAutomationsFile(off(parsed.entries));
+        if (stop.aborted) return null;
+        if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash)).status === "written") {
+          const automationId = collectionAutomationId(collectionPath, automation.id);
+          this.timeouts.delete(automationId);
+          await this.options.store.saveTimeouts(this.timeouts);
+          const indexed = this.files.get(collectionPath);
+          if (indexed?.file.status === "read") {
+            this.files.set(collectionPath, { ...indexed, file: { status: "read", entries: off(indexed.file.entries) } });
+          }
+          return `dohc switched off ${name} after ${TIMEOUTS_BEFORE_SWITCH_OFF} runs in a row took too long. Fix it, then switch it on again.`;
+        }
+      }
+    } catch (error) {
+      this.options.onError(`switch off automation "${automation.id}"`, error);
+    }
+    return `${name} took too long ${TIMEOUTS_BEFORE_SWITCH_OFF} times in a row, and dohc could not switch it off. Switch it off in ${path}.`;
+  }
+
+  private async dropStaleSubscription(held: HeldClaim): Promise<void> {
+    if (this.isSubscribed(held)) return;
+    const { automationId } = held.claim;
+    if (held.source === "dataset") {
+      await this.withLiveHost((ledger) => ledger.unsubscribe(held.claim.datasetId, automationId));
+      return;
+    }
+    // A Group's subscriptions go as a whole at the next reconcile.
+    if (held.claim.change.kind === "message") return;
+    const id = parseCollectionAutomationId(automationId);
+    if (id === null) return;
+    const stored = this.subscribed.get(automationId);
+    const path = stored && !isGroupSubscription(stored) ? stored.path : id.collectionPath;
+    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path }));
+    if (removed !== null && this.subscribed.delete(automationId)) {
+      await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    }
+  }
+}
+
+type RecordSubscription = Extract<StoredSubscription, { path: string }>;
+type GroupSubscription = Extract<StoredSubscription, { groupId: string }>;
+const isGroupSubscription = (subscription: StoredSubscription): subscription is GroupSubscription => "groupId" in subscription;
+
+function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
+  return reach.kind === "post"
+    ? { target: reach.group.name, action: "post" as const }
+    : reach.kind === "read-group"
+      ? { target: reach.group.name, action: "read" }
+    : reach.kind === "notify"
+      ? { target: reach.person.name, action: "notify" }
+    : reach.kind === "personal"
+      ? { target: "your agent", action: "wake" }
+    : "collection" in reach
+      ? { target: reach.collection.name, action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" as const : "change" as const }
+      : null;
+}

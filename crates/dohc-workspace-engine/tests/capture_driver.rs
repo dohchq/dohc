@@ -1263,7 +1263,7 @@ async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
     )));
     let opening_transport = Arc::clone(&transport);
     let root = scratch.path().to_path_buf();
-    let mut opening = tokio::spawn(async move {
+    let opening = tokio::spawn(async move {
         opening_transport
             .call(
                 RequestContext::unbounded(),
@@ -1279,17 +1279,25 @@ async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
             )
             .await
     });
-    probe.wait_until_paused().await;
+    tokio::time::timeout(WAIT, async {
+        probe.wait_until_paused().await;
+        probe.wait_until_open_waiting().await;
+    })
+    .await
+    .expect("open must park at the readiness barrier while the baseline is paused");
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut opening)
-            .await
-            .is_err(),
+        !probe.is_open_ready(),
+        "the paused small baseline must keep the readiness barrier closed"
+    );
+    assert!(
+        !opening.is_finished(),
         "a small baseline must finish before workspace.open returns"
     );
 
     probe.release();
-    let opened = opening
+    let opened = tokio::time::timeout(WAIT, opening)
         .await
+        .expect("open must finish after releasing the baseline")
         .expect("open task")
         .expect("workspace open after baseline");
     let handle: WorkspaceHandle =
@@ -1334,13 +1342,12 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     ));
     let mut events = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let handle = tokio::time::timeout(
-        Duration::from_secs(2),
-        open_workspace(&transport, &scratch, 1),
-    )
-    .await
-    .expect("fresh open must not wait for the paused import");
-    probe.wait_until_paused().await;
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .expect("fresh open must not wait for the paused import");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("initial apply must reach the pause seam");
 
     let status = transport
         .call(
@@ -1665,12 +1672,9 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
     ));
     let mut events = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let handle = tokio::time::timeout(
-        Duration::from_secs(2),
-        open_workspace(&transport, &scratch, 1),
-    )
-    .await
-    .expect("fresh open must not wait for the initial apply");
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .expect("fresh open must not wait for the initial apply");
     tokio::time::timeout(WAIT, probe.wait_until_apply_worker_paused())
         .await
         .expect("retry plain apply worker must reach the pause seam");
@@ -1806,7 +1810,7 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
 
         let opening_transport = Arc::clone(&transport);
         let root = scratch.path().to_path_buf();
-        let mut opening = tokio::spawn(async move {
+        let opening = tokio::spawn(async move {
             opening_transport
                 .call(
                     RequestContext::unbounded(),
@@ -1822,11 +1826,18 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
                 )
                 .await
         });
-        probe.wait_until_paused().await;
+        tokio::time::timeout(WAIT, async {
+            probe.wait_until_paused().await;
+            probe.wait_until_open_waiting().await;
+        })
+        .await
+        .expect("strict open must park at the readiness barrier while the baseline is paused");
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut opening)
-                .await
-                .is_err(),
+            !probe.is_open_ready(),
+            "the paused strict baseline must keep the readiness barrier closed"
+        );
+        assert!(
+            !opening.is_finished(),
             "{} must not release before its baseline",
             if unreadable_policy {
                 "unknown policy"
@@ -1835,8 +1846,9 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
             }
         );
         probe.release();
-        let opened = opening
+        let opened = tokio::time::timeout(WAIT, opening)
             .await
+            .expect("strict open must finish after releasing the baseline")
             .expect("open task")
             .expect("workspace open after baseline");
         let handle: WorkspaceHandle =
@@ -1945,11 +1957,16 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
     let transport = InProcessTransport::new(Arc::new(
         EngineService::with_capture_apply_probe_for_harness(probe.clone()),
     ));
-    let handle = open_workspace(&transport, &scratch, 1).await;
-    probe.wait_until_paused().await;
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .expect("fresh open must not wait for the paused import");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("initial apply must reach the pause seam");
 
+    // Keep the pause held: close must cancel it without a test-side release.
     tokio::time::timeout(
-        Duration::from_secs(2),
+        WAIT,
         transport.call(
             RequestContext::unbounded(),
             request(2, "workspace.close", Some(handle), json!({})),
@@ -1958,6 +1975,10 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
     .await
     .expect("close must cancel between bounded import chunks")
     .expect("close");
+    assert!(
+        !probe.is_apply_blocked(),
+        "close cancelled the paused initial apply without releasing its gate"
+    );
 
     let reopened = open_workspace(&transport, &scratch, 3).await;
     wait_for_text(&transport, &reopened, "seed.md", Some("survives restart")).await;

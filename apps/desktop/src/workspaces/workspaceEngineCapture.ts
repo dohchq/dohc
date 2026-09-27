@@ -1575,6 +1575,7 @@ export function createWorkspaceEngineCapture(
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+  const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
@@ -3513,6 +3514,7 @@ export function createWorkspaceEngineCapture(
         options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
+          captureWaitAbort.signal,
         ),
       );
 
@@ -6528,6 +6530,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
+      captureWaitAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;

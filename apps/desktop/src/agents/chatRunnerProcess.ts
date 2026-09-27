@@ -167,7 +167,7 @@ export function createChatRunnerProcess(
   }
 
   function runnerEnvironment(input: {
-    threadId: string;
+    threadId?: string;
     runId: string;
   }): NodeJS.ProcessEnv {
     const cliBin = resolveDohcCliBinDirectory({
@@ -190,7 +190,7 @@ export function createChatRunnerProcess(
 
   function spawnConfiguredRunner(input: {
     rootPath: string;
-    threadId: string;
+    threadId?: string;
     runId: string;
     logPath: string;
     command: string;

@@ -2517,6 +2517,31 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
     let store =
         dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 10)
             .expect("store");
+    // Older orphan rows remain accessible through watcher.status, but cannot
+    // consume the page of named copies or violate its nonempty-path contract.
+    for n in 0..100 {
+        let job_id = format!("orphan-{n}");
+        let name = format!("h{}.0", dohc_engine_storage::hex_sha256(job_id.as_bytes()));
+        write_file(
+            scratch.path(),
+            &format!(".dohc/engine/displaced/{name}"),
+            b"orphan bytes",
+        );
+        store
+            .keep_displacement(
+                &dohc_engine_storage::DisplacementSpec {
+                    job_id,
+                    workspace_id: workspace_id.clone(),
+                    target_path: String::new(),
+                    displaced_name: name,
+                    expected_sha256: String::new(),
+                    content_sha256: None,
+                    now_ms: 9,
+                },
+                Some(&dohc_engine_storage::hex_sha256(b"orphan bytes")),
+            )
+            .expect("keep orphan");
+    }
     let id = store
         .open_displacement(&dohc_engine_storage::DisplacementSpec {
             job_id: "job".to_owned(),
@@ -2542,6 +2567,9 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
         .expect("keep");
     drop(store);
 
+    let status = call(&transport, &handle, 9, "watcher.status", json!({})).await;
+    let recovery = status["keptFiles"].as_array().expect("recovery copies");
+    assert_eq!(recovery.iter().filter(|copy| copy[0] == "").count(), 100);
     let listed = call(&transport, &handle, 10, "keptCopies.list", json!({})).await;
     assert_eq!(
         listed,

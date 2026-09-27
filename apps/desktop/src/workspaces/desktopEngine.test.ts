@@ -83,7 +83,7 @@ function fixture() {
   let quitting = false;
   const dependencies: Dependencies = {
     findWorkspace: id => rows.get(id) ?? null,
-    app: { isPackaged: false, getAppPath: vi.fn(() => "app-root"), quit: vi.fn() },
+    app: { isPackaged: false, getAppPath: vi.fn(() => "app-root") },
     dialog: { showErrorBox: vi.fn() },
     process: { env: {}, resourcesPath: "resources" },
     createRustEngineDaemon: vi.fn((input) => {
@@ -133,6 +133,18 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("passes account changes to relay-session cleanup", async () => {
+    const f = fixture();
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const close = vi.spyOn(f.engine.relayClient!, "closeAll").mockResolvedValue(undefined);
+      await f.engine.closeAllRelayTransportWorkspaces({ accountChanged: true });
+      expect(close).toHaveBeenCalledWith({ accountChanged: true });
+    } finally {
+      await f.close();
+    }
+  });
+
   it("discovers remaining configured owners after another workspace closes", async () => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
@@ -360,7 +372,7 @@ describe("desktop engine construction", () => {
     } finally { await f.close(); }
   });
 
-  it("contains binary path failure, shows the startup dialog, and takes ordinary quit", async () => {
+  it("contains binary path failure, and shows the startup dialog", async () => {
     const f = fixture(); const error = new Error("binary path failed");
     f.dependencies.defaultEngineBinaryPath = () => { throw error; };
     const engine = createDesktopEngine(f.dependencies);
@@ -370,31 +382,31 @@ describe("desktop engine construction", () => {
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Rust engine failed to start",
         "binary path failed\n\nThe desktop cannot start without the Rust engine.");
       expect(f.dependencies.recordEngineProblem).toHaveBeenCalledWith(error, "startup");
-      expect(f.dependencies.app.quit).toHaveBeenCalledOnce();
       expect(engine.daemon).toBeNull(); expect(engine.sessions).toBeNull(); expect(engine.relayClient).toBeNull();
     } finally { await f.close(); }
   });
 
-  it("waits for failed-start stop before clearing constructed handles and quitting", async () => {
+  it("waits for failed-start stop before clearing constructed handles and reporting the failure", async () => {
     const f = fixture(); const held = deferred();
     f.client.exitWait = held.promise;
     const error = new Error("marks failed");
     f.dependencies.launchMarks.daemonReady = () => { throw error; };
+    let settled = false;
     const started = f.engine.start();
+    void started.then(() => { settled = true; });
     try {
       await f.client.closed.promise;
       expect(f.engine.daemon).toBe(f.daemons[0]);
       expect(f.engine.sessions).toBeInstanceOf(EngineWorkspaceSessions);
       expect(f.engine.relayClient).toBeInstanceOf(EngineRelayClient);
-      expect(f.dependencies.app.quit).not.toHaveBeenCalled();
+      expect(settled).toBe(false);
       held.resolve();
       expect(await started).toBe(false);
       expect(f.engine.daemon).toBeNull(); expect(f.engine.sessions).toBeNull(); expect(f.engine.relayClient).toBeNull();
-      expect(f.dependencies.app.quit).toHaveBeenCalledOnce();
     } finally { held.resolve(); await started; await f.close(); }
   });
 
-  it("contains stop rejection on failed start and still quits", async () => {
+  it("contains stop rejection on failed start and still reports the failure", async () => {
     const f = fixture(); const stopError = new Error("stop failed");
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     f.dependencies.launchMarks.daemonReady = () => { throw "non-error startup failure"; };
@@ -405,7 +417,6 @@ describe("desktop engine construction", () => {
       expect(logged).toHaveBeenCalledWith("[desktop] Rust engine daemon stop after failed start:", stopError);
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Rust engine failed to start",
         "Unknown Rust engine startup error.\n\nThe desktop cannot start without the Rust engine.");
-      expect(f.dependencies.app.quit).toHaveBeenCalledOnce();
       expect(engine.daemon).toBeNull();
     } finally {
       await f.close();
@@ -494,7 +505,6 @@ describe("desktop engine restart coordination", () => {
       expect(f.dependencies.recordEngineProblem).toHaveBeenCalledTimes(2);
       expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
       expect(f.engine.sessions).not.toBeNull();
-      expect(f.dependencies.app.quit).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
 });
@@ -638,7 +648,6 @@ describe("server owner peer lifecycle", () => {
     try {
       expect(await f.engine.start()).toBe(true);
       expect(f.options().privateOwnerHost).toBeUndefined();
-      expect(f.dependencies.app.quit).not.toHaveBeenCalled();
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("restart-required");
     } finally {await f.close();}

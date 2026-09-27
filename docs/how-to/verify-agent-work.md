@@ -58,7 +58,10 @@ Record the operator's result with the session evidence. The automated picker sea
 
 ## Verify a pull request
 
-One verification owner runs the full selected gates locally and records the evidence in the PR.
+One verification owner records passing evidence for every selected gate in the PR.
+While Blacksmith is off, run the gates locally.
+When enabled, reuse passing CI evidence that covers the change instead of repeating full gates locally.
+Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change activation.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
 For platform-specific changes, add focused checks on that platform.

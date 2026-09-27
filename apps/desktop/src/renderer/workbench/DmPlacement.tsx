@@ -70,7 +70,7 @@ export function AcceptDmDialog(props: {
               key={workspace.workspaceId}
               data-testid="chats-accept-dm-workspace-option"
               data-workspace-id={workspace.workspaceId}
-              className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-2 text-xs text-ink hover:bg-panel-2"
+              className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-2 text-xs text-ink hover:bg-hover"
             >
               <input
                 type="radio"
@@ -231,7 +231,7 @@ export function DmRequestListItem(props: {
                 type="button"
                 data-testid="chats-dm-request-accept"
                 onClick={props.onAccept}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink"
               >
                 Accept
               </button>
@@ -242,7 +242,7 @@ export function DmRequestListItem(props: {
                 data-testid="chats-dm-request-decline"
                 disabled={props.busy}
                 onClick={props.onDecline}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
               >
                 Decline
               </button>
@@ -254,7 +254,7 @@ export function DmRequestListItem(props: {
             data-testid="chats-dm-request-again"
             disabled={props.busy}
             onClick={props.onRequestAgain}
-            className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Move back to requests
           </button>
