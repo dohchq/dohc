@@ -105,6 +105,7 @@ import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetH
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
+import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
 import * as handoffStorage from "./storage/handoff";
@@ -949,6 +950,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return sharesStorage.listSharesReceivedBy(this, recipientUserId);
+  }
+
+  removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
+    return shareRemovalStorage.removeShareAccess(this, input);
+  }
+
+  undoShareRemoval(input: Parameters<typeof shareRemovalStorage.undoShareRemoval>[1]) {
+    return shareRemovalStorage.undoShareRemoval(this, input);
+  }
+
+  listRemovedSharesForRecipient(userId: string, shareId?: string) {
+    return shareRemovalStorage.listRemovedSharesForRecipient(this, userId, shareId);
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {

@@ -31,11 +31,13 @@ const ACTIVE_SHARE = {
   shareCode: "dohc-share:share-1:http://relay.test",
 };
 
+const UNDO = { undoId: "undo-1", expiresAtMs: 600_000 };
+
 beforeEach(() => {
   vi.resetAllMocks();
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [ACTIVE_SHARE] });
   bridgeMock.listShareProposals.mockResolvedValue({ proposals: [] });
-  bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
+  bridgeMock.revokeRelayShare.mockResolvedValue({ undo: UNDO });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
 });
 
@@ -65,6 +67,70 @@ describe("SharedByMeList", () => {
     // After the refresh the row reads as ended, with no revoke affordance.
     await screen.findByText("Ended — was shared with friend@dohc.test");
     expect(screen.queryByTestId("shared-by-me-revoke-start")).toBeNull();
+  });
+
+  // The shell owns the notice and its Undo. This list hands over the receipt
+  // and the words, and reads again once the share is back.
+  it("reports an ended share with its undo receipt, and reads again when it is restored", async () => {
+    const user = userEvent.setup();
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    render(<SharedByMeList workspaceId="ws-1" shareRemovals={shareRemovals} />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      undo: UNDO,
+      message: "Ended the share of docs with friend@dohc.test.",
+      restoredMessage: "Restored the share of docs with friend@dohc.test.",
+    });
+    await waitFor(() => expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2));
+
+    shareRemovals.removed.mock.calls[0]![0].restored();
+    await waitFor(() => expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(3));
+  });
+
+  it("does not read again for a restore that lands after this list is gone", async () => {
+    const user = userEvent.setup();
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const view = render(<SharedByMeList workspaceId="ws-1" shareRemovals={shareRemovals} />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2));
+
+    view.unmount();
+    shareRemovals.removed.mock.calls[0]![0].restored();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+  });
+
+  // A refused End is the shell's to show, with Try again. The list stays:
+  // the other shares are still there to manage.
+  it("hands a refused End share to the shell with Try again, and keeps the list", async () => {
+    const user = userEvent.setup();
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    bridgeMock.revokeRelayShare
+      .mockRejectedValueOnce(new Error("relay down"))
+      .mockResolvedValueOnce({ undo: UNDO });
+    render(<SharedByMeList workspaceId="ws-1" shareRemovals={shareRemovals} />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    await user.click(screen.getByTestId("shared-by-me-revoke"));
+
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      message: "dohc could not end the share of docs with friend@dohc.test.",
+    });
+    expect(shareRemovals.failed.mock.calls[0]![0].cause).toBeInstanceOf(Error);
+    expect(screen.getByTestId("shared-by-me-row")).toBeTruthy();
+    expect(screen.queryByTestId("shared-by-me-error")).toBeNull();
+
+    shareRemovals.failed.mock.calls[0]![0].retry();
+    await waitFor(() => expect(bridgeMock.revokeRelayShare).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
   });
 
   // Every row carries its level. A badge shown only on some rows
@@ -192,8 +258,9 @@ describe("SharedByMeList", () => {
     });
   });
 
-  // Ending a share declines whatever the recipient still has waiting, and
-  // they cannot send it again. AGENTS.md: tell the user before it runs.
+  // Ending a share declines whatever the recipient still has waiting. Undo
+  // brings the share back, not the changes. AGENTS.md: tell the user before
+  // it runs.
   it("names the changes an End share will discard, before it discards them", async () => {
     const user = userEvent.setup();
     bridgeMock.listShareProposals.mockResolvedValue({
@@ -225,7 +292,7 @@ describe("SharedByMeList", () => {
       (await screen.findByTestId("shared-by-me-revoke-confirm")).textContent,
       "ending a share silently discards work the recipient cannot resend",
     ).toBe(
-      "End this share and decline 2 changes friend@dohc.test sent? They cannot send them again.",
+      "End this share and decline 2 changes friend@dohc.test sent? Undo restores the share, not the declined changes.",
     );
     expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
 

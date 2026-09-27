@@ -3280,7 +3280,19 @@ export type GetRelayReceivedSharePayload = z.infer<
 >;
 
 export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
-  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(false),
+      // Present when the authenticated exact lookup confirms owner removal.
+      removed: z
+        .object({
+          message: z.string().min(1).max(500),
+          removedAtMs: z.number().int().nonnegative().optional(),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   z
     .object({
       found: z.literal(true),
@@ -3292,11 +3304,22 @@ export type GetRelayReceivedShareResult = z.infer<
   typeof GetRelayReceivedShareResult
 >;
 
+// A grant the owner removed from this account. The relay keeps the row apart
+// from `received`, which stays active-only, and words the reason itself.
+export const RelayShareRemovedRow = z.object({
+  shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  message: z.string().min(1).max(500),
+  removedAtMs: z.number().int().nonnegative(),
+});
+export type RelayShareRemovedRow = z.infer<typeof RelayShareRemovedRow>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
   // Path/version shares addressed to this account (chat grants are
   // listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
+  removed: z.array(RelayShareRemovedRow).max(1000).default([]),
 });
 export type ListRelaySharesResult = z.infer<typeof ListRelaySharesResult>;
 
@@ -3326,6 +3349,43 @@ export const RevokeRelaySharePayload = z.object({
   shareId: OPAQUE_ID,
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
+
+// The relay's receipt for a removal it can put back. It restores the grants
+// the removal ended, as they were; it never makes a new grant or link. The
+// relay forgets the receipt at `expiresAtMs`, 10 minutes after the removal.
+export const RelayShareUndoReceipt = z
+  .object({
+    undoId: z.string().min(1).max(256),
+    expiresAtMs: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RelayShareUndoReceipt = z.infer<typeof RelayShareUndoReceipt>;
+
+export const RevokeRelayShareResult = z
+  .object({ undo: RelayShareUndoReceipt })
+  .strict();
+export type RevokeRelayShareResult = z.infer<typeof RevokeRelayShareResult>;
+
+export const RelayShareRevokeResponse = z.object({
+  ok: z.literal(true),
+  undo: RelayShareUndoReceipt,
+});
+
+export const UndoRelaySharePayload = z
+  .object({
+    shareId: OPAQUE_ID,
+    undoId: RelayShareUndoReceipt.shape.undoId,
+  })
+  .strict();
+export type UndoRelaySharePayload = z.infer<typeof UndoRelaySharePayload>;
+
+export const UndoRelayShareResult = z.object({ shareId: OPAQUE_ID }).strict();
+export type UndoRelayShareResult = z.infer<typeof UndoRelayShareResult>;
+
+export const RelayShareUndoResponse = z.object({
+  ok: z.literal(true),
+  shareId: OPAQUE_ID,
+});
 
 const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment", "edit"]);
 
@@ -3517,6 +3577,7 @@ export const RelayShareLinkRetuneNarrowResponse = z.object({
 
 export const RelayShareLinkEndResponse = z.object({
   ok: z.literal(true),
+  undo: RelayShareUndoReceipt,
 });
 
 const RelayShareLinkDependentsChangedOutcome = z
@@ -3554,7 +3615,7 @@ export type RetuneRelayShareLinkResult = z.infer<
 >;
 
 export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
-  z.object({ outcome: z.literal("ended") }).strict(),
+  z.object({ outcome: z.literal("ended"), undo: RelayShareUndoReceipt }).strict(),
   RelayShareLinkDependentsChangedOutcome,
 ]);
 export type RevokeRelayShareLinkResult = z.infer<
@@ -3903,6 +3964,7 @@ export const RevokeRelayShareGrantResult = z
     ...RelayShareNamedGrantTransitionBase,
     status: z.literal("revoked"),
     revokedAtMs: z.number().int().nonnegative(),
+    undo: RelayShareUndoReceipt,
   })
   .strict();
 export type RevokeRelayShareGrantResult = z.infer<
@@ -4339,6 +4401,9 @@ export const ListChatChannelSharesResult = z.object({
       state: z.literal("answered"),
       granted: z.array(ChatChannelShareGrantRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+      // Share ids whose owner removed this account, as the relay confirms.
+      // Only this lane may say "the owner removed your access".
+      removed: z.array(OPAQUE_ID).max(1000).default([]),
     }),
     z.object({ state: z.literal("unreachable") }),
     // Over the per-lane cap. Not "unreachable": that word means dohc could not
@@ -5925,7 +5990,9 @@ export interface DohcDesktopBridge
   getRelayReceivedShare(
     payload: GetRelayReceivedSharePayload,
   ): Promise<GetRelayReceivedShareResult>;
-  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
+  // Puts back what a removal ended, using its receipt. Owner only.
+  undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
   createRelayShareLink(
     payload: CreateRelayShareLinkPayload,
   ): Promise<CreateRelayShareLinkResult>;

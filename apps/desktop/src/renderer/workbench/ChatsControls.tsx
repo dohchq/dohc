@@ -178,10 +178,14 @@ export function ChatHeader(props: {
 }
 
 // One line describing who a joined channel came from — calm, not a banner.
-export function joinedChannelLabel(joined: JoinedSharedChannelRow): string {
+// `ownerRemoved` is the relay's confirmed removal; without it an ended row
+// says only that the share is gone.
+export function joinedChannelLabel(joined: JoinedSharedChannelRow, ownerRemoved = false): string {
   const from = joined.granterEmail ?? "someone else";
   const suffix = joined.ended
-    ? " — no longer shared"
+    ? ownerRemoved
+      ? " — the owner removed your access"
+      : " — no longer shared"
     : joined.access === "read-only"
       ? " — read-only"
       : "";

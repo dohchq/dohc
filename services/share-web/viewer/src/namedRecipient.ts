@@ -7,14 +7,16 @@ const RESPONSE_BYTES = 2 * 1024 * 1024;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export interface NamedRecipientFiles {userId: string; workspaceId: string; shareId: string; grantId: string;
   files: {objectId: string; path: string}[]; limits: NamedLiveBrowserLimits}
+export class ShareAccessRemovedError extends Error { constructor() { super("The owner removed your access."); } }
 export async function namedRequest(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
   signal = AbortSignal.any([signal, AbortSignal.timeout(RETRY_BUDGET_MS)]);
   const response = await fetch(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
     redirect: "error", signal, headers: {accept: "application/json", ...(body === undefined ? {} : {"content-type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
-    if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError("Unavailable");
-    if (response.status !== 200 || response.redirected || !response.body ||
+    const removedResponse = response.status === 404;
+    if ([401, 403].includes(response.status)) throw new LiveAuthorityUnavailableError("Unavailable");
+    if ((response.status !== 200 && !removedResponse) || response.redirected || !response.body ||
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw Error("Unavailable");
     const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
     let length = 0, text = "";
@@ -28,7 +30,12 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
         if (chunk.value.length > RESPONSE_BYTES - length) throw Error("Response too large");
         length += chunk.value.length; text += decoder.decode(chunk.value, {stream: true});
       }
-      return JSON.parse(text + decoder.decode()) as unknown;
+      const result: unknown = JSON.parse(text + decoder.decode());
+      if (removedResponse) {
+        if (record(result) && result.code === "share_access_removed") throw new ShareAccessRemovedError();
+        throw new LiveAuthorityUnavailableError("Unavailable");
+      }
+      return result;
     } finally {signal.removeEventListener("abort", cancel); await reader.cancel().catch(() => {}); reader.releaseLock();}
   } finally {await response.body?.cancel().catch(() => {});}
 }

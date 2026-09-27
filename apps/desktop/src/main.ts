@@ -201,8 +201,13 @@ import {
   setWorkspaceAutomationHost,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
+  reconcileWorkspaceRecipientShares,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import {
+  recipientShareNeedsRecheck,
+  readReceivedShareListing,
+} from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
 import { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
@@ -1019,7 +1024,9 @@ type RelayShareRetainedDependentSetResult<T> =
 
 type RelayShareRetainedNotFoundResult<T> =
   | { kind: "success"; body: T }
-  | { kind: "missing" };
+  // `removed`: the relay said the owner removed this account's access, as
+  // opposed to a share it does not know.
+  | { kind: "missing"; removed: boolean };
 
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
@@ -1142,9 +1149,9 @@ async function relayShareJsonWithCredentials<T>(
       "retainNotFound" in options &&
       response.status === 404 &&
       data?.ok === false &&
-      data.code === "not_found"
+      (data.code === "not_found" || data.code === "share_access_removed")
     ) {
-      return { kind: "missing" };
+      return { kind: "missing", removed: data.code === "share_access_removed" };
     }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
@@ -1158,6 +1165,53 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   await warmCredentialCache();
   const credentials = requireCredentials(cachedCredentials, RelaySessionError);
   return relayShareJsonWithCredentials(credentials, path, init);
+}
+
+// Every authenticated `/sync/shares` listing this app reads is applied to the
+// received-share records of every registered workspace it speaks for: an
+// ended record whose share is active again resumes, and the owner's confirmed
+// removals are recorded. See recipientShareReconciliation.ts.
+function reconcileReceivedShares(listing: unknown): void {
+  const parsed = readReceivedShareListing(listing);
+  const credentials = cachedCredentials;
+  if (!parsed || !credentials?.relayUrl) return;
+  for (const entry of listWorkspaces()) {
+    let changed = false;
+    try {
+      changed = reconcileWorkspaceRecipientShares(entry.workspaceId, parsed, credentials);
+    } catch (error) {
+      console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
+    }
+    if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
+  }
+}
+
+// A restored share must resume even if this device was offline during Undo.
+let removalRecheck: { generation: number; startedAt: number; pending: Promise<void> } | null = null;
+async function recheckRemovedShares(workspaceId: string): Promise<void> {
+  const entry = findWorkspace(workspaceId);
+  if (!entry || !recipientShareNeedsRecheck(entry)) return;
+  await warmCredentialCache();
+  const credentials = cachedCredentials;
+  if (!credentials?.relayUrl) return;
+  const generation = credentialCacheGeneration;
+  if (removalRecheck?.generation === generation && Date.now() - removalRecheck.startedAt < 30_000) {
+    return removalRecheck.pending;
+  }
+  const pending = (async () => {
+    try {
+      const listing = await awaitCredentialGeneration({
+        capturedGeneration: generation,
+        currentGeneration: () => credentialCacheGeneration,
+        run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
+      });
+      reconcileReceivedShares(listing);
+    } catch (error) {
+      console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
+    }
+  })();
+  removalRecheck = { generation, startedAt: Date.now(), pending };
+  await pending;
 }
 
 // Each open workspace's copy of the grants its owner gave, for the automation
@@ -1646,6 +1700,7 @@ const {
   notifyRenderer,
   projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
+  recheckRemovedShares,
 });
 
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
@@ -3957,6 +4012,7 @@ function createShareMountCommandsFor(
         () => notifyRenderer(scope),
       ),
     logError: (message, error) => console.error(`[desktop] ${message}`, error),
+    recheckRemovedShares,
   });
 }
 
@@ -4847,6 +4903,7 @@ function registerIpcHandlers(): void {
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
     sharesChanged: shareRosters.sharesChanged,
+    reconcileReceivedShares,
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
@@ -5129,6 +5186,7 @@ function registerIpcHandlers(): void {
         assertCurrent,
       }),
     sharesChanged: shareRosters.sharesChanged,
+    reconcileReceivedShares,
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
@@ -5263,6 +5321,7 @@ function registerIpcHandlers(): void {
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
+    recheckRemovedShares,
   });
 
   // ---- Share mounts ----

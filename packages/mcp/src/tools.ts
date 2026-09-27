@@ -1198,6 +1198,7 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  confirmedRemovedShares?: Array<{ shareId: string; removedAtMs: number }>;
 }
 
 interface RegistryFile {
@@ -1345,23 +1346,34 @@ export async function listWorkspaces(ctx: ToolContext) {
     rootPath: w.rootPath,
     kind: w.kind,
     ...(w.remote ? { remote: w.remote } : {}),
+    ...removedShareStatus(w),
   }));
   return { workspaces };
 }
 
 // --- dohc_workspace_status --------------------------------------------------
 
+function removedShareStatus(workspace: RegistryWorkspace | null) {
+  const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
+    shareId,
+    message: "The owner removed your access. Your local copy stays readable.",
+  }));
+  return removedShares.length ? {removedShares} : {};
+}
+
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials] = await Promise.all([
+  const [manifest, remote, credentials, workspace] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
+    findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
   const credential = credentialStatusFor(remote, credentials);
   return {
     synced,
+    ...removedShareStatus(workspace),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
     ...(remote?.workspaceId ?? manifest?.workspaceId

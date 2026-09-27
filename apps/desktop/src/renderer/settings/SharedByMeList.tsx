@@ -7,6 +7,7 @@ import type {
   ShareProposalRow,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
 
@@ -43,7 +44,17 @@ function selectorLabel(share: RelayShareGrantedRow): string {
   return share.selector.paths.join(", ") || "Everything";
 }
 
-export function SharedByMeList(props: { workspaceId: string }) {
+function recipientLabel(share: RelayShareGrantedRow): string {
+  return share.recipientEmail ?? share.recipientUserId ?? "the recipient";
+}
+
+export function SharedByMeList(props: {
+  workspaceId: string;
+  // Ending a share is undoable for a while. The shell shows that notice and
+  // holds the Undo, so it outlives Settings; a refused End goes to the same
+  // shell with Try again, and the list stays.
+  shareRemovals?: ShareRemovalNotices;
+}) {
   const workspaceId = props.workspaceId;
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
@@ -56,6 +67,9 @@ export function SharedByMeList(props: { workspaceId: string }) {
   // Latest-wins token: the open-changes read is workspace-scoped, so an
   // answer for one workspace must never repaint another.
   const loadToken = useRequestSequence();
+  // Bumped only by unmount or a workspace switch, so an Undo that lands later
+  // can tell this list is still the one it came from before reading again.
+  const listEpoch = useRequestSequence([workspaceId]);
 
   async function refresh() {
     const token = loadToken.next();
@@ -94,16 +108,40 @@ export function SharedByMeList(props: { workspaceId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  async function revoke(shareId: string) {
+  async function revoke(share: RelayShareGrantedRow) {
+    const shareId = share.shareId;
+    const epoch = listEpoch.current();
     setBusyShareId(shareId);
     try {
-      await bridge().revokeRelayShare({ shareId });
+      const result = await bridge().revokeRelayShare({ shareId });
+      const subject = `the share of ${selectorLabel(share)} with ${recipientLabel(share)}`;
+      props.shareRemovals?.removed({
+        workspaceId,
+        shareId,
+        undo: result.undo,
+        message: `Ended ${subject}.`,
+        restoredMessage: `Restored ${subject}.`,
+        restored: () => {
+          if (listEpoch.isCurrent(epoch)) void refresh();
+        },
+      });
+      if (!listEpoch.isCurrent(epoch)) return;
       setConfirmShareId(null);
       await refresh();
     } catch (cause) {
-      setLoad({ status: "error", message: ipcErrorMessage(cause) });
+      if (!listEpoch.isCurrent(epoch)) return;
+      if (props.shareRemovals) {
+        props.shareRemovals.failed({
+          workspaceId,
+          message: `dohc could not end the share of ${selectorLabel(share)} with ${recipientLabel(share)}.`,
+          cause,
+          retry: () => void revoke(share),
+        });
+      } else {
+        setLoad({ status: "error", message: ipcErrorMessage(cause) });
+      }
     } finally {
-      setBusyShareId(null);
+      if (listEpoch.isCurrent(epoch)) setBusyShareId(null);
     }
   }
 
@@ -222,9 +260,9 @@ export function SharedByMeList(props: { workspaceId: string }) {
               </button>
               ) : null}
               {/* Ending a share DECLINES whatever the recipient still has
-                  waiting, and they cannot send it again — the share is gone.
-                  So the count is stated before the click that discards it,
-                  never after. */}
+                  waiting. Undo brings the share back, not the declined
+                  changes, so the count is stated before the click that
+                  discards them, never after. */}
               {confirmShareId === share.shareId ? (
                 <>
                   <span
@@ -233,9 +271,9 @@ export function SharedByMeList(props: { workspaceId: string }) {
                   >
                     {waiting
                       ? waiting.count === 1
-                        ? `End this share and decline 1 change ${share.recipientEmail ?? share.recipientUserId} sent? They cannot send it again.`
-                        : `End this share and decline ${waiting.count} changes ${share.recipientEmail ?? share.recipientUserId} sent? They cannot send them again.`
-                      : `End this share? ${share.recipientEmail ?? share.recipientUserId} keeps a read-only copy and stops receiving updates.`}
+                        ? `End this share and decline 1 change ${recipientLabel(share)} sent? Undo restores the share, not the declined change.`
+                        : `End this share and decline ${waiting.count} changes ${recipientLabel(share)} sent? Undo restores the share, not the declined changes.`
+                      : `End this share? ${recipientLabel(share)} keeps a read-only copy and stops receiving updates.`}
                   </span>
                   <button
                     type="button"
@@ -249,7 +287,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
                     type="button"
                     data-testid="shared-by-me-revoke"
                     disabled={busyShareId === share.shareId}
-                    onClick={() => void revoke(share.shareId)}
+                    onClick={() => void revoke(share)}
                     className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-panel-2 disabled:opacity-50"
                   >
                     {busyShareId === share.shareId ? "Ending…" : "End share"}

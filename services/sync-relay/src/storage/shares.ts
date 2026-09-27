@@ -665,7 +665,7 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
         .prepare(
           `UPDATE sync_relay_share_grants
            SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
-           WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
+           WHERE principal_kind = 'email' AND principal_email = ?`,
         )
         .run(userId, normalized);
       return Number(result.changes ?? 0);
@@ -940,7 +940,10 @@ export function listSharesReceivedBy(storage: StorageContext, recipientUserId: s
   }
 
 export function revokeShare(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
-    return storage.tx(() => {
+  return storage.tx(() => revokeShareInTransaction(storage, shareId, revokedAtMs));
+}
+
+export function revokeShareInTransaction(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
       const existing = storage.db
         .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
@@ -978,5 +981,4 @@ export function revokeShare(storage: StorageContext, shareId: string, revokedAtM
           .run(Math.trunc(revokedAtMs), shareId);
       }
       return true;
-    });
   }

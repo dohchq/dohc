@@ -136,12 +136,14 @@ export function mergeJoinedChannel(
 
 // Member leave stops sync but keeps a durable provenance tombstone. The local
 // rows stay readable, and DM ownership must not flip when live grant data goes.
+// `left` records that the person chose this: the grant may still be active on
+// the relay, and an active listing must not resume a channel they left.
 export function endJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   shareId: string,
 ): JoinedSharedChannel[] {
   return existing.map((channel) =>
-    channel.shareId === shareId ? { ...channel, ended: true } : channel,
+    channel.shareId === shareId ? { ...channel, ended: true, left: true } : channel,
   );
 }
 

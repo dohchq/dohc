@@ -45,6 +45,7 @@ import { ScheduleHostRow } from "./ScheduleHostRow";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
+import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { SidebarViewsControl } from "./SidebarViewsControl";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -127,6 +128,8 @@ export function SettingsDialog(props: {
     // shell needs the id before its reload sees the record vanish.
     folderLeftShareId?: string;
   }) => void;
+  // Ending a share under Shared by me: the shell shows the notice and its Undo.
+  shareRemovals?: ShareRemovalNotices;
 }) {
   const { onWorkspaceSettingsRead } = props;
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -671,7 +674,10 @@ export function SettingsDialog(props: {
               <span aria-hidden />
             </SettingRow>
             <div className="px-1 pb-2">
-              <SharedByMeList workspaceId={props.workspaceId} />
+              <SharedByMeList
+                workspaceId={props.workspaceId}
+                {...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {})}
+              />
             </div>
             <SettingRow
               title="Shared with me"

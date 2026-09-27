@@ -79,6 +79,7 @@ function harness() {
   });
   const warm = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string | null) => void>();
+  const reconcileReceivedShares = vi.fn<(listing: unknown) => void>();
   registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
@@ -95,6 +96,7 @@ function harness() {
     relayShareErrorCopy: (status) => `sharing failed (${status})`,
     relayShareDiscussionActivityPolls: polls,
     sharesChanged,
+    reconcileReceivedShares,
   });
   const invoke = async (channel: string, payload?: unknown, senderId = 1) => {
     const handler = handlers.get(channel);
@@ -103,6 +105,7 @@ function harness() {
   };
   return {
     workspace, credentials, remote, request, accountRequest, polls, handlers, warm, invoke, sharesChanged,
+    reconcileReceivedShares,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     rotateCredentials: () => { generation += 1; },
@@ -368,7 +371,7 @@ describe("registered relay share handlers", () => {
       CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument,
       CHANNELS.ownerRestore,
       CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
-      CHANNELS.revokeRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
+      CHANNELS.revokeRelayShare, CHANNELS.undoRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
       CHANNELS.listRelayShareLinks, CHANNELS.retuneRelayShareLink, CHANNELS.rotateRelayShareLink,
       CHANNELS.revokeRelayShareLink, CHANNELS.listRelayShareDiscussion,
       CHANNELS.pollRelayShareDiscussionActivity, CHANNELS.cancelRelayShareDiscussionActivity,
@@ -492,6 +495,8 @@ describe("registered relay share handlers", () => {
   });
 });
 
+const undo = {undoId: "undo-1", expiresAtMs: 600_000};
+
 describe("share roster refresh", () => {
   const grantBody = {grantId: "grant", access: "edit", generation: 2, parentGrantId: null};
   const linkPayload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
@@ -502,8 +507,8 @@ describe("share roster refresh", () => {
     [CHANNELS.promoteRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
       {ok: true, ...grantBody, status: "active", revokedAtMs: null}],
     [CHANNELS.revokeRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant"},
-      {ok: true, ...grantBody, status: "revoked", revokedAtMs: 5}],
-    [CHANNELS.revokeRelayShareLink, linkPayload, {kind: "success", body: {ok: true}}],
+      {ok: true, ...grantBody, status: "revoked", revokedAtMs: 5, undo}],
+    [CHANNELS.revokeRelayShareLink, linkPayload, {kind: "success", body: {ok: true, undo}}],
     [CHANNELS.retuneRelayShareLink, {...linkPayload, access: "view"}, {kind: "success", body: {ok: true, access: "view"}}],
   ] as const)("refreshes after %s even when the window moved on while the relay answered", async (channel, payload, body) => {
     for (const invalidate of ["retireRenderer", "retirePhysical", "rotateCredentials"] as const) {
@@ -528,15 +533,18 @@ describe("share roster refresh", () => {
     expect(h.sharesChanged).not.toHaveBeenCalled();
   });
 
-  it("refreshes every open workspace after ending a share, which names none", async () => {
+  it("refreshes every open workspace after ending or restoring a share, which names none", async () => {
     const h = harness();
+    h.accountRequest.mockResolvedValue({ok: true, undo});
     await h.invoke(CHANNELS.revokeRelayShare, {shareId: "share"});
-    expect(h.sharesChanged).toHaveBeenCalledWith(null);
+    h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
+    await h.invoke(CHANNELS.undoRelayShare, {shareId: "share", undoId: "undo-1"});
+    expect(h.sharesChanged.mock.calls).toEqual([[null], [null]]);
   });
 
   it("refreshes after a link ends or changes level, because its dependents follow it", async () => {
     const h = harness();
-    h.request.mockResolvedValue({kind: "success", body: {ok: true}});
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, undo}});
     await h.invoke(CHANNELS.revokeRelayShareLink, linkPayload);
     h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view"}});
     await h.invoke(CHANNELS.retuneRelayShareLink, {...linkPayload, access: "view"});
@@ -577,16 +585,46 @@ describe("registered account share handlers", () => {
       received: [{ ...received, shareCode: buildShareCode({
         shareId: "share", relayUrl: h.credentials.relayUrl!,
       }) }],
+      removed: [],
     });
     expect(h.remote).not.toHaveBeenCalled();
     expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares");
   });
 
+  it("applies every account listing to this machine's received shares", async () => {
+    const h = harness();
+    const listing = { granted: [], received: [received], removed: [] };
+    h.accountRequest.mockResolvedValue(listing);
+    await h.invoke(CHANNELS.listRelayShares);
+    expect(h.reconcileReceivedShares).toHaveBeenCalledWith(listing);
+  });
+
+  it("keeps the verified removal explanation without depending on the capped account listing", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({ kind: "missing", removed: true });
+    await expect(h.invoke(CHANNELS.getRelayReceivedShare, { shareId: "share" }))
+      .resolves.toEqual({ found: false, removed: { message: "The owner removed your access." } });
+    expect(h.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reconcile a listing returned after an account switch", async () => {
+    const h = harness(), started = deferred(), response = deferred<unknown>();
+    h.accountRequest.mockImplementation(() => { started.resolve(); return response.promise; });
+    const result = h.invoke(CHANNELS.listRelayShares);
+    await started.promise;
+    h.rotateCredentials();
+    response.resolve({ granted: [], received: [received] });
+    await expect(result).rejects.toThrow("session changed");
+    expect(h.reconcileReceivedShares).not.toHaveBeenCalled();
+  });
+
   it("retains exact received-share missing and mismatched identity outcomes", async () => {
     const h = harness();
-    h.request.mockResolvedValue({ kind: "missing" });
+    h.request.mockResolvedValue({ kind: "missing", removed: false });
     await expect(h.invoke(CHANNELS.getRelayReceivedShare, { shareId: "share" }))
       .resolves.toEqual({ found: false });
+    expect(h.request).toHaveBeenCalledTimes(1);
+    expect(h.reconcileReceivedShares).not.toHaveBeenCalled();
     h.request.mockResolvedValue({ kind: "success", body: { ...received, shareId: "other" } });
     await expect(h.invoke(CHANNELS.getRelayReceivedShare, { shareId: "share" }))
       .rejects.toThrow("Invalid exact received share response");
@@ -605,12 +643,47 @@ describe("registered account share handlers", () => {
     await expect(result).rejects.toThrow("session changed");
   });
 
-  it("revokes an account share through the account transport without a workspace operation", async () => {
+  it("revokes an account share through the account transport and keeps the relay's undo receipt", async () => {
     const h = harness();
     h.retirePhysical();
-    await expect(h.invoke(CHANNELS.revokeRelayShare, { shareId: "share" })).resolves.toBeUndefined();
+    h.accountRequest.mockResolvedValue({ ok: true, undo });
+    await expect(h.invoke(CHANNELS.revokeRelayShare, { shareId: "share" })).resolves.toEqual({ undo });
     expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/revoke", { method: "POST" });
     expect(h.remote).not.toHaveBeenCalled();
+  });
+
+  it("refuses a revoke answer without a receipt, because the notice would promise an Undo it cannot make", async () => {
+    const h = harness();
+    h.accountRequest.mockResolvedValue({ ok: true });
+    await expect(h.invoke(CHANNELS.revokeRelayShare, { shareId: "share" })).rejects.toThrow("sharing failed (500)");
+  });
+
+  it("restores a removal through the account transport with the receipt's id", async () => {
+    const h = harness();
+    h.retirePhysical();
+    h.accountRequest.mockResolvedValue({ ok: true, shareId: "share" });
+    await expect(h.invoke(CHANNELS.undoRelayShare, { shareId: "share", undoId: "undo-1" }))
+      .resolves.toEqual({ shareId: "share" });
+    expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {
+      method: "POST", body: JSON.stringify({ undoId: "undo-1" }),
+    });
+    expect(h.remote).not.toHaveBeenCalled();
+  });
+
+  it("rejects an undo answer that names another share", async () => {
+    const h = harness();
+    h.accountRequest.mockResolvedValue({ ok: true, shareId: "other" });
+    await expect(h.invoke(CHANNELS.undoRelayShare, { shareId: "share", undoId: "undo-1" }))
+      .rejects.toThrow("sharing failed (500)");
+  });
+
+  it("keeps the relay's removed lane beside the active received lane", async () => {
+    const h = harness();
+    const removed = { shareId: "gone", grantId: "gone-grant", message: "The owner removed your access.", removedAtMs: 5 };
+    h.accountRequest.mockResolvedValue({ granted: [], received: [received], removed: [removed] });
+    await expect(h.invoke(CHANNELS.listRelayShares)).resolves.toMatchObject({
+      received: [{ shareId: "share" }], removed: [removed],
+    });
   });
 });
 

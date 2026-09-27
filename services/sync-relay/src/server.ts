@@ -387,6 +387,7 @@ export function createSyncRelayHandler({
   ): AuthorizedShareAction {
     const result = authorizeShareAction({ storage, actorUserId, shareId, action });
     if (result.ok) return result;
+    if (storage.listRemovedSharesForRecipient(actorUserId, shareId).length > 0) throw relayError("share_access_removed");
     if (result.reason === "denied" && (action === "append" || action === "propose")) {
       throw relayError("share_read_only");
     }
@@ -862,6 +863,7 @@ export function createSyncRelayHandler({
         route.route === "share-link-retune" ||
         route.route === "share-grant-promote" ||
         route.route === "share-grant-revoke" ||
+        route.route === "share-undo" ||
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
@@ -1046,6 +1048,7 @@ function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       throw notFound();
     }
     if (parts.length === 3) return { route: "share", shareId };
+    if (parts.length === 4 && parts[3] === "undo") return { route: "share-undo", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {
       return {
