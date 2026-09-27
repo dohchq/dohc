@@ -17,8 +17,9 @@ import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
+import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 import {serveRemoteMcp} from "./remoteMcp";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, readRelayVersionRefusal } from "./relayVersion";
+import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -98,8 +99,8 @@ interface RelayCall {
   limiter?: ShareWebInFlightLimiter;
   /** Reads the whole relay body, up to the proxy limit, inside the deadline. */
   buffered?: boolean;
-  /** Refuses with this status when the session changed before the call answered. */
-  ifSessionChanged?: 404 | 409;
+  /** Refuses when the session changed before the call answered. */
+  ifSessionChanged?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
   ok?(relayResponse: Response, holdSlot: () => () => void): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
@@ -328,8 +329,8 @@ function jsonResponse(
   return response(JSON.stringify(body), { status: init.status, headers });
 }
 
-function refused(status: 404 | 409 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
-  return jsonResponse(REFUSAL_VALUE, { status, headers });
+function refused(): Response {
+  return jsonResponse(REFUSAL_VALUE, {status: 404});
 }
 
 function parseCookies(header: string | null): Map<string, string> {
@@ -948,7 +949,7 @@ export function createShareWebApplication({
         );
         try {
           const relayResponse = await fetchRelay(boundedRelay.request);
-          if (relayResponse.status === 401) return { status: "invalid" };
+          if (relayResponse.status === 404) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
             await relayResponse.json(),
@@ -1047,7 +1048,7 @@ export function createShareWebApplication({
 
   async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
     const refreshed = await refreshSession(browser);
-    if (!refreshed.ok) return refused(refreshed.status);
+    if (!refreshed.ok) return refused();
     const capabilityToken = browser.session.capabilityToken;
     const current = (): boolean =>
       sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
@@ -1060,11 +1061,11 @@ export function createShareWebApplication({
       return result;
     };
     const superseded = (): Response | null =>
-      call.ifSessionChanged && !current() ? refused(call.ifSessionChanged) : null;
+      call.ifSessionChanged && !current() ? refused() : null;
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
-    if (!release) return answer(refused(429));
+    if (!release) return answer(refused());
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;
@@ -1089,12 +1090,11 @@ export function createShareWebApplication({
     );
     try {
       let relayResponse = await fetchRelay(bounded.request);
-      // Eviction never waits on the body, which may be oversized or broken.
-      if (relayResponse.status === 401) {
+      // A refusal can mean an out-of-scope target, so it must not evict the session.
+      if (relayResponse.status === 404) {
         const stale = superseded();
-        sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
         await relayResponse.body?.cancel().catch(() => undefined);
-        return stale ?? refused(404);
+        return stale ?? refused();
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1105,18 +1105,17 @@ export function createShareWebApplication({
       if (relayResponse.status === 200) {
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
-      const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
-      if (versionRefusal) {
-        await relayResponse.body?.cancel().catch(() => undefined);
-        return answer(jsonResponse(versionRefusal, { status: RELAY_VERSION_REFUSAL_STATUS }));
+      if ([403, 413, 429, 503].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
+        const detail = parseLinkRefusal(value, relayResponse.status);
+        if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
+        const translated = await call.refusal?.(Response.json(value, {status: relayResponse.status}));
+        if (translated) return answer(translated);
       }
-      const translated = await call.refusal?.(relayResponse);
-      if (translated) return answer(translated);
       await relayResponse.body?.cancel().catch(() => undefined);
-      if (relayResponse.status === 429) return answer(refused(429));
-      return answer(refused(relayResponse.status >= 400 && relayResponse.status < 500 ? 404 : 503));
+      return answer(refused());
     } catch {
-      return superseded() ?? answer(refused(503));
+      return superseded() ?? answer(refused());
     } finally {
       bounded.dispose();
       if (!slotHeld) release();
@@ -1144,11 +1143,11 @@ export function createShareWebApplication({
         request.headers.get("sec-fetch-site") === "cross-site") return refused();
       const bearer = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,256})$/u.exec(request.headers.get("authorization") ?? "");
       const session = bearer && sessions.get(bearer[1]!, bearer[2]!, nowMs());
-      if (!session?.agentProfileSecret) return response(null, {status: 401, headers: {"www-authenticate": "Bearer"}});
+      if (!session?.agentProfileSecret) return refused();
       const discriminator = session.discriminator;
-      if (mcpRequests >= 64) return refused(429);
+      if (mcpRequests >= 64) return refused();
       const release = mcpLimiter.acquire(sessionKey(discriminator, bearer![2]!), session.grantId);
-      if (!release) return refused(429);
+      if (!release) return refused();
       mcpRequests++;
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(35_000)]);
       // Only server-held agent credentials cross into the shared link handlers.
@@ -1217,11 +1216,11 @@ export function createShareWebApplication({
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
       if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
-          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused(429);
+          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused();
       exchangeAddressInFlight.set(clientIp, addressPending + 1);
       exchangesInFlight++;
       try {
-        const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : refused(429);
+        const malformed = () => {exchangeRateLimiter.allow(clientIp, nowMs()); return refused();};
         let secret: string | null = null;
         try {
           if (agent) {
@@ -1246,10 +1245,8 @@ export function createShareWebApplication({
           try {
             const relayResponse = await fetchRelay(bounded.request);
             if (relayResponse.status !== 200) {
-              const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
               await relayResponse.body?.cancel().catch(() => undefined);
-              if (versionRefusal) return jsonResponse(versionRefusal, {status: RELAY_VERSION_REFUSAL_STATUS});
-              return refused(relayResponse.status === 429 ? 429 : 404);
+              return refused();
             }
             exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
           } finally {bounded.dispose();}
@@ -1310,7 +1307,7 @@ export function createShareWebApplication({
         exchangeKey: true,
         ok: async (relayResponse) => {
           const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-          if (!handoff) return refused(503);
+          if (!handoff) return refused();
           return jsonResponse({
             ok: true,
             code: handoff.code,
@@ -1377,8 +1374,8 @@ export function createShareWebApplication({
         holdMs,
         buffered: true,
         ...(isActivity
-          ? { limiter: activityHoldLimiter, ifSessionChanged: 409 }
-          : { ifSessionChanged: 404, refusal: discussionRefusal }),
+          ? { limiter: activityHoldLimiter, ifSessionChanged: true }
+          : { ifSessionChanged: true, refusal: discussionRefusal }),
       });
     }
 
@@ -1400,7 +1397,7 @@ export function createShareWebApplication({
           path: `/sync/link/log${search}`,
           holdMs: Number(hold),
           limiter: activityHoldLimiter,
-          ifSessionChanged: 409,
+          ifSessionChanged: true,
         });
       }
       const sha = pathname.slice("/api/view/blob/".length);

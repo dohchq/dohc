@@ -241,24 +241,18 @@ describe("share-web sessions", () => {
 
   describe.each(["api_version_too_old", "api_version_too_new"] as const)("a relay that refuses share-web's API version (%s)", (code) => {
     const versionRefused = () => Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
-    const expected = {
-      ok: false,
-      code,
-      error: code === "api_version_too_old"
-        ? "This server's share page needs an update to match its sync service. Ask the person who runs the server to update it."
-        : "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.",
-    };
+    const expected = {ok: false, error: "not found"};
 
-    it.each(["/api/exchange", "/api/mcp/exchange"])("answers %s with which part needs the update", async (path) => {
+    it.each(["/api/exchange", "/api/mcp/exchange"])("answers %s with an opaque refusal", async (path) => {
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: async () => versionRefused(),
       });
       const response = await handler(request(path, exchange(SECRET_ALPHA)));
-      expect(response.status).toBe(409);
+      expect(response.status).toBe(404);
       expect(await response.json()).toEqual(expected);
     });
 
-    it("answers a session route and an agent's MCP call with which part needs the update", async () => {
+    it("answers a session route and an agent's MCP call with an opaque refusal", async () => {
       let refuse = false;
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
@@ -276,7 +270,7 @@ describe("share-web sessions", () => {
       const meta = await handler(request("/api/view/meta", {
         headers: { cookie: cookiePair(exchanged), "x-dohc-link-session": session },
       }));
-      expect(meta.status).toBe(409);
+      expect(meta.status).toBe(404);
       expect(await meta.json()).toEqual(expected);
 
       const mcp = await handler(request("/mcp", {
@@ -284,7 +278,7 @@ describe("share-web sessions", () => {
         headers: { authorization: `Bearer ${agent.bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       }));
-      expect(mcp.status).toBe(409);
+      expect(mcp.status).toBe(404);
       expect(await mcp.json()).toEqual(expected);
     });
 
@@ -806,7 +800,7 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(2);
   });
 
-  it("returns 409 when a held read completes under a replaced capability", async () => {
+  it("refuses when a held read completes under a replaced capability", async () => {
     let now = 1_000;
     let resolveHeldRead: ((response: Response) => void) | undefined;
     let markHeldReadStarted: (() => void) | undefined;
@@ -880,7 +874,7 @@ describe("share-web sessions", () => {
     }), { status: 401 }));
     const stale = await held;
     expect({ status: stale.status, body: await stale.text() }).toEqual({
-      status: 409,
+      status: 404,
       body: shareWebRefusalBody,
     });
     expect(staleBodyCancelled).toBe(true);
@@ -1022,7 +1016,7 @@ describe("share-web sessions", () => {
       refreshCalls,
       readCapabilities,
     }).toEqual({
-      statuses: [503, 200],
+      statuses: [404, 200],
       refreshCalls: 2,
       readCapabilities: [`LinkCapability ${CAP_ALPHA_2}`],
     });
@@ -1074,7 +1068,7 @@ describe("share-web sessions", () => {
     expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
   });
 
-  it("deletes a near-expiry session when relay refresh answers 401", async () => {
+  it("deletes a near-expiry session when relay refresh answers 404", async () => {
     let now = 1_000;
     let refreshCalls = 0;
     let readCalls = 0;
@@ -1096,7 +1090,7 @@ describe("share-web sessions", () => {
         }
         if (pathname === "/sync/link-refresh") {
           refreshCalls += 1;
-          return new Response("relay refresh refusal", { status: 401 });
+          return new Response("relay refresh refusal", { status: 404 });
         }
         readCalls += 1;
         return Response.json({ ok: true, access: "view" });
@@ -1174,7 +1168,7 @@ describe("share-web sessions", () => {
     for(let index=0;index<EXCHANGE_BUCKET_CAPACITY;index++) {
       expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
     }
-    expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(429);
+    expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
     expect((await handler(request("/api/exchange",{method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
     expect(relayCalls).toBe(101);
   });
@@ -1186,10 +1180,10 @@ describe("share-web sessions", () => {
     let address=0;
     const exchange=()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":`192.0.${Math.floor(address/250)}.${address++%250}`},body:JSON.stringify({secret:SECRET_ALPHA})}));
     const pending=Array.from({length:64},()=>exchange());
-    expect((await exchange()).status).toBe(429);
+    expect((await exchange()).status).toBe(404);
     release();expect((await Promise.all(pending)).every(response=>response.status===200)).toBe(true);
     for(let index=64;index<EXCHANGE_GLOBAL_BUCKET_CAPACITY;index++) expect((await exchange()).status).toBe(200);
-    expect((await exchange()).status).toBe(429);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
+    expect((await exchange()).status).toBe(404);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
   });
 
   it("keeps another network available during invalid floods and stalled bodies from one address", async () => {
@@ -1206,7 +1200,7 @@ describe("share-web sessions", () => {
     const pending=Array.from({length:16},()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":"slow-network"},
       signal:controller.signal,body:new ReadableStream<Uint8Array>(),duplex:"half"} as RequestInit)));
     try {
-      expect((await exchange("slow-network")).status).toBe(429);
+      expect((await exchange("slow-network")).status).toBe(404);
       expect((await exchange("other-network")).status).toBe(200);
     } finally {controller.abort();await Promise.all(pending);}
     expect((await exchange("slow-network")).status).toBe(200);
@@ -1268,7 +1262,7 @@ describe("share-web sessions", () => {
     try {
       expect(heldByA.map(({ status }) => status)).toEqual(Array(8).fill(200));
       expect(requestedByB.status).toBe(200);
-      expect(ninthFromA.status).toBe(429);
+      expect(ninthFromA.status).toBe(404);
       expect(blobReads).toBe(9);
     } finally {
       await Promise.all(
@@ -1335,7 +1329,7 @@ describe("share-web sessions", () => {
 
     try {
       expect(held.map(({ status }) => status)).toEqual(Array(24).fill(200));
-      expect(twentyFifth.status).toBe(429);
+      expect(twentyFifth.status).toBe(404);
       expect(await twentyFifth.text()).toBe(shareWebRefusalBody);
       expect(blobReads).toBe(24);
 
@@ -1481,11 +1475,11 @@ describe("share-web relay call", () => {
     { relay: 404, status: 404 },
     { relay: 409, status: 404 },
     { relay: 413, status: 404 },
-    { relay: 429, status: 429 },
-    { relay: 500, status: 503 },
-    { relay: 502, status: 503 },
-    { relay: 204, status: 503 },
-    { relay: "network error", status: 503 },
+    { relay: 429, status: 404 },
+    { relay: 500, status: 404 },
+    { relay: 502, status: 404 },
+    { relay: 204, status: 404 },
+    { relay: "network error", status: 404 },
   ];
 
   it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
@@ -1513,21 +1507,21 @@ describe("share-web relay call", () => {
             return new Response(`relay detail ${CAP_ALPHA_2}`, { status: Number(outcome.relay) });
         }
       }, 200_000);
-      const evicted = String(outcome.relay).startsWith("401");
+      const opaque = outcome.relay === 404;
 
       const answer = await state.call(target);
       const body = await answer.text();
       expect({ relay: outcome.relay, status: answer.status }).toEqual(outcome);
       if (outcome.status !== 200) expect(body).toBe(shareWebRefusalBody);
       expectSecurityHeaders(answer);
-      // The call refreshed first. Only the refusal that evicts the session skips its cookie.
+      // The call refreshed first. An opaque target refusal does not evict its session.
       expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
         `LinkCapability ${CAP_ALPHA_2}`,
       ]);
-      expect(cookiePairs(answer)).toEqual(evicted ? [] : [state.sessionCookie]);
+      expect(cookiePairs(answer)).toEqual(opaque ? [] : [state.sessionCookie]);
 
       await (await state.call(target)).body?.cancel();
-      expect(state.calls).toHaveLength(evicted ? 1 : 2);
+      expect(state.calls).toHaveLength(2);
     }
   });
 
@@ -1554,7 +1548,7 @@ describe("share-web relay call", () => {
       expect(state.calls[0]!.signal.aborted).toBe(true);
       const timedOut = await stalled;
       expect({ status: timedOut.status, body: await timedOut.text() }).toEqual({
-        status: 503,
+        status: 404,
         body: shareWebRefusalBody,
       });
 
@@ -1564,7 +1558,7 @@ describe("share-web relay call", () => {
       await started;
       browser.abort();
       expect(state.calls[1]!.signal.aborted).toBe(true);
-      expect((await abandoned).status).toBe(503);
+      expect((await abandoned).status).toBe(404);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1602,8 +1596,8 @@ describe("share-web relay call", () => {
   });
 
   const supersededStatus: Record<string, number> = {
-    log: 409,
-    "discussion activity": 409,
+    log: 404,
+    "discussion activity": 404,
     discussion: 404,
     "discussion append": 404,
   };
@@ -1629,7 +1623,7 @@ describe("share-web relay call", () => {
 
     const answer = await pending;
     expect(answer.status).toBe(
-      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 503),
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 404),
     );
     expect(answer.headers.has("set-cookie")).toBe(false);
     await answer.body?.cancel();
@@ -1701,7 +1695,7 @@ describe("share-web protected discussion proxy", () => {
   }
 
   async function expectDiscussionUnavailable(response: Response): Promise<void> {
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(404);
     expect(await response.text()).toBe(shareWebRefusalBody);
   }
 
@@ -1867,12 +1861,12 @@ describe("share-web protected discussion proxy", () => {
       const path = "/api/view/log?since=0&hold=30000";
       pending = Array.from({ length: 8 }, () => handler(request(path, init)));
       await started;
-      expect((await handler(request(path, init))).status).toBe(429);
+      expect((await handler(request(path, init))).status).toBe(404);
       await vi.advanceTimersByTimeAsync(39_999);
       expect(relayed.every((value) => !value.signal.aborted)).toBe(true);
       await vi.advanceTimersByTimeAsync(1);
       expect(relayed.every((value) => value.signal.aborted)).toBe(true);
-      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(503));
+      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(404));
       const retry = await handler(request(path, init));
       expect(retry.status).toBe(200);
       expect(await retry.json()).toEqual(page);
@@ -1926,7 +1920,7 @@ describe("share-web protected discussion proxy", () => {
 
     try {
       expect({ status: ninth.status, body: await ninth.text() }).toEqual({
-        status: 429,
+        status: 404,
         body: shareWebRefusalBody,
       });
       expect(activityCalls).toBe(8);
@@ -2002,7 +1996,7 @@ describe("share-web protected discussion proxy", () => {
     try {
       expect(independent.status).toBe(200);
       expect({ status: twentyFifth.status, body: await twentyFifth.text() }).toEqual({
-        status: 429,
+        status: 404,
         body: shareWebRefusalBody,
       });
       expect(alphaActivityCalls).toBe(24);
@@ -2064,7 +2058,7 @@ describe("share-web protected discussion proxy", () => {
       for (const { path } of holdRoutes) {
         const extra = await handler(request(path, { headers }));
         expect({ status: extra.status, body: await extra.text() }).toEqual({
-          status: 429, body: shareWebRefusalBody,
+          status: 404, body: shareWebRefusalBody,
         });
       }
       expect(relayCalls).toBe(limit);
@@ -2153,8 +2147,8 @@ describe("share-web protected discussion proxy", () => {
 
       const ninthBlob = await handler(request(`/api/view/blob/${blobSha}`, { headers }));
       const ninthActivity = await handler(request(activityPath, { headers }));
-      expect(ninthBlob.status).toBe(429);
-      expect(ninthActivity.status).toBe(429);
+      expect(ninthBlob.status).toBe(404);
+      expect(ninthActivity.status).toBe(404);
     } finally {
       for (const resolve of activityResolvers) resolve(Response.json(publicActivity));
       await Promise.allSettled(activities);
@@ -2166,16 +2160,16 @@ describe("share-web protected discussion proxy", () => {
     ...[
       { name: "success", expectedStatus: 200 },
       { name: "upstream refusal", expectedStatus: 404 },
-      { name: "abort", expectedStatus: 503 },
-      { name: "timeout", expectedStatus: 503 },
-      { name: "malformed response", expectedStatus: 503 },
-      { name: "thrown fetch", expectedStatus: 503 },
+      { name: "abort", expectedStatus: 404 },
+      { name: "timeout", expectedStatus: 404 },
+      { name: "malformed response", expectedStatus: 404 },
+      { name: "thrown fetch", expectedStatus: 404 },
     ].map(terminal => ({ ...terminal, ...holdRoutes[0]! })),
     ...[
       { name: "success", expectedStatus: 200 },
       { name: "upstream refusal", expectedStatus: 404 },
-      { name: "abort", expectedStatus: 503 },
-      { name: "thrown fetch", expectedStatus: 503 },
+      { name: "abort", expectedStatus: 404 },
+      { name: "thrown fetch", expectedStatus: 404 },
     ].map(terminal => ({ ...terminal, ...holdRoutes[1]! })),
   ])("releases $kind capacity after $name", async ({ name, expectedStatus, path, publicBody }) => {
     let phase: "terminal" | "hold" | "probe" = "terminal";
@@ -2263,7 +2257,7 @@ describe("share-web protected discussion proxy", () => {
       ]);
       expect(admission).toBe("all-started");
       const ninth = await handler(request(path, { headers }));
-      expect(ninth.status).toBe(429);
+      expect(ninth.status).toBe(404);
     } finally {
       for (const resolve of holdResolvers) resolve(Response.json(publicBody));
       await Promise.allSettled(held);
@@ -2340,7 +2334,7 @@ describe("share-web protected discussion proxy", () => {
     const firstSettled = await Promise.race(pending.map(async (response) =>
       await response));
     try {
-      expect(firstSettled.status).toBe(429);
+      expect(firstSettled.status).toBe(404);
       expect(firstSettled.headers.getSetCookie()).toHaveLength(1);
       expect(firstSettled.headers.getSetCookie()[0]).toContain(
         `${originalSessionCookie};`,
@@ -3140,7 +3134,7 @@ describe("share-web protected discussion proxy", () => {
       status: abortedResponse.status,
       body: await abortedResponse.clone().text(),
     }).toEqual({
-      status: 503,
+      status: 404,
       body: shareWebRefusalBody,
     });
 
@@ -3430,7 +3424,7 @@ describe("share-web protected discussion proxy", () => {
     ).toEqual(["retry-once", "retry-once"]);
   });
 
-  it("marks only a superseded activity response as retryable", async () => {
+  it("keeps a superseded activity response opaque", async () => {
     let exchangeCalls = 0;
     let activityCalls = 0;
     let releaseOldActivity: (() => void) | undefined;
@@ -3503,7 +3497,7 @@ describe("share-web protected discussion proxy", () => {
 
     const staleResponse = await firstActivity;
     expect({ status: staleResponse.status, body: await staleResponse.text() }).toEqual({
-      status: 409,
+      status: 404,
       body: shareWebRefusalBody,
     });
     expect(staleResponse.headers.has("set-cookie")).toBe(false);
@@ -3685,7 +3679,7 @@ describe("share-web protected discussion proxy", () => {
       status: 403,
       body: { ok: false, state: "blocked", activityRevision: 11 },
     });
-    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 429, 404, 503];
+    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404];
     for (const [index, status] of genericStatuses.entries()) {
       const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
@@ -4039,7 +4033,7 @@ describe("share-web handoff adapter", () => {
     }
   });
 
-  it("refuses malformed handoff mints with 503 and exposes nothing from them", async () => {
+  it("refuses malformed handoff mints opaquely and exposes nothing from them", async () => {
     const attempts: Array<() => Response> = [
       () => new Response("not-json", { status: 200 }),
       () => Response.json({ ok: false, code: HANDOFF_CODE, expiresAtMs: 301_000 }),
@@ -4061,7 +4055,7 @@ describe("share-web handoff adapter", () => {
     for (let index = 0; index < attempts.length; index += 1) {
       await generic(
         await state.handler(request("/api/handoff", { method: "POST", headers })),
-        503,
+        404,
       );
     }
   });
@@ -4128,6 +4122,6 @@ it("does not install an Edit renewal when the viewer release is absent", async (
   expect(nearExpiry.headers.get("set-cookie")).toBeNull();
   expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
   now = 901_001;
-  expect((await handle(request("/api/view/meta", {headers}))).status).toBe(503);
+  expect((await handle(request("/api/view/meta", {headers}))).status).toBe(404);
   expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
 });

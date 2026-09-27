@@ -15,7 +15,7 @@ const BODY_DEADLINE_MS=30_000;
 export function createLinkAppCollectionRoutes(options:{
   storage:SyncRelayStorage;limits?:AppPublicationLimits;policy?:AppCollectionPolicy;
   linkKey:string|Uint8Array;publicEditRelease?:PublicEditRelease;nowMs():number;
-  requireLinkRead(request:Request,capabilityLimiter:TokenBucketLimiter,grantLimiter:TokenBucketLimiter):{capability:ValidatedLinkCapability};
+  requireLinkRead(request:Request,capabilityLimiter:TokenBucketLimiter,grantLimiter:TokenBucketLimiter):{capability:ValidatedLinkCapability;assertAdmitted():void};
   capabilityLimiter:TokenBucketLimiter;grantLimiter:TokenBucketLimiter;
   egress:Pick<LinkEgressRateLimiter,"reserve">;
   streams:Pick<ReturnType<typeof createLinkResponseStreams>,"admitLinkBlobBytes"|"respondWithLinkBytes">;
@@ -25,7 +25,7 @@ export function createLinkAppCollectionRoutes(options:{
   if(policy&&(!limits||!Number.isSafeInteger(policy.maxCreatesPerGrant)||policy.maxCreatesPerGrant<1))throw new TypeError("Invalid app collection policy.");
   return async(request:Request,route:LinkAppCollectionRoute):Promise<Response>=>{
     if(!limits||!policy||request.headers.has("cookie"))throw notFound();
-    const {capability}=options.requireLinkRead(request,options.capabilityLimiter,options.grantLimiter);
+    const {capability,assertAdmitted}=options.requireLinkRead(request,options.capabilityLimiter,options.grantLimiter);
     const secret=request.headers.get("x-dohc-link-profile-secret");
     if(!secret||!LINK_SECRET_PATTERN.test(secret))throw notFound();
     if(request.method!=="GET"&&request.method!=="POST")throw relayError("method_not_allowed");
@@ -34,6 +34,7 @@ export function createLinkAppCollectionRoutes(options:{
     const base={publicationId:route.publicationId,capabilityHash:capability.session.capabilityHash,profileTokenHash:hashLinkProfileSecret(secret,options.linkKey),limits,publicEditRelease:options.publicEditRelease};
     const signal=AbortSignal.any([request.signal,options.storage.unavailable]);signal.throwIfAborted();
     const admitted=options.storage.authorizeLinkAppCollection({...base,nowMs:options.nowMs()});
+    assertAdmitted();
     const releaseBytes=options.streams.admitLinkBlobBytes(admitted.grantId,RESPONSE_BYTES+(request.method==="POST"?APP_COLLECTION_REQUEST_BYTES:0));
     if(!releaseBytes)throw relayError("link_read_rate_limited");
     const settleEgress=options.egress.reserve(admitted.grantId,RESPONSE_BYTES,options.nowMs());

@@ -1,6 +1,7 @@
 import {afterEach, expect, it} from "vitest";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 
 const origin = "https://share.example.test";
 const secret = "A".repeat(43);
@@ -23,6 +24,7 @@ servedLog = logPage;
 function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text") {
   const calls: Request[] = [];
   let revoked = false;
+  let rateLimited: string | undefined;
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -36,6 +38,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       const path = new URL(request.url).pathname;
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 401});
+      if (path === rateLimited) return Response.json(linkRefusalBody("link_read_rate_limited"), {status: 429});
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
@@ -67,8 +70,28 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}};
+  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string) {rateLimited = path;}};
 }
+
+it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
+  const f = fixture(); const client = await f.connect(await f.exchange());
+  f.limit("/sync/link/current");
+  const before = f.calls.length;
+  const result = await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}});
+  expect(result).toMatchObject({isError: true, content: [{type: "text", text: "not found"}]});
+  expect(f.calls.slice(before).map(call => new URL(call.url).pathname)).not.toContain("/sync/link/current");
+});
+
+it("explains metadata limits for discovery but keeps unverified tool targets opaque", async () => {
+  const f = fixture(); const bearer = await f.exchange();
+  f.limit("/sync/link/share");
+  for (const method of ["tools/list", "tools/call"]) {
+    const response = await f.send("/mcp", {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({jsonrpc: "2.0", id: 1, method, ...(method === "tools/call" ? {params: {name: "dohc_read_file", arguments: {blobSha256: withdrawn}}} : {})})});
+    expect(response.status).toBe(method === "tools/list" ? 429 : 404);
+    expect(await response.json()).toEqual(method === "tools/list" ? linkRefusalBody("link_read_rate_limited") : {ok: false, error: "not found"});
+  }
+});
 
 it.each(["legacy", "auto"] as const)("serves a real %s MCP client without transport sessions", async mode => {
   const f = fixture(); const client = await f.connect(await f.exchange(), mode);
@@ -89,7 +112,7 @@ it("assigns independent agent profiles and rejects revoked bearers", async () =>
 
 it("rejects browser cookies, foreign origins, and query credentials", async () => {
   const f = fixture(); const bearer = await f.exchange();
-  expect((await f.send("/mcp", {headers: {cookie: "dohc_share_any=token"}})).status).toBe(401);
+  expect((await f.send("/mcp", {headers: {cookie: "dohc_share_any=token"}})).status).toBe(404);
   expect((await f.send("/mcp?bearer=" + bearer, {headers: {authorization: `Bearer ${bearer}`}})).status).toBe(404);
   expect((await f.send("/mcp", {headers: {authorization: `Bearer ${bearer}`, origin: "https://evil.test"}})).status).toBe(404);
 });
@@ -119,7 +142,7 @@ it("does not turn a browser session token into an agent bearer", async () => {
   const {session} = await browser.json() as {session: string};
   const cookie = browser.headers.getSetCookie().find(value => value.startsWith(`dohc_share_${session}=`))!;
   const token = cookie.split(";", 1)[0]!.split("=")[1]!;
-  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${session}.${token}`}})).status).toBe(401);
+  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${session}.${token}`}})).status).toBe(404);
 });
 
 it("rejects oversized and malformed MCP bodies without tool side effects", async () => {
@@ -185,7 +208,7 @@ it("lists the link log as changes through the browser's log route", async () => 
   expect(await client.callTool({name: "dohc_list_changes", arguments: {limit: 501}})).toMatchObject({isError: true});
   expect(f.calls.filter(call => new URL(call.url).pathname === "/sync/link/log")).toHaveLength(1);
   expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: second}})).toMatchObject({structuredContent: {ok: true, encoding: "utf8", content: "hello"}});
-  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}})).toMatchObject({isError: true, content: [{text: expect.stringContaining("withdraws its history")}]});
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}})).toMatchObject({isError: true, content: [{text: "not found"}]});
   expect(f.calls.filter(call => new URL(call.url).pathname.startsWith("/sync/link/blobs/")).map(call => new URL(call.url).pathname)).toEqual([`/sync/link/blobs/${second}`, `/sync/link/blobs/${withdrawn}`]);
 });
 

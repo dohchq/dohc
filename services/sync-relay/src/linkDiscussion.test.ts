@@ -1,3 +1,4 @@
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
@@ -2277,7 +2278,8 @@ describe("share discussion HTTP boundary", () => {
         PROFILE_A,
       ),
     );
-    expect(await genericRefusal(viewWrite)).toContain("404:");
+    expect(viewWrite.status).toBe(403);
+    expect(await viewWrite.json()).toEqual(linkRefusalBody("link_view_access"));
     expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
       rowsBefore,
     );
@@ -2521,7 +2523,7 @@ describe("share discussion HTTP boundary", () => {
       const response = await test.handler(
         trustedAppend(test.comment, { ...validBody, [field]: `forged-${field}` }),
       );
-      expect(response.status, field).toBe(400);
+      expect(response.status, field).toBe(404);
       expectPrivate(response);
       await response.arrayBuffer();
     }
@@ -2531,7 +2533,7 @@ describe("share discussion HTTP boundary", () => {
       { body: 42, idempotencyKey: "wrong-body-type" },
     ]) {
       const response = await test.handler(trustedAppend(test.comment, malformed));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(404);
       expectPrivate(response);
       await response.arrayBuffer();
     }
@@ -2571,13 +2573,11 @@ describe("share discussion HTTP boundary", () => {
           ),
         ),
       ];
-      for (const response of responses) {
-        expect(response.status).toBe(400);
+      for (const [index, response] of responses.entries()) {
+        expect(response.status).toBe(index === 0 ? 404 : 400);
         expectPrivate(response);
-        expect(await body(response)).toEqual({
-          ok: false,
-          error: "discussion message is invalid",
-          code: "bad_request",
+        expect(await body(response)).toEqual(index === 0 ? {ok: false, error: "not found"} : {
+          ok: false, error: "discussion message is invalid", code: "bad_request",
         });
       }
       expect({
@@ -4028,7 +4028,7 @@ describe("share discussion HTTP boundary", () => {
     const overMax = await test.handler(
       linkRequest(test.view, "/sync/link/discussion?limit=101"),
     );
-    expect(overMax.status).toBe(400);
+    expect(overMax.status).toBe(404);
     expectPrivate(overMax);
   });
 
@@ -5655,7 +5655,6 @@ describe("share discussion HTTP boundary", () => {
       "not-authorized",
       "name-already-set",
       "idempotency-conflict",
-      "rate-limit",
       "workspace-quota",
     ] as const;
     for (const reason of nonStateReasons) {
@@ -5679,13 +5678,14 @@ describe("share discussion HTTP boundary", () => {
         idempotencyKey: "reason-invalid-input",
       }),
     );
-    expect(invalidInput.status).toBe(400);
+    expect(invalidInput.status).toBe(404);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({
-      ok: false,
-      error: "discussion message is invalid",
-      code: "bad_request",
-    });
+    expect(await body(invalidInput)).toEqual({ok: false, error: "not found"});
+
+    test.storage.appendLinkDiscussionMessage = () => ({ok: false, reason: "rate-limit"});
+    const limited = await test.handler(trustedAppend(test.comment, {body: "wait", idempotencyKey: "rate-refusal"}));
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual(linkRefusalBody("link_read_rate_limited"));
 
     for (const state of ["blocked", "paused"] as const) {
       test.storage.appendLinkDiscussionMessage = () => ({
@@ -5840,13 +5840,9 @@ describe("share discussion HTTP boundary", () => {
         idempotencyKey: "trusted-invalid-input",
       }),
     );
-    expect(invalidInput.status).toBe(400);
+    expect(invalidInput.status).toBe(404);
     expectPrivate(invalidInput);
-    expect(await body(invalidInput)).toEqual({
-      ok: false,
-      error: "discussion message is invalid",
-      code: "bad_request",
-    });
+    expect(await body(invalidInput)).toEqual({ok: false, error: "not found"});
 
     await discussionStateRefusal(
       await test.handler(

@@ -8,6 +8,7 @@ import type { LinkBrowserMaterial } from "./server";
 import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { forwardAppCollection } from "./appCollectionProxy";
 import { forwardAppBackend } from "./appBackendProxy";
+import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const PUBLICATION = /^[a-f0-9]{64}$/;
@@ -132,10 +133,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       if (issue) {
         // Untrusted bodies have their own bounded lane; they cannot occupy document builds.
         if (issuePending >= 64 || (issueByAddress.get(address) ?? 0) >= 16 ||
-            !issueAddressRate.allow(address, now()) || !issueGlobalRate.allow("issue", now())) return rateLimited();
+            !issueAddressRate.allow(address, now()) || !issueGlobalRate.allow("issue", now())) return refusal();
         issuePending++; issueByAddress.set(address, (issueByAddress.get(address) ?? 0) + 1);
       } else {
-        if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return unavailable();
+        if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return refusal();
         if (statusRequest) statusPending++; else if (collectionRequest) collectionPending++; else pending++;
       }
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
@@ -151,11 +152,11 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           } else if (exact(issueBody, "publicationId,workspaceId") && typeof issueBody.workspaceId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(issueBody.workspaceId) && !issueBody.workspaceId.includes("\n") && options.resolveNamedMaterial) {
             material = await options.resolveNamedMaterial(issueBody.workspaceId, issueBody.publicationId as string, request.headers.get("cookie"), signal);
           } else return refusal();
-          if (!material.ok) return material.status === 503 ? unavailable() : refusal();
+          if (!material.ok) return refusal();
           const current = await descriptor({ publicationId: body.publicationId, material }, signal);
           // The relay authorizes the resolved profile/account cookies before they get a budget.
           const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;
-          if (!issueRate.allow(identity, now())) return rateLimited();
+          if (!issueRate.allow(identity, now())) return namedMaterial(material) ? rateLimited() : Response.json(linkRefusalBody("link_read_rate_limited"), {status: 429, headers});
           signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
           launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, material,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
@@ -179,10 +180,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
             // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
             delete launch.handoffHash;
           }
-          if (launch.rebuilding || !sessionRate.allow(host, now())) return unavailable();
+          if (launch.rebuilding || !sessionRate.allow(host, now())) return namedMaterial(launch.material) ? unavailable() : refusal();
           if (stagedSlots.size >= 2) {
             const oldestReady = [...stagedSlots].find(value => value.staged !== undefined);
-            if (!oldestReady) return unavailable();
+            if (!oldestReady) return namedMaterial(launch.material) ? unavailable() : refusal();
             oldestReady.staged = undefined; stagedSlots.delete(oldestReady);
           }
           launch.rebuilding = true; stagedSlots.add(launch);
@@ -202,7 +203,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         const cookies = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
         const cookie = cookies.length === 1 ? cookies[0]!.slice(COOKIE.length + 1) : "", proof = request.headers.get("x-dohc-app-proof") ?? "";
         if (!launch.cookieHash || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash || !TOKEN.test(proof) || hash(proof) !== launch.proofHash || request.headers.get("origin") !== launch.origin) return refusal();
-        if (!(url.pathname === "/backend" ? backendRate : collectionRequest ? collectionRate : sessionRate).allow(host, now())) return unavailable();
+        if (!(url.pathname === "/backend" ? backendRate : collectionRequest ? collectionRate : sessionRate).allow(host, now())) return namedMaterial(launch.material) ? unavailable() : refusal();
         if (url.pathname === "/collection" && !namedMaterial(launch.material)) return await forwardAppCollection({request,relayUrl:options.relayUrl,publicationId:launch.publicationId,
           authorityRevision:launch.revision,capability:launch.material.capabilityToken,profileSecret:launch.material.profileSecret,signal,fetchRelay:request => fetchForLaunch(launch, request)});
         if (url.pathname === "/backend") return await forwardAppBackend({request,relayUrl:options.relayUrl,publicationId:launch.publicationId,
@@ -214,7 +215,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!doc) return refusal();
         if (launch.expires <= now()) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-      } catch (error) { return error instanceof RelayRateLimited ? rateLimited() : error instanceof RelayUnavailable ? unavailable() : refusal(); } finally {
+      } catch (error) {
+        const launch = launches.get(host);
+        return issue || !launch || !namedMaterial(launch.material) ? refusal() : error instanceof RelayRateLimited ? rateLimited() : error instanceof RelayUnavailable ? unavailable() : refusal();
+      } finally {
         if (issue) {
           issuePending--; const remaining = issueByAddress.get(address)! - 1;
           if (remaining) issueByAddress.set(address, remaining); else issueByAddress.delete(address);

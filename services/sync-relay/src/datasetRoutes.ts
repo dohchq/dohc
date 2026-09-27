@@ -237,9 +237,15 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
     const published = host.publication(auth, route.publicationId);
     if (!published) throw notFound();
     const {authority, workspaceId, datasetId, authorityRevision, capability} = published;
-    const release = admit({dataset: JSON.stringify([workspaceId, datasetId]), participant: authority.principalKey,
+    let release: () => void;
+    try { release = admit({dataset: JSON.stringify([workspaceId, datasetId]), participant: authority.principalKey,
       ...(authority.caller.kind === "link" ? {link: JSON.stringify([workspaceId, authority.caller.grantId])} : {}),
       organizer: authority.caller.kind === "owner"}, route.action, options.nowMs());
+    } catch (error) {
+      // The publication is known here, but its requested operation or file is not yet authorized.
+      if (auth.kind === "link") throw notFound();
+      throw error;
+    }
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
     try {
       const get = route.action === "descriptor" || route.action === "blob";
