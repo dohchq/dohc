@@ -12,6 +12,7 @@ import type {
 } from "./collection";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
+  collectionVersionError,
   FIELD_VALUE_REASON_CODES,
 } from "./collection";
 import {
@@ -79,6 +80,15 @@ describe("Collection reason-code contract", () => {
 });
 
 describe("Collection schema contract vectors", () => {
+  it("reads current and missing versions and refuses a newer schema without interpreting fields", () => {
+    const yaml = "name: Tasks\nfields:\n  Done:\n    type: checkbox\n";
+    expect(parseCollectionSchema(`version: 1\n${yaml}`)).toEqual(parseCollectionSchema(yaml));
+    const newer = parseCollectionSchema(`version: 2\n${yaml}`);
+    expect(newer.status).toBe("degraded");
+    expect(newer.schema.fields).toEqual([]);
+    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml"))
+      .toBe("tasks/collection.yaml uses a newer version. Update dohc to read this file.");
+  });
   it.each(schemaVectors)("matches $name", ({ yaml, expected }) => {
     expect(() => parseCollectionSchema(yaml)).not.toThrow();
     expect(parseCollectionSchema(yaml)).toEqual(expected);

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, APP_COLLECTION_PAGE_BYTES, APP_COLLECTION_FIELDS_BYTES, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { isRecordId, parseCollectionRecordFields, parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
 import type { StorageContext } from "./context";
@@ -41,6 +42,8 @@ function schema(storage: StorageContext, workspaceId: string, versionId: string,
   if (!row || row.blob_sha256 !== capability.schemaSha256 || row.content_kind !== "text") throw notFound();
   const blob = boundedBlob(storage,workspaceId,capability.schemaSha256,MAX_SCHEMA_BYTES);
   const parsed = parseCollectionSchema(new TextDecoder("utf-8", {fatal: true}).decode(blob));
+  const versionError = collectionVersionError(parsed.reasons, `${capability.collectionPath}/collection.yaml`);
+  if (versionError) throw badRequest(versionError);
   if (parsed.status !== "valid" || [...capability.allowedFields, ...capability.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw badRequest("Collection schema does not match approval.");
   return parsed.schema;
 }

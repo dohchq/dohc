@@ -21,6 +21,24 @@ import {
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
 import { createTestScratch } from "./testTemp";
+import { settingsFileNotice } from "../renderer/shell/useSettingsFileNotices";
+
+it("applies settings beside one unknown key and names it in one file notice", async () => {
+  const root = await createTestScratch("dohc-settings-unknown-key-");
+  await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+  const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
+  const raw = { ...DEFAULT_WORKSPACE_SETTINGS, sites: { defaultPreviewMode: "static", futurePreview: true } };
+  await writeFile(path, JSON.stringify(raw));
+  const read = await readWorkspaceSettingsFile(root);
+  expect(read.source).toBe("stored");
+  expect(read.settings.sites.defaultPreviewMode).toBe("static");
+  expect(read.ignored).toEqual([{ key: "sites.futurePreview", reason: "unknown" }]);
+  expect(settingsFileNotice(".dohc/settings.local.json", read)).toBe(
+    "dohc ignored sites.futurePreview in .dohc/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+  );
+  await saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } });
+  expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ sites: raw.sites, privacy: { confirmExternalLinks: false } });
+});
 // A seam for the write-ordering test below: every settings read and write
 // resolves the metadata directory first, so a gate here can hold one of them
 // open while another write is fired. Pass-through until a test arms it.

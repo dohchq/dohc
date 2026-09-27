@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseFilesPolicy,
+  serializeFilesPolicy,
   parseVisibilityPolicy,
   policyGlobMatches,
   resolveEffectivePolicy,
@@ -20,6 +21,16 @@ function expectReject(result: PolicyParseResult<unknown>, pattern?: RegExp): voi
 }
 
 describe("workspace engine effective policy parsing", () => {
+  it("writes version 1 and reads current and missing versions", () => {
+    const rules = [{ path: "private/**", tracked: false }];
+    const text = serializeFilesPolicy(rules);
+    expect(text).toMatch(/^version = 1/);
+    expect(parseFilesPolicy(text)).toEqual({ ok: true, rules });
+    expect(parseFilesPolicy(text.replace(/^version = 1\r?\n/, ""))).toEqual({ ok: true, rules });
+    expect(parseFilesPolicy(text.replace("version = 1", "version = 2"))).toEqual({
+      ok: false, errors: ["files.toml uses a newer version. Update dohc to read this file."],
+    });
+  });
   it("accepts well-formed files and visibility policy files", () => {
     expect(
       parseFilesPolicy(`
@@ -56,7 +67,7 @@ describe("workspace engine effective policy parsing", () => {
   it("rejects malformed files policy shapes without partial application", () => {
     const cases: Array<[string, RegExp]> = [
       ["[[rule]\npath = \"x.md\"\n", /invalid TOML/],
-      ["version = true\n[[rule]]\npath = \"x.md\"\n", /unknown top-level key/],
+      ["version = true\n[[rule]]\npath = \"x.md\"\n", /files.toml has an invalid version/],
       ["rule = \"not-array\"\n", /array/],
       ["[[rule]]\ntracked = false\n", /path is required/],
       ["[[rule]]\npath = \"x.md\"\nmode = true\n", /unknown key/],

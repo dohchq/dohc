@@ -1,6 +1,7 @@
 import { isRecord } from "@dohc/workspace-core/records";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { classifyEngineFilePath } from "./enginePathFloor";
+import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 
 export interface FilesPolicyRule {
   path: string;
@@ -180,8 +181,11 @@ function validateTopLevel(parsed: ParsedToml, errors: string[]): unknown {
 export function parseFilesPolicy(tomlText: string): PolicyParseResult<FilesPolicyRule> {
   const parsed = parsePolicyToml(tomlText);
   if (!parsed.ok) return parsed;
+  const versionError = fileVersionError(parsed.value.version, "files.toml");
+  if (versionError) return { ok: false, errors: [versionError] };
   const errors: string[] = [];
-  const ruleValue = validateTopLevel(parsed.value, errors);
+  const { version: _version, ...policy } = parsed.value;
+  const ruleValue = validateTopLevel(policy, errors);
   if (!Array.isArray(ruleValue)) {
     errors.push("rule must be an array of tables");
   }
@@ -216,6 +220,13 @@ export function parseFilesPolicy(tomlText: string): PolicyParseResult<FilesPolic
     }
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, rules };
+}
+
+export function serializeFilesPolicy(rules: readonly FilesPolicyRule[]): string {
+  const text = stringifyToml({ version: 1, rule: rules });
+  const parsed = parseFilesPolicy(text);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return `${text}\n`;
 }
 
 export function parseVisibilityPolicy(

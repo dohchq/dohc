@@ -70,6 +70,8 @@ export interface CollectionSchema {
 export const COLLECTION_SCHEMA_REASON_CODES = [
   "invalid-yaml",
   "root-not-mapping",
+  "unsupported-version",
+  "invalid-version",
   "root-collection-unsupported",
   "unknown-property",
   "expected-text",
@@ -97,6 +99,16 @@ type CollectionSchemaReasonCode =
 export interface CollectionSchemaReason {
   code: CollectionSchemaReasonCode;
   path: string;
+}
+
+export function collectionVersionError(reasons: readonly CollectionSchemaReason[], file = COLLECTION_SCHEMA_FILENAME): string | null {
+  if (reasons.some(reason => reason.code === "unsupported-version")) {
+    return `${file} uses a newer version. Update dohc to read this file.`;
+  }
+  if (reasons.some(reason => reason.code === "invalid-version")) {
+    return `${file} has an invalid version. Set version to 1.`;
+  }
+  return null;
 }
 
 export interface CollectionSchemaParseResult {

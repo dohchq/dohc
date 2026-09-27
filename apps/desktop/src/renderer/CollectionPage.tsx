@@ -1,4 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import {
   useCallback,
   useEffect,
@@ -137,6 +138,12 @@ export function CollectionPage({
         collectionPath,
       });
       if (!detailsRequest.isCurrent(request)) return;
+      const versionError = collectionVersionError(result.reasons, `${collectionPath}/collection.yaml`);
+      if (versionError) {
+        setDetails(null);
+        setLoadError(versionError);
+        return;
+      }
       setDetails({ schema: result.schema });
       setLoadError(null);
     } catch (error) {

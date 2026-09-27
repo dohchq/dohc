@@ -4,6 +4,8 @@ import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@do
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { parseDatasetBindingReference, resolveAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { posix } from "node:path";
+import { fileVersionError } from "@dohc/workspace-contracts/file-version";
+import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 
@@ -35,10 +37,18 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
   const manifestPath = `${appRoot}/app.publish.json`;
   if (bytes.byteLength > manifestLimit) throw new Error(`${manifestPath} is larger than 64 KB.`);
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!value || typeof value !== "object" || Array.isArray(value) || !["entryPath,inputs,packageMap", "collection,entryPath,inputs,packageMap", "dataset,entryPath,inputs,packageMap"].includes(Object.keys(value).sort().join())) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${manifestPath} must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.`);
   }
   const row = value as Record<string, unknown>;
+  const versionError = fileVersionError(row.version, manifestPath);
+  if (versionError) throw new Error(versionError);
+  if (Object.hasOwn(row, "backend")) {
+    throw new Error(`${manifestPath} cannot use backend. Use a dataset binding for app data.`);
+  }
+  if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
+    throw new Error(`${manifestPath} must hold at most one of collection or dataset.`);
+  }
   const resolve = (path: unknown, field: string): string => {
     if (typeof path !== "string" || path === "") throw new Error(`${manifestPath} names no file in ${field}.`);
     if (path.startsWith("/")) throw new Error(`${manifestPath} lists ${path}. Write the path relative to ${appRoot}, without a leading /.`);
@@ -152,6 +162,8 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
     const file = selected.files.find(file => file.path === schemaPath);
     if (!file || file.bytes.byteLength > 65_536) throw new Error("The collection schema is unavailable or too large.");
     const parsed = parseCollectionSchema(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes));
+    const versionError = collectionVersionError(parsed.reasons, schemaPath);
+    if (versionError) throw new Error(versionError);
     if (parsed.status !== "valid" || [...declared.collection.allowedFields, ...declared.collection.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw new Error("Collection fields do not match its schema.");
     capabilities.push(parseAppCollectionCapability({ ...declared.collection, schemaSha256: file.sha256 }));
   }

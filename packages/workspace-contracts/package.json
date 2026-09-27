@@ -16,6 +16,7 @@
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
+    "./file-version": "./src/fileVersion.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./relay": "./src/relay.ts",
     "./relay-values": "./src/relayValues.ts",

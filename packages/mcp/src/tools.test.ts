@@ -1391,6 +1391,26 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it.each([undefined, 1, 2])("dohc_detect_apps checks dohc.json version %s", async (version) => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "versioned"));
+      await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
+      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "site", title: "Declared title" }));
+      const result = await detectApps(ctx);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const app = result.apps.find(app => app.root === "versioned")!;
+      if (version === 2) {
+        expect(app.diagnostics).toContainEqual({ severity: "error", code: "unsupported-version", path: "versioned/dohc.json",
+          message: "versioned/dohc.json uses a newer version. Update dohc to read this file." });
+        expect(app.title).not.toBe("Declared title");
+      } else {
+        expect(app.title).toBe("Declared title");
+        expect(app.diagnostics).toEqual([]);
+      }
+    });
+  });
+
   it("dohc_create_app scaffolds a normal website (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
       const result = await createApp(ctx, { appRoot: "finance/ledger", title: "Ledger" });
@@ -1425,7 +1445,7 @@ describe("mcp tools operate on allowed paths", () => {
           serve: "14.2.6",
         },
       });
-      expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
+      expect(config).toMatchObject({ version: 1, type: "site", title: "Ledger", build: { output: "dist" } });
       // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,

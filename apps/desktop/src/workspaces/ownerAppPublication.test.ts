@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { prepareOwnerAppPublication } from "./ownerAppPublication";
+import { parseAppPublicationDeclaration, prepareOwnerAppPublication } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
@@ -33,11 +33,20 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
 
 it("refuses retired app-owned backend declarations before compilation", async () => {
   const h = harness();
-  await expect(h.prepare()).rejects.toThrow("app/app.publish.json must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.");
+  await expect(h.prepare()).rejects.toThrow("app/app.publish.json cannot use backend. Use a dataset binding for app data.");
   expect(h.compile).not.toHaveBeenCalled();
 });
 
 describe("app.publish.json paths", () => {
+  it.each([undefined, 1])("reads version %s and additive keys", (version) => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, title: "App" }));
+    expect(parseAppPublicationDeclaration(bytes, "app").entryPath).toBe("app/main.ts");
+  });
+
+  it("refuses a newer version before interpreting fields", () => {
+    expect(() => parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"))
+      .toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
+  });
   const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
   const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
     h.sources.clear();

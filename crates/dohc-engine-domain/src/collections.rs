@@ -205,6 +205,8 @@ macro_rules! reason_code {
 reason_code!(CollectionSchemaReasonCode {
     InvalidYaml,
     RootNotMapping,
+    UnsupportedVersion,
+    InvalidVersion,
     RootCollectionUnsupported,
     UnknownProperty,
     ExpectedText,
@@ -1186,10 +1188,28 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
         return degraded_document(CollectionSchemaReasonCode::RootNotMapping);
     };
 
+    if let Some(version) = mapping_get(root, "version") {
+        let number = version
+            .as_integer()
+            .map(|value| value as f64)
+            .or_else(|| version.as_floating_point());
+        if number != Some(1.0) {
+            let code = if number.is_some_and(|value| {
+                value > 1.0 && value <= 9_007_199_254_740_991.0 && value.fract() == 0.0
+            }) {
+                CollectionSchemaReasonCode::UnsupportedVersion
+            } else {
+                CollectionSchemaReasonCode::InvalidVersion
+            };
+            let mut result = degraded_document(code);
+            result.reasons[0].path = "/version".to_owned();
+            return result;
+        }
+    }
     let mut reasons = Vec::new();
     report_unknown_properties(
         root,
-        &["name", "description", "fields", "views"],
+        &["version", "name", "description", "fields", "views"],
         "",
         &mut reasons,
     );

@@ -354,10 +354,25 @@ fn array_index(key: &str) -> Option<u32> {
 /// Parse `.dohc/files.toml`. Collects all shape errors in one pass (never a
 /// partial application), matching `parseFilesPolicy` (`effectivePolicy.ts`).
 pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<String>> {
-    let value = match toml_text.parse::<toml::Table>() {
+    let mut value = match toml_text.parse::<toml::Table>() {
         Ok(table) => table,
         Err(err) => return Err(vec![format!("invalid TOML: {err}")]),
     };
+    if let Some(version) = value.remove("version") {
+        let number = version
+            .as_integer()
+            .map(|value| value as f64)
+            .or_else(|| version.as_float());
+        if number != Some(1.0) {
+            return Err(vec![if number.is_some_and(|value| {
+                value > 1.0 && value <= 9_007_199_254_740_991.0 && value.fract() == 0.0
+            }) {
+                "files.toml uses a newer version. Update dohc to read this file.".to_owned()
+            } else {
+                "files.toml has an invalid version. Set version to 1.".to_owned()
+            }]);
+        }
+    }
     let mut errors: Vec<String> = Vec::new();
     let rule_value = validate_top_level(&value, &mut errors);
     let mut rules: Vec<FilesPolicyRule> = Vec::new();
