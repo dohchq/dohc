@@ -18,20 +18,13 @@ import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type N
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
 import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+import {opaqueLinkRefusal as refused} from "./linkRefusal";
+import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
+export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
-export const SHARE_WEB_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
-  "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
-  "content-security-policy": SHARE_WEB_CSP,
-  "referrer-policy": "no-referrer",
-  "x-content-type-options": "nosniff",
-  "x-robots-tag": "noindex, nofollow, noarchive",
-  "cache-control": "private, no-store",
-});
 
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
@@ -324,10 +317,6 @@ function jsonResponse(
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   return response(JSON.stringify(body), { status: init.status, headers });
-}
-
-function refused(): Response {
-  return jsonResponse(REFUSAL_VALUE, {status: 404});
 }
 
 function parseCookies(header: string | null): Map<string, string> {
@@ -1041,7 +1030,7 @@ export function createShareWebApplication({
   async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
     const refreshed = await refreshSession(browser);
     if (!refreshed.ok) return refreshed.status === 503
-      ? jsonResponse(linkRefusalBody("link_live_unavailable"), {status: 503}) : refused();
+      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
     const capabilityToken = browser.session.capabilityToken;
     const current = (): boolean =>
       sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
@@ -1094,7 +1083,7 @@ export function createShareWebApplication({
       }
       if (relayResponse.status >= 500) {
         await relayResponse.body?.cancel().catch(() => undefined);
-        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_live_unavailable"), {status: 503}));
+        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();

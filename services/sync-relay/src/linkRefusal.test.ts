@@ -11,6 +11,12 @@ it.each([401, 403, 404])("hides non-contract %s bodies", async status => {
 it.each([500, 502, 503])("keeps %s outages retryable without exposing details", async status => {
   const result = await normalizeLinkRefusal(Response.json({error: "private path"}, {status}));
   expect(result.status).toBe(503);
+  expect(await result.json()).toEqual(linkRefusalBody("link_unavailable"));
+});
+
+it.each([500, 502, 503])("uses live-editing words only for live routes on %s", async status => {
+  const result = await normalizeLinkRefusal(Response.json({error: "private host"}, {status}), true);
+  expect(result.status).toBe(503);
   expect(await result.json()).toEqual(linkRefusalBody("link_live_unavailable"));
 });
 

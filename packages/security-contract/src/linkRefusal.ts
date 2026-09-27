@@ -3,6 +3,7 @@ export const LINK_REFUSALS = {
   link_view_access: {status: 403, error: "This link gives View access. Ask the owner for a link with the access you need."},
   link_comment_access: {status: 403, error: "This link gives Comment access. Ask the owner for an Edit link."},
   link_live_unavailable: {status: 503, error: "Live editing is unavailable. Try again later."},
+  link_unavailable: {status: 503, error: "This link can't be reached right now. Try again in a moment."},
   link_read_rate_limited: {status: 429, error: "This link has reached its request limit. Try again later."},
 } as const;
 

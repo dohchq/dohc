@@ -10,10 +10,15 @@ beforeEach(()=>{container=document.createElement("div");document.body.append(con
 afterEach(async()=>{await act(async()=>root.unmount());container.remove();vi.unstubAllGlobals();});
 const render=(session="abcdefghijkl")=>act(async()=>root.render(<PublishedApps session={session}/>));
 const row=(id:string,name:string)=>({publicationId:id.repeat(64),name});
-it.each(["link_read_rate_limited", "link_live_unavailable", "link_view_access"] as const)("shows the verified %s message", async code => {
+it.each(["link_read_rate_limited", "link_live_unavailable", "link_unavailable", "link_view_access"] as const)("shows the verified %s message", async code => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(linkRefusalBody(code), LINK_REFUSALS[code].status)));
   await render();
   await settle(() => container.textContent!.includes(LINK_REFUSALS[code].error));
+  const retry = [...container.querySelectorAll("button")].find(button => button.textContent === "Retry");
+  expect(retry).toBeDefined();
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({publications: [], nextCursor: null})));
+  await act(async () => retry!.click());
+  await settle(() => container.textContent!.includes("No apps are available"));
 });
 it("ignores a previous session's delayed refusal and rejects forged refusal words", async () => {
   const held = heldJsonResponse(429);

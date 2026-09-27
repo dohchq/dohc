@@ -149,7 +149,7 @@ describe("CommentsPanel", () => {
     });
   }
 
-  it.each(["link_read_rate_limited", "link_live_unavailable", "link_view_access"] as const)("shows %s when loading fails, retaining the last refusal after retries", async code => {
+  it.each(["link_read_rate_limited", "link_live_unavailable", "link_unavailable", "link_view_access"] as const)("shows %s when loading fails, retaining the last refusal after retries", async code => {
     vi.useFakeTimers();
     const fetcher = vi.fn().mockImplementation(async () => jsonResponse(linkRefusalBody(code), LINK_REFUSALS[code].status));
     vi.stubGlobal("fetch", fetcher);
@@ -179,7 +179,7 @@ describe("CommentsPanel", () => {
     expect(attempts).toBe(outcome === "recovered" ? 3 : 2);
   });
 
-  it.each(["link_read_rate_limited", "link_live_unavailable", "link_view_access"] as const)("shows %s on post and preserves the draft", async code => {
+  it.each(["link_read_rate_limited", "link_live_unavailable", "link_unavailable", "link_view_access"] as const)("shows %s on post and preserves the draft", async code => {
     vi.useFakeTimers();
     let posts = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

@@ -1984,7 +1984,7 @@ describe("relay capability reads", () => {
         capability = String(exchange.capabilityToken);
       } else if (failure === "throwing") {
         expect(failed.status).toBe(503);
-        expect(await json(failed)).toEqual(linkRefusalBody("link_live_unavailable"));
+        expect(await json(failed)).toEqual(linkRefusalBody("link_unavailable"));
       } else {
         expect(failed.status).toBe(404);
         expect(await failed.text()).toBe(LINK_REFUSAL_BODY);

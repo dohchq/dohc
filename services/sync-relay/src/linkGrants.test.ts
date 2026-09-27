@@ -5562,7 +5562,7 @@ describe("relay link grants", () => {
         ),
       );
       expect(response.status).toBe(503);
-      expect(await json(response)).toEqual(linkRefusalBody("link_live_unavailable"));
+      expect(await json(response)).toEqual(linkRefusalBody("link_unavailable"));
       expect(errorSpy).toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();

@@ -21,11 +21,33 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
 ]};
 servedLog = logPage;
 
+it("returns identical opaque MCP refusals before and after evicting a revoked session", async () => {
+  const f = fixture();
+  const bearer = await f.exchange();
+  f.revoke();
+  const snapshot = async (token?: string) => {
+    const response = await f.send("/mcp", {method: "POST",
+      headers: {"content-type": "application/json", ...(token ? {authorization: `Bearer ${token}`} : {})},
+      body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+    return {status: response.status, body: await response.text(), headers: [...response.headers]};
+  };
+  const missing = await snapshot();
+  const first = await snapshot(bearer);
+  const calls = f.calls.length;
+  const later = await snapshot(bearer);
+  expect(first).toEqual(missing);
+  expect(later).toEqual(first);
+  expect(first.status).toBe(404);
+  expect(first.body).toBe(JSON.stringify({ok: false, error: "not found"}));
+  expect(first.headers).toContainEqual(["cross-origin-resource-policy", "same-origin"]);
+  expect(f.calls).toHaveLength(calls);
+});
+
 function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text") {
   const calls: Request[] = [];
   let revoked = false;
   let rateLimited: string | undefined;
-  let refusalCode: "link_read_rate_limited" | "link_live_unavailable" = "link_read_rate_limited";
+  let refusalCode: "link_read_rate_limited" | "link_unavailable" = "link_read_rate_limited";
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -38,7 +60,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       calls.push(request);
       const path = new URL(request.url).pathname;
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
-      if (revoked) return new Response(null, {status: 401});
+      if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
@@ -83,7 +105,7 @@ it("refuses an out-of-scope blob before requesting rate-limited inventory", asyn
   expect(f.calls.slice(before).map(call => new URL(call.url).pathname)).not.toContain("/sync/link/current");
 });
 
-it.each(["link_read_rate_limited", "link_live_unavailable"] as const)("returns the same %s metadata refusal for every MCP method", async code => {
+it.each(["link_read_rate_limited", "link_unavailable"] as const)("returns the same %s metadata refusal for every MCP method", async code => {
   const f = fixture(); const bearer = await f.exchange();
   f.limit("/sync/link/share", code);
   for (const method of ["initialize", "tools/list", "tools/call", "resources/list"]) {

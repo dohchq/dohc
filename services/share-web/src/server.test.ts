@@ -1518,7 +1518,7 @@ describe("share-web relay call", () => {
       const answer = await state.call(target);
       const body = await answer.text();
       expect({ relay: outcome.relay, status: answer.status }).toEqual(outcome);
-      if (outcome.status !== 200) expect(body).toBe(outcome.status === 503 ? JSON.stringify(linkRefusalBody("link_live_unavailable")) : shareWebRefusalBody);
+      if (outcome.status !== 200) expect(body).toBe(outcome.status === 503 ? JSON.stringify(linkRefusalBody("link_unavailable")) : shareWebRefusalBody);
       expectSecurityHeaders(answer);
       // Metadata refusal evicts the session; a target refusal keeps it.
       expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
@@ -2524,7 +2524,7 @@ describe("share-web protected discussion proxy", () => {
       expect(stalledRefresh?.signal.aborted).toBe(true);
       const unavailable = await pending;
       expect(unavailable.status).toBe(503);
-      expect(await unavailable.json()).toEqual(linkRefusalBody("link_live_unavailable"));
+      expect(await unavailable.json()).toEqual(linkRefusalBody("link_unavailable"));
 
       const retry = await handler(request("/api/view/discussion", {
         headers: sessionHeaders(state.session, state.cookies),
@@ -3692,7 +3692,7 @@ describe("share-web protected discussion proxy", () => {
       const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
         status,
-        body: status === 503 ? JSON.stringify(linkRefusalBody("link_live_unavailable")) : shareWebRefusalBody,
+        body: status === 503 ? JSON.stringify(linkRefusalBody("link_unavailable")) : shareWebRefusalBody,
       });
     }
     for (const response of responses) {

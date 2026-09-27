@@ -8,10 +8,10 @@ export function linkRefusal(code: LinkRefusalCode): Response {
   return Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status, headers: {"cache-control": "private, no-store"}});
 }
 
-export async function normalizeLinkRefusal(response: Response): Promise<Response> {
+export async function normalizeLinkRefusal(response: Response, liveEditing = false): Promise<Response> {
   if (response.status >= 500) {
     await response.body?.cancel().catch(() => undefined);
-    return linkRefusal("link_live_unavailable");
+    return linkRefusal(liveEditing ? "link_live_unavailable" : "link_unavailable");
   }
   if (![401, 403, 404].includes(response.status)) return response;
   const body = await response.json().catch(() => null) as Record<string, unknown> | null;
