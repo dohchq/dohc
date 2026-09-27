@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   claimWorkspace,
@@ -984,6 +984,23 @@ it("recovers engine Notices even if the desktop file was lost", async () => {
   expect((await first.store.list()).notices).toHaveLength(1);
   const fresh = await computer(null, {refusalNotices});
   expect((await fresh.store.list()).notices).toHaveLength(1);
+});
+
+it("keeps a queued refusal dismissal hidden when applying it fails, then retries", async () => {
+  const pending = [{ noticeId: "queued-refusal", originId: "peer", originSeq: 1,
+    reason: "Review this file", document: null }];
+  let open = true;
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: open ? pending : null }];
+  const dismissRefusal = vi.fn(async () => {});
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [row] = (await first.store.list()).notices;
+  open = false;
+  await first.store.mark([row!], "dismissed", null);
+  open = true;
+  dismissRefusal.mockRejectedValueOnce(new Error("engine unavailable"));
+  await first.store.refreshRefusals(WORKSPACE);
+  expect((await first.store.list()).notices).toEqual([]);
+  expect(dismissRefusal).toHaveBeenCalledTimes(3);
 });
 
 it("keeps unavailable workspace refusals while refreshing other workspaces", async () => {

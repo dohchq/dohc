@@ -3892,6 +3892,11 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
+  onWorkspaceOpened: workspaceId => {
+    void noticeStore().refreshRefusals(workspaceId).catch(error => {
+      console.warn("[notices] could not refresh workspace sync refusals after open", error);
+    });
+  },
   onRefusalsChanged: notifyNoticesChanged,
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),

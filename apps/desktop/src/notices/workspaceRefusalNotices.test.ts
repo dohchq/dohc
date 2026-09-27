@@ -8,6 +8,7 @@ import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiv
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createWorkspaceRefusalNotices } from "./workspaceRefusalNotices";
+import { createNoticeStore, type NoticeStore } from "./noticeStore";
 
 const notice = { noticeId: "refusal", originId: "peer", originSeq: 1, reason: "seed-lineage-conflict", document: null };
 
@@ -21,13 +22,21 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     canonicalizeRoot: realpathSync,
     createState: () => ({}),
   });
-  const sendRequest = vi.fn(async (request: Request): Promise<Response> => ({ id: request.id,
-    result: request.method === "workspace.open" ? { workspace: "handle" }
-      : request.method === "sync.refusalNotices" ? { notices: [notice] }
-      : request.method === "sync.dismissRefusal" ? { dismissed: true } : { closed: true },
-  }));
+  let pending = [notice];
+  const sendRequest = vi.fn(async (request: Request): Promise<Response> => {
+    if (request.method === "sync.dismissRefusal") pending = [];
+    return { id: request.id,
+      result: request.method === "workspace.open" ? { workspace: "handle" }
+        : request.method === "sync.refusalNotices" ? { notices: pending }
+        : request.method === "sync.dismissRefusal" ? { dismissed: true } : { closed: true },
+    };
+  });
   const client = { sendRequest, close() {} };
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  let store: NoticeStore | undefined;
+  let refreshed: Promise<void> | undefined;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    onOpened: workspace => { refreshed = store?.refreshRefusals(workspace.workspaceId); },
+  });
   const received = createReceivedShareEngineAccess({
     sessions: () => sessions, createStores: createCaptureLiveStores,
     relayClient: () => { throw new Error("No relay needed."); },
@@ -38,33 +47,75 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     withOperation: authorities.withOperation.bind(authorities),
     workspaceForRegistered: received.workspaceForRegistered,
   };
-  return { ...createWorkspaceRefusalNotices(deps), deps, sendRequest, authorities,
-    openEditor: () => authorities.withOperation(workspace.workspaceId, operation =>
-      sessions.run(received.workspaceForRegistered(operation.workspace), async binding => binding.workspace)),
+  const refusals = createWorkspaceRefusalNotices(deps);
+  const directory = await createTestScratch("refusal-notices-");
+  const onChanged = vi.fn();
+  let now = Date.now();
+  const createStore = () => store = createNoticeStore({ directory, session: async () => null,
+    installId: () => "install", onChanged, nowMs: () => now, ...refusals });
+  return { ...refusals, deps, sendRequest, authorities, createStore, onChanged,
+    advanceYear: () => { now += 365 * 24 * 60 * 60_000; },
+    closeEditor: () => authorities.withOperation(workspace.workspaceId, operation =>
+      sessions.closeWorkspace(received.workspaceForRegistered(operation.workspace))),
+    openEditor: async () => {
+      const handle = await authorities.withOperation(workspace.workspaceId, operation =>
+        sessions.run(received.workspaceForRegistered(operation.workspace), async binding => binding.workspace));
+      await refreshed;
+      return handle;
+    },
     close: async () => { await sessions.closeAll(); await authorities.close(); },
   };
 }
 
 describe("workspace refusal notices", () => {
-  it.each(["notices", "editor"])("shares one attachment when %s opens first", async first => {
+  it("does not open a closed workspace to list Notices, and refreshes on open", async () => {
     const f = await fixture();
     try {
-      if (first === "editor") await f.openEditor();
-      expect(await f.refusalNotices()).toEqual([{ workspaceId: "workspace", notices: [notice] }]);
+      const store = f.createStore();
+      expect((await store.list()).notices).toEqual([]);
+      expect(f.sendRequest).not.toHaveBeenCalled();
       expect(await f.openEditor()).toBe("handle");
+      expect(f.onChanged).toHaveBeenCalledOnce();
+      expect((await store.list()).notices).toEqual([expect.objectContaining({ noticeId: "refusal" })]);
       await f.dismissRefusal("workspace", "refusal");
       expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "workspace.open")).toHaveLength(1);
       expect(f.sendRequest.mock.calls.find(([request]) => request.method === "sync.dismissRefusal")?.[0]).toMatchObject({ workspace: "handle" });
     } finally { await f.close(); }
   });
 
-  it("preserves received-share capture mode when notices open first", async () => {
+  it("preserves received-share capture mode when the editor opens", async () => {
     const f = await fixture({ shareId: "share", granterEmail: null, genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" } });
     try {
       await f.refusalNotices();
-      expect(f.sendRequest.mock.calls.find(([request]) => request.method === "workspace.open")?.[0].params).toMatchObject({ captureMode: "none" });
+      expect(f.sendRequest).not.toHaveBeenCalled();
       await f.openEditor();
+      await f.refusalNotices();
+      expect(f.sendRequest.mock.calls.find(([request]) => request.method === "workspace.open")?.[0].params).toMatchObject({ captureMode: "none" });
+    } finally { await f.close(); }
+  });
+
+  it("keeps closed workspace rows and queues dismissal across restart until next open", async () => {
+    const f = await fixture();
+    try {
+      await f.openEditor();
+      const store = f.createStore();
+      const [row] = (await store.list()).notices;
+      await f.closeEditor();
+      f.sendRequest.mockClear();
+      expect((await store.list()).notices).toEqual([row]);
+      await store.mark([row!], "dismissed", null);
+      expect((await store.list()).notices).toEqual([]);
+      expect(f.sendRequest).not.toHaveBeenCalled();
+
+      f.advanceYear();
+      const restarted = f.createStore();
+      expect((await restarted.list()).notices).toEqual([]);
+      expect(f.sendRequest).not.toHaveBeenCalled();
+      await f.openEditor();
+      expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "sync.dismissRefusal")).toHaveLength(1);
+      expect((await restarted.list()).notices).toEqual([]);
+      expect(f.sendRequest.mock.calls.filter(([request]) => request.method === "workspace.open")).toHaveLength(1);
     } finally { await f.close(); }
   });
 

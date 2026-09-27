@@ -13,13 +13,14 @@ export function createWorkspaceRefusalNotices(deps: {
   workspaceForRegistered(workspace: PhysicalWorkspace<RegistryEntry>): AttachedEngineWorkspace;
 }) {
   return {
-    refusalNotices: async () => {
+    refusalNotices: async (openedWorkspaceId?: string) => {
       const sessions = deps.sessions();
       const workspaces = deps.workspaces();
       if (!sessions) return workspaces.map(({ workspaceId }) => ({ workspaceId, notices: null }));
       const results = await Promise.allSettled(workspaces.map(async ({ workspaceId }) =>
+        openedWorkspaceId !== undefined && openedWorkspaceId !== workspaceId ? null :
         deps.withOperation(workspaceId, ({ workspace }) =>
-          sessions.run(deps.workspaceForRegistered(workspace), async ({ client, workspace: handle }) => {
+          sessions.runIfOpen(deps.workspaceForRegistered(workspace), async ({ client, workspace: handle }) => {
             const result = await new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
               workspaceId,
             }, { workspace: handle });
@@ -37,9 +38,9 @@ export function createWorkspaceRefusalNotices(deps: {
     },
     dismissRefusal: async (workspaceId: string, noticeId: string) => {
       const sessions = deps.sessions();
-      if (!sessions) throw new Error("The workspace is not available. Open it and try again.");
+      if (!sessions) return;
       await deps.withOperation(workspaceId, ({ workspace }) =>
-        sessions.run(deps.workspaceForRegistered(workspace), async ({ client, workspace: handle }) => {
+        sessions.runIfOpen(deps.workspaceForRegistered(workspace), async ({ client, workspace: handle }) => {
           await new WorkspaceDaemonRequester(client).request("sync.dismissRefusal", { workspaceId, noticeId }, { workspace: handle });
         }),
       );

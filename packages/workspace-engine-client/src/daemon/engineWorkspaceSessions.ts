@@ -108,6 +108,7 @@ export interface EngineWorkspaceRunOptions {
 }
 
 export interface EngineWorkspaceSessionsOptions {
+  onOpened?(workspace: EngineWorkspace): void;
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
   // Test injection for the retry-deadline clock; production uses
@@ -327,6 +328,7 @@ export class EngineWorkspaceSessions {
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly now: () => number;
   private readonly workspaceOpenDeadlineMs: number;
+  private readonly onOpened: EngineWorkspaceSessionsOptions["onOpened"];
   private acceptingRuns = true;
   // App quit: retry waiting is over. Armed backoff sleeps resolve,
   // and a transport failure after this point is final. Operations themselves
@@ -399,6 +401,7 @@ export class EngineWorkspaceSessions {
     private readonly source: EngineDaemonClientSource,
     options: EngineWorkspaceSessionsOptions = {},
   ) {
+    this.onOpened = options.onOpened;
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
@@ -424,6 +427,24 @@ export class EngineWorkspaceSessions {
       );
     }
     this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;
+  }
+
+  /** Uses an existing binding without opening or reconnecting a workspace. */
+  async runIfOpen<T>(
+    workspace: EngineWorkspace,
+    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
+  ): Promise<T | null> {
+    const key = this.sessionKey(workspace);
+    const entry = this.entries.get(key);
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
+      entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
+      !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
+    entry.activeRuns += 1;
+    try {
+      return await operation(entry.binding);
+    } finally {
+      this.release(entry);
+    }
   }
 
   async run<T>(
@@ -1164,6 +1185,11 @@ export class EngineWorkspaceSessions {
         continue;
       }
       entry.binding = binding;
+      try {
+        this.onOpened?.(workspace);
+      } catch (error) {
+        console.warn("[engine] workspace-open observer failed", error);
+      }
       return binding;
     }
   }

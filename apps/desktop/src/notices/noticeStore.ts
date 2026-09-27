@@ -83,6 +83,7 @@ export interface NoticeStore {
   withdraw(noticeId: string): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
+  refreshRefusals(openedWorkspaceId?: string): Promise<void>;
 }
 
 const kindValues = Object.keys(NOTICE_KINDS) as [NoticeKind, ...NoticeKind[]];
@@ -234,7 +235,7 @@ export function createNoticeStore(deps: {
   installId(): string;
   onChanged(): void;
   // Null keeps cached rows for a workspace whose engine could not be read.
-  refusalNotices?(): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
+  refusalNotices?(openedWorkspaceId?: string): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
   dismissRefusal?(workspaceId: string, noticeId: string): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
@@ -303,8 +304,9 @@ export function createNoticeStore(deps: {
   }
 
   function pruneLocal(file: LocalFile): boolean {
-    const pending = file.rows.filter(row => row.kind === "sync-refusal" && row.dismissedAtMs === null);
-    const rest = file.rows.filter(row => row.kind !== "sync-refusal" || row.dismissedAtMs !== null);
+    // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
+    const pending = file.rows.filter(row => row.kind === "sync-refusal");
+    const rest = file.rows.filter(row => row.kind !== "sync-refusal");
     const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, nowMs())];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
@@ -608,11 +610,11 @@ export function createNoticeStore(deps: {
     return running;
   }
 
-  async function refreshRefusals(): Promise<void> {
+  async function refreshRefusals(openedWorkspaceId?: string): Promise<void> {
     if (!deps.refusalNotices) return;
     const readRefusals = deps.refusalNotices;
-    await locked(async () => {
-      const workspaces = await readRefusals();
+    const changed = await locked(async () => {
+      const workspaces = await readRefusals(openedWorkspaceId);
       const prior = await loadLocal();
       const previousRows = new Map(prior.rows.map(row => [row.noticeId, row]));
       const failedWorkspaces = new Set(workspaces.filter(row => row.notices === null).map(row => row.workspaceId));
@@ -621,6 +623,16 @@ export function createNoticeStore(deps: {
         if (notices === null) continue;
         for (const refusal of notices) {
           const previous = previousRows.get(refusal.noticeId);
+          if (previous?.dismissedAtMs != null) {
+            // Keep the durable dismissal hidden until a later engine read confirms it is gone.
+            rows.push(previous);
+            try {
+              await deps.dismissRefusal?.(workspaceId, refusal.noticeId);
+            } catch (error) {
+              console.warn("[notices] could not apply queued sync refusal dismissal", workspaceId, error);
+            }
+            continue;
+          }
           const document = refusal.document;
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
@@ -635,8 +647,11 @@ export function createNoticeStore(deps: {
             createdAtMs: previous?.createdAtMs ?? nowMs(), readAtMs: previous?.readAtMs ?? null, dismissedAtMs: null }));
         }
       }
-      if (JSON.stringify(rows) !== JSON.stringify(prior.rows)) await saveLocal({ ...prior, rows });
+      if (JSON.stringify(rows) === JSON.stringify(prior.rows)) return false;
+      await saveLocal({ ...prior, rows });
+      return true;
     });
+    if (changed) deps.onChanged();
   }
 
   async function postNotice(input: PostNoticeInput): Promise<void> {
@@ -948,7 +963,7 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw };
+  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals };
 }
 
 // Folds one page into the stored rows. A page that starts the list over
