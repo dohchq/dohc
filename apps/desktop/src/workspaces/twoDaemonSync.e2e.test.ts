@@ -5,6 +5,7 @@ import * as Y from "yjs";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
@@ -337,10 +338,13 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-it.skipIf(engine.missing)(
-  "arbitrates independent Y.Doc bases without overwriting either document",
-  async () => {
-    const workspaceId = "two-daemon-independent-bases";
+it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
+  "preserves independent Y.Doc bases in a version conflict and converges after %s",
+  async (resolution) => {
+    const workspaceId = `two-daemon-independent-bases-${resolution}`;
+    const textA = "seed from A\n";
+    const textB = "seed from B\n";
+    const chosen = resolution === "keep-current" ? textB : textA;
     const token = `test:${workspaceId}`;
     const path = "notes/shared.txt";
     const rootA = await createTestScratch("dohc-independent-base-a-");
@@ -368,13 +372,13 @@ it.skipIf(engine.missing)(
         daemonA,
         rootA,
         path,
-        "winner from A\n",
+        textA,
       );
       const sessionB = await openIndependentPlaintextLineage(
         daemonB,
         rootB,
         path,
-        "recovered from B\n",
+        textB,
       );
       expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
       expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
@@ -387,33 +391,81 @@ it.skipIf(engine.missing)(
       await daemonB.capture.runRelaySync((materializePage) =>
         daemonB!.relay.pull(materializePage),
       );
-      expect(await readFile(join(rootA, path), "utf8")).toBe("winner from A\n");
-      expect(await readFile(join(rootB, path), "utf8")).toBe("recovered from B\n");
+      expect(await readFile(join(rootA, path), "utf8")).toBe(textA);
+      expect(await readFile(join(rootB, path), "utf8")).toBe(textB);
+      expect(await daemonA.capture.countOpenConflicts()).toBe(0);
+      expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 
-      // Close is the serialized replacement boundary. A was pushed first, so
-      // its lower relay position owns the original path. B's full projection
-      // becomes one ordinary recovered file before its lineage is purged.
+      // Closing releases the leases. A's earlier relay position wins the
+      // lineage; B keeps its file and reviews both complete texts in a conflict.
       await sessionB.close({ settle: false });
       await sessionA.close({ settle: false });
-      expect(await readFile(join(rootB, path), "utf8")).toBe("winner from A\n");
-      const recoveredNames = (await readdir(join(rootB, "notes"))).filter(
-        (name) => name.startsWith("shared (recovered ") && name.endsWith(".txt"),
-      );
-      expect(recoveredNames).toHaveLength(1);
-      const recoveredPath = `notes/${recoveredNames[0]}`;
-      expect(await readFile(join(rootB, recoveredPath), "utf8")).toBe(
-        "recovered from B\n",
+      expect(await readFile(join(rootA, path), "utf8")).toBe(textA);
+      expect(await readFile(join(rootB, path), "utf8")).toBe(textB);
+      expect(await daemonA.capture.countOpenConflicts()).toBe(0);
+      expect(await daemonB.capture.countOpenConflicts()).toBe(1);
+      const { conflicts } = await daemonB.capture.listOpenConflictsPage();
+      expect(conflicts).toHaveLength(1);
+      const conflict = conflicts[0]!;
+      expect(conflict).toMatchObject({
+        path,
+        status: "open",
+        current: { text: textB },
+        incoming: { text: textA },
+      });
+      for (const root of [rootA, rootB]) {
+        expect(await readdir(join(root, "notes"))).toEqual(["shared.txt"]);
+      }
+
+      await daemonB.capture.resolveConflict(conflict.id, { kind: resolution });
+      expect(await readFile(join(rootB, path), "utf8")).toBe(chosen);
+      expect(await daemonB.capture.countOpenConflicts()).toBe(0);
+      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      await pullAndExpect(daemonA, rootA, path, chosen);
+      // Advance B's cursor past its own resolution before reopening editors.
+      await daemonB.capture.runRelaySync((materializePage) =>
+        daemonB!.relay.pull(materializePage),
       );
 
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
-      await pullAndExpect(
-        daemonA,
-        rootA,
-        recoveredPath,
-        "recovered from B\n",
-        "text",
-      );
-      expect(await readFile(join(rootA, path), "utf8")).toBe("winner from A\n");
+      // Reopen both editors to inspect the daemon's chosen CRDT lineage,
+      // then prove it accepts edits from either machine without another conflict.
+      const afterA = `${chosen}continued on A\n`;
+      const finalText = `${afterA}continued on B\n`;
+      const arrival = { timeout: REAL_DAEMON_DEADLINE_MS };
+      const editorA = await openEditor(daemonA, path);
+      const editorB = await openEditor(daemonB, path);
+      try {
+        expect(shown(editorA)).toBe(chosen);
+        expect(shown(editorB)).toBe(chosen);
+        expect(editorA.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
+        expect(editorB.session.lineageClaimId).toBe(
+          editorA.session.lineageClaimId,
+        );
+        await typeAtEnd(editorA, "continued on A\n");
+        expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+        await daemonB.capture.runRelaySync((materializePage) =>
+          daemonB!.relay.pull(materializePage),
+        );
+        await vi.waitFor(() => expect(shown(editorB)).toBe(afterA), arrival);
+        await typeAtEnd(editorB, "continued on B\n");
+        expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+        await daemonA.capture.runRelaySync((materializePage) =>
+          daemonA!.relay.pull(materializePage),
+        );
+        await vi.waitFor(() => expect(shown(editorA)).toBe(finalText), arrival);
+        expect(shown(editorB)).toBe(finalText);
+      } finally {
+        await editorB.session.close();
+        await editorA.session.close();
+      }
+      for (const [daemon, root] of [
+        [daemonA, rootA],
+        [daemonB, rootB],
+      ] as const) {
+        expect(await readFile(join(root, path), "utf8")).toBe(finalText);
+        expect(await daemon.capture.countOpenConflicts()).toBe(0);
+        expect(await readdir(join(root, "notes"))).toEqual(["shared.txt"]);
+      }
 
       daemonC = await openJoinedDaemonCapture({
         workspaceId,
@@ -423,10 +475,9 @@ it.skipIf(engine.missing)(
       await daemonC.capture.runRelaySync((materializePage) =>
         daemonC!.relay.pull(materializePage),
       );
-      expect(await readFile(join(rootC, path), "utf8")).toBe("winner from A\n");
-      expect(await readFile(join(rootC, recoveredPath), "utf8")).toBe(
-        "recovered from B\n",
-      );
+      expect(await readFile(join(rootC, path), "utf8")).toBe(finalText);
+      expect(await daemonC.capture.countOpenConflicts()).toBe(0);
+      expect(await readdir(join(rootC, "notes"))).toEqual(["shared.txt"]);
     } finally {
       await daemonC?.close().catch(() => undefined);
       await daemonB?.close().catch(() => undefined);

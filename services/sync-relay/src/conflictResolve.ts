@@ -481,6 +481,11 @@ function sameProjectedContent(left: Side, right: Side): boolean {
   );
 }
 
+function sameObjectAndProjectedContent(left: Side, right: Side): boolean {
+  if (!left.present || !right.present) return left.present === right.present;
+  return left.objectId === right.objectId && sameProjectedContent(left, right);
+}
+
 function canonicalAuthor(value: AgentAuthor | null): Record<string, unknown> | null {
   if (value === null) return null;
   return {
@@ -619,7 +624,10 @@ function validateBindings(payload: ParsedResolve): void {
     invalid("one object has conflicting creation times");
   }
 
-  if (payload.resolution === "kept-current" && !sameSide(payload.current, payload.result)) {
+  if (
+    payload.resolution === "kept-current" &&
+    !sameObjectAndProjectedContent(payload.current, payload.result)
+  ) {
     invalid("kept-current result must equal current");
   }
   if (

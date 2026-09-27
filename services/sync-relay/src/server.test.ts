@@ -1310,6 +1310,68 @@ describe("sync relay handler", () => {
     expect(refs).toEqual([current.blobSha256]);
   });
 
+  it("accepts a kept-current lineage successor with a new write moment", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const transition = payload.transition as {
+      current: Record<string, unknown>;
+      result: Record<string, unknown>;
+    };
+    const current = transition.current;
+    transition.result = {
+      ...current,
+      latestMomentId: "moment-write",
+      updatedAtMs: 21,
+    };
+    payload.chosenFrom = "current";
+    payload.resolution = "kept-current";
+    const lineage = payload.lineageTransition as {
+      successor: { resultSha256: unknown };
+    };
+    lineage.successor.resultSha256 = current.blobSha256;
+    const writeShadow = {
+      ...fixture.shadows[0],
+      operation: "write",
+      momentId: "moment-write",
+    };
+    payload.effects = [
+      {
+        kind: "write",
+        momentId: "moment-write",
+        payloadSha256: sha256(stableJsonStringify(writeShadow)),
+      },
+    ];
+    const validate = () =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      });
+    expect(new Set(validate())).toEqual(new Set(fixture.blobs.keys()));
+
+    payload.effects = [];
+    expect(validate).toThrow(/effects do not match the ordered state transition/u);
+  });
+
+  it.each([
+    ["objectId", "another-object"],
+    ["pathRef", 1],
+    ["contentKind", "binary"],
+    ["blobSha256", "f".repeat(64)],
+    ["byteLength", 999],
+  ])("rejects a kept-current resolution that changes %s", (field, value) => {
+    const payload = compactNoEffectResolvePayload();
+    const transition = payload.transition as {
+      result: Record<string, unknown>;
+    };
+    transition.result[field] = value;
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/kept-current result must equal current/u);
+  });
+
   it("accepts a text move to a new object while retiring the current lineage", () => {
     const fixture = compactConflictResolveFixture();
     const payload = structuredClone(fixture.payload);
