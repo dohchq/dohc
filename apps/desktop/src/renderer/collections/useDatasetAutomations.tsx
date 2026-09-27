@@ -67,6 +67,9 @@ export function useDatasetAutomations(props: {
     name: described.name,
     operations: new Set(dataset?.operations.flatMap((operation) => (operation.tableId === tableId ? [operation.name] : []))),
     tables: new Set(dataset?.tables.map((candidate) => candidate.name)),
+    actions: (dataset?.operations ?? []).flatMap((operation) => operation.kind === "action"
+      ? [{ name: operation.name, label: operation.label, table: dataset?.tables.find((candidate) => candidate.tableId === operation.tableId)?.name ?? "", reversible: false }]
+      : []),
   }, [dataset, tableId]);
   const tableName = table?.name;
   // What main answered, or "failed" when dohc could not ask it; null while it asks.

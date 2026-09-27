@@ -75,6 +75,7 @@ import {
 import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
 import {
   datasetAutomationProblem,
+  datasetIrreversibleActions,
   datasetFieldWritesOf,
   datasetOperationsOf,
   datasetReachSteps,
@@ -1848,7 +1849,9 @@ export class CollectionAutomations {
    * since, a renamed button included; only a new press is checked.
    */
   async pressDataset(
-    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string },
+    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string;
+      /** The names of the actions the person was told can't be undone and chose to run. */
+      confirmed: readonly string[] },
     description: DatasetDescription,
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
@@ -1868,6 +1871,8 @@ export class CollectionAutomations {
     }
     const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster());
     if (!("checked" in button)) throw new Error(button.state.reason);
+    // The automation changed since the button asked: it would run an action nobody agreed to.
+    if ((button.state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
     const { datasetId, tableId, fieldId, automation } = button.checked;
     const pressed = await this.withLiveHost(async (ledger) => {
       // A dataset that moved to a server says so before anything reads it.
@@ -1931,9 +1936,13 @@ export class CollectionAutomations {
     const { automation } = resolved;
     if (!datasetButtonAccess(description, table.name, datasetOperationsOf(automation, dataset))) return disabled(noAccessReason(table.name));
     const state = await this.runnableButtonState(collectionPath, automation, roster);
-    return state.kind === "ready"
-      ? { state, checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId } }
-      : { state };
+    if (state.kind !== "ready") return { state };
+    // A press that runs an action asks first, since dohc cannot undo what the action did.
+    const irreversible = datasetIrreversibleActions(automation, definition);
+    return {
+      state: irreversible.length === 0 ? state : { ...state, irreversible },
+      checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId },
+    };
   }
 
   /**

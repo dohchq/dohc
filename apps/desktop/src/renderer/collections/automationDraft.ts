@@ -161,6 +161,12 @@ export interface AutomationTable {
   name: string;
   operations: ReadonlySet<string>;
   tables: ReadonlySet<string>;
+  /**
+   * The dataset's actions, by name, label, and table; `reversible` when the
+   * rules name a reverse. A new step offers this table's; a step the file
+   * wrote may run another table's.
+   */
+  actions: ReadonlyArray<{ name: string; label: string; table: string; reversible: boolean }>;
 }
 
 /**

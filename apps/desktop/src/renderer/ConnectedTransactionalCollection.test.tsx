@@ -35,6 +35,21 @@ describe("a dataset table's buttons", () => {
   const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
   const settle = (event: AutomationRunSettledEvent) => { for (const listener of backend.settled) listener(event); };
 
+  it("asks before a button runs an action that can't be undone, and presses naming the actions it agreed to", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.onAutomationRunSettled.mockImplementation((listener: (event: AutomationRunSettledEvent) => void) => { backend.settled.push(listener); return () => undefined; });
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Confirm", table: "Registrations", state: { kind: "ready", automationId: "collection:Fundraiser#confirm", irreversible: [{ name: "registrations.receipt", label: "Send receipt" }] } },
+    ] });
+    backend.pressAutomationButton.mockResolvedValue({ busy: false, claimId: "claim-2", settled: null });
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    const button = await screen.findByRole("button", { name: "Confirm for record 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ field: "Confirm", confirmed: ["registrations.receipt"] })));
+  });
+
   it("presses with the dataset, the table's name, and the record's key as JSON, runs until settled, says what ran, and reads the records again", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.onAutomationRunSettled.mockImplementation((listener: (event: AutomationRunSettledEvent) => void) => { backend.settled.push(listener); return () => undefined; });
@@ -51,7 +66,7 @@ describe("a dataset table's buttons", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith({
-      workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String),
+      workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String), confirmed: [],
     }));
     await waitFor(() => expect(button.getAttribute("aria-busy")).toBe("true"));
     const version = () => Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));

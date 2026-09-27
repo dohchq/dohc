@@ -869,8 +869,8 @@ describe("pressing a button on a dataset record", () => {
 ${step}`;
   const pressId = (number: number) => `4f2d3c1a-9b8e-4c7d-a6f5-${String(number).padStart(12, "0")}`;
   const owner = (f: Awaited<ReturnType<typeof world>>) => f.host.describe(definition.datasetId);
-  const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string }, description = owner(f)) =>
-    f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, ...input, recordId: JSON.stringify(input.recordId) },
+  const press = (f: Awaited<ReturnType<typeof world>>, input: { recordId: string; pressId: string; pressedBy?: string; field?: string; confirmed?: string[] }, description = owner(f)) =>
+    f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", pressedBy: PRESSER, confirmed: [], ...input, recordId: JSON.stringify(input.recordId) },
       description, () => undefined);
 
   it("runs a press on a dataset whose operations someone wrote, calling none of them for its own checks", async () => {
@@ -906,8 +906,13 @@ ${step}`;
     const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
     await f.writeAutomations(markPaid(settle) + watchStatus);
     await f.executor.open();
+    // The button says which action it runs that dohc cannot undo, so it can ask first.
+    expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], owner(f)))
+      .toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION, irreversible: [{ name: "invoices.settle", label: "Settle" }] }]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
-    const pressed = await press(f, { recordId: invoice, pressId: pressId(20) });
+    // A press that did not agree to Settle is refused: the button would run what nobody was told of.
+    await expect(press(f, { recordId: invoice, pressId: pressId(25) })).rejects.toThrow("changed");
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(20), confirmed: ["invoices.settle"] });
     if (pressed.busy) throw new Error("The press ran.");
     await f.until(() => f.settled.length === 1 && f.host.automations.claims("collection:Budget#watch")[0]?.state === "done");
     expect(f.settled).toEqual([{ claimId: pressed.claimId, outcome: "done", error: null }]);
@@ -931,7 +936,7 @@ ${step}`;
     await f.writeAutomations(markPaid(settle));
     await f.executor.open();
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
-    const pressed = await press(f, { recordId: invoice, pressId: pressId(22) });
+    const pressed = await press(f, { recordId: invoice, pressId: pressId(22), confirmed: ["invoices.settle"] });
     if (pressed.busy) throw new Error("The press ran.");
     await committed;
     const disposed = f.executor.dispose();
@@ -973,7 +978,7 @@ ${step}`;
     expect(f.host.automations.subscriptions()).toEqual([]);
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     const watched: string[] = [];
-    const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER },
+    const pressed = await f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: JSON.stringify(invoice), pressId: pressId(1), pressedBy: PRESSER, confirmed: [] },
       owner(f), (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("The press ran.");
     expect(pressed.settled).toBeNull();
@@ -1007,7 +1012,7 @@ ${step}`;
       await expect(press(f, { recordId: invoice, pressId: pressId(2) }, description)).rejects.toThrow(refusal);
       expect(await f.executor.datasetButtons(definition.datasetId, [{ field: "Mark paid", table: "Invoices" }], description)).toEqual([{ kind: "disabled", reason: refusal }]);
     }
-    await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER },
+    await expect(f.executor.pressDataset({ datasetId: definition.datasetId, table: "Invoices", field: "Mark paid", recordId: "not json", pressId: pressId(3), pressedBy: PRESSER, confirmed: [] },
       described, () => undefined)).rejects.toThrow("This record is not in Invoices.");
     // A record the table does not hold gets no claim.
     await expect(press(f, { recordId: "missing", pressId: pressId(3) })).rejects.toThrow("This record is no longer in Invoices.");
