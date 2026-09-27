@@ -206,8 +206,50 @@ function buildCliRequest(
         protocolVersion: common.protocolVersion,
         args: { cwd: common.cwd, actor: common.actor, id: command.id },
       };
+    case "automationRuns":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation },
+      };
+    case "automationRun":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
+          run: command.run,
+        },
+      };
+    case "automationRetry":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
+          run: command.run,
+          startOver: command.startOver,
+        },
+      };
   }
 }
+
+// A verb that could not do what was asked exits with its reason. A refused
+// Try again for another computer's run adds the notice that names it.
+function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  if (!("ok" in result) || result.ok !== false) return null;
+  return "notice" in result && result.notice
+    ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
+    : result.reason;
+}
+
+const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -240,7 +282,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     } catch {
       throw new DohcCliError("desktop app returned an invalid response");
     }
-    if ((command.verb === "moment" || command.verb === "documentRead" || command.verb === "documentEdit" || command.verb === "documentCreate") && "ok" in result && result.ok === false) throw new DohcCliError(result.reason);
+    const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
+    if (refused !== null) throw new DohcCliError(refused);
     const output = command.json
       ? jsonOutput(result)
       : renderCliResult(command.verb, result, {

@@ -442,6 +442,8 @@ export const NOTICE_KINDS = {
   "schedule-skipped": { senderKind: "automation", recipients: "self" },
   "automation-failed": { senderKind: "automation", recipients: "readers" },
   "automation-notify": { senderKind: "automation", recipients: "readers" },
+  // Someone switched off an automation you last changed.
+  "automation-switched-off": { senderKind: "person", recipients: "readers" },
   // A share reached you. The relay writes it from the granter when a named
   // grant becomes active for you.
   "share-received": { senderKind: "person", recipients: "relay" },
@@ -533,14 +535,21 @@ export type NoticeReach =
   | { workspaceId: string; shareId?: undefined }
   | { shareId: string; workspaceId?: undefined };
 
+// Who a notice goes to: a person by relay user id, or, for a post through a
+// share, the owner of the shared workspace. A person the work was shared with
+// does not know the owner's user id; the relay finds it from the share.
+export type NoticeRecipient =
+  | { recipientUserId: string; toWorkspaceOwner?: undefined }
+  | { toWorkspaceOwner: true; recipientUserId?: undefined };
+
 // POST /sync/notices. A second post of the same `noticeId` for the same
 // recipient changes nothing, so two computers of one sender post one notice.
 // Posting to yourself always works. A notice for another person needs a
 // "readers" kind and a `target.path` both people can read, and only the
 // workspace owner or a person the work was shared with by name can send one.
-export type PostNoticeRequest = NoticeReach & {
+// `toWorkspaceOwner` needs a `shareId` reach.
+export type PostNoticeRequest = NoticeReach & NoticeRecipient & {
   noticeId: string;
-  recipientUserId: string;
   kind: PostableNoticeKind;
   title: string;
   body: string;

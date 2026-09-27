@@ -79,8 +79,8 @@ describe("desktop user settings model", () => {
 
     // The stored appearance choices survive; only the new field fills in.
     expect(DesktopUserSettings.parse(legacySettings).appearance).toEqual({
+      ...DEFAULT_USER_SETTINGS.appearance,
       themeMode: "dark",
-      zoomLevel: 0,
     });
 
     for (const zoomLevel of [-6, 6, 0.5, Number.NaN]) {
@@ -295,6 +295,46 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("reads the accent, your colors, and the editor font, and turns off only a bad one", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, JSON.stringify({
+      appearance: { accentColor: "#3A7EE9", yourColor: "teal", yourAgentColor: "plum" },
+      editor: { fontFamily: "Iowan Old Style", fontSize: 17 },
+    }));
+    expect((await readUserSettingsFile(root)).settings).toMatchObject({
+      appearance: { accentColor: "#3A7EE9", yourColor: "teal", yourAgentColor: "plum" },
+      editor: { fontFamily: "Iowan Old Style", fontSize: 17 },
+    });
+
+    // A named color, a hue dohc does not have, and a font name that could
+    // close its CSS quotes: each takes its default, and the rest applies.
+    await writeFile(path, JSON.stringify({
+      appearance: { themeMode: "dark", accentColor: "teal", yourColor: "green", yourAgentColor: "plum" },
+      editor: { fontFamily: "Inter\", serif; x: \"", fontSize: 17 },
+    }));
+    expect(await readUserSettingsFile(root)).toEqual({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark", yourAgentColor: "plum" },
+        editor: { ...DEFAULT_USER_SETTINGS.editor, fontSize: 17 },
+      },
+      source: "stored",
+      ignored: [
+        { key: "appearance.accentColor", reason: "invalid" },
+        { key: "appearance.yourColor", reason: "invalid" },
+        { key: "editor.fontFamily", reason: "invalid" },
+      ],
+    });
+  });
+
+  it("writes every look setting's default into a new settings file", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const written = JSON.parse(await readFile(await ensureUserSettingsFile(root), "utf8"));
+    expect(written.appearance).toMatchObject({ accentColor: null, yourColor: null, yourAgentColor: null });
+    expect(written.editor).toMatchObject({ fontFamily: "sans", fontSize: 15 });
+  });
+
   it("turns off only an unknown key or a key with a value dohc cannot use", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     await writeFile(
@@ -302,20 +342,20 @@ describe("desktop user settings store", () => {
       JSON.stringify({
         appearance: { themeMode: "dark", zoomLevel: 9 },
         editor: { fontSize: 18, lineWrap: "yes" },
-        accentColor: "teal",
+        wallpaper: "teal",
       }),
     );
     expect(await readUserSettingsFile(root)).toEqual({
       settings: {
         ...DEFAULT_USER_SETTINGS,
-        appearance: { themeMode: "dark", zoomLevel: 0 },
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
         editor: { ...DEFAULT_USER_SETTINGS.editor, fontSize: 18 },
       },
       source: "stored",
       ignored: [
         { key: "appearance.zoomLevel", reason: "invalid" },
         { key: "editor.lineWrap", reason: "invalid" },
-        { key: "accentColor", reason: "unknown" },
+        { key: "wallpaper", reason: "unknown" },
       ],
     });
   });
@@ -345,7 +385,7 @@ describe("desktop user settings store", () => {
     await writeFile(path, JSON.stringify({
       appearance: { themeMode: "dark" },
       editor: { fontSize: 99 },
-      accentColor: "teal",
+      wallpaper: "teal",
     }));
     const current = await readUserSettingsFile(root);
     const saved = await writeUserSettingsFile(root, {
@@ -355,14 +395,17 @@ describe("desktop user settings store", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       appearance: { themeMode: "dark", zoomLevel: 2 },
       editor: { fontSize: 99 },
-      accentColor: "teal",
+      wallpaper: "teal",
     });
     expect(saved).toEqual({
-      settings: { ...current.settings, appearance: { themeMode: "dark", zoomLevel: 2 } },
+      settings: {
+        ...current.settings,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark", zoomLevel: 2 },
+      },
       source: "stored",
       ignored: [
         { key: "editor.fontSize", reason: "invalid" },
-        { key: "accentColor", reason: "unknown" },
+        { key: "wallpaper", reason: "unknown" },
       ],
     });
     // Changing the setting dohc could not use replaces the bad value.
@@ -387,7 +430,11 @@ describe("desktop user settings store", () => {
       ...seen,
       appearance: { ...seen.appearance, zoomLevel: 1 },
     }, seen);
-    expect(saved.settings.appearance).toEqual({ themeMode: "dark", zoomLevel: 1 });
+    expect(saved.settings.appearance).toEqual({
+      ...DEFAULT_USER_SETTINGS.appearance,
+      themeMode: "dark",
+      zoomLevel: 1,
+    });
   });
 
   it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {

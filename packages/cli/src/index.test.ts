@@ -319,6 +319,83 @@ describe("executeCli", () => {
     });
   });
 
+  it("lists an automation's runs and shows what one run's steps changed", async () => {
+    const run = {
+      run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.",
+      createdAtMs: Date.UTC(2026, 8, 27, 9), updatedAtMs: Date.UTC(2026, 8, 27, 9),
+      trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 },
+      definitionChanged: false, chainStopped: false, undone: false,
+    };
+    const list = vi.fn(async () => ({ ok: true, runs: [{ ...run, changes: 1 }] }));
+    expect(await executeCli({ argv: ["automation", "runs", "tasks", "stamp"], cwd: "/workspace", env: {}, request: list })).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "atc_1 · 2026-09-27T09:00:00.000Z · failed · record changed · record rec_1 · by agent · depth 1 · 1 change · The record is open elsewhere.\n",
+    });
+    expect(list).toHaveBeenCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "automationRuns",
+      args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp" },
+    });
+
+    const steps = [
+      { step: 1, changes: [{ kind: "field", recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" }] },
+      { step: 3, changes: [{ kind: "message", messageId: "message-1", name: "Team" }] },
+    ];
+    const show = vi.fn(async () => ({ ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } }));
+    expect((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], cwd: "/workspace", env: {}, request: show })).stdout).toBe([
+      "atc_1 · 2026-09-27T09:00:00.000Z · failed",
+      "trigger: record changed · record rec_1 · by agent · depth 1",
+      "error: The record is open elsewhere.",
+      "step 3 failed",
+      "Try again resumes at step 3.",
+      "step 1:",
+      '  set Done on tasks/one.md: null -> "2026-09-27"',
+      "step 3:",
+      "  posted to Team · message-1",
+      "",
+    ].join("\n"));
+    expect(JSON.parse((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"], env: {}, request: show })).stdout))
+      .toEqual({ schemaVersion: 2, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
+    // A changed automation's run does not resume; Try again starts over.
+    const changed = async () => ({ ok: true, run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true } });
+    const changedText = (await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], env: {}, request: changed })).stdout;
+    expect(changedText).toContain("step 3 failed\nTry again starts over from step 1 and needs --start-over.\n");
+    expect(changedText).not.toContain("resumes");
+    expect(await executeCli({ argv: ["automation", "run", "tasks", "stamp"], env: {}, request: show })).toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: automation run requires a run id\n",
+    });
+  });
+
+  it("tries a run again, and exits with the reason it refused", async () => {
+    const send = vi.fn(async (request: CliRequestWithoutToken) =>
+      request.verb === "automationRetry" && request.args.startOver
+        ? { ok: true, status: "queued" }
+        : { ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed. To do that, try again with --start-over, or startOver: true." });
+    expect(await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1"], env: {}, request: send })).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: This automation changed since the run failed. To do that, try again with --start-over, or startOver: true.\n",
+    });
+    expect(await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1", "--start-over"], cwd: "/workspace", env: {}, request: send })).toEqual({
+      exitCode: 0, stderr: "", stdout: "queued\n",
+    });
+    expect(send).toHaveBeenLastCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "automationRetry",
+      args: { cwd: WORKSPACE, actor: "human", collectionPath: "tasks", automation: "stamp", run: "atc_1", startOver: true },
+    });
+
+    const elsewhere = async () => ({
+      ok: false,
+      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+    });
+    expect((await executeCli({ argv: ["automation", "retry", "tasks", "stamp", "atc_1"], env: {}, request: elsewhere })).stderr).toBe(
+      'dohc: Only the computer this run failed on can try it again. The notice names that computer. Automation "Stamp" failed: The record is open elsewhere. It ran on Laptop.\n',
+    );
+  });
+
   it("refuses a history list limit past the desktop's bound before sending", async () => {
     const send = vi.fn();
     expect(await executeCli({ argv: ["history", "list", "--limit", "501"], env: {}, request: send })).toEqual({
