@@ -3,7 +3,7 @@ import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contrac
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
-import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetEffectKey, datasetReachSteps, pinDatasetOperations } from "./datasetAutomationPlan";
+import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetEffectKey, datasetOperationsOf, datasetReachSteps, datasetStepsOf, pinDatasetOperations } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const TABLE = id(2), STATUS = id(4), NOTES = id(5), FINISHED = id(6);
@@ -26,6 +26,7 @@ const definition: DatasetDefinition = {
   ],
 };
 const generated = { definition, generated: true };
+const authored = { definition, generated: false };
 
 function automation(steps: string, when = "field-changed: Status"): Automation {
   const parsed = parseAutomationsFile(`version: 1\nautomations:\n  - id: a\n    name: A\n    when:\n      ${when}\n    do:\n${steps}`);
@@ -77,9 +78,33 @@ describe("dataset automation steps", () => {
       .toBe("Budget has no approved way to add records with Finished on.");
     expect(datasetAutomationProblem(automation("      - find: contains(record.Notes, \"late\")\n        as: late\n        operation: invoices.list\n"), generated))
       .toMatch(/^This Collection needs a Find that checks fields with ==/);
-    expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), { definition, generated: false }))
-      .toBe("Budget's operations were written or changed outside dohc, so automations cannot use them yet.");
     expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), generated)).toBeNull();
+  });
+
+  it("runs only steps that touch no record on a dataset whose operations someone wrote", () => {
+    const refusal = "Budget's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.";
+    expect(datasetAutomationProblem(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), authored)).toBe(refusal);
+    expect(datasetAutomationProblem(automation("      - if: 'true'\n        do:\n          - post: Hi\n            group: Team\n        otherwise:\n          - add-record:\n              Status: New\n            operation: invoices.create\n"), authored))
+      .toBe(refusal);
+    expect(datasetAutomationProblem(automation("      - post: 'Invoice {record.id} changed'\n        group: Team\n"), authored)).toBeNull();
+    expect(datasetAutomationProblem(automation("      - notify: '{previous.Status} is gone'\n        to: [user_ana]\n", "button: Ask"), authored)).toBeNull();
+    expect(datasetAutomationProblem(automation("      - post: Done\n        group: Team\n", "starts-matching: record.id == \"a\""), authored))
+      .toBe("Budget's operations were written or changed outside dohc, so dohc cannot read a record to check a condition. Choose a record change or a button as the trigger.");
+  });
+
+  it("says a Find cannot use these operations before it says how a Find must look", () => {
+    expect(datasetAutomationProblem(automation("      - find: contains(record.Notes, \"late\")\n        as: late\n        operation: invoices.list\n"), authored))
+      .toBe("Budget's operations were written or changed outside dohc, so Set fields, Add record, and Find steps cannot use them.");
+  });
+
+  it("does not read the trigger record, or ask for a read, on a dataset whose operations someone wrote", () => {
+    const posting = automation("      - post: 'Invoice {record.id} changed'\n        group: Team\n");
+    expect(datasetStepsOf(posting, authored).triggerRead).toBeNull();
+    expect(datasetStepsOf(posting, generated).triggerRead?.name).toBe("invoices.list");
+    expect(datasetOperationsOf(posting, authored)).toEqual([]);
+    const steps = datasetReachSteps(posting, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null);
+    expect(steps.some((step) => step.kind === "dataset-operation")).toBe(false);
+    expect(() => datasetStepsOf(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), authored)).toThrow(/Set fields, Add record, and Find/);
   });
 
   it("says it cannot run an action step yet", () => {
@@ -97,7 +122,7 @@ describe("dataset automation steps", () => {
             operation: invoices.status
       - set:
           Finished on: '2026-09-25'
-`), definition);
+`), generated);
     const names = (steps: Automation["do"]): Array<string | null> => steps.flatMap((step) =>
       step.kind === "if" ? names(step.do) : "operation" in step ? [step.operation] : []);
     // invoices.edit is reversible and wins over the narrower invoices.status.
@@ -117,7 +142,7 @@ describe("dataset automation steps", () => {
     };
     const add = (table: string, step = "Status: New", operationName = "") =>
       automation(`      - add-record:\n          ${step}\n${operationName ? `        operation: ${operationName}\n` : ""}`, `field-changed: Status\n      table: ${table}`);
-    const pinnedOf = (built: Automation) => pinDatasetOperations(built, twoTables).do[0];
+    const pinnedOf = (built: Automation) => pinDatasetOperations(built, { definition: twoTables, generated: true }).do[0];
     const problemOf = (built: Automation) => datasetAutomationProblem(built, { definition: twoTables, generated: true });
     expect(pinnedOf(add("Invoices"))).toMatchObject({ kind: "add-record", operation: "invoices.create" });
     expect(pinnedOf(add("Refunds"))).toMatchObject({ kind: "add-record", operation: "refunds.create" });
@@ -125,7 +150,7 @@ describe("dataset automation steps", () => {
     // the step names the create that would fit, for a person to choose.
     const notes = add("Refunds", "Notes: seen");
     expect(pinnedOf(notes)).toMatchObject({ kind: "add-record", operation: null });
-    expect(problemOf(pinDatasetOperations(notes, twoTables))).toBe("Name the approved operation step 1 uses, such as invoices.create.");
+    expect(problemOf(pinDatasetOperations(notes, { definition: twoTables, generated: true }))).toBe("Name the approved operation step 1 uses, such as invoices.create.");
     // A step that names another table's create adds records there, and keeps it.
     const named = add("Invoices", "Status: New", "refunds.create");
     expect(pinnedOf(named)).toMatchObject({ operation: "refunds.create" });
@@ -164,7 +189,7 @@ describe("dataset automation steps", () => {
         records: added
         operation: invoices.edit
 `, "record-removed: null");
-    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] }, null);
+    const steps = datasetReachSteps(addThenSet, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, null);
     // No trigger record to read: the create, the edit, and the read that checks the added record again.
     expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.create", "invoices.edit", "invoices.list"]);
     expect(steps.flatMap((step) => step.kind === "dataset-field" ? [step.field.name] : [])).toEqual(["ID", "Status", "Notes", "Finished on"]);
@@ -186,7 +211,7 @@ describe("dataset automation steps", () => {
       - wake-agent: Look
         person: user-owner
 `, "button: Ask");
-    const steps = datasetReachSteps(telling, { path: "Budget", name: "Budget" }, definition, { workspaceId: "workspace", grants: [] }, chat);
+    const steps = datasetReachSteps(telling, { path: "Budget", name: "Budget" }, generated, { workspaceId: "workspace", grants: [] }, chat);
     // A person a formula names is checked once the formula has run.
     expect(steps.slice(0, 3)).toEqual([
       { kind: "post", group: { channelWireId: "team-wire", name: "Team" } },
