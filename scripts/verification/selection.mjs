@@ -16,6 +16,13 @@ const testInputs = {
   "@dohc/sync-relay": ["@dohc/share-web"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
 };
+// Desktop changes affect these compatibility tests, not the storage-only suite.
+// Changes within Y.Doc projection or its other inputs still run every test.
+const externalTestFiles = {
+  "@dohc/ydoc-projection": {
+    "@dohc/desktop": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"],
+  },
+};
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 
 export function readWorkspacePackages(root) {
@@ -53,13 +60,21 @@ function sharedInput(path) {
 }
 
 function result(selected, affected, full, reason) {
+  const testFiles = {};
+  if (!full) for (const name of selected) {
+    if (affected.has(name)) continue;
+    const inputs = testInputs[name]?.filter(input => affected.has(input)) ?? [];
+    if (inputs.length && inputs.every(input => externalTestFiles[name]?.[input])) {
+      testFiles[name] = [...new Set(inputs.flatMap(input => externalTestFiles[name][input]))].sort();
+    }
+  }
   const proofs = {
     accounts: selected.has("@dohc/workspace-api"),
     selfHostNative: selected.has("@dohc/share-web"),
     desktop: selected.has("@dohc/desktop"),
   };
   return {
-    packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs,
+    packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles,
     needs: {
       postgres: proofs.desktop || proofs.selfHostNative || [...selected].some(name => databasePackages.has(name)),
       engine: proofs.desktop || proofs.selfHostNative,
@@ -114,7 +129,10 @@ export function uncoveredWorkspaceInputs(files, packages) {
         ? packages.find(pkg => pkg.name === reference.split("/").slice(0, 2).join("/"))
         : owner(posix.normalize(posix.join(posix.dirname(path), reference)), packages);
       if (!input || input.name === consumer.name || declared.has(input.name) || productionInputs[consumer.name]?.includes(input.name)) continue;
-      if (testFile && testInputs[consumer.name]?.includes(input.name)) continue;
+      if (testFile && testInputs[consumer.name]?.includes(input.name)) {
+        const files = externalTestFiles[consumer.name]?.[input.name];
+        if (!files || files.includes(posix.relative(consumer.path, path))) continue;
+      }
       findings.push({ path, reference, consumer: consumer.name, input: input.name });
     }
   }
