@@ -607,9 +607,9 @@ describe("persistent dataset worker",()=>{
           child.on("error",options.onError);child.on("close",options.onExit);
           return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
         };
-        // This test is about the CPU budget, not the silence watchdog: under a loaded gate the 6 s stop plus the
-        // query can pass 30 s without a progress report. 50 s stays inside the test's 60 s limit, so a real stall still fails.
-        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:50_000});
+        // This test is about the CPU budget, not the silence watchdog. A loaded gate has stretched the 6 s stop plus
+        // the query past 50 s without a progress report, so silence is only a hang guard here, inside the 180 s limit.
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:170_000});
         // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
         const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
         await stall;
@@ -619,7 +619,7 @@ describe("persistent dataset worker",()=>{
         expect(repliedAt).toBeGreaterThan(resumedAt);
       });
     } finally {suspender?.stdin!.end();}
-  },60_000);
+  },180_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{
