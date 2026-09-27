@@ -7,10 +7,22 @@ import { collectionAutomationId, definitionHash, unsupportedReason } from "./aut
 
 /** A Button field's state, as its button shows it. */
 export type AutomationButtonState =
-  | { kind: "ready"; automationId: string }
+  /**
+   * `irreversible` lists the actions a press runs whose changes dohc cannot
+   * undo, by operation name and by what a person reads, so the button asks
+   * before it runs them. Absent when there are none.
+   */
+  | { kind: "ready"; automationId: string; irreversible?: IrreversibleAction[] }
   // Nothing runs yet. Someone who can edit the Collection can choose what it does.
   | { kind: "no-automation"; reason: string }
   | { kind: "disabled"; reason: string };
+
+/**
+ * An action a press runs that dohc cannot undo. `name` is unique in its
+ * dataset and is what a press confirms; `label` is what the question shows,
+ * with the name added where two actions share a label.
+ */
+export interface IrreversibleAction { name: string; label: string }
 
 export const NO_AUTOMATION = "No automation uses this button.";
 export const RUNNING_FOR_RECORD = "Running for this record.";

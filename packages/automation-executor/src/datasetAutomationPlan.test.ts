@@ -3,7 +3,7 @@ import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contrac
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { chatDirectoryOf } from "./automationChat";
 import { datasetFindOf, datasetSubscriptionFor } from "./automationPlan";
-import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetEffectKey, datasetOperationsOf, datasetReachSteps, datasetStepsOf, pinDatasetOperations } from "./datasetAutomationPlan";
+import { DATASET_WAKE_NEEDS_BUTTON, datasetAutomationProblem, datasetIrreversibleActions, datasetEffectKey, datasetOperationsOf, datasetReachSteps, datasetStepsOf, pinDatasetOperations } from "./datasetAutomationPlan";
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 const TABLE = id(2), STATUS = id(4), NOTES = id(5), FINISHED = id(6);
@@ -106,6 +106,17 @@ describe("dataset automation steps", () => {
     const steps = datasetReachSteps(posting, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null);
     expect(steps.some((step) => step.kind === "dataset-operation")).toBe(false);
     expect(() => datasetStepsOf(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), authored)).toThrow(/Set fields, Add record, and Find/);
+  });
+
+  it("names each action a run can't undo once, by name, and tells apart two that share a label", () => {
+    const shared: DatasetDefinition = { ...definition, operations: [...definition.operations,
+      operation(15, "invoices.send", "action", [STATUS]), operation(16, "reminders.send", "action", [STATUS])].map((entry) => entry.kind === "action" ? { ...entry, label: "Send" } : entry) };
+    const both = automation("      - invoke: invoices.send\n      - if: 'true'\n        do:\n          - invoke: reminders.send\n          - invoke: invoices.send\n", "button: Send");
+    expect(datasetIrreversibleActions(both, shared)).toEqual([
+      { name: "invoices.send", label: "Send (invoices.send)" },
+      { name: "reminders.send", label: "Send (reminders.send)" },
+    ]);
+    expect(datasetIrreversibleActions(automation("      - invoke: invoices.markPaid\n", "button: Send"), definition)).toEqual([{ name: "invoices.markPaid", label: "invoices.markPaid" }]);
   });
 
   it("runs an action a step names, on any dataset, and says why a name is not one", () => {

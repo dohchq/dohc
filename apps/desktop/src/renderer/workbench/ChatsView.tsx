@@ -5,6 +5,7 @@ import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -528,6 +529,7 @@ export function ChatsView(props: {
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
 }) {
+  const isOwn = useIsOwnAuthor();
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
   const collaboration = props.collaboration ?? null;
@@ -3758,6 +3760,7 @@ export function ChatsView(props: {
                         <ChatAvatar
                           name={item.message.authorDisplayName}
                           kind={isAgent ? "agent" : "human"}
+                          own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
                         />
                         <span className="flex min-w-0 flex-1 flex-col leading-tight">
                           <span
@@ -4913,7 +4916,7 @@ export function ChatsView(props: {
                   data={{ "data-channel-id": agentChannel.id }}
                   active={selectedChannelId === agentChannel.id}
                   onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
+                  icon={<ChatAvatar name={agentLabel} kind="agent" own size="strip" />}
                   label={agentLabel}
                   labelTestId="chats-my-agent-name"
                   trailing={

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { datasetRevisionsPreserveAccess, describeApprovedDataset, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { DATASET_UNDO_BYTES, datasetRevisionsPreserveAccess, describeApprovedDataset, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { effectiveDatasetOperations, parseDatasetBinding, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { validateDatasetReadResult } from "./dataset-read-result.js";
@@ -9,7 +9,7 @@ import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js
 import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration, createDatasetSupervisor, DatasetMigrationCandidate } from "./supervisor.js";
-import type { JsonValue } from "./protocol.js";
+import type { AppOperationRefusal, JsonValue } from "./protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";
 import { validateDatasetRecovery } from "./recovery-import.js";
@@ -141,6 +141,18 @@ function synchronous<T>(run: () => T): T {
   const result = run();
   if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Dataset host callbacks must be synchronous.");
   return result;
+}
+/**
+ * Why a reversible action's result cannot commit, or null: it must hold
+ * `undo`, the input its reverse action takes, within DATASET_UNDO_BYTES, so
+ * every change it makes has a way back.
+ */
+function missingUndo(operation: DatasetOperation, result: JsonValue): AppOperationRefusal | null {
+  const undo = result !== null && typeof result === "object" && !Array.isArray(result) && Object.hasOwn(result, "undo") ? result.undo : undefined;
+  if (undo !== undefined) {
+    try { parseAppBackendJson(undo, DATASET_UNDO_BYTES); return null; } catch { /* Refused below. */ }
+  }
+  return { code: "undo_missing", message: `${operation.label} is reversed by ${operation.reversedBy}, so it must return undo: the input ${operation.reversedBy} takes to reverse it, at most 16 KB.` };
 }
 function denied(): never { throw new DatasetHostError("not_authorized", "You do not have access to this Collection."); }
 function chainDepth(value: number | undefined, caller: AppBackendCaller): number | undefined {
@@ -830,7 +842,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         operation: operation.name, caller: approvedLinkRead ? { ...permitted.authority.caller, approvedRead: operationId } : permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
         files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize,
-        recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }) });
+        recordCommit: commit => automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }),
+        ...(operation.reversedBy === undefined ? {} : { refuseResult: (result: JsonValue) => missingUndo(operation, result) }) });
       if (approvedLinkRead) {
         const result = validateDatasetReadResult(response.result, input, permitted.revision.definition, operation);
         authorize();

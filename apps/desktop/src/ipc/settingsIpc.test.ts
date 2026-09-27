@@ -338,7 +338,7 @@ describe("registered settings IPC", () => {
     }));
     await h.reload();
     const applied = {
-      settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" }, appearance: { themeMode: "dark", zoomLevel: 3 } },
+      settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark", zoomLevel: 3 } },
       source: "stored",
       ignored: [{ key: "fancyBorders", reason: "unknown" }],
     };

@@ -148,6 +148,93 @@ function renderMoment(result: CliResultByVerb["moment"], side: "before" | "after
   return snapshot.text;
 }
 
+type AutomationRunsResult = Extract<CliResultByVerb["automationRuns"], { ok: true }>;
+type AutomationRunResult = Extract<CliResultByVerb["automationRun"], { ok: true }>;
+type AutomationRunLine = AutomationRunsResult["runs"][number];
+
+const TRIGGER_KINDS = {
+  added: "record added",
+  changed: "record changed",
+  removed: "record removed",
+  message: "Group message",
+  button: "button pressed",
+  schedule: "schedule",
+} as const;
+
+function triggerText(trigger: AutomationRunLine["trigger"]): string {
+  return [
+    trigger.kind === null ? "unknown change" : TRIGGER_KINDS[trigger.kind],
+    ...(trigger.recordId === null ? [] : [`record ${trigger.recordId}`]),
+    ...(trigger.by === null ? [] : [`by ${trigger.by}`]),
+    ...(trigger.depth > 0 ? [`depth ${trigger.depth}`] : []),
+  ].join(" · ");
+}
+
+function runStateText(run: Omit<AutomationRunLine, "changes">): string {
+  return [
+    run.chainStopped ? "chain stopped" : run.state,
+    ...(run.undone ? ["undone"] : []),
+    ...(run.definitionChanged ? ["automation changed since"] : []),
+  ].join(", ");
+}
+
+function renderAutomationRuns(result: AutomationRunsResult): string {
+  return result.runs
+    .map((run) => [
+      run.run,
+      dateTime(run.createdAtMs),
+      runStateText(run),
+      triggerText(run.trigger),
+      countLabel(run.changes, "change"),
+      ...(run.error === null ? [] : [lineSafe(run.error)]),
+    ].join(" · "))
+    .join("\n");
+}
+
+function json(value: unknown): string {
+  return lineSafe(JSON.stringify(value) ?? "null");
+}
+
+function changeText(change: AutomationRunResult["run"]["steps"][number]["changes"][number]): string {
+  switch (change.kind) {
+    case "field":
+      return `set ${change.field} on ${change.path}: ${json(change.before)} -> ${json(change.after)}`;
+    case "created":
+      return `added ${change.path}`;
+    case "kept":
+      return `kept ${change.field} on ${change.path} as someone changed it: ${json(change.current)}, not ${json(change.planned)}`;
+    case "skipped":
+      return `skipped ${change.path}: ${lineSafe(change.reason)}`;
+    case "dataset-edit":
+      return `set ${change.fields.map((field) => `${field.field} ${json(field.before)} -> ${json(field.after)}`).join(", ")} on record ${change.recordId} in table ${change.tableId}`;
+    case "dataset-created":
+      return `added record ${change.recordId} in table ${change.tableId}`;
+    case "dataset-action":
+      return `ran ${lineSafe(change.name)} in table ${change.tableId}`;
+    case "dataset-kept":
+      return `kept ${change.field} on record ${change.recordId} as someone changed it: ${json(change.current)}, not ${json(change.planned)}`;
+    case "dataset-skipped":
+      return `skipped record ${change.recordId}: ${lineSafe(change.reason)}`;
+    case "message":
+      return `posted to ${lineSafe(change.name)} · ${change.messageId}`;
+    case "notice":
+      return `sent a notice to ${lineSafe(change.name)} · ${change.noticeId}`;
+  }
+}
+
+function renderAutomationRun({ run }: AutomationRunResult): string {
+  return [
+    `${run.run} · ${dateTime(run.createdAtMs)} · ${runStateText(run)}`,
+    `trigger: ${triggerText(run.trigger)}`,
+    ...(run.error === null ? [] : [`error: ${lineSafe(run.error)}`]),
+    ...(run.failedStep === null ? [] : [`step ${run.failedStep} failed`]),
+    ...(run.startsOver
+      ? ["Try again starts over from step 1 and needs --start-over."]
+      : run.failedStep === null ? [] : [`Try again resumes at step ${run.failedStep}.`]),
+    ...run.steps.flatMap((step) => [`step ${step.step}:`, ...step.changes.map((change) => `  ${changeText(change)}`)]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -191,6 +278,12 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderMoments(result as CliResultByVerb["moments"]);
     case "moment":
       return renderMoment(result as CliResultByVerb["moment"], options.momentSide ?? "after");
+    case "automationRuns":
+      return renderAutomationRuns(result as AutomationRunsResult);
+    case "automationRun":
+      return renderAutomationRun(result as AutomationRunResult);
+    case "automationRetry":
+      return "queued";
     default:
       return JSON.stringify(result, null, 2);
   }

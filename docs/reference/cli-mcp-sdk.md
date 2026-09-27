@@ -353,6 +353,42 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, recordId, recordPath } | { ok: false, reason }`.
 
+### `dohc_list_automation_runs`
+
+List an automation's 20 newest runs on this computer, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. Each computer keeps the runs of the automations it ran.
+
+A shared view keeps no automation runs, so it does not offer this tool.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] } | { ok: false, reason }`.
+
+### `dohc_read_automation_run`
+
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+
+A shared view keeps no automation runs, so it does not offer this tool.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+- `run`: `string`. Required.
+
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } } | { ok: false, reason }`.
+
+### `dohc_retry_automation_run`
+
+Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+- `run`: `string`. Required.
+- `startOver`: `boolean`
+
+Returns `{ ok: true, status: "queued" } | { ok: false, status, repeatsMessages, reason } | { ok: false, reason, notice?: { title, body } }`.
+
 ## CLI
 
 ```sh
@@ -1161,6 +1197,50 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, author?, fileCount: 1, files, before, after } }`.
+
+### `dohc automation`
+
+Read an automation's runs and try a failed run again.
+
+Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
+
+#### `dohc automation runs`
+
+```sh
+dohc automation runs <collection> <automation> [options]
+```
+
+List an automation's runs on this computer, newest first.
+
+Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID.
+
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, changes }[] }`.
+
+#### `dohc automation run`
+
+```sh
+dohc automation run <collection> <automation> <run> [options]
+```
+
+Show one run: what started it, what each step changed, and why it failed.
+
+Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, chainStopped, undone, steps, failedStep, startsOver } }`.
+
+#### `dohc automation retry`
+
+```sh
+dohc automation retry <collection> <automation> <run> [options]
+```
+
+Try a failed run again. It resumes after the last step that finished.
+
+Only the computer that ran it can try a run again. Anywhere else, the command names that computer.
+
+- `--start-over`: Run it from the first step when the automation changed since the run failed. This can repeat changes the run already made.
+
+With `--json`, prints `{ schemaVersion, ok: true, status: "queued" }`.
 
 ## App channel
 

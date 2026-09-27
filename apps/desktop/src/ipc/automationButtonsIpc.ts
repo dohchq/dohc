@@ -200,7 +200,7 @@ export function registerAutomationButtonsIpc<
           throw new Error(sharedDatasetButtonState(description, input.table).reason);
         }
         return await operation.state.collectionAutomations.pressDataset(
-          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy },
+          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, confirmed: input.confirmed ?? [] },
           description, watch);
       });
       return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;

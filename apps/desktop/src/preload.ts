@@ -314,10 +314,6 @@ const bridge: DohcDesktopBridge = {
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
-  listAutomationFailures: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
-  dismissAutomationFailure: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   listCollectionAutomationRuns: (payload) =>
@@ -360,7 +356,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
-  onAutomationFailuresChanged: (
+  onAutomationRunsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
     // Validate at the boundary like every main-sent event: the listener
@@ -377,9 +373,9 @@ const bridge: DohcDesktopBridge = {
         });
       }
     };
-    ipcRenderer.on(CHANNELS.automationFailuresChanged, handler);
+    ipcRenderer.on(CHANNELS.automationRunsChanged, handler);
     return () =>
-      ipcRenderer.removeListener(CHANNELS.automationFailuresChanged, handler);
+      ipcRenderer.removeListener(CHANNELS.automationRunsChanged, handler);
   },
   ...operationBridge(crashReportOperations, invoke),
   onCrashReportChanged: (listener) =>

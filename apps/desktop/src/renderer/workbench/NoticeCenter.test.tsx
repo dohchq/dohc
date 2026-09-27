@@ -70,7 +70,6 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
-      {...(props.automationFailures ? { automationFailures: props.automationFailures } : {})}
       {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
       {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
       {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
@@ -86,11 +85,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
-      {...(props.onRetryAutomationFailure ? { onRetryAutomationFailure: props.onRetryAutomationFailure } : {})}
-      {...(props.onOpenAutomation ? { onOpenAutomation: props.onOpenAutomation } : {})}
-      {...(props.automationFailureToast ? { automationFailureToast: props.automationFailureToast } : {})}
-      {...(props.onHideAutomationFailureToast ? { onHideAutomationFailureToast: props.onHideAutomationFailureToast } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
+      {...(props.onRetrySentNotice ? { onRetrySentNotice: props.onRetrySentNotice } : {})}
     />
   );
 }
@@ -118,40 +114,7 @@ function liveDeliveryStatus(
   };
 }
 
-describe("automation failure notices", () => {
-  it("names a Collection automation's failure, offers Try again and Open automation, and no Try again for a chain stop", async () => {
-    const failed = {
-      automationId: "collection:Projects/Tasks#finished-date", claimId: "atc_1", chainStopped: false,
-      name: "Stamp the finish date", error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
-    };
-    const onRetryAutomationFailure = vi.fn();
-    const onOpenAutomation = vi.fn();
-    renderNotices({
-      automationFailures: [
-        failed,
-        { automationId: "collection:Projects/Tasks#nudge", claimId: "atc_2", chainStopped: true, name: null,
-          error: "chain-stopped", updatedAtMs: 6_000, generation: 2, datasetInstance: null },
-      ],
-      onRetryAutomationFailure,
-      onOpenAutomation,
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const row = await screen.findByTestId("notice-automation-failure-collection:Projects/Tasks#finished-date");
-    expect(row.textContent).toContain('Automation "Stamp the finish date" failed');
-    expect(row.textContent).toContain("ana@dohc.test cannot edit Budget.");
-    const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
-    expect(stopped.textContent).toContain('"nudge" did not run.');
-    expect(within(stopped).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(document.body.textContent).not.toContain("automations.yaml");
-
-    await userEvent.click(within(row).getByRole("button", { name: "Try again" }));
-    expect(onRetryAutomationFailure).toHaveBeenCalledWith(failed);
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(within(screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge"))
-      .getByRole("button", { name: "Open automation" }));
-    expect(onOpenAutomation).toHaveBeenCalledWith("collection:Projects/Tasks#nudge");
-  });
-
+describe("automation notices", () => {
   it("says every automation waits when dohc cannot read the allowed steps, and offers a way back", async () => {
     const onResetAutomationHolds = vi.fn();
     const onRevealAutomationHolds = vi.fn();
@@ -166,34 +129,6 @@ describe("automation failure notices", () => {
     await userEvent.click(within(again).getByRole("button", { name: "Open folder" }));
     expect(onResetAutomationHolds).toHaveBeenCalledOnce();
     expect(onRevealAutomationHolds).toHaveBeenCalledOnce();
-  });
-
-  it("toasts a failure that just arrived with Try again, Open automation, and copy, and keeps its row", async () => {
-    const failure = {
-      automationId: "collection:Tasks#stamp", claimId: "atc_1", chainStopped: false,
-      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1, datasetInstance: null,
-    };
-    const user = userEvent.setup();
-    const onRetryAutomationFailure = vi.fn();
-    const onOpenAutomation = vi.fn();
-    const onHideAutomationFailureToast = vi.fn();
-    renderNotices({
-      automationFailures: [failure], automationFailureToast: failure,
-      onRetryAutomationFailure, onOpenAutomation, onHideAutomationFailureToast,
-    });
-    const toast = screen.getByTestId("automation-failure-toast");
-    expect(toast.textContent).toContain('Automation "Stamp" failed. The record is open elsewhere.');
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
-    expect(await navigator.clipboard.readText()).toContain("Run: atc_1");
-    await user.click(within(toast).getByRole("button", { name: "Try again" }));
-    expect(onRetryAutomationFailure).toHaveBeenCalledWith(failure);
-    expect(onHideAutomationFailureToast).toHaveBeenCalledTimes(1);
-    await user.click(within(toast).getByRole("button", { name: "Open automation" }));
-    expect(onOpenAutomation).toHaveBeenCalledWith("collection:Tasks#stamp");
-    await user.click(within(toast).getByRole("button", { name: "Dismiss automation notice" }));
-    expect(onHideAutomationFailureToast).toHaveBeenCalledTimes(3);
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.getByTestId("notice-automation-failure-collection:Tasks#stamp")).toBeTruthy();
   });
 
   it("asks once to allow a step that reaches more only because an editor left", async () => {
@@ -1514,6 +1449,7 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
       target: { path: "Trip/day-2.md" },
       createdAtMs: 1_700_000_000_000,
       readAtMs: null,
+      postedHere: false,
       ...overrides,
     },
     folder,
@@ -1547,6 +1483,72 @@ describe("skipped-run notices", () => {
     expect(screen.getByTestId("sent-notice-s-run-now").textContent).toBe("Run now");
     expect(within(screen.getByTestId("sent-notice-s")).getByRole("status").textContent)
       .toBe("This already ran from another computer, or from here.");
+  });
+});
+
+describe("failed run notices", () => {
+  const failed = (id: string, target: NoticeRow["target"], postedHere = true) => sentRow(id, {
+    kind: "automation-failed",
+    senderKind: "automation",
+    title: 'Automation "Stamp the finish date" failed',
+    body: "ana@dohc.test cannot edit Budget. It ran on Ice's laptop.",
+    target,
+    postedHere,
+  });
+  const run = { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" };
+
+  it("offers Try again, copy, and Open automation where the run is, and no Try again for a run it cannot name or run", async () => {
+    const onRetrySentNotice = vi.fn();
+    renderNotices({
+      sentNotices: [
+        failed("f", run),
+        failed("c", { automation: "collection:Tasks#nudge", path: "Tasks/automations.yaml" }),
+        failed("o", run, false),
+      ],
+      onOpenSentNotice: vi.fn(async () => null),
+      onRetrySentNotice,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-f").textContent).toContain("It ran on Ice's laptop.");
+    expect(screen.getByTestId("sent-notice-f-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-c-retry"), "a chain stop cannot run again").toBeNull();
+    expect(screen.queryByTestId("sent-notice-o-retry"), "another computer holds the run").toBeNull();
+    expect(screen.getByTestId("sent-notice-o").textContent).toContain("It ran on Ice's laptop.");
+    await userEvent.click(screen.getByTestId("sent-notice-f-copy"));
+    expect(await navigator.clipboard.readText()).toContain("Run: atc_1");
+    await userEvent.click(screen.getByTestId("sent-notice-f-retry"));
+    expect(onRetrySentNotice).toHaveBeenCalledWith(expect.objectContaining({ noticeId: "f" }));
+  });
+
+  it("keeps a failure's toast until it is closed, with Try again", async () => {
+    vi.useFakeTimers();
+    try {
+      const onHideSentNoticeToast = vi.fn();
+      const onRetrySentNotice = vi.fn();
+      renderNotices({ sentNotices: [failed("f", run)], sentNoticeToast: failed("f", run), onHideSentNoticeToast, onRetrySentNotice });
+      const toast = screen.getByTestId("sent-notice-toast");
+      expect(toast.getAttribute("role")).toBe("alert");
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(onHideSentNoticeToast).not.toHaveBeenCalled();
+      act(() => screen.getByTestId("sent-notice-toast-retry").click());
+      expect(onRetrySentNotice).toHaveBeenCalledWith(expect.objectContaining({ noticeId: "f" }));
+      expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens the automation a switch-off notice names", async () => {
+    renderNotices({
+      sentNotices: [sentRow("o", {
+        kind: "automation-switched-off", title: 'ana@dohc.test switched off "Stamp the finish date"',
+        target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml" },
+      })],
+      onOpenSentNotice: vi.fn(async () => null),
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-o-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-o-retry")).toBeNull();
   });
 });
 
