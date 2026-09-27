@@ -20,8 +20,8 @@ import {
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 
-const PROJECTS_TAB = "tab-dohc://collection/projects";
-const CLIENTS_TAB = "tab-dohc://collection/clients";
+const PROJECTS_TAB = "tab-tab://collection/projects";
+const CLIENTS_TAB = "tab-tab://collection/clients";
 
 // Calendar month view opens on today, so the walkthrough's dates must land
 // in the current month. One clock read: deriving both dates from separate

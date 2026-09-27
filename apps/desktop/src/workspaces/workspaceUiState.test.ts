@@ -8,6 +8,7 @@ import {
   readUiStateFile,
   writeUiStateFile,
 } from "./workspaceUiState";
+import { serializeUiState, defaultWorkbenchState, openTab, GRAPH_TAB_PATH } from "../renderer/workbench/workbenchState";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
 import { createTestScratch } from "./testTemp";
@@ -23,15 +24,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-const STATE = {
-  version: 1,
-  activeView: "explorer",
-  sidebarVisible: true,
-  sidebarWidth: 320,
-  tabs: ["notes/a.md"],
-  activeTab: "notes/a.md",
-  chatsVisible: false,
-};
+const STATE = serializeUiState(openTab(openTab(defaultWorkbenchState(), "notes/a.md"), GRAPH_TAB_PATH));
 
 
 describe("ui-state file store", () => {

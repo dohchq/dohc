@@ -135,7 +135,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
-    const path = `dohc://data-collection/${dataset.datasetId}/${table.tableId}`;
+    const path = `tab://data-collection/${dataset.datasetId}/${table.tableId}`;
     await page.getByTestId(`tab-${path}`).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     const names = collection.getByRole("button", { name: /^Edit Name for record / });

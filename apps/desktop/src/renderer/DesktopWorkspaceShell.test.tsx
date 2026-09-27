@@ -208,7 +208,7 @@ const READY_UPDATE_STATE: UpdateStateEvent = {
 };
 
 const STORED_STATE: WorkspaceUiState = {
-  version: 2,
+  version: 3,
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 320,
@@ -1486,7 +1486,7 @@ describe("collection folders", () => {
     });
     await user.click(row);
 
-    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("tab-tab://collection/tasks")).toBeTruthy();
     // The surface is a lazy chunk (@dohc/collection-views pulls the table,
     // board, and calendar libraries) plus two bridge round trips; on a
     // loaded worker that cold load can outlast the default wait.
@@ -2677,7 +2677,7 @@ describe("editor groups", () => {
   it.each([
     {
       destination: "Graph",
-      tabPath: "dohc://graph",
+      tabPath: "tab://graph",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
         await user.click(screen.getByTestId("activity-graph"));
         await user.click(await screen.findByTestId("graph-open-tab"));
@@ -2685,7 +2685,7 @@ describe("editor groups", () => {
     },
     {
       destination: "History",
-      tabPath: "dohc://history",
+      tabPath: "tab://history",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
         await user.click(screen.getByTestId("activity-history"));
         await user.click(await screen.findByTestId("history-open-tab"));
@@ -2693,7 +2693,7 @@ describe("editor groups", () => {
     },
     {
       destination: "Chats",
-      tabPath: "dohc://chats",
+      tabPath: "tab://chats",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
         await user.click(await screen.findByTestId("chats-open-tab"));
       },
@@ -8682,7 +8682,7 @@ describe("automation failure notices", () => {
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
-    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("tab-tab://collection/tasks")).toBeTruthy();
     expect(await screen.findByTestId("automation-run-atc_failed", undefined, { timeout: 15_000 })).toBeTruthy();
     expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId,
@@ -9956,7 +9956,7 @@ describe("graph view", () => {
 
     await user.click(screen.getByTestId("graph-open-tab"));
 
-    const graphTab = await screen.findByTestId("tab-dohc://graph");
+    const graphTab = await screen.findByTestId("tab-tab://graph");
     expect(graphTab.dataset.active).toBe("true");
     await waitFor(() => {
       expect(
@@ -14736,7 +14736,7 @@ describe("chats panel (right side)", () => {
     await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
     await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
     await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("Random draft"));
-    expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
+    expect(screen.getAllByTestId(/^tab-tab:\/\/chats/)).toHaveLength(3);
 
   });
 

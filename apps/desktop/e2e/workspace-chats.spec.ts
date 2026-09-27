@@ -75,7 +75,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // Chats click is a reveal (the panel's visibility persists in ui-state,
     // and collapsing fully unmounts the view — no right-edge stub).
     await page
-      .getByTestId(/^tab-dohc:\/\/chats\/channel\//)
+      .getByTestId(/^tab-tab:\/\/chats\/channel\//)
       .getByRole("button", { name: "Close #general" })
       .click();
     await page.getByTestId("chats-panel-collapse").click();
@@ -205,7 +205,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const panel = page.getByTestId("chats-panel");
     await expect(panel).toBeVisible();
     await panel.getByTestId("chats-channel").click();
-    const chatsTab = page.getByTestId(/^tab-dohc:\/\/chats\/channel\//);
+    const chatsTab = page.getByTestId(/^tab-tab:\/\/chats\/channel\//);
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
     const pageChannelView = page.locator(
@@ -264,7 +264,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
 
     // Home has its own tab; returning to General preserves the thread draft.
     await panel.getByTestId("chats-feed-link").click();
-    const homeTab = page.getByTestId("tab-dohc://chats");
+    const homeTab = page.getByTestId("tab-tab://chats");
     await expect(homeTab).toContainText("Home");
     await expect(chatsTab).toContainText("#general");
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
@@ -297,9 +297,9 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
-    await expect(page.getByTestId(/^tab-dohc:\/\/chats\/channel\//)).toContainText("#general");
-    await expect(page.getByTestId("tab-dohc://chats")).toContainText("Home");
-    await page.getByTestId("tab-dohc://chats").click();
+    await expect(page.getByTestId(/^tab-tab:\/\/chats\/channel\//)).toContainText("#general");
+    await expect(page.getByTestId("tab-tab://chats")).toContainText("Home");
+    await page.getByTestId("tab-tab://chats").click();
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
 
   } finally {

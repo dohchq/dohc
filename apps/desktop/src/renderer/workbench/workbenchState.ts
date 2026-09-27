@@ -116,22 +116,23 @@ export function toggleSidebarOnRail(
 }
 // Reserved for dohc's own tabs. A workspace file path is never spelled this
 // way, so a persisted tab carrying it is always one of the kinds below.
-const DOHC_TAB_SCHEME = "dohc://";
-export const GRAPH_TAB_PATH = "dohc://graph";
-export const HISTORY_TAB_PATH = "dohc://history";
+const INTERNAL_TAB_SCHEME = "tab://";
+const V2_TAB_SCHEME = "dohc://";
+export const GRAPH_TAB_PATH = "tab://graph";
+export const HISTORY_TAB_PATH = "tab://history";
 // Home and each conversation have their own workspace-scoped tab identity.
-export const CHATS_TAB_PATH = "dohc://chats";
-const APP_TAB_PREFIX = "dohc://app/";
-const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
+export const CHATS_TAB_PATH = "tab://chats";
+const APP_TAB_PREFIX = "tab://app/";
+const VERSION_COMPARE_TAB_PREFIX = "tab://versions/compare/";
 // Engine moment diff (PR 0M-5): history diffs open by MOMENT id, not
 // legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
-const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
+const MOMENT_DIFF_TAB_PREFIX = "tab://moment-diff/";
 // A collection folder opened as its views (Phase 2 collections). Keyed by
 // the folder path, so reopening re-activates instead of duplicating.
-const COLLECTION_TAB_PREFIX = "dohc://collection/";
-const DATA_COLLECTION_TAB_PREFIX = "dohc://data-collection/";
+const COLLECTION_TAB_PREFIX = "tab://collection/";
+const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
 
 export function transactionalCollectionTabPath(datasetId: string, tableId: string): string {
   return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetId)}/${encodeURIComponent(tableId)}`;
@@ -277,17 +278,18 @@ export function parseVersionCompareTabPath(path: string | null): string | null {
 }
 
 /**
- * `dohc://` is reserved for tabs dohc renders itself. A persisted tab on that
+ * `tab://` is reserved for tabs dohc renders itself. A persisted tab on that
  * scheme that no kind above recognizes is a tab from a removed surface.
  * It is not a workspace file and must never be restored as one. For example,
- * `dohc://retired-dashboard/report` would otherwise open as a plain path and
+ * `tab://retired-dashboard/report` would otherwise open as a plain path and
  * show an editor for a file that does not exist. Restore drops it instead.
+ * Unmigrated v2 IDs are also dropped; only the v2 reader converts them.
  */
 export function isRemovedVirtualTabPath(path: string | null): boolean {
   return (
     typeof path === "string" &&
-    path.startsWith(DOHC_TAB_SCHEME) &&
-    !isVirtualTabPath(path)
+    (path.startsWith(V2_TAB_SCHEME) ||
+      (path.startsWith(INTERNAL_TAB_SCHEME) && !isVirtualTabPath(path)))
   );
 }
 
@@ -959,7 +961,7 @@ export function togglePinned(state: WorkbenchState, path: string): WorkbenchStat
 // projection. Tab collisions are removed within each group.
 //
 // The projection speaks filesystem paths. A collection tab encodes its folder
-// path behind dohc://collection/, so the tab projects the DECODED folder and
+// path behind tab://collection/, so the tab projects the DECODED folder and
 // re-encodes the result — projecting the tab path itself matches no rename,
 // and the tab would keep naming the folder the move vacated.
 export function remapWorkbenchPaths(
@@ -1030,7 +1032,7 @@ export function remapWorkbenchPaths(
 // raced its create can never close it.
 //
 // Tabs only: pinned paths, expanded folders and recent files include folders,
-// which no file listing carries. Virtual tabs (dohc://graph, chats, a moment
+// which no file listing carries. Virtual tabs (tab://graph, chats, a moment
 // diff) have no file and always survive.
 export function pruneMissingRestoredTabs(
   state: WorkbenchState,
@@ -1063,7 +1065,7 @@ export function pruneMissingRestoredTabs(
 export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
   const editorGroups = normalizeEditorGroupSizes(state.editorGroups);
   return {
-    version: 2,
+    version: 3,
     activeView: state.activeView,
     sidebarVisible: state.sidebarVisible,
     sidebarWidth: clampSidebarWidth(state.sidebarWidth),
@@ -1093,9 +1095,14 @@ export function parseUiState(raw: unknown): WorkbenchState {
   // is reached — never materialize/filter a huge foreign array first.
   const own = (key: string): unknown =>
     Object.hasOwn(value, key) ? value[key] : undefined;
-  // Version 2 replaces the flat tab contract. Earlier versions reset instead
-  // of being migrated or accepted through aliases.
-  if (own("version") !== 2) return defaults;
+  const version = own("version");
+  if (version !== 2 && version !== 3) return defaults;
+  // Version 2 shared the public URL scheme. Rewrite tab references before
+  // validation and deduplication; file paths and other settings stay intact.
+  const migrateTabPath = (path: unknown): unknown =>
+    version === 2 && typeof path === "string" && path.length <= 4096 && path.startsWith(V2_TAB_SCHEME)
+      ? `${INTERNAL_TAB_SCHEME}${path.slice(V2_TAB_SCHEME.length)}`
+      : path;
   // Bounded path-list collector (tabs, expandedFolders, pinned): stops once
   // the cap is reached — never materialize/filter a huge foreign array first.
   const collectPaths = (raw: unknown, cap: number): string[] => {
@@ -1143,15 +1150,16 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabs: WorkbenchTab[] = [];
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
-      const rawActiveTab = groupOwn("activeTab");
+      const rawActiveTab = migrateTabPath(groupOwn("activeTab"));
       const normalizedActiveTab =
         typeof rawActiveTab === "string"
           ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
             (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
           : null;
       if (Array.isArray(rawTabs)) {
-        for (const tab of rawTabs) {
+        for (const rawTab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
+          const tab = migrateTabPath(rawTab);
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
