@@ -213,7 +213,7 @@ pub enum JobOutcome {
     /// write performed, marked complete.
     AlreadyMaterialized,
     /// A newer generation was already materialized at this path; this job is
-    /// superseded and marked complete without regressing the path to older
+    /// superseded and cancelled without regressing the path to older
     /// content.
     Superseded,
     /// Newer external content was found at revalidation; preserved-both, marked
@@ -468,7 +468,7 @@ pub fn probe_projection_target(
         return ProjectionTargetState::UntrackedContent;
     }
     let cap = match kind {
-        ProjectionTargetKind::Plaintext => MAX_CAPTURE_BINARY_BYTES,
+        ProjectionTargetKind::Plaintext => MAX_CAPTURE_TEXT_BYTES.max(MAX_CAPTURE_BINARY_BYTES),
         ProjectionTargetKind::Secret => MAX_CAPTURE_TEXT_BYTES,
     };
     if metadata.len() > cap {
@@ -497,15 +497,21 @@ pub fn probe_projection_target(
         },
         ProjectionTargetKind::Plaintext => {
             let media_type = media_type_for_path(rel);
+            let binary_in_bounds = bytes.len() as u64 <= MAX_CAPTURE_BINARY_BYTES;
             if !is_text_media_type(media_type, rel) {
-                return ProjectionTargetState::Binary { sha256 };
+                return if binary_in_bounds {
+                    ProjectionTargetState::Binary { sha256 }
+                } else {
+                    ProjectionTargetState::UntrackedContent
+                };
             }
             match String::from_utf8(bytes) {
                 Ok(text) if text.len() as u64 <= MAX_CAPTURE_TEXT_BYTES => {
                     ProjectionTargetState::Text { sha256 }
                 }
                 Ok(_) => ProjectionTargetState::UntrackedContent,
-                Err(_) => ProjectionTargetState::Binary { sha256 },
+                Err(_) if binary_in_bounds => ProjectionTargetState::Binary { sha256 },
+                Err(_) => ProjectionTargetState::UntrackedContent,
             }
         }
     }
@@ -674,13 +680,13 @@ fn materialize_one_ordinary(
 
     // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
-    // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    // to older content (concurrent / out-of-order jobs). Cancel without publishing.
     if !job.job_id.starts_with("version-switch-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        store.mark_materialization_cancelled(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Superseded);
     }
 
@@ -1069,6 +1075,20 @@ fn materialize_write_content(
             backoff,
             &mut validate_preimage,
         )?
+    } else if job.preimage == Preimage::Absent {
+        if !validate_preimage()? {
+            false
+        } else {
+            match std::fs::hard_link(&tmp, target) {
+                Ok(()) => {
+                    std::fs::remove_file(&tmp)
+                        .map_err(|error| MaterializeError::io(&tmp, &error))?;
+                    true
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(MaterializeError::io(target, &error)),
+            }
+        }
     } else {
         replace_with_bounded_retry(&tmp, target, replacer, backoff, &mut validate_preimage)?
     };
@@ -2900,8 +2920,10 @@ mod tests {
         let scratch = Scratch::new("ordinary-retry-preimage");
         let mut store = EngineStore::open(&scratch.db(), 1).expect("store");
         enqueue_write_job(&mut store, "retry", "notes.md", b"intended", 1);
-        let job = store.load_materialization_job("retry").unwrap().unwrap();
+        let mut job = store.load_materialization_job("retry").unwrap().unwrap();
         let target = scratch.root.join("notes.md");
+        std::fs::write(&target, b"before").unwrap();
+        job.preimage = Preimage::Present(dohc_engine_storage::hex_sha256(b"before"));
         let outcome = materialize_one(
             &store,
             &scratch.root,

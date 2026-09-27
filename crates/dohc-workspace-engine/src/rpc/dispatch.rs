@@ -325,6 +325,10 @@ impl EngineService {
             "share.direct.push" => {
                 Box::pin(self.share_direct_push(&ctx, request.workspace, request.params)).await?
             }
+            "versionedText.writeBlob" => {
+                self.versioned_text_write_blob(&ctx, &request, request.params.clone())
+                    .await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -1045,6 +1049,7 @@ mod tests {
             "sync.recoverOrigin",
             "sync.probe",
             "versionedText.write",
+            "versionedText.writeBlob",
         ] {
             request.method = method.into();
             assert_eq!(
@@ -1310,6 +1315,7 @@ mod tests {
             "versionedText.rename",
             "versionedText.rollback",
             "versionedText.write",
+            "versionedText.writeBlob",
             "versions.active",
             "versions.compareFiles",
             "versions.createNamed",

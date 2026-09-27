@@ -95,6 +95,9 @@ fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = &error {
+        return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
+    }
     let error = match error {
         RuntimeError::LiveApplication(ApplicationError::Storage(error)) => {
             RuntimeError::Storage(error)

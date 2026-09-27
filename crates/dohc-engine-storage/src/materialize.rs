@@ -62,9 +62,8 @@ pub enum JobStatus {
     /// preserved both and did not overwrite. Terminal until a human/agent
     /// resolves it (never silently replayed).
     Conflict,
-    /// Its target path was deleted before the job ever reached disk.
-    /// Terminal, and distinct from `Conflict`: nothing needs a human's
-    /// resolution here — the delete is the resolution. Never replayed.
+    /// A delete or newer publication superseded this job before it reached disk.
+    /// Terminal; never replayed.
     Cancelled,
 }
 
@@ -414,6 +413,14 @@ pub(crate) fn mark_complete(
     now_ms: i64,
 ) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Complete, now_ms)
+}
+
+pub(crate) fn mark_cancelled(
+    conn: &Connection,
+    job_id: &str,
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    set_status(conn, job_id, JobStatus::Cancelled, now_ms)
 }
 
 /// Mark a job in conflict (newer external content was preserved; not clobbered).

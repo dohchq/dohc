@@ -108,8 +108,7 @@ const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
 /// headroom. A row past it is degraded, not refused — `conflicts_list`
 /// withholds its over-cap side bodies, and the caller hydrates them through
 /// `versionedText.readBlob`.
-const CONFLICT_ROW_HARD_CAP_BYTES: usize =
-    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+const CONFLICT_ROW_HARD_CAP_BYTES: usize = RESPONSE_FRAME_BYTES - 64 * 1024;
 
 /// What a hand-combined resolution is bounded by: the control frame that has
 /// to carry the whole REQUEST. Not the body alone, and not a fixed headroom
@@ -122,8 +121,7 @@ const CONFLICT_ROW_HARD_CAP_BYTES: usize =
 /// frame carries encoded bytes and `check_string` bounds decoded ones, so
 /// escaping is invisible to every other limit on this path: 4,194,304
 /// newlines are 4 MiB raw and 8 MiB encoded.
-const RESOLVE_REQUEST_FRAME_BYTES: usize =
-    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+const RESOLVE_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// What a fully withheld resolve answer spends on JSON keys, punctuation and
 /// every fixed-width field beside them — 64-hex digests, i64 counters, enum

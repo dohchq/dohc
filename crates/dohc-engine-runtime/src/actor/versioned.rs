@@ -20,7 +20,7 @@ use dohc_engine_domain::{
     VersionedTextStore, WriteBinary, WriteResult, WriteText, binary_delete_job_id,
     binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     enqueue_binary_delete, enqueue_binary_rename, insert_text_conflict_if_absent,
-    rollback_compensating_moment_id, write_binary_in_tx, write_text_in_tx,
+    rollback_compensating_moment_id, write_text_in_tx,
 };
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, Preimage, StorageError,
@@ -34,6 +34,55 @@ use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Default)]
+pub struct WriteConditions {
+    pub create_only: bool,
+    pub expected_sha256: Option<String>,
+}
+
+impl WriteConditions {
+    fn fingerprint(&self) -> String {
+        serde_json::json!([self.create_only, self.expected_sha256]).to_string()
+    }
+
+    fn check(
+        &self,
+        root: &std::path::Path,
+        path: &str,
+        before_present: bool,
+    ) -> Result<(), RuntimeError> {
+        use dohc_engine_files::materialize::{
+            ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+        };
+        if !self.create_only && self.expected_sha256.is_none() {
+            return Ok(());
+        }
+        let current = probe_projection_target(root, path, ProjectionTargetKind::Plaintext);
+        if self.create_only && (before_present || !matches!(current, ProjectionTargetState::Absent))
+        {
+            return Err(DomainError::TargetPathExists.into());
+        }
+        if let Some(expected) = &self.expected_sha256 {
+            let current_sha256 = match current {
+                ProjectionTargetState::Text { sha256 }
+                | ProjectionTargetState::Binary { sha256 } => Some(sha256),
+                _ => None,
+            };
+            if current_sha256.as_ref() != Some(expected) {
+                return Err(DomainError::WritePreconditionFailed { current_sha256 }.into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextWriteExecutionResult {
+    pub write: WriteResult,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryWriteExecutionResult {
@@ -161,6 +210,73 @@ impl ActorHandle {
                     store,
                     &input,
                     &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
+            })
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn versioned_text_publish(
+        &self,
+        input: WriteText,
+        root: PathBuf,
+        conditions: WriteConditions,
+        restore_before_moment_id: Option<String>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<TextWriteExecutionResult, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                let write = versioned_text_write_with_publication_on_store(
+                    store,
+                    &input,
+                    Some(&root),
+                    restore_before_moment_id.as_deref(),
+                    false,
+                    Some(&conditions),
+                    faults.as_ref(),
+                    &token,
+                )?;
+                let (materialized, materialize_outcome) = publish_write_job(
+                    store,
+                    &root,
+                    &input.workspace_id,
+                    &format!("authored-mat_{}", write.moment.moment_id),
+                    self_writes.as_ref(),
+                    input.now_ms,
+                    faults.as_ref(),
+                )?;
+                Ok(TextWriteExecutionResult {
+                    write,
+                    materialized,
+                    materialize_outcome,
+                })
+            })
+        })
+        .await
+    }
+
+    pub async fn versioned_binary_write_with_conditions(
+        &self,
+        input: WriteBinary,
+        root: PathBuf,
+        conditions: WriteConditions,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_binary_write_conditioned_on_store(
+                    store,
+                    &input,
+                    &root,
+                    Some(&conditions),
                     self_writes.as_ref(),
                     faults.as_ref(),
                     &token,
@@ -576,6 +692,29 @@ pub(super) fn versioned_text_write_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    versioned_text_write_with_publication_on_store(
+        store,
+        input,
+        root_dir,
+        restore_before_moment_id,
+        finish_create,
+        None,
+        faults,
+        token,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn versioned_text_write_with_publication_on_store(
+    store: &mut EngineStore,
+    input: &WriteText,
+    root_dir: Option<&std::path::Path>,
+    restore_before_moment_id: Option<&str>,
+    finish_create: bool,
+    conditions: Option<&WriteConditions>,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<WriteResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -595,11 +734,35 @@ pub(super) fn versioned_text_write_on_store(
     let (actor, attribution) =
         dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
-        let mut result = match restore_before_moment_id {
-            Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
-            None => write_text_in_tx(tx, input),
+        let fingerprint = conditions.map(WriteConditions::fingerprint);
+        let mut result = match (restore_before_moment_id, fingerprint.as_deref()) {
+            (Some(source), conditions) => dohc_engine_domain::write_published_history_text_in_tx(
+                tx, input, source, conditions,
+            ),
+            (None, Some(conditions)) => {
+                dohc_engine_domain::write_published_text_in_tx(tx, input, conditions)
+            }
+            (None, None) => write_text_in_tx(tx, input),
         }
         .map_err(RuntimeError::from)?;
+        if !result.deduped
+            && let (Some(conditions), Some(root)) = (conditions, root_dir)
+        {
+            conditions.check(root, &result.snapshot.path, result.moment.before_present)?;
+            let preimage = if result.moment.before_present {
+                Preimage::Present(
+                    result
+                        .moment
+                        .before_binary_sha256
+                        .clone()
+                        .or_else(|| result.moment.before_blob_sha256.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                Preimage::Absent
+            };
+            dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
+        }
         if !result.deduped
             && let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
@@ -670,6 +833,26 @@ fn versioned_binary_write_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+    versioned_binary_write_conditioned_on_store(
+        store,
+        input,
+        root_dir,
+        None,
+        self_writes,
+        faults,
+        token,
+    )
+}
+
+fn versioned_binary_write_conditioned_on_store(
+    store: &mut EngineStore,
+    input: &WriteBinary,
+    root_dir: &std::path::Path,
+    conditions: Option<&WriteConditions>,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<BinaryWriteExecutionResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -681,7 +864,24 @@ fn versioned_binary_write_on_store(
         faults,
     )?;
     let outcome = store.write_with(faults, |tx| {
-        let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let fingerprint = conditions.map(WriteConditions::fingerprint);
+        let replayed: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id = ?1)",
+                [&input.request_id],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)?;
+        let result =
+            dohc_engine_domain::write_published_binary_in_tx(tx, input, fingerprint.as_deref())
+                .map_err(RuntimeError::from)?;
+        if !replayed && let Some(conditions) = conditions {
+            conditions.check(
+                root_dir,
+                &result.path,
+                result.deduped || result.moment.before_present,
+            )?;
+        }
         if !result.deduped {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
@@ -714,68 +914,41 @@ fn versioned_binary_write_on_store(
         TxnOutcome::Committed(result) => result,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    if !result.deduped && !result.materialize_enqueued {
-        // A NON-ACTIVE version write is DB-only. Disk mirrors the active
-        // version, so there is no job to run and no self-write to suppress.
-        return Ok(BinaryWriteExecutionResult {
-            write: result,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-        });
-    }
-
-    // Request-ledger reconstruction returns the original moment. A replay must
-    // probe that moment's durable job, not the caller's newly supplied id: a
-    // transient first materialization can leave the original job pending.
-    let job = match store.load_materialization_job(&result.moment.moment_id) {
-        Ok(Some(job)) => job,
-        Ok(None) if result.deduped => {
-            return Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
-        }
-        Ok(None) => {
-            return Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            });
-        }
-        Err(error) => {
-            // The wire result self-describes the outcome; stderr keeps the
-            // server-side trail (the DOP1 wire owns stdin/stdout).
-            eprintln!(
-                "engine: binary write committed but loading its materialization job failed: {error}"
-            );
-            return Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            });
-        }
-    };
-    if result.deduped && job.status != JobStatus::Pending {
-        return Ok(BinaryWriteExecutionResult {
-            write: result,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-        });
-    }
-    let (materialized, materialize_outcome) = materialize_pending_job(
+    let (materialized, materialize_outcome) = publish_write_job(
         store,
         root_dir,
         &input.workspace_id,
-        &job,
+        &result.moment.moment_id,
         self_writes,
         input.now_ms,
         faults,
-    );
+    )?;
     Ok(BinaryWriteExecutionResult {
         write: result,
         materialized,
         materialize_outcome,
+    })
+}
+
+fn publish_write_job(
+    store: &EngineStore,
+    root: &std::path::Path,
+    workspace_id: &str,
+    job_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(bool, PostCommitMaterializeOutcome), RuntimeError> {
+    let Some(job) = store.load_materialization_job(job_id)? else {
+        return Ok((false, PostCommitMaterializeOutcome::Skipped));
+    };
+    Ok(match job.status {
+        JobStatus::Complete => (true, PostCommitMaterializeOutcome::Applied),
+        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+        JobStatus::Cancelled => (false, PostCommitMaterializeOutcome::Superseded),
+        JobStatus::Pending => {
+            materialize_pending_job(store, root, workspace_id, &job, self_writes, now_ms, faults)
+        }
     })
 }
 

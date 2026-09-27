@@ -332,6 +332,15 @@ impl EngineStore {
         materialize::mark_complete(&self.conn, job_id, now_ms)
     }
 
+    /// Mark an unpublished job superseded by a newer durable generation.
+    pub fn mark_materialization_cancelled(
+        &self,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::mark_cancelled(&self.conn, job_id, now_ms)
+    }
+
     /// Mark a job in conflict (newer external content was preserved).
     pub fn mark_materialization_conflict(
         &self,

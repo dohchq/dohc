@@ -86,6 +86,7 @@ export function createFakeDaemonCapture(input: {
     await writeFile(absolutePath, bytes);
   }
   const leases = new Map<string, string>();
+  const publishedRequests = new Set<string>();
   let nextId = 5_000_000;
   let nextSecretMoment = 1;
 
@@ -309,6 +310,21 @@ export function createFakeDaemonCapture(input: {
         case "capture.reconcile": {
           await ingest(await activeVersionId());
           return { id: request.id, result: { settled: true, running: true, degraded: false } };
+        }
+        case VERSIONED_METHOD.textWrite:
+        case VERSIONED_METHOD.textWriteBlob:
+        case VERSIONED_METHOD.binaryWrite:
+        case VERSIONED_METHOD.binaryWriteBlob: {
+          const response = await loopback.sendRequest(request);
+          const result = response.result as { materializeOutcome?: string };
+          const key = typeof params.requestId === "string" ? params.requestId : null;
+          if (result.materializeOutcome === "applied" &&
+              (!key || !publishedRequests.has(key)) &&
+              String(params.versionId) === await activeVersionId()) {
+            await writeHead(String(params.versionId), String(params.path));
+            if (key) publishedRequests.add(key);
+          }
+          return response;
         }
         case VERSIONED_METHOD.versionsSetActive: {
           const from = await activeVersionId();

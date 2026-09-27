@@ -1705,7 +1705,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
             |row| row.get(0),
         )
         .expect("restore job");
-    assert_eq!(status, "complete");
+    assert_eq!(status, "cancelled");
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }
@@ -1929,7 +1929,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
             |row| row.get(0),
         )
         .expect("spoof-prefixed ordinary job");
-    assert_eq!(status, "complete");
+    assert_eq!(status, "cancelled");
     assert_eq!(
         std::fs::read(scratch.path().join("spoof.bin")).expect("newer bytes remain"),
         UPDATED_BYTES
@@ -2140,7 +2140,7 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
             |row| row.get(0),
         )
         .expect("legacy job status");
-    assert_eq!(status, "complete", "the global job must be superseded");
+    assert_eq!(status, "cancelled", "the global job must be superseded");
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }

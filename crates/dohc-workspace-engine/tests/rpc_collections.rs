@@ -1307,7 +1307,7 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
         ("beta.md", "rec_cccccccccccccccccccccccccc", 1),
     ];
     assert!(
-        LARGE_FIELD_BYTES * RECORDS.len() > WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize,
+        LARGE_FIELD_BYTES * RECORDS.len() > (8 * 1024 * 1024),
         "the fixture must exceed one response frame"
     );
 
@@ -1920,7 +1920,7 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collection_get_uses_blob_egress_only_above_inband_limit() {
-    const RESPONSE_CAP: usize = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    const RESPONSE_CAP: usize = (8 * 1024 * 1024) - 64 * 1024;
     let response_with_empty_description = json!({
         "path": "at-limit",
         "status": "valid",

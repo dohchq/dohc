@@ -322,12 +322,13 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() {
+async fn text_and_binary_writes_publish_through_materialization() {
     let (scratch, transport, handle) = fixture("materialize").await;
-    write(&transport, &handle, 2, "plain.md", "db only", "plain-1").await;
-    assert!(
-        !scratch.path().join("plain.md").exists(),
-        "enqueue text materialization or omit binary materialization -> moment/disk assertions fail."
+    let text = write(&transport, &handle, 2, "plain.md", "published", "plain-1").await;
+    assert_eq!(text["materializeOutcome"], "applied");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("plain.md")).unwrap(),
+        "published"
     );
     let binary = call(
         &transport,
@@ -3763,7 +3764,7 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload() {
     let (_scratch, transport, handle) = fixture("moment-id").await;
-    let params = json!({ "versionId": "main", "path": "moment.md", "text": "same", "origin": "api", "momentId": "fixed-moment" });
+    let params = json!({ "versionId": "main", "path": "moment.md", "text": "same", "origin": "api", "momentId": "fixed-moment", "requestId": "stable-moment-write" });
     call(
         &transport,
         &handle,

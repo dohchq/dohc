@@ -155,6 +155,7 @@ const MUTATION_OPTIONAL_STRINGS = [
   "summary",
   "correlationId",
   "requestId",
+  "expectedSha256",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
   ...MUTATION_OPTIONAL_STRINGS,
@@ -175,6 +176,12 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
+    optionalI64: ["nowMs"],
+    optionalJson: ["author", "createOnly"],
+  },
+  [VERSIONED_METHOD.textWriteBlob]: {
+    requiredStrings: ["versionId", "path", "sha256", "bytesBase64"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author", "createOnly"],
@@ -211,13 +218,13 @@ const VERSIONED_PARAM_SHAPES = {
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
     optionalI64: ["nowMs"],
     optionalBytes: ["bytes"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
     optionalI64: ["nowMs"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryRead]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.binaryReadBlob]: {
@@ -1122,6 +1129,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
     let parsedSecretWrite: ParsedSecretWriteFields | undefined;
     let parsedSecretDelete: ParsedSecretDeleteFields | undefined;
     switch (request.method) {
+      case VERSIONED_METHOD.textWriteBlob: {
+        const bytes = Buffer.from(serdeRequiredParamString(params, "bytesBase64"), "base64");
+        if (sha256([...bytes]) !== params.sha256 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("invalid-input");
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        const decoded: JsonObject = { ...params, text };
+        delete decoded.sha256;
+        delete decoded.bytesBase64;
+        const parsed = parseTextWriteFields(decoded, request);
+        const workspace = this.requireWorkspaceHandle(request);
+        this.validateWorkspaceParam(decoded, workspace);
+        return this.textWrite(this.workspace(workspace), workspace, decoded, parsed, false);
+      }
       case VERSIONED_METHOD.textWrite:
         parsedTextWrite = parseTextWriteFields(params, request);
         break;
@@ -1290,6 +1309,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const replay = this.replay(state, requestId, params, replayFingerprint);
       if (replay) return replay;
     }
+    if (typeof params.expectedSha256 === "string" && knownVersion?.files.get(path) &&
+        sha256(Buffer.from(knownVersion.files.get(path)!.text ?? "")) !== params.expectedSha256) {
+      throw new Error("write-precondition-failed");
+    }
     const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
     const authorFingerprint = this.writeAuthorFingerprint(params);
     if (existingMoment) {
@@ -1317,6 +1340,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
           snapshot: this.textSnapshot(workspace, versionId, path, recorded),
           moment: this.capMoment(existingMoment.wire),
           deduped: true,
+          materialized: true, materializeOutcome: "applied",
         };
       }
     }
@@ -1378,6 +1402,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       snapshot: this.textSnapshot(workspace, version.id, path, file),
       moment: this.capMoment(moment),
       deduped: false,
+      materialized: true, materializeOutcome: "applied",
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
@@ -1512,15 +1537,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
     );
     const replay = this.replay(state, requestId, params, replayFingerprint);
-    if (replay) {
-      return {
-        ...replay,
-        materializeEnqueued: false,
-        materialized: false,
-        materializeOutcome: "skipped",
-      };
-    }
+    if (replay) return replay;
     const before = version.files.get(path);
+    if (params.createOnly === true && before) throw new Error("target-path-exists");
+    if (typeof params.expectedSha256 === "string" && (!before ||
+        (before.contentKind === "binary" ? before.binarySha : sha256(Buffer.from(before.text ?? ""))) !== params.expectedSha256)) {
+      throw new Error("write-precondition-failed");
+    }
     const binarySha = sha256(bytes);
     // Daemon parity: writing the same bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
@@ -2790,6 +2813,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       path: params.path,
       text: params.text,
       createOnly: params.createOnly === true,
+      expectedSha256: params.expectedSha256 ?? null,
       momentId,
       objectId,
       metadataOrigin: origin,
@@ -2810,6 +2834,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): string {
     return JSON.stringify({
       operation: "versioned-binary-write",
+      createOnly: params.createOnly === true,
+      expectedSha256: params.expectedSha256 ?? null,
       workspaceId: workspace,
       versionId: params.versionId,
       path: params.path,

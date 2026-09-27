@@ -50,7 +50,10 @@ pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
-pub use versioned::{BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult};
+pub use versioned::{
+    BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult,
+    TextWriteExecutionResult, WriteConditions,
+};
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};
 pub use ydoc::{
     ArtifactAssetDescriptor, YdocAppend, YdocCloseSessionOutcome, YdocOpenState, YdocResyncState,

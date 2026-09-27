@@ -36,8 +36,8 @@ pub use actor::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    WorkspaceActor, WorkspaceRootGuard, YdocAppend, YdocCloseSessionOutcome, YdocOpenState,
-    YdocSettleOutcome, YdocSettlement,
+    TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
+    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;

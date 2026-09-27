@@ -54,6 +54,41 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     create_only: bool,
     #[serde(default)]
+    expected_sha256: Option<String>,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextWriteBlobParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
+    path: String,
+    sha256: String,
+    bytes_base64: String,
+    #[serde(default)]
+    restore_before_moment_id: Option<String>,
+    #[serde(default)]
+    create_only: bool,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -75,6 +110,10 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     workspace_id: Option<String>,
     version_id: String,
+    #[serde(default)]
+    create_only: bool,
+    #[serde(default)]
+    expected_sha256: Option<String>,
     #[serde(default)]
     object_id: Option<String>,
     path: String,
@@ -104,6 +143,10 @@ struct VersionedBinaryWriteBlobParams {
     #[serde(default)]
     workspace_id: Option<String>,
     version_id: String,
+    #[serde(default)]
+    create_only: bool,
+    #[serde(default)]
+    expected_sha256: Option<String>,
     #[serde(default)]
     object_id: Option<String>,
     path: String,
@@ -287,16 +330,25 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionedTextWriteParams = parse(params)?;
-        let open = self.open(request.workspace.as_ref())?;
-        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = params.path.clone();
-        let text = params.text;
-        if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
+        if params.text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "content-exceeds-inband-cap",
             ));
         }
+        self.publish_text(ctx, request, params).await
+    }
+
+    async fn publish_text(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: VersionedTextWriteParams,
+    ) -> Result<Value, WireError> {
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = params.path.clone();
+        let text = params.text;
         let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref())?;
@@ -335,28 +387,24 @@ impl EngineService {
             author_json,
             now_ms: params.now_ms.unwrap_or(now_ms()?),
         };
-        let result = if params.create_only {
-            open.actor
-                .versioned_text_create(
-                    input,
-                    open.root.clone(),
-                    Arc::new(NoFaults),
-                    cancellation.token(),
-                )
-                .await
-        } else {
-            open.actor
-                .versioned_text_write_indexed_with_history(
-                    input,
-                    open.root.clone(),
-                    params.restore_before_moment_id,
-                    Arc::new(NoFaults),
-                    cancellation.token(),
-                )
-                .await
-        };
+        let result = open
+            .actor
+            .versioned_text_publish(
+                input,
+                open.root.clone(),
+                dohc_engine_runtime::WriteConditions {
+                    create_only: params.create_only,
+                    expected_sha256: params.expected_sha256,
+                },
+                params.restore_before_moment_id,
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
         drop(session_serial);
-        let result = result.map_err(map_runtime)?;
+        let execution = result.map_err(map_runtime)?;
+        let result = execution.write;
         crate::events::emit_automation_claimed(
             &self.events,
             &open.workspace_id,
@@ -364,10 +412,57 @@ impl EngineService {
         );
         Ok(json!({
             "object": file_object_json(&result.object),
-            "snapshot": snapshot_json(&result.snapshot),
+            "snapshot": crate::rpc::reads::settled_snapshot_json(&result.snapshot),
             "moment": moment_json(&result.moment),
             "deduped": result.deduped,
+            "materialized": execution.materialized,
+            "materializeOutcome": materialize_outcome_name(execution.materialize_outcome),
         }))
+    }
+
+    pub(super) async fn versioned_text_write_blob(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let parsed: VersionedTextWriteBlobParams = parse(params)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&parsed.bytes_base64)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?;
+        if bytes.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "content-exceeds-capture-cap",
+            ));
+        }
+        if dohc_engine_storage::hex_sha256(&bytes) != parsed.sha256 {
+            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-utf8"))?;
+        self.publish_text(
+            ctx,
+            request,
+            VersionedTextWriteParams {
+                workspace_id: parsed.workspace_id,
+                version_id: parsed.version_id,
+                object_id: parsed.object_id,
+                path: parsed.path,
+                text,
+                restore_before_moment_id: parsed.restore_before_moment_id,
+                create_only: parsed.create_only,
+                expected_sha256: parsed.expected_sha256,
+                moment_id: parsed.moment_id,
+                origin: parsed.origin,
+                summary: parsed.summary,
+                correlation_id: parsed.correlation_id,
+                author: parsed.author,
+                request_id: parsed.request_id,
+                now_ms: parsed.now_ms,
+            },
+        )
+        .await
     }
 
     pub(super) async fn versioned_binary_write(
@@ -413,7 +508,7 @@ impl EngineService {
         });
         let execution = open
             .actor
-            .versioned_binary_write(
+            .versioned_binary_write_with_conditions(
                 WriteBinary {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -429,6 +524,10 @@ impl EngineService {
                     request_id,
                 },
                 open.root.clone(),
+                dohc_engine_runtime::WriteConditions {
+                    create_only: params.create_only,
+                    expected_sha256: params.expected_sha256,
+                },
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -522,7 +621,7 @@ impl EngineService {
         });
         let execution = open
             .actor
-            .versioned_binary_write(
+            .versioned_binary_write_with_conditions(
                 WriteBinary {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -538,6 +637,10 @@ impl EngineService {
                     request_id,
                 },
                 open.root.clone(),
+                dohc_engine_runtime::WriteConditions {
+                    create_only: params.create_only,
+                    expected_sha256: params.expected_sha256,
+                },
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -958,6 +1061,206 @@ mod tests {
     use dohc_engine_protocol::wire::WorkspaceHandle;
     use dohc_engine_testkit::ScratchDir;
     use serde_json::json;
+
+    async fn open_for_test(service: &EngineService, root: &std::path::Path) -> WorkspaceHandle {
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": root.to_string_lossy(), "workspaceId": "rpc-publish" }),
+            )
+            .await
+            .unwrap();
+        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        service
+            .open(Some(&handle))
+            .unwrap()
+            .shutdown_capture()
+            .await;
+        handle
+    }
+
+    async fn write_for_test(
+        service: &EngineService,
+        handle: &WorkspaceHandle,
+        id: u64,
+        key: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, dohc_engine_protocol::error::WireError> {
+        let mut params = params;
+        params["origin"] = json!("api");
+        let request = Request {
+            id,
+            method: method.into(),
+            workspace: Some(handle.clone()),
+            deadline_ms: None,
+            idempotency_key: Some(key.into()),
+            progress: false,
+            params,
+        };
+        dohc_engine_protocol::wire::encode_control(
+            &dohc_engine_protocol::wire::Envelope::Request(request.clone()),
+            &dohc_engine_protocol::limits::WireLimits::default(),
+        )
+        .expect("request fits transport limits");
+        if method == "versionedText.writeBlob" {
+            service
+                .versioned_text_write_blob(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone(),
+                )
+                .await
+        } else {
+            service
+                .versioned_text_write(
+                    &RequestContext::unbounded(),
+                    &request,
+                    request.params.clone(),
+                )
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn text_rpc_lost_reply_uses_stable_ids_across_service_restart() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        let params = json!({ "versionId": "main", "path": "note.txt", "text": "original", "createOnly": true, "author": { "kind": "agent", "agentId": "writer", "onBehalfOf": "local" } });
+        let first = write_for_test(
+            &service,
+            &handle,
+            5,
+            "stable",
+            "versionedText.write",
+            params.clone(),
+        )
+        .await
+        .unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        drop(service);
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        let replay = write_for_test(
+            &service,
+            &handle,
+            99,
+            "stable",
+            "versionedText.write",
+            params.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["moment"], replay["moment"]);
+        assert_eq!(replay["deduped"], true);
+        assert_eq!(replay["materializeOutcome"], "applied");
+        for (field, value) in [
+            ("text", json!("changed")),
+            ("path", json!("other.txt")),
+            ("createOnly", json!(false)),
+            ("expectedSha256", json!("a".repeat(64))),
+            (
+                "author",
+                json!({ "kind": "agent", "agentId": "different", "onBehalfOf": "local" }),
+            ),
+        ] {
+            let mut changed = params.clone();
+            changed[field] = value;
+            assert!(
+                write_for_test(
+                    &service,
+                    &handle,
+                    100,
+                    "stable",
+                    "versionedText.write",
+                    changed
+                )
+                .await
+                .is_err()
+            );
+        }
+        let rows = service
+            .open(Some(&handle))
+            .unwrap()
+            .actor
+            .list_moments(dohc_engine_domain::ListMomentsQuery {
+                workspace_id: "rpc-publish".into(),
+                version_id: None,
+                object_id: None,
+                limit: 10,
+                before_moment_order: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows.moments.len(), 1);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_blob_utf8_byte_limits_and_invalid_payloads() {
+        use base64::Engine as _;
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        for size in [
+            128 * 1024 - 1,
+            128 * 1024,
+            128 * 1024 + 1,
+            10 * 1024 * 1024 - 1,
+            10 * 1024 * 1024,
+            10 * 1024 * 1024 + 1,
+        ] {
+            let text = format!("{}€", "x".repeat(size - 3));
+            let path = format!("size-{size}.txt");
+            let params = json!({ "versionId": "main", "path": path, "sha256": dohc_engine_storage::hex_sha256(text.as_bytes()), "bytesBase64": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()) });
+            let result = write_for_test(
+                &service,
+                &handle,
+                size as u64,
+                &path,
+                "versionedText.writeBlob",
+                params,
+            )
+            .await;
+            if size > dohc_engine_domain::MAX_TEXT_BYTES {
+                assert!(result.is_err());
+                assert!(!scratch.path().join(path).exists());
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result["materializeOutcome"], "applied");
+                assert_eq!(result["snapshot"]["contentKind"], "text");
+                assert_eq!(result["snapshot"]["byteLength"], size);
+                assert_eq!(
+                    std::fs::read_to_string(scratch.path().join(path)).unwrap(),
+                    text
+                );
+                if size > 128 * 1024 {
+                    assert!(result["snapshot"]["text"].is_null());
+                }
+            }
+        }
+        for bytes in [vec![0xff], vec![0xe2, 0x82]] {
+            let params = json!({ "versionId": "main", "path": "invalid.txt", "sha256": dohc_engine_storage::hex_sha256(&bytes), "bytesBase64": base64::engine::general_purpose::STANDARD.encode(bytes) });
+            assert!(
+                write_for_test(
+                    &service,
+                    &handle,
+                    80,
+                    "invalid",
+                    "versionedText.writeBlob",
+                    params
+                )
+                .await
+                .is_err()
+            );
+        }
+        for encoded in ["!bad-base64!", "aGVsbG8="] {
+            assert!(write_for_test(&service, &handle, 81, "invalid", "versionedText.writeBlob", json!({ "versionId": "main", "path": "invalid.txt", "sha256": "0".repeat(64), "bytesBase64": encoded })).await.is_err());
+        }
+        assert!(!scratch.path().join("invalid.txt").exists());
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn binary_write_records_suppression_in_the_root_scoped_registry() {

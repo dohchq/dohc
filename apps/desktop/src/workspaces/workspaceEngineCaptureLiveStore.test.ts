@@ -437,7 +437,7 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
-  it("keeps an authored create request identity across a session retry", async () => {
+  it.each([false, true])("keeps caller identity across a session retry with createOnly=%s", async (createOnly) => {
     const requests: Request[] = [];
     const client = clientFor(async (request) => {
       requests.push(request);
@@ -458,10 +458,10 @@ describe("createCaptureLiveStores", () => {
     );
     await expect(store.writeTextFile({
       workspaceId: WORKSPACE_ID, versionId: "main", path: "note.md",
-      text: "hello", createOnly: true, metadata: { origin: "api" },
+      text: "hello", createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64), metadata: { origin: "api" },
     })).rejects.toBe(SENTINEL);
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.params).toMatchObject({ createOnly: true, requestId: expect.any(String) });
+    expect(requests[0]?.params).toMatchObject({ createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64) });
     expect(requests[1]?.params).toEqual(requests[0]?.params);
     expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
     expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
@@ -1076,7 +1076,7 @@ describe("createCaptureLiveStores", () => {
     const requests: Request[] = [];
     const client = blobClientFor(async (request, deliver) => {
       requests.push(request);
-      if (request.method === VERSIONED_METHOD.textWrite) {
+      if (request.method === VERSIONED_METHOD.textWriteBlob) {
         return {
           id: request.id,
           result: {
@@ -1090,6 +1090,7 @@ describe("createCaptureLiveStores", () => {
               afterInbandLimitBytes: 128 * 1024,
             },
             deduped: false,
+            materialized: true, materializeOutcome: "applied",
           },
         };
       }
@@ -1110,7 +1111,7 @@ describe("createCaptureLiveStores", () => {
 
     expect(written.moment.payload.after.text).toBe(OVER_CAP_TEXT);
     expect(requests.map((request) => request.method)).toEqual([
-      VERSIONED_METHOD.textWrite,
+      VERSIONED_METHOD.textWriteBlob,
       VERSIONED_METHOD.textReadBlob,
     ]);
   });
