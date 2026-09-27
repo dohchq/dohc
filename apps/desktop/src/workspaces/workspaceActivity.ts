@@ -181,6 +181,7 @@ export function createWorkspaceActivity(
     const baseStatus = {
       ...status,
       conflictCount,
+      ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,

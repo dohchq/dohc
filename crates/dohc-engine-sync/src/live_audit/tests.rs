@@ -365,6 +365,18 @@ fn first_push_exports_native_history_after_actual_contact() {
     bootstrap(&mut f, false).unwrap();
     accept_enrollment_event(&mut f, 1);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .claim_workspace(
+            &mut f.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
     let outcome = client
         .push_workspace(
             &mut f.store,
@@ -503,6 +515,18 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     assert_eq!(cursor.cursor, 0);
     assert!(cursor.bootstrap_complete);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    client
+        .claim_workspace(
+            &mut f.store,
+            crate::ClaimRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            },
+            None,
+            &NoFaults,
+        )
+        .unwrap();
     client
         .push_workspace(
             &mut f.store,
