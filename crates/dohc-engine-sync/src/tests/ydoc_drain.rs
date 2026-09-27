@@ -1923,7 +1923,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
                 conn.query_row(
                     "SELECT COUNT(*) FROM replication_pending_refusals \
-                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0",
+                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0 \
+                       AND reason_message='parked ydoc.update could not be applied'",
                     [],
                     |row| row.get(0),
                 )?,

@@ -5,6 +5,31 @@ use serde_json::Value;
 
 use crate::SyncError;
 
+// reason_code currently permits only invalid-input. Keep the retained-update
+// messages shared with their writers until the schema can distinguish them.
+pub(crate) enum RetainedUpdateRefusal {
+    ProjectionTooLarge(dohc_engine_collab::ContentKind),
+    ContentKindMismatch,
+    InvalidContentKind,
+}
+
+impl RetainedUpdateRefusal {
+    pub(crate) const fn message_prefix(&self) -> &'static str {
+        use dohc_engine_collab::ContentKind;
+        match self {
+            Self::ProjectionTooLarge(ContentKind::Plaintext) => "plaintext projection exceeds ",
+            Self::ProjectionTooLarge(ContentKind::Richdoc) => "richdoc projection exceeds ",
+            Self::ProjectionTooLarge(ContentKind::Scene) => "scene projection exceeds ",
+            Self::ContentKindMismatch => {
+                "ydoc.update content kind does not match the established lineage"
+            }
+            Self::InvalidContentKind => {
+                "ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`"
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusalDocument {
@@ -200,11 +225,10 @@ pub(crate) fn clear_lineage_in_tx(
 ) -> Result<(), SyncError> {
     tx.execute(
         "DELETE FROM replication_pending_refusals AS p WHERE p.workspace_id=?1 AND COALESCE(p.report_id,'') != ?4 \
-         AND (p.reason_message GLOB 'plaintext projection exceeds *' \
-           OR p.reason_message GLOB 'richdoc projection exceeds *' \
-           OR p.reason_message GLOB 'scene projection exceeds *' \
-           OR p.reason_message IN ('ydoc.update content kind does not match the established lineage', \
-             'ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`')) AND EXISTS( \
+         AND (substr(p.reason_message,1,length(?6))=?6 \
+           OR substr(p.reason_message,1,length(?7))=?7 \
+           OR substr(p.reason_message,1,length(?8))=?8 \
+           OR p.reason_message IN (?9,?10)) AND EXISTS( \
          SELECT 1 FROM replication_log r WHERE r.workspace_id=p.workspace_id \
          AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq \
          AND COALESCE(json_extract(r.payload_json,'$.objectId'), \
@@ -214,7 +238,15 @@ pub(crate) fn clear_lineage_in_tx(
            json_extract(r.payload_json,'$.lineageTransition.successor.lineageClaimId'))=?3 \
          AND COALESCE(json_extract(r.payload_json,'$.versionId'), \
            json_extract(r.payload_json,'$.targetVersionId'))=?5)",
-        params![workspace_id, object_id, lineage_claim_id, crate::apply::DIRECT_RPC_REFUSAL_REPORT_ID, version_id],
+        params![
+            workspace_id, object_id, lineage_claim_id,
+            crate::apply::DIRECT_RPC_REFUSAL_REPORT_ID, version_id,
+            RetainedUpdateRefusal::ProjectionTooLarge(dohc_engine_collab::ContentKind::Plaintext).message_prefix(),
+            RetainedUpdateRefusal::ProjectionTooLarge(dohc_engine_collab::ContentKind::Richdoc).message_prefix(),
+            RetainedUpdateRefusal::ProjectionTooLarge(dohc_engine_collab::ContentKind::Scene).message_prefix(),
+            RetainedUpdateRefusal::ContentKindMismatch.message_prefix(),
+            RetainedUpdateRefusal::InvalidContentKind.message_prefix(),
+        ],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -339,6 +371,40 @@ mod tests {
                 .as_deref(),
             Some("branch")
         );
+    }
+
+    #[test]
+    fn successful_projection_clears_each_retained_update_reason() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        let reasons = [
+            "plaintext projection exceeds MAX_TEXT_BYTES: limit 10 bytes, observed at least 11 bytes",
+            "richdoc projection exceeds MAX_PROJECTION_BYTES: limit 10 bytes, observed at least 11 bytes",
+            "scene projection exceeds MAX_PROJECTION_BYTES: limit 10 bytes, observed at least 11 bytes",
+            "ydoc.update content kind does not match the established lineage",
+            "ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`",
+        ];
+        for (seq, reason) in reasons.into_iter().enumerate() {
+            let seq = seq as i64;
+            refuse(&mut store, "ws", "object", "lineage", seq);
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE replication_pending_refusals SET reason_message=?1 WHERE origin_seq=?2",
+                        params![reason, seq],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                clear_lineage_in_tx(tx, "ws", "main", "object", "lineage")
+            })
+            .unwrap();
+        assert!(list_refusal_notices(&store, "ws").unwrap().is_empty());
     }
 
     #[test]

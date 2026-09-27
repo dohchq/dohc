@@ -20,6 +20,7 @@ use dohc_engine_files::{
 
 use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
+use crate::refusal_notices::RetainedUpdateRefusal;
 use crate::{ApplyDisposition, ApplyOutcome, ReplicationEnvelope, SyncError};
 
 fn projection_too_large_reason(
@@ -28,9 +29,9 @@ fn projection_too_large_reason(
     actual_bytes: usize,
     limit_bytes: usize,
 ) -> String {
-    let format = content_kind.as_str();
+    let prefix = RetainedUpdateRefusal::ProjectionTooLarge(content_kind).message_prefix();
     format!(
-        "{format} projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
+        "{prefix}{constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )
 }
 
@@ -1052,12 +1053,10 @@ fn drain_deferred_ydoc(
         let content_kind_refusal =
             match dohc_engine_collab::ContentKind::parse(&payload.content_kind) {
                 Ok(payload_kind) if established_kind.is_some_and(|kind| kind != payload_kind) => {
-                    Some("ydoc.update content kind does not match the established lineage")
+                    Some(RetainedUpdateRefusal::ContentKindMismatch.message_prefix())
                 }
                 Ok(_) => None,
-                Err(_) => {
-                    Some("ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`")
-                }
+                Err(_) => Some(RetainedUpdateRefusal::InvalidContentKind.message_prefix()),
             };
         // Once the base arrives it establishes the authoritative path. A
         // queued payload naming another path is still refused, but its valid
