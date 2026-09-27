@@ -22,6 +22,11 @@ describe("classifyDatabaseFile", () => {
   it("treats databases under .dohc as hidden internal caches", () => {
     expect(classifyDatabaseFile(".dohc/databases/index.sqlite")).toBe("hidden-internal");
     expect(classifyDatabaseFile(".dohc/cache/thumbs.db")).toBe("hidden-internal");
+    for (const name of [".DOHC", ".Dohc", ".ＤＯＨＣ"]) {
+      expect(classifyDatabaseFile(`nested/${name}/engine/store.db`)).toBe("hidden-internal");
+      expect(databaseSyncStrategy(`nested/${name}/engine/store.db`)).toBe("ignore");
+    }
+    expect(classifyDatabaseFile("my-dohc/notes.db")).toBe("visible-user");
   });
 
   it("treats WAL/SHM/journal sidecars as sidecars regardless of location", () => {

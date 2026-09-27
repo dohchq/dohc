@@ -1,13 +1,7 @@
 //! Cross-platform engine path policy: tracked, ignored, or secret.
 //!
-//! This is deliberately distinct from [`crate::floor`]. The scan floor asks
-//! whether a real on-disk entry participates in a local scan and therefore
-//! applies case/trailing-alias folding only on Windows. This module ports the
-//! relay-facing TypeScript security contract (`enginePathFloor.ts` plus Check A
-//! in `paths.ts`): every platform strips Win32 trailing aliases and folds case
-//! for reserved comparisons. That intentional non-parity makes classification
-//! stable across peers, so a POSIX relay and a Windows desktop cannot disagree
-//! about which path contains secret material.
+//! Reserved names share the capture floor's Unicode folding. Peer paths also
+//! strip Win32 trailing aliases on every platform so peers agree.
 //!
 //! Only Check A lives here: absolute/traversal/NUL rejection, stable percent
 //! decoding, ignored/reserved segments, and reserved 8.3 aliases. NTFS ADS,
@@ -217,9 +211,7 @@ fn is_reserved_83_alias(segment: &str, stem: &str) -> bool {
 }
 
 fn normalized_segments(path: &str) -> impl Iterator<Item = String> + '_ {
-    path.split(['/', '\\'])
-        .map(strip_windows_alias_suffix)
-        .map(str::to_lowercase)
+    path.split(['/', '\\']).map(crate::floor::collision_key)
 }
 
 fn is_dohc_metadata_path(path: &str) -> bool {
@@ -239,10 +231,7 @@ fn is_reserved_path(path: &str) -> bool {
 }
 
 fn has_ignored_segment(path: &str) -> bool {
-    normalized_segments(path).any(|segment| {
-        matches!(segment.as_str(), ".dohc" | ".git" | "node_modules")
-            || segment.starts_with(".dohc-write-")
-    })
+    normalized_segments(path).any(|segment| crate::floor::segment_is_ignored(&segment))
 }
 
 /// The secret-path rule. `path` must already be normalized: relative,

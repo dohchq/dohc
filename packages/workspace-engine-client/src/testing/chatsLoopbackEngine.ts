@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
@@ -240,8 +240,7 @@ function validateProjectionPath(path: string): string {
     path.includes("\\") ||
     path[1] === ":" ||
     path.includes("..") ||
-    path === ".dohc" ||
-    path.startsWith(".dohc/")
+    hasIgnoredSegment(path)
   ) {
     throw new Error("invalid-bookmark-target");
   }

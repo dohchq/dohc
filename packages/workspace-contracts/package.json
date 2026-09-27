@@ -18,6 +18,7 @@
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
     "./live-documents": "./src/liveDocuments.ts",
+    "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",
     "./relay-values": "./src/relayValues.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",

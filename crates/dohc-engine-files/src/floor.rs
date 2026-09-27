@@ -9,17 +9,8 @@
 //! is a SQLite sidecar (`*.db-wal` / `-shm` / `-journal`, and the `.sqlite`
 //! variants).
 //!
-//! Segment comparison is normalized **per platform**. On Windows, Win32 strips
-//! trailing dots/spaces on open and NTFS is case-insensitive, so `.dohc ` and
-//! `.DOHC` both alias the reserved `.dohc` and must be excluded. On
-//! case-sensitive POSIX hosts
-//! those are **distinct real inodes** — a user's `.DOHC`, `.Dohc`, or `.dohc.`
-//! directory is legitimate content, not the engine floor — so the strip and the
-//! case-fold are gated behind `cfg(windows)` and only the exact `.dohc` (etc.)
-//! is reserved on POSIX. The retired reference accelerator lowercased + stripped
-//! unconditionally, which silently omitted those real POSIX directories from the
-//! scan; Rust is corrected here per the plan's "Rust is right, TS is
-//! platform-buggy → approved delta, don't reproduce the bug" rule.
+//! Reserved names use the same Unicode folding as collision keys on every
+//! platform. Only Windows strips trailing dots/spaces from on-disk names.
 //!
 //! We deliberately do not re-open the ADS-colon (7.2), device-name (7.10), or
 //! 8.3-short-name (7.12) hazards here: those are `validateWorkspacePath`
@@ -54,21 +45,38 @@ const DB_BASE_EXTENSIONS: &[&str] = &[".db", ".sqlite", ".sqlite3"];
 /// the floor keeps them out of the workspace's tracked set.
 const CONFLICT_ARTIFACT_SUFFIX: &str = ".conflict";
 
-/// Normalize a single path segment for reserved/ignored comparison.
-///
-/// On Windows: strip trailing `.`/` ` (Win32 open-time aliasing), then
-/// lowercase (NTFS case-insensitivity), so `.DOHC` / `.dohc ` alias `.dohc`.
-/// On POSIX (case-sensitive): identity — the segment is compared exactly, so a
-/// real `.DOHC` directory is user content, not the floor. This diverges from,
-/// and corrects, the TS kernel, which strips and folds unconditionally.
+/// Unicode folding shared by reserved names and peer collision keys.
+pub fn fold_segment(segment: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    if segment.is_ascii() {
+        return segment.to_ascii_lowercase();
+    }
+    segment
+        .nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .to_uppercase()
+        .to_lowercase()
+        .nfkc()
+        .collect()
+}
+
+/// Cross-platform peer comparison, including Win32 trailing aliases.
+pub fn collision_key(segment: &str) -> String {
+    fold_segment(segment)
+        .trim_end_matches(['.', ' '])
+        .to_owned()
+}
+
+/// Normalize an on-disk name for the capture floor.
 pub fn normalize_segment(segment: &str) -> String {
     #[cfg(windows)]
     {
-        segment.trim_end_matches(['.', ' ']).to_lowercase()
+        collision_key(segment)
     }
     #[cfg(not(windows))]
     {
-        segment.to_owned()
+        fold_segment(segment)
     }
 }
 
@@ -127,6 +135,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reserved_folding_does_not_change_the_secret_rule() {
+        let path = "notes/config.ｅｎｖ";
+        assert_eq!(
+            crate::policy::classify_engine_file_path(path),
+            crate::policy::PathClassification::Tracked
+        );
+        assert_eq!(
+            crate::search_policy::classify_engine_file_path(path),
+            crate::search_policy::PathFloor::Tracked
+        );
+    }
+
+    #[test]
+    fn reserved_names_fold_like_collision_keys_on_every_platform() {
+        for name in [
+            ".dohc",
+            ".DOHC",
+            ".Dohc",
+            ".ＤＯＨＣ",
+            ".GIT",
+            "NODE_MODULES",
+            ".DOHC-WRITE-tmp",
+        ] {
+            let path = format!("notes/{name}/engine/private.md");
+            assert!(is_excluded_file(&path), "{path}");
+            assert_eq!(
+                crate::policy::classify_engine_file_path(&path),
+                crate::policy::PathClassification::Ignored
+            );
+            assert_eq!(
+                crate::search_policy::classify_engine_file_path(&path),
+                crate::search_policy::PathFloor::Ignored
+            );
+        }
+        for name in ["dohc", ".dohc-notes", "my-dohc", "my-node_modules"] {
+            assert!(!is_excluded_file(&format!("{name}/notes.md")));
+        }
+    }
+
+    #[test]
     fn reserved_segments_excluded_at_any_depth() {
         assert!(is_excluded_file(".dohc/engine/engine.db"));
         assert!(is_excluded_file("a/b/.git/config"));
@@ -145,11 +193,11 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn posix_case_and_trailing_variants_are_distinct_content() {
-        // Corrected POSIX behavior: only the exact reserved name is the floor.
+    fn posix_trailing_variants_are_distinct_content() {
+        // POSIX keeps trailing dots as part of the name.
         assert!(has_ignored_segment(".dohc/internal"));
-        assert!(!has_ignored_segment(".DOHC/x.md"));
-        assert!(!has_ignored_segment(".Dohc/x.md"));
+        assert!(has_ignored_segment(".DOHC/x.md"));
+        assert!(has_ignored_segment(".Dohc/x.md"));
         assert!(!has_ignored_segment(".dohc./x.md"));
         assert!(!has_ignored_segment(".git./config"));
     }

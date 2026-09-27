@@ -1,4 +1,5 @@
 import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain-values";
+import { foldPathSegment, isIgnoredPathSegment } from "@dohc/workspace-contracts/path-floor";
 
 export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;
@@ -62,8 +63,8 @@ const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
-    .toLowerCase()
     .split("/")
+    .map(foldPathSegment)
     .map(stripWindowsAliasSuffix)
     .some((segment) => segment === ".dohc" || isReserved83Alias(segment, DOHC_SHORT_NAME_STEM));
 }
@@ -74,7 +75,7 @@ export function isDohcMetadataPath(relativePath: string): boolean {
 // validation (validateUserReadPath) allows it while every write surface
 // refuses it.
 export function isSharedWithMePath(relativePath: string): boolean {
-  const first = relativePath.replaceAll("\\", "/").toLowerCase().split("/").map(stripWindowsAliasSuffix)[0] ?? "";
+  const first = relativePath.replaceAll("\\", "/").split("/").map(foldPathSegment).map(stripWindowsAliasSuffix)[0] ?? "";
   return first === "shared-with-me" || isReserved83Alias(first, SHARED_WITH_ME_SHORT_NAME_STEM);
 }
 
@@ -88,27 +89,13 @@ export function isReservedPath(relativePath: string): boolean {
 // The `.dohc-write-*` prefix is reserved for visible-directory atomic staging:
 // it can briefly exist beside user files, but scanners/watchers must treat it
 // as dohc noise, never a workspace artifact.
-const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
-const IGNORED_FILE_PREFIXES = [".dohc-write-"];
-
-// Rust's capture floor compares every path segment after platform-specific
-// normalization: Win32 folds case and strips trailing dot/space aliases;
-// every other host compares the on-disk name exactly. Callers pass the host
-// explicitly because this predicate runs in main and the sandboxed renderer.
+// Capture folds reserved names on every host. Only Windows strips trailing
+// dot/space aliases from on-disk names.
 export function hasEngineIgnoredSegment(
   relativePath: string,
   platform: NodeJS.Platform,
 ): boolean {
-  return relativePath.split("/").some((rawSegment) => {
-    const segment =
-      platform === "win32"
-        ? stripWindowsAliasSuffix(rawSegment).toLowerCase()
-        : rawSegment;
-    return (
-      IGNORED_SEGMENTS.has(segment) ||
-      IGNORED_FILE_PREFIXES.some((prefix) => segment.startsWith(prefix))
-    );
-  });
+  return relativePath.split("/").some((segment) => isIgnoredPathSegment(segment, platform === "win32"));
 }
 
 export function hasIgnoredSegment(path: string): boolean {

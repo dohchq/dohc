@@ -454,17 +454,29 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
 });
 
 describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
-  it("uses exact names and prefixes at any depth on POSIX", () => {
+  it.each(["linux", "darwin", "win32"] as const)("folds reserved names on %s", (platform) => {
+    for (const name of [".dohc", ".DOHC", ".Dohc", ".ＤＯＨＣ", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"]) {
+      const path = `notes/${name}/engine/store`;
+      expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
+      expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(path, { platform }), path).toEqual({ ok: false, reason: "reserved" });
+    }
+    for (const name of ["dohc", ".dohc-notes", "my-dohc", "my-node_modules"]) {
+      expect(hasEngineIgnoredSegment(`${name}/notes.md`, platform)).toBe(false);
+      expect(validateUserWritePath(`${name}/notes.md`).ok).toBe(true);
+    }
+  });
+  it("folds names and prefixes at any depth on POSIX", () => {
     expect(hasEngineIgnoredSegment(".dohc/history/index.json", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("sub/.git/config", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("pkg/node_modules/x.js", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment("sub/.dohc-write-123.tmp", "linux")).toBe(true);
 
-    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment("sub/.GIT/config", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES/x.js", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("sub/.GIT/config", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES/x.js", "linux")).toBe(true);
     expect(hasEngineIgnoredSegment(".dohc./history/index.json", "linux")).toBe(false);
-    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(true);
   });
 
   it("normalizes case and trailing aliases on Windows", () => {

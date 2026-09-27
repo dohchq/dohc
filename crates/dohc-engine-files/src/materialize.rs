@@ -2896,6 +2896,41 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_writes_refuse_reserved_case_variants() {
+        for name in [
+            ".DOHC",
+            ".Dohc",
+            ".dohc",
+            ".ＤＯＨＣ",
+            ".GIT",
+            "NODE_MODULES",
+        ] {
+            let scratch = Scratch::new("reserved-case");
+            let mut store = EngineStore::open(&scratch.db(), 1).expect("store");
+            let path = format!("{name}/engine/injected.md");
+            enqueue_write_job(&mut store, "reserved", &path, b"peer content", 1);
+            let job = store.load_materialization_job("reserved").unwrap().unwrap();
+            let result = materialize_one(
+                &store,
+                &scratch.root,
+                &job,
+                &MaterializeOptions {
+                    policy: DurabilityPolicy::none(),
+                    replacer: &StdReplacer,
+                    backoff: &NoBackoff,
+                    now_ms: 2,
+                    faults: &NoFaults,
+                },
+            );
+            assert!(
+                matches!(result, Err(MaterializeError::UnsafeTargetPath)),
+                "{name}: {result:?}"
+            );
+            assert!(!scratch.root.join(&path).exists());
+        }
+    }
+
+    #[test]
     fn ordinary_replace_retry_preserves_external_edit() {
         let scratch = Scratch::new("ordinary-retry-preimage");
         let mut store = EngineStore::open(&scratch.db(), 1).expect("store");

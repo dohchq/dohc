@@ -40,15 +40,10 @@ pub fn classify_share_path(path: &str) -> PathClass {
     {
         return PathClass::Unsafe;
     }
-    let normalized: Vec<String> = segments
-        .iter()
-        .map(|segment| segment.trim_end_matches(['.', ' ']).to_ascii_lowercase())
-        .collect();
-    if normalized.iter().any(|segment| {
-        segment == ".dohc"
-            || segment == ".git"
-            || segment == "node_modules"
-            || segment.starts_with(".dohc-write-")
+    if segments.iter().any(|segment| {
+        dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::collision_key(
+            segment,
+        ))
     }) {
         return PathClass::Ignored;
     }

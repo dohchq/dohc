@@ -147,6 +147,33 @@ fn completed(run: ReconcileRun) -> dohc_engine_files::ReconcilePlan {
 }
 
 #[test]
+fn capture_ignores_reserved_case_variants() {
+    for name in [
+        ".DOHC",
+        ".Dohc",
+        ".dohc",
+        ".ＤＯＨＣ",
+        ".GIT",
+        "NODE_MODULES",
+    ] {
+        let ws = Scratch::new();
+        ws.write(&format!("{name}/engine/private.md"), b"private");
+        ws.write(&format!("nested/{name}/private.md"), b"private");
+        ws.write("my-dohc/notes.md", b"ordinary");
+        let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+        let mut controller = ReconcileController::new();
+        let plan = completed(
+            controller
+                .reconcile(&scanner, ws.path(), &CancellationToken::new())
+                .expect("scan"),
+        );
+        let mut sink = IdempotentSink::default();
+        apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("capture");
+        assert_eq!(sink.calls, ["my-dohc/notes.md"], "{name}");
+    }
+}
+
+#[test]
 fn failed_apply_keeps_prior_manifest_entry_and_continues_the_batch() {
     let ws = Scratch::new();
     ws.write("a.md", b"a");

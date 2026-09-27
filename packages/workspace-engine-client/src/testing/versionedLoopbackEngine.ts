@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
@@ -799,8 +799,7 @@ function validateRustPathFloor(path: string): void {
     path.includes("\\") ||
     bytes[1] === 0x3a ||
     path.includes("..") ||
-    path === ".dohc" ||
-    path.startsWith(".dohc/")
+    hasIgnoredSegment(path)
   ) {
     throw new Error("invalid-path");
   }

@@ -23,33 +23,16 @@
 //! search (chat visibility is not governed by these files) — see `index.rs` and
 //! `query.rs` for how the scoping is carried through.
 //!
-//! ## The path floor and the Rust engine's per-platform posture
-//!
-//! The reserved/ignored/secret segment comparison uses the same per-platform
-//! normalization as the sibling scan floor (`dohc_engine_files::floor`): on
-//! Windows, Win32 strips trailing dots/spaces and NTFS folds case, so `.DOHC`
-//! and `.dohc ` alias `.dohc`; on case-sensitive POSIX only the exact segment
-//! is the floor. This keeps capture and search consistent within the Rust
-//! engine (the TS engine lowercases unconditionally — a platform bug the Rust
-//! engine corrects). The `.env` secret
-//! family is classified on the DECODED path so a percent-encoded `secrets%2eenv`
-//! cannot slip through as tracked.
+//! Reserved names share the capture floor's Unicode folding on every host.
+//! On-disk trailing aliases remain platform-specific.
 
+use crate::floor::{has_ignored_segment, normalize_segment};
 use std::path::Path;
 
 /// The desktop policy reader's cap (`MAX_WORKSPACE_SETTINGS_FILE_BYTES`, 256
 /// KiB). A file the desktop accepts and applies must not be treated as broken
 /// here, or search would silently pause on a policy both layers consider valid.
 pub const POLICY_FILE_MAX_BYTES: u64 = 256 * 1024;
-
-/// Reserved directory/segment names, matched per-platform at any depth. Mirrors
-/// `dohc_engine_files::floor::RESERVED_SEGMENTS` and `paths.ts`
-/// `IGNORED_SEGMENTS`; kept in lockstep by `floor_parity` tests.
-const RESERVED_SEGMENTS: &[&str] = &[".dohc", ".git", "node_modules"];
-
-/// Write-temp file prefixes: in-progress `.dohc-write-*` staging is engine
-/// scratch, never user content.
-const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 
 /// The shared-with-me projection root: a write reservation that classifies as
 /// non-tracked for the write-side floor search uses.
@@ -64,19 +47,6 @@ pub enum PathFloor {
     Ignored,
     /// The `.env` secret family — never searchable, never surfaced.
     Secret,
-}
-
-/// Normalize a single path segment for reserved/ignored/secret comparison,
-/// per platform (see module docs). Mirrors `dohc_engine_files::floor`.
-fn normalize_segment(segment: &str) -> String {
-    #[cfg(windows)]
-    {
-        segment.trim_end_matches(['.', ' ']).to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        segment.to_owned()
-    }
 }
 
 /// Decode percent-encoded dots/separators until stable, matching
@@ -127,17 +97,6 @@ fn is_absolute_path_like(path: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
-}
-
-/// Whether a normalized (forward-slash) path has any reserved/ignored segment.
-fn has_ignored_segment(rel_path: &str) -> bool {
-    rel_path.split('/').any(|segment| {
-        let normalized = normalize_segment(segment);
-        RESERVED_SEGMENTS.contains(&normalized.as_str())
-            || IGNORED_FILE_PREFIXES
-                .iter()
-                .any(|prefix| normalized.starts_with(prefix))
-    })
 }
 
 /// The engine path floor. Ports `classifyEngineFilePath` (`enginePathFloor.ts`)
@@ -191,7 +150,16 @@ pub fn classify_engine_file_path(path: &str) -> PathFloor {
     // search without importing the relay-facing normalization.
     let normalized_segments: Vec<String> = kept
         .iter()
-        .map(|s| normalize_segment(s).to_ascii_lowercase())
+        .map(|segment| {
+            #[cfg(windows)]
+            {
+                segment.trim_end_matches(['.', ' ']).to_lowercase()
+            }
+            #[cfg(not(windows))]
+            {
+                segment.to_ascii_lowercase()
+            }
+        })
         .collect();
     if crate::policy::segments_are_secret(&normalized_segments) {
         return PathFloor::Secret;

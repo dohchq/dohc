@@ -1989,6 +1989,87 @@ fn pull_rejects_op_for_foreign_workspace() {
 }
 
 #[test]
+fn relay_pull_refuses_reserved_case_variants() {
+    for name in [
+        ".DOHC",
+        ".Dohc",
+        ".dohc",
+        ".ＤＯＨＣ",
+        ".GIT",
+        "NODE_MODULES",
+        "my-dohc",
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_300, &NoFaults)
+            .expect("main");
+        engine.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws','reserved-target',1400)", []).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).expect("object");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "peer content");
+        let bytes = doc.encode_full_state();
+        let sha = dohc_engine_storage::hex_sha256(&bytes);
+        let path = format!("{name}/engine/injected.md");
+        let op = envelope(
+            "reserved-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "reserved-target", "path": path,
+                "contentKind": "plaintext", "updateBlobSha256": sha,
+                "lineageClaimId": sha, "isBaseState": true
+            }),
+        );
+        let mut relay = PagedRelay::new([(
+            0,
+            PullResponse {
+                ops: vec![op],
+                next_cursor: 1,
+                has_more: false,
+            },
+        )]);
+        relay.blobs.insert(sha, bytes);
+        let outcome = RelaySyncClient::new(relay)
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                2_000,
+            )
+            .expect("pull");
+        let SyncPassOutcome::Complete {
+            applied,
+            refused,
+            changed_paths,
+            ..
+        } = outcome
+        else {
+            panic!("incomplete pull: {outcome:?}");
+        };
+        if name == "my-dohc" {
+            assert_eq!((applied, refused), (1, 0));
+            assert_eq!(changed_paths.len(), 1);
+        } else {
+            assert_eq!((applied, refused), (0, 1), "{name}");
+            assert!(changed_paths.is_empty(), "{name}");
+            let jobs = engine
+                .read_with(|conn| {
+                    conn.query_row("SELECT count(*) FROM materialization_jobs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                })
+                .expect("jobs");
+            assert_eq!(jobs, 0, "{name}");
+        }
+    }
+}
+
+#[test]
 fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);

@@ -1,5 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
+import { activityPathsAffectWorkspaceListing } from "./bridgeContract";
+
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
   EXPLORER_MENU_COMMANDS,
@@ -173,6 +175,13 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+it.each(["linux", "darwin", "win32"] as const)("ignores reserved activity paths on %s", (platform) => {
+  for (const name of [".dohc", ".DOHC", ".Dohc", ".ＤＯＨＣ", ".GIT", "NODE_MODULES"]) {
+    expect(activityPathsAffectWorkspaceListing([`${name}/engine/private.md`], platform)).toBe(false);
+  }
+  expect(activityPathsAffectWorkspaceListing(["my-dohc/notes.md"], platform)).toBe(true);
+});
 
 describe("owner relay share link IPC contract", () => {
   const readable = {

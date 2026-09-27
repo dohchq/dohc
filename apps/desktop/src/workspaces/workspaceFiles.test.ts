@@ -276,14 +276,14 @@ describe("listFiles", () => {
     expect(result.folders).toEqual(["notes"]);
   });
 
-  it("keeps POSIX-distinct .GIT content in the listing", async () => {
+  it("excludes reserved case variants from the POSIX listing", async () => {
     await mkdir(join(root, ".GIT"), { recursive: true });
     await writeFile(join(root, ".GIT", "file.md"), "owned");
 
     const result = await listFiles(root, { platform: "linux" });
 
-    expect(result.files).toEqual([{ path: ".GIT/file.md", kind: "file" }]);
-    expect(result.folders).toEqual([".GIT"]);
+    expect(result.files).toEqual([]);
+    expect(result.folders).toEqual([]);
   });
 
   it("surfaces a markdown page's icon frontmatter for the tree glyph", async () => {
@@ -740,7 +740,7 @@ describe("collectZipEntries", () => {
     expect(byPath.get("notes/a.md")).toBe("alpha");
   });
 
-  it("keeps POSIX-distinct .GIT content in zip exports", async () => {
+  it("excludes reserved case variants from POSIX zip exports", async () => {
     await mkdir(join(root, ".GIT"), { recursive: true });
     await writeFile(join(root, ".GIT", "file.md"), "owned");
 
@@ -748,7 +748,7 @@ describe("collectZipEntries", () => {
       platform: "linux",
     });
 
-    expect(entries.map((entry) => entry.path)).toEqual([".GIT/file.md"]);
+    expect(entries.map((entry) => entry.path)).toEqual([]);
   });
 
   it("exports a single folder under its own top-level name", async () => {
