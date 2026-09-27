@@ -36,20 +36,28 @@ export function useFocusReturn(
       ? [active, ...ancestors(active)] : [];
   }
   wasOpen.current = open;
-  const generation = useRef(0);
+  const pendingReturn = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
-    if (!open) return;
-    const current = ++generation.current;
+    if (!open) {
+      // A mounted owner can return focus after the close commit's DOM changes.
+      pendingReturn.current?.();
+      return;
+    }
+    // Reopening (including StrictMode's effect replay) cancels the return.
+    pendingReturn.current = null;
     const closing = container.current;
     const targets = captured.current;
     return () => {
-      queueMicrotask(() => {
-        // Reopening (including StrictMode's effect replay) cancels the return.
-        if (generation.current !== current) return;
+      const restore = () => {
+        if (pendingReturn.current !== restore) return;
+        pendingReturn.current = null;
         const active = document.activeElement;
         if (active !== document.body && active !== null && !closing?.contains(active)) return;
         focusSurface(latestTarget.current?.(), ...targets);
-      });
+      };
+      pendingReturn.current = restore;
+      // Unmounts need the rest of the commit to finish before resolving targets.
+      queueMicrotask(restore);
     };
   }, [open, container]);
 }

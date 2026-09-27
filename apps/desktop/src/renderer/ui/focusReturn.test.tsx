@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useRef, useState } from "react";
+import { StrictMode, useRef, useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
 import { SidePanel } from "../workbench/SidePanel";
@@ -11,6 +11,49 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it("returns focus once in the Escape close commit", async () => {
+  function Menu() {
+    const [open, setOpen] = useState(false);
+    const root = useRef<HTMLDivElement>(null);
+    useFocusReturn(open, root);
+    return <><button onClick={() => setOpen(true)}>Open menu</button>
+      {open && <div ref={root} onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}><button>Menu item</button></div>}
+    </>;
+  }
+  render(<Menu />);
+  const opener = screen.getByText("Open menu");
+  opener.focus();
+  fireEvent.click(opener);
+  const item = screen.getByText("Menu item");
+  item.focus();
+  const focus = vi.spyOn(opener, "focus");
+  fireEvent.keyDown(item, { key: "Escape" });
+  expect(screen.queryByText("Menu item")).toBeNull();
+  expect(document.activeElement).toBe(opener);
+  opener.blur();
+  await act(async () => {});
+  expect(focus).toHaveBeenCalledTimes(1);
+  expect(document.activeElement).toBe(document.body);
+});
+
+it("cancels StrictMode replay returns before a mounted owner closes", async () => {
+  function Menu({ open }: { open: boolean }) {
+    const root = useRef<HTMLDivElement>(null);
+    useFocusReturn(open, root);
+    return open ? <div ref={root}><button autoFocus>Menu item</button></div> : null;
+  }
+  const view = render(<button>Open menu</button>);
+  const opener = screen.getByText("Open menu");
+  opener.focus();
+  view.rerender(<><button>Open menu</button><StrictMode><Menu open /></StrictMode></>);
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByText("Menu item"));
+  view.rerender(<><button>Open menu</button><StrictMode><Menu open={false} /></StrictMode></>);
+  expect(document.activeElement).toBe(opener);
 });
 
 function Workspace({ name }: { name: string }) {
