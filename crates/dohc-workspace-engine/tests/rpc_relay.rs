@@ -2081,6 +2081,11 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let methods = [
         ("sync.push", json!({ "workspaceId": "other" })),
         ("sync.pull", json!({ "workspaceId": "other" })),
+        ("sync.refusalNotices", json!({ "workspaceId": "other" })),
+        (
+            "sync.dismissRefusal",
+            json!({ "workspaceId": "other", "noticeId": "sync-refusal-missing" }),
+        ),
         (
             "sync.commitCursor",
             json!({
@@ -2797,6 +2802,64 @@ async fn remote_changes_answer_the_durable_count_without_a_relay() {
             .await,
             json!({ "applied": 2 })
         );
+        call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refusal_notices_list_and_dismiss_without_a_relay() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        store.bind_root_token(TOKEN, &NoFaults).unwrap();
+        let envelope = dohc_engine_sync::ReplicationEnvelope {
+            workspace_id: "ws-refusal".into(),
+            origin_id: "peer".into(),
+            origin_seq: 0,
+            relay_seq: Some(1),
+            op_kind: "ydoc.update".into(),
+            recorded_at_ms: 1,
+            payload: json!({"versionId":"main","objectId":"object-a","lineageClaimId":"inactive","path":"doc.md"}),
+        };
+        dohc_engine_sync::apply_envelope_with(&mut store, &envelope, &NoFaults, |_, _| {
+            Err::<(), _>(dohc_engine_sync::SyncError::InvalidInput {
+                reason: "projection exceeds limit",
+            })
+        })
+        .unwrap();
+    }
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 0;
+    for pass in 0..2 {
+        id += 1;
+        let opened = transport.call(RequestContext::unbounded(), request(id, "workspace.open", None,
+            json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"ws-refusal","captureMode":"none"}))).await.unwrap();
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+        let listed = call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.refusalNotices",
+            json!({"workspaceId":"ws-refusal"}),
+        )
+        .await;
+        assert_eq!(
+            listed["notices"].as_array().unwrap().len(),
+            if pass == 0 { 1 } else { 0 }
+        );
+        if pass == 0 {
+            call(
+                &transport,
+                &handle,
+                &mut id,
+                "sync.dismissRefusal",
+                json!({"workspaceId":"ws-refusal","noticeId":listed["notices"][0]["noticeId"]}),
+            )
+            .await;
+        }
         call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     }
 }

@@ -1482,7 +1482,6 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         cursor: 0,
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
-        refusal_report_id: None,
         settlement_report_id: None,
     };
     commit_relay_cursor(

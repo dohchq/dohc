@@ -1440,7 +1440,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             .expect("mismatched-kind disposition");
         assert_eq!(
             (deferred, updates, refusal_rows),
-            (0, 2, 1),
+            (0, 2, 0),
             "the refused clock and its dependent descendant must both enter the causal lineage"
         );
     }
@@ -1914,7 +1914,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         text.contains(" valid-after"),
         "the valid update after the refusal must still apply: {text:?}"
     );
-    let (queued, applied_updates, refusal_rows, reason): (i64, i64, i64, String) = engine
+    let (queued, applied_updates, refusal_rows): (i64, i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -1923,12 +1923,6 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
                 conn.query_row(
                     "SELECT COUNT(*) FROM replication_pending_refusals \
-                     WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT reason_message FROM replication_pending_refusals \
                      WHERE workspace_id='ws' AND origin_id='b-invalid-collision' AND origin_seq=0",
                     [],
                     |row| row.get(0),
@@ -1942,10 +1936,9 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         "only the two valid parked updates may enter the lineage"
     );
     assert_eq!(
-        refusal_rows, 1,
-        "omitting refusal persistence loses the invalid coordinate"
+        refusal_rows, 0,
+        "the later successful update clears the Notice for this lineage"
     );
-    assert_eq!(reason, "parked ydoc.update could not be applied");
     assert_eq!(
         drain_deferred_ydoc_for_key(
             &mut engine,

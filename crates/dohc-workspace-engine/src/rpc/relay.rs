@@ -68,16 +68,9 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RefusalDocumentsParams {
+struct DismissRefusalParams {
     workspace_id: String,
-    coordinates: Vec<RefusalCoordinate>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RefusalCoordinate {
-    origin_id: String,
-    origin_seq: i64,
+    notice_id: String,
 }
 
 #[derive(Deserialize)]
@@ -998,41 +991,51 @@ impl EngineService {
         Ok(json!({ "applied": applied }))
     }
 
-    pub(super) async fn sync_refusal_documents(
+    pub(super) async fn sync_refusal_notices(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: RefusalDocumentsParams = parse(params)?;
+        let params: RelayWorkspaceParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        if params.coordinates.len() > 500
-            || params
-                .coordinates
-                .iter()
-                .any(|key| key.origin_seq < 0 || key.origin_id.len() > 256)
-        {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid refusal coordinates",
-            ));
-        }
         let cancellation = OperationCancellation::new(ctx);
-        let documents = Self::read_under_ctx(
+        let notices = Self::read_under_ctx(
             &cancellation,
-            "sync.refusalDocuments",
-            open.actor.sync_refusal_documents(
-                open.workspace_id.clone(),
-                params
-                    .coordinates
-                    .into_iter()
-                    .map(|key| (key.origin_id, key.origin_seq))
-                    .collect(),
-            ),
+            "sync.refusalNotices",
+            open.actor.sync_refusal_notices(open.workspace_id.clone()),
         )
         .await?;
-        Ok(json!({"documents": documents}))
+        Ok(json!({"notices": notices}))
+    }
+
+    pub(super) async fn sync_dismiss_refusal(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: DismissRefusalParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        if params.notice_id.len() != 77 || !params.notice_id.starts_with("sync-refusal-") {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid refusal notice id",
+            ));
+        }
+        if ctx.cancel.is_cancelled() {
+            return Err(WireError::new(
+                ErrorCode::Cancelled,
+                "refusal dismissal cancelled",
+            ));
+        }
+        open.actor
+            .dismiss_sync_refusal(open.workspace_id.clone(), params.notice_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({}))
     }
 
     pub(super) async fn sync_probe(

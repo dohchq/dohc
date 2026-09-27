@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_commit_backfills_a_refused_import_collision_before_clearing_its_report() {
+    fn cursor_commit_backfills_a_refused_import_collision_and_retains_its_notice() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
@@ -835,17 +835,14 @@ mod tests {
                 sharing_declined: ref outcome_sharing_declined,
             }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
-        let (refusals, refusal_report_id) =
-            crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults)
-                .expect("claim refusal report");
+        let refusals =
+            crate::apply::read_pending_refusals(&store, "ws").expect("read refusal report");
         assert_eq!(refusals.len(), 1);
-        let refusal_report_id = refusal_report_id.expect("claimed report id");
         let cursor = crate::RelayCursor {
             bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            refusal_report_id: Some(refusal_report_id),
             settlement_report_id: None,
         };
 
@@ -861,7 +858,7 @@ mod tests {
                 })
                 .count(),
             1,
-            "first-position backfill must see the refusal before its report is cleared"
+            "first-position backfill must see the refused import"
         );
         let pending_refusals: i64 = store
             .read_with(|conn| {
@@ -872,7 +869,10 @@ mod tests {
                 )
             })
             .expect("pending refusal count");
-        assert_eq!(pending_refusals, 0, "the committed report is cleared");
+        assert_eq!(
+            pending_refusals, 1,
+            "cursor commit retains unresolved refusals"
+        );
 
         crate::commit_relay_cursor(
             &mut store,
@@ -1610,7 +1610,6 @@ mod tests {
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            refusal_report_id: None,
             settlement_report_id: None,
         };
         crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &leases, 1_001)
@@ -2668,7 +2667,6 @@ mod tests {
             cursor: 0,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            refusal_report_id: None,
             settlement_report_id: None,
         };
         let declines = match crate::commit_relay_cursor(

@@ -2396,6 +2396,25 @@ fn commit_imported_lineage(
         )
         .map_err(map_local_collab_error)?;
         if reviewed.is_some() {
+            let review: Option<String> = tx
+                .query_row(
+                    "SELECT l.open_conflict_id FROM ydoc_inactive_lineages l JOIN conflicts c \
+                 ON c.workspace_id=l.workspace_id AND c.conflict_id=l.open_conflict_id \
+                 WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
+                 AND l.lineage_claim_id=?4 AND c.status='open'",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        transition.predecessor_claim_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            if let Some(review) = review {
+                crate::refusal_notices::clear_conflict_in_tx(tx, &key.workspace_id, &review)?;
+            }
             tx.execute(
                 "UPDATE conflicts SET status='resolved',updated_at_ms=?5, \
                  chosen_from=CASE WHEN current_blob_sha256=?6 THEN 'current' \
@@ -2543,18 +2562,26 @@ fn close_imported_conflict(
         ResolutionV1::AppliedIncoming => "applied-incoming",
         ResolutionV1::AppliedMerged => "applied-merged",
     };
-    tx.execute(
-        "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
+    let changed = tx
+        .execute(
+            "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
          WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-        params![
-            payload.workspace_id,
-            payload.conflict_id,
-            choice,
-            resolution,
-            payload.effect_context.recorded_at_ms
-        ],
-    )
-    .map_err(SyncError::persist)?;
+            params![
+                payload.workspace_id,
+                payload.conflict_id,
+                choice,
+                resolution,
+                payload.effect_context.recorded_at_ms
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    if changed > 0 {
+        crate::refusal_notices::clear_conflict_in_tx(
+            tx,
+            &payload.workspace_id,
+            &payload.conflict_id,
+        )?;
+    }
     Ok(())
 }
 
@@ -2847,6 +2874,11 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
     result: &ResolveTextConflictResult,
 ) -> Result<(), SyncError> {
     verify_local_result_in_tx(tx, &prepared.built.validated.payload, result)?;
+    crate::refusal_notices::clear_conflict_in_tx(
+        tx,
+        &prepared.built.validated.payload.workspace_id,
+        &prepared.built.validated.payload.conflict_id,
+    )?;
     match &prepared.lineage {
         LocalLineagePlan::None => {}
         LocalLineagePlan::ExactSuccessor {
@@ -4987,7 +5019,7 @@ mod tests {
                 .map_err(SyncError::persist)?;
                 Ok::<_, SyncError>(())
             })
-            .expect("simulate the refusal report committed before the next pull page");
+            .expect("simulate dismissal before the next pull page");
 
         let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
         let outcome = crate::apply_replication_envelope(
@@ -5782,6 +5814,28 @@ mod tests {
                 crate::read_replication_acked_seq(&store, "ws", "late-archive").unwrap(),
                 0
             );
+            assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 1);
+            let active = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let active_update = active.doc.plaintext_insert(0, "active change ");
+            let active_sha = store.put_binary_blob(&active_update).unwrap();
+            let mut active_op = op(0, active_sha);
+            active_op.origin_id = "active-peer".into();
+            active_op.payload["lineageClaimId"] = json!(active.marker.lineage_claim_id.unwrap());
+            crate::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &active_op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::list_refusal_notices(&store, "ws").unwrap().len(),
+                1,
+                "active lineage must not withdraw an inactive refusal"
+            );
             let bytes:Vec<u8> = store.read_with(|conn| conn.query_row(
                 "SELECT b.bytes FROM ydoc_inactive_lineages l JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 WHERE l.lineage_claim_id=?1",
                 [&claim],|row| row.get(0))).unwrap();
@@ -5803,6 +5857,11 @@ mod tests {
             let recovered:String = store.read_with(|conn| conn.query_row(
                 "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",[],|row| row.get(0))).unwrap();
             assert_eq!(recovered, "after limit current text");
+            assert!(
+                crate::list_refusal_notices(&store, "ws")
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 
@@ -6526,6 +6585,77 @@ mod tests {
                 .lineage_claim_id,
             active_claim_before,
             "the active lineage must remain untouched"
+        );
+        let (review, claim): (String, String) = store.read_with(|conn| conn.query_row(
+            "SELECT open_conflict_id,lineage_claim_id FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND object_id='object-a' AND disposition='conflicting-successor'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        )).unwrap();
+        let refused = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":"object-a", "lineageClaimId":claim, "path":"doc.md",
+            }),
+        );
+        crate::apply_envelope_with(&mut store, &refused, &NoFaults, |_, _| {
+            Err::<(), _>(SyncError::InvalidInput {
+                reason: "projection exceeds limit",
+            })
+        })
+        .unwrap();
+        for (seq, claim) in [
+            (2, active_claim_before.unwrap()),
+            (3, "unrelated-inactive".into()),
+        ] {
+            let refused = imported_envelope(
+                seq,
+                "ydoc.update",
+                json!({
+                    "versionId":"main", "objectId":"object-a", "lineageClaimId":claim, "path":"doc.md",
+                }),
+            );
+            crate::apply_envelope_with(&mut store, &refused, &NoFaults, |_, _| {
+                Err::<(), _>(SyncError::InvalidInput {
+                    reason: "projection exceeds limit",
+                })
+            })
+            .unwrap();
+        }
+        assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 3);
+        let input = ResolveTextConflict {
+            workspace_id: "ws".into(),
+            conflict_id: review,
+            resolution: ResolveConflictKind::KeepCurrent,
+            object_id: "object-a".into(),
+            write_moment_id: "review-write".into(),
+            delete_moment_id: "review-delete".into(),
+            metadata_origin: "sync".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 50,
+            request_id: Some("review-request".into()),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                        .map_err(sync_as_domain)
+                },
+                |tx, result, prepared| {
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .unwrap();
+        let remaining = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].document.as_ref().unwrap().lineage_claim_id,
+            "unrelated-inactive"
         );
     }
 

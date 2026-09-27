@@ -198,7 +198,7 @@ afterEach(async () => {
   );
 });
 
-async function harness(daemon = new MockDaemon(), recordRefusals?: import("./engineRelayClient").EngineRelayClientOptions["recordRefusals"], reconcileRefusals?: import("./engineRelayClient").EngineRelayClientOptions["reconcileRefusals"]) {
+async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
@@ -214,8 +214,7 @@ async function harness(daemon = new MockDaemon(), recordRefusals?: import("./eng
     sessions,
     routes,
     requestDeadlineMs: 1_000,
-    recordRefusals,
-    reconcileRefusals,
+    onRefusalsChanged,
   });
   const relay = { baseUrl: "https://relay.test/", token: "secret-token" };
   const client = live.bind({
@@ -247,33 +246,16 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
-  it("finishes durable notice recovery before acknowledging the pull", async () => {
-    const daemon = new MockDaemon();
-    const { client } = await harness(daemon, undefined, async () => { throw new Error("notice save failed"); });
-    await expect(client.pull(async () => undefined)).rejects.toThrow("notice save failed");
-    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
-  });
-  it("persists every workspace refusal before cursor commit and retries a failed save", async () => {
-    const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input",
-      reason: 'dohc could not apply the resolution for "doc.md" because the document is too large. Review its conflict.' };
+  it("commits engine-owned refusals before notifying Notices", async () => {
+    const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
     const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
       status: "complete", fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
       nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
     } : undefined);
-    let fail = true;
-    const saved: unknown[] = [];
-    const { client } = await harness(daemon, async (_workspace, refusals) => {
-      expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
-      if (fail) throw new Error("notice disk unavailable");
-      saved.push(...refusals);
-    });
-    await expect(client.pull(async () => undefined)).rejects.toThrow("notice disk unavailable");
-    expect(saved).toEqual([]);
-    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
-    fail = false;
+    const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
+    const { client } = await harness(daemon, changed);
     await client.pull(async () => undefined);
-    expect(saved).toEqual([refusal]);
-    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true);
+    expect(changed).toHaveBeenCalledOnce();
   });
 
   it("routes push, pull, cursor commit, recover, claim, and probe through one daemon session", async () => {

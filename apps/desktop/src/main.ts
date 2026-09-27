@@ -258,7 +258,7 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
-import { createNoticeStore, RefusalDocuments, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { createNoticeStore, RefusalNotices, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -899,15 +899,22 @@ function noticeStore(): NoticeStore {
     session: noticeSession,
     installId: localReactorFallbackId,
     onChanged: notifyNoticesChanged,
-    refusalDocuments: async (workspaceId, coordinates) => {
+    refusalNotices: async () => {
+      const sessions = desktopEngine.sessions;
+      if (!sessions) return [];
+      return Promise.all(listWorkspaces().map(workspace => sessions.run(workspace, async ({ client, workspace: handle }) => {
+        const result = await new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
+          workspaceId: workspace.workspaceId,
+        }, { workspace: handle });
+        return { workspaceId: workspace.workspaceId, notices: RefusalNotices.parse(result).notices };
+      })));
+    },
+    dismissRefusal: async (workspaceId, noticeId) => {
       const workspace = findWorkspace(workspaceId);
       const sessions = desktopEngine.sessions;
-      if (!workspace || !sessions) return [];
-      return sessions.run(workspace, async ({ client, workspace: handle }) => {
-        const result = await new WorkspaceDaemonRequester(client).request("sync.refusalDocuments", {
-          workspaceId, coordinates: coordinates.map(key => ({ originId: key.originId, originSeq: key.originSeq })),
-        }, { workspace: handle });
-        return RefusalDocuments.parse(result).documents;
+      if (!workspace || !sessions) throw new Error("The workspace is not available. Open it and try again.");
+      await sessions.run(workspace, async ({ client, workspace: handle }) => {
+        await new WorkspaceDaemonRequester(client).request("sync.dismissRefusal", { workspaceId, noticeId }, { workspace: handle });
       });
     },
   });
@@ -3873,8 +3880,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
-  recordSyncRefusals: (workspace, refusals) => noticeStore().recordSyncRefusals(workspace.workspaceId, refusals),
-  reconcileSyncRefusals: (workspace, paths, current) => noticeStore().reconcileSyncRefusals(workspace.workspaceId, paths, current),
+  onRefusalsChanged: notifyNoticesChanged,
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -5337,7 +5343,7 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
-    reconcileSyncRefusals: workspaceId => noticeStore().reconcileSyncRefusals(workspaceId),
+    onRefusalsChanged: notifyNoticesChanged,
   }));
 
   workspaceEngineIpc.registerHistory();

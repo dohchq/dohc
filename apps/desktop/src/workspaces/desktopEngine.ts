@@ -52,8 +52,7 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
-  recordSyncRefusals?: import("./engineRelayClient").EngineRelayClientOptions["recordRefusals"];
-  reconcileSyncRefusals?: import("./engineRelayClient").EngineRelayClientOptions["reconcileRefusals"];
+  onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
   ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
@@ -483,8 +482,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
-        recordRefusals: dependencies.recordSyncRefusals,
-        reconcileRefusals: dependencies.reconcileSyncRefusals,
+        onRefusalsChanged: dependencies.onRefusalsChanged,
         sessions,
         routes: relayTransportRoutes,
         closeWorkspaceBinding: workspace => withOwnerHostPaused(

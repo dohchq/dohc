@@ -2802,7 +2802,17 @@ fn apply_inactive_batch_in_tx(
         Ok::<_, SyncError>(())
     })();
     let refusal = match projection {
-        Ok(()) => None,
+        Ok(()) => {
+            if rejected.len() < updates.len() {
+                crate::refusal_notices::clear_lineage_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.object_id,
+                    &payload.lineage_claim_id,
+                )?;
+            }
+            None
+        }
         Err(SyncError::ProjectionTooLarge {
             constraint,
             actual_bytes,
@@ -3221,6 +3231,18 @@ pub fn project_and_write_in_tx(
         .map_err(map_domain_hard_error)?;
     }
     let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
+    let lineage: Option<String> = tx.query_row(
+        "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    if let Some(lineage) = lineage {
+        crate::refusal_notices::clear_lineage_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.object_id,
+            &lineage,
+        )?;
+    }
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
     // the conflict preserves. Coalesce the incoming side to the freshest

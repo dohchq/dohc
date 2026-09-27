@@ -1464,8 +1464,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
         // the claimed token; a later drain remains unowned, while a newer pull
         // retags relay rows so a stale cursor cannot destroy an unread refusal.
-        let (pending_refusals, refusal_report_id) =
-            crate::apply::claim_pending_refusals(store, workspace_id, faults).map_err(local)?;
+        let pending_refusals =
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
         for refusal in pending_refusals {
             push_refusal_once(&mut refusals, refusal);
         }
@@ -1506,7 +1506,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
-            refusal_report_id,
             settlement_report_id: settlements.report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {

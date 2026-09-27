@@ -29,7 +29,11 @@ pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
 mod path_policy;
+mod refusal_notices;
 mod relay;
+pub use refusal_notices::{
+    RefusalDocument, RefusalNotice, dismiss_refusal_notice, list_refusal_notices,
+};
 mod router;
 mod secret_apply;
 mod share;

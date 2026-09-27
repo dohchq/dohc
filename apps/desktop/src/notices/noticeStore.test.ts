@@ -113,7 +113,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalDocuments?: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -144,7 +144,8 @@ async function computer(
     installId: () => options.installId ?? "install-a",
     onChanged: () => { state.changes += 1; },
     nowMs: () => clock,
-    refusalDocuments: options.refusalDocuments,
+    refusalNotices: options.refusalNotices,
+    dismissRefusal: options.dismissRefusal,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
   });
   return state;
@@ -935,107 +936,52 @@ describe("notices for another person", () => {
   }, 60_000);
 });
 
-it("keeps sync refusals after restart and never ages out an unreviewed refusal", async () => {
-  const first = await computer(null);
-  const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input",
-    reason: 'dohc could not apply the resolution for "doc.md" because the document is too large. Review its conflict.' };
-  await first.store.recordSyncRefusals(WORKSPACE, [refusal, refusal]);
-  const long = {...refusal, originSeq: 2, reason: refusal.reason + "x".repeat(1_000)};
-  await first.store.recordSyncRefusals(WORKSPACE, [long]);
+it("rebuilds refusal Notices from the engine and keeps read marks across restart", async () => {
+  let pending = [{ noticeId: "sync-refusal-a", originId: "peer", originSeq: 1,
+    reason: "plaintext projection exceeds limit", document: { versionId: "main", path: "doc.md",
+      objectId: "object-a", lineageClaimId: "inactive", conflictId: "review" } }];
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  let failDismiss = false;
+  const dismissRefusal = async (workspaceId: string, noticeId: string) => {
+    expect(workspaceId).toBe(WORKSPACE);
+    if (failDismiss) throw new Error("engine unavailable");
+    pending = pending.filter(row => row.noticeId !== noticeId);
+  };
+  const first = await computer(null, {refusalNotices, dismissRefusal});
+  const [notice] = (await first.store.list()).notices;
+  expect(notice).toMatchObject({kind: "sync-refusal", workspaceId: WORKSPACE, target: {path: "doc.md"}});
+  expect(notice!.body).toContain("Open its conflict and choose a copy.");
+  expect(notice!.detail).toContain("Object: object-a\nLineage: inactive");
+  await first.store.mark([notice!], "read", null);
   clock += 365 * 24 * 60 * 60_000;
-  const restarted = await computer(null, { directory: first.directory });
-  const { notices } = await restarted.store.list();
-  expect(notices).toHaveLength(2);
-  expect(notices.find(row => row.detail === long.reason)?.body.length).toBeLessThanOrEqual(500);
-  expect(notices.find(row => row.detail === long.reason)?.body).not.toContain("x".repeat(20));
-  expect(notices[0]).toMatchObject({ store: "local", kind: "sync-refusal", workspaceId: WORKSPACE });
-  await restarted.store.mark(notices, "dismissed", null);
-  const again = await computer(null, { directory: first.directory });
+  const restarted = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await restarted.store.list()).notices[0]!.readAtMs).not.toBeNull();
+  failDismiss = true;
+  await expect(restarted.store.mark([notice!], "dismissed", null)).rejects.toThrow("engine unavailable");
+  expect((await restarted.store.list()).notices).toHaveLength(1);
+  failDismiss = false;
+  await restarted.store.mark([notice!], "dismissed", null);
+  const again = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
   expect((await again.store.list()).notices).toEqual([]);
 });
 
-it("keeps the pending refusal when local Notices have reached their limit", async () => {
-  const first = await computer(null);
-  const refusals = Array.from({length: 500}, (_, originSeq) => ({originId: "peer", originSeq,
-    opKind: "conflict.resolve", code: "invalid-input", reason: "Review doc.md on the other computer."}));
-  await first.store.recordSyncRefusals(WORKSPACE, refusals);
-  await expect(first.store.recordSyncRefusals(WORKSPACE, [{...refusals[0]!, originSeq: 501}])).rejects.toThrow("Notices are full");
-  const restarted = await computer(null, { directory: first.directory });
-  const listed = (await restarted.store.list()).notices;
-  expect(listed).toHaveLength(500);
-  await restarted.store.mark([listed[0]!], "dismissed", null);
-  await restarted.store.recordSyncRefusals(WORKSPACE, [{...refusals[0]!, originSeq: 501}]);
-  expect((await restarted.store.list()).notices).toHaveLength(500);
+it("lists engine refusals without the local row limit and removes resolved rows", async () => {
+  let pending = Array.from({length: 1_001}, (_, index) => ({noticeId: `sync-refusal-${index}`,
+    originId: "peer", originSeq: index, reason: "Review this file", document: null}));
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: pending}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1_001);
+  await first.store.postNotice(notice());
+  expect((await first.store.list()).notices).toHaveLength(1_002);
+  pending = [];
+  expect((await first.store.list()).notices).toHaveLength(1);
 });
 
-it("resumes a large refusal report after restart and dismissal", async () => {
-  const first = await computer(null);
-  const refusals = Array.from({length: 1_001}, (_, originSeq) => ({originId: "peer", originSeq,
-    opKind: "conflict.resolve", code: "invalid-input", reason: "Review file-" + originSeq + ".md."}));
-  await expect(first.store.recordSyncRefusals(WORKSPACE, refusals)).rejects.toThrow("Notices are full");
-  const seen = new Set<string>();
-  for (let page = 0; page < 2; page++) {
-    const current = await computer(null, {directory: first.directory});
-    const rows = (await current.store.list()).notices;
-    expect(rows).toHaveLength(500);
-    for (const row of rows) seen.add(row.detail!);
-    await current.store.mark(rows, "dismissed", null);
-    refusals.reverse();
-    if (page === 0) await expect(current.store.recordSyncRefusals(WORKSPACE, refusals)).rejects.toThrow("Notices are full");
-    else await current.store.recordSyncRefusals(WORKSPACE, refusals);
-  }
-  const final = await computer(null, {directory: first.directory});
-  const rows = (await final.store.list()).notices;
-  expect(rows).toHaveLength(1);
-  seen.add(rows[0]!.detail!);
-  expect(seen.size).toBe(1_001);
-});
-
-it("names refused files plainly and clears only the recovered document or resolved conflict", async () => {
-  let resolved = false;
-  const refusalDocuments: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] = async (_workspace, keys) => keys.map(key => ({
-    ...key, resolved: resolved && key.originSeq === 1,
-    recoveryRevision: null, recoveryPath: null,
-    document: { versionId: "main", path: `doc-${key.originSeq}.md`, objectId: `object-${key.originSeq}`,
-      lineageClaimId: `lineage-${key.originSeq}`, conflictId: key.originSeq === 1 ? "conflict-a" : null },
-  }));
-  const first = await computer(null, { refusalDocuments });
-  const refusals = [1, 2, 3].map(originSeq => ({ originId: "peer", originSeq, opKind: "ydoc.update", code: "invalid-input", reason: "plaintext projection exceeds 4194304 bytes" }));
-  await first.store.recordSyncRefusals(WORKSPACE, refusals);
-  const notices = (await first.store.list()).notices;
-  expect(notices[0]!.body).toContain("doc-1.md");
-  expect(notices[0]!.body).toContain("Open its conflict and choose a copy.");
-  expect(notices[0]!.body).not.toContain("plaintext projection");
-  expect(notices[0]!.detail).toBe(refusals[0]!.reason);
-  const restarted = await computer(null, { directory: first.directory, refusalDocuments });
-  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "other", path: "doc-2.md" }]);
-  expect((await restarted.store.list()).notices).toHaveLength(3);
-  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc-2.md" }], [refusals[1]!]);
-  expect((await restarted.store.list()).notices).toHaveLength(3);
-  resolved = true;
-  await restarted.store.reconcileSyncRefusals(WORKSPACE);
-  expect((await restarted.store.list()).notices).toHaveLength(2);
-  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc-2.md" }]);
-  expect((await restarted.store.list()).notices.map(row => row.target?.path)).toEqual(["doc-3.md"]);
-});
-
-it("keeps a new refusal after an old conflict resolved, then clears a recovered lineage", async () => {
-  let recoveryRevision = "before";
-  const refusalDocuments: Parameters<typeof createNoticeStore>[0]["refusalDocuments"] = async (_workspace, keys) => keys.map(key => ({
-    ...key, resolved: true, recoveryRevision, recoveryPath: "doc (recovered).md",
-    document: { versionId: "main", path: "doc.md", objectId: "object-a", lineageClaimId: "claim", conflictId: "old-conflict" },
-  }));
-  const first = await computer(null, { refusalDocuments });
-  const refusal = { originId: "peer", originSeq: 1, opKind: "ydoc.update", code: "invalid-input", reason: "plaintext projection exceeds limit" };
-  await first.store.recordSyncRefusals(WORKSPACE, [refusal]);
-  expect((await first.store.list()).notices[0]!.body).not.toContain("Open its conflict");
-  const restarted = await computer(null, { directory: first.directory, refusalDocuments });
-  await restarted.store.reconcileSyncRefusals(WORKSPACE);
-  expect((await restarted.store.list()).notices).toHaveLength(1);
-  await restarted.store.reconcileSyncRefusals(WORKSPACE, [{ versionId: "main", path: "doc (recovered).md" }]);
-  expect((await restarted.store.list()).notices).toHaveLength(0);
-  await restarted.store.recordSyncRefusals(WORKSPACE, [{ ...refusal, originSeq: 2 }]);
-  recoveryRevision = "after";
-  await restarted.store.reconcileSyncRefusals(WORKSPACE);
-  expect((await restarted.store.list()).notices).toHaveLength(0);
+it("recovers engine Notices even if the desktop file was lost", async () => {
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: [{noticeId: "sync-refusal-a",
+    originId: "peer", originSeq: 1, reason: "Review this file", document: null}]}];
+  const first = await computer(null, {refusalNotices});
+  expect((await first.store.list()).notices).toHaveLength(1);
+  const fresh = await computer(null, {refusalNotices});
+  expect((await fresh.store.list()).notices).toHaveLength(1);
 });

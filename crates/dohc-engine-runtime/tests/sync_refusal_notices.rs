@@ -4,7 +4,7 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use serde_json::json;
 
 #[tokio::test]
-async fn refusal_documents_use_journal_coordinates_and_workspace_scope() {
+async fn refusal_notices_survive_restart_and_dismiss_with_workspace_scope() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let mut store = EngineStore::open(&db, 0).unwrap();
@@ -47,22 +47,43 @@ async fn refusal_documents_use_journal_coordinates_and_workspace_scope() {
         ] {
             tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES (?1,'peer',0,'conflict.resolve',?2,0,1)",
                 rusqlite::params![workspace, payload.to_string()]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute("INSERT INTO replication_pending_refusals (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES (?1,'peer',0,'conflict.resolve','invalid-input','projection exceeds limit')",
+                [workspace]).map_err(dohc_engine_storage::StorageError::persist_public)?;
         }
         Ok::<_, dohc_engine_storage::StorageError>(())
     }).unwrap();
     drop(store);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).unwrap().actor;
-    let result = actor
-        .sync_refusal_documents("ws".into(), vec![("peer".into(), 0), ("missing".into(), 0)])
+    let result = actor.sync_refusal_notices("ws".into()).await.unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        serde_json::to_value(result[0].document.as_ref().unwrap()).unwrap(),
+        json!({"versionId":"main","path":"renamed.md","objectId":"object-a","lineageClaimId":claim,"conflictId":null})
+    );
+    let id = result[0].notice_id.clone();
+    actor
+        .dismiss_sync_refusal("other".into(), id.clone())
         .await
         .unwrap();
     assert_eq!(
-        result[0]["document"],
-        json!({"versionId":"main","path":"renamed.md","objectId":"object-a","lineageClaimId":claim,"conflictId":null})
+        actor.sync_refusal_notices("ws".into()).await.unwrap().len(),
+        1
     );
-    assert_eq!(result[0]["resolved"], false);
-    assert_eq!(result[0]["recoveryRevision"], recovery.snapshot.blob_sha256);
-    assert_eq!(result[0]["recoveryPath"], "renamed (recovered).md");
-    assert_eq!(result[1]["document"], serde_json::Value::Null);
+    actor.dismiss_sync_refusal("ws".into(), id).await.unwrap();
+    assert!(
+        actor
+            .sync_refusal_notices("ws".into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        actor
+            .sync_refusal_notices("other".into())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
