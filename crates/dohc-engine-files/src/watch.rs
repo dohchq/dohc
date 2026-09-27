@@ -161,6 +161,10 @@ impl Debounce {
     fn flush(&mut self) -> bool {
         self.burst.take().is_some()
     }
+
+    fn timeout(&mut self, now: Instant) -> bool {
+        self.next_deadline().is_some_and(|deadline| now >= deadline) && self.flush()
+    }
 }
 
 /// A started native watcher plus the initial serialized reconcile result. The
@@ -414,8 +418,9 @@ fn watcher_thread(
             Some(next) => match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
-                    handle.notify_overflow();
-                    debounce.flush();
+                    if debounce.timeout(Instant::now()) {
+                        handle.notify_overflow();
+                    }
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -620,8 +625,10 @@ mod tests {
         let first = Instant::now();
         assert!(!debounce.event(first));
         assert_eq!(debounce.next_deadline(), Some(first + WATCH_SETTLE));
-        assert!(debounce.flush());
+        assert!(!debounce.timeout(first + WATCH_SETTLE - Duration::from_nanos(1)));
+        assert!(debounce.timeout(first + WATCH_SETTLE));
         assert_eq!(debounce.next_deadline(), None);
+        assert!(!debounce.timeout(first + WATCH_SETTLE));
     }
 
     /// A fresh, existing, watchable temp directory (removed on drop).
