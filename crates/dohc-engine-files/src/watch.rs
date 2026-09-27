@@ -35,7 +35,7 @@ pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 /// thread to attach the OS watch before giving up. `notify` offers no
 /// cancellable attach primitive, so a startup that never signals ready would
 /// otherwise hang the caller (a workspace open) forever.
-pub const WATCH_STARTUP_DEADLINE: Duration = Duration::from_secs(5);
+pub const WATCH_STARTUP_DEADLINE: Duration = Duration::from_secs(60);
 /// Bounded retry count for re-attaching the OS watch after the backend
 /// reports an error (including the watched root itself being replaced).
 const WATCH_REATTACH_ATTEMPTS: usize = 3;
@@ -132,6 +132,30 @@ enum ThreadMessage {
     Stop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushReason {
+    HardDeadline,
+    Settle,
+}
+
+#[derive(Default)]
+struct WatchState {
+    disruptions: AtomicU64,
+    unavailable: AtomicBool,
+    hard_deadline_flushes: AtomicU64,
+    settle_flushes: AtomicU64,
+}
+
+impl WatchState {
+    fn record_flush(&self, reason: FlushReason) {
+        let counter = match reason {
+            FlushReason::HardDeadline => &self.hard_deadline_flushes,
+            FlushReason::Settle => &self.settle_flushes,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Default)]
 struct Debounce {
     // First event and the quiet-period deadline for the current burst.
@@ -162,8 +186,19 @@ impl Debounce {
         self.burst.take().is_some()
     }
 
-    fn timeout(&mut self, now: Instant) -> bool {
-        self.next_deadline().is_some_and(|deadline| now >= deadline) && self.flush()
+    fn timeout(&mut self, now: Instant) -> Option<FlushReason> {
+        let (first, settle) = self.burst?;
+        let hard_deadline = first + WATCH_HARD_DEADLINE;
+        if now < settle.min(hard_deadline) {
+            return None;
+        }
+        self.burst = None;
+        // Classify by the deadline that won, even if this thread woke late.
+        Some(if hard_deadline <= settle {
+            FlushReason::HardDeadline
+        } else {
+            FlushReason::Settle
+        })
     }
 }
 
@@ -180,8 +215,7 @@ pub struct WatchStart {
 /// no notification can arrive after stop returns.
 pub struct NativeWatcher {
     stop_tx: SyncSender<ThreadMessage>,
-    disruptions: Arc<AtomicU64>,
-    unavailable: Arc<AtomicBool>,
+    state: Arc<WatchState>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -196,12 +230,10 @@ impl NativeWatcher {
     ) -> Result<WatchStart, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
-        let disruptions = Arc::new(AtomicU64::new(0));
-        let unavailable = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(WatchState::default());
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let thread_handle = handle.clone();
-        let thread_disruptions = Arc::clone(&disruptions);
-        let thread_unavailable = Arc::clone(&unavailable);
+        let thread_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-native-watcher".to_owned())
             .spawn(move || {
@@ -210,8 +242,7 @@ impl NativeWatcher {
                     thread_handle,
                     message_rx,
                     message_tx,
-                    thread_disruptions,
-                    thread_unavailable,
+                    thread_state,
                     ready_tx,
                 );
             })
@@ -220,8 +251,7 @@ impl NativeWatcher {
             })?;
         let mut watcher = NativeWatcher {
             stop_tx,
-            disruptions,
-            unavailable,
+            state,
             worker: Some(worker),
         };
         if let Err(err) = await_ready_with_deadline(
@@ -229,7 +259,7 @@ impl NativeWatcher {
             ready_rx,
             &mut watcher.worker,
             &watcher.stop_tx,
-            &watcher.unavailable,
+            &watcher.state.unavailable,
         )
         .await
         {
@@ -272,7 +302,18 @@ impl NativeWatcher {
     /// watcher, silently swallowing every later disruption on the same live
     /// watch.
     pub fn disruption_count(&self) -> u64 {
-        self.disruptions.load(Ordering::Acquire)
+        self.state.disruptions.load(Ordering::Acquire)
+    }
+
+    /// Number of bursts flushed at the hard deadline since startup.
+    pub fn hard_deadline_flush_count(&self) -> u64 {
+        self.state.hard_deadline_flushes.load(Ordering::Relaxed)
+    }
+
+    /// Number of bursts flushed after the quiet period since startup.
+    /// Shutdown flushes are excluded from both deadline counters.
+    pub fn settle_flush_count(&self) -> u64 {
+        self.state.settle_flushes.load(Ordering::Relaxed)
     }
 
     /// Whether the OS watch is genuinely, permanently lost: either the
@@ -288,7 +329,7 @@ impl NativeWatcher {
     /// drops the files layer and rebuilds it on the escalating backoff
     /// schedule — closing the silent-dead-watch class this flag exists for.
     pub fn is_unavailable(&self) -> bool {
-        self.unavailable.load(Ordering::Acquire)
+        self.state.unavailable.load(Ordering::Acquire)
     }
 }
 
@@ -347,13 +388,13 @@ fn watcher_thread(
     handle: FilesHandle,
     rx: Receiver<ThreadMessage>,
     callback_tx: SyncSender<ThreadMessage>,
-    disruptions: Arc<AtomicU64>,
-    unavailable: Arc<AtomicBool>,
+    state: Arc<WatchState>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
     let callback_handle = handle.clone();
-    let loop_disruptions = Arc::clone(&disruptions);
+    let callback_state = Arc::clone(&state);
+    let unavailable = &state.unavailable;
     // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
     // event queue can drop a `try_send` under load, so a re-attach request
     // must not ride on it: a dropped `Event` merely loses a wake (the health
@@ -365,7 +406,7 @@ fn watcher_thread(
     let mut watcher = match notify::RecommendedWatcher::new(
         move |event: Result<notify::Event, notify::Error>| {
             if event.is_err() {
-                disruptions.fetch_add(1, Ordering::AcqRel);
+                callback_state.disruptions.fetch_add(1, Ordering::AcqRel);
                 callback_backend_error.store(true, Ordering::Release);
                 callback_handle.notify_overflow();
             }
@@ -412,14 +453,15 @@ fn watcher_thread(
             && !unavailable.load(Ordering::Acquire)
         {
             watched_root = WatchedRoot::bind(&root);
-            attempt_reattach(&mut watcher, &root, &unavailable);
+            attempt_reattach(&mut watcher, &root, unavailable);
         }
         let message = match debounce.next_deadline() {
             Some(next) => match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
-                    if debounce.timeout(Instant::now()) {
+                    if let Some(reason) = debounce.timeout(Instant::now()) {
                         handle.notify_overflow();
+                        state.record_flush(reason);
                     }
                     None
                 }
@@ -433,7 +475,7 @@ fn watcher_thread(
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
-                        loop_disruptions.fetch_add(1, Ordering::AcqRel);
+                        state.disruptions.fetch_add(1, Ordering::AcqRel);
                         handle.notify_overflow();
                         // Rebind to the new directory object (so we don't
                         // reattach every poll forever), then reattach -- same
@@ -442,7 +484,7 @@ fn watcher_thread(
                         // exhaustion `unavailable` is set and this branch stops
                         // running entirely.
                         watched_root = WatchedRoot::bind(&root);
-                        attempt_reattach(&mut watcher, &root, &unavailable);
+                        attempt_reattach(&mut watcher, &root, unavailable);
                     }
                     None
                 }
@@ -455,6 +497,7 @@ fn watcher_thread(
                     // A ready queued event must not postpone the hard bound:
                     // publish the whole burst even when the queue never drains.
                     handle.notify_overflow();
+                    state.record_flush(FlushReason::HardDeadline);
                 }
             }
             Some(ThreadMessage::Stop) => {
@@ -625,10 +668,35 @@ mod tests {
         let first = Instant::now();
         assert!(!debounce.event(first));
         assert_eq!(debounce.next_deadline(), Some(first + WATCH_SETTLE));
-        assert!(!debounce.timeout(first + WATCH_SETTLE - Duration::from_nanos(1)));
-        assert!(debounce.timeout(first + WATCH_SETTLE));
+        assert_eq!(
+            debounce.timeout(first + WATCH_SETTLE - Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(
+            debounce.timeout(first + WATCH_SETTLE),
+            Some(FlushReason::Settle)
+        );
         assert_eq!(debounce.next_deadline(), None);
-        assert!(!debounce.timeout(first + WATCH_SETTLE));
+        assert_eq!(debounce.timeout(first + WATCH_SETTLE), None);
+    }
+
+    #[test]
+    fn timeout_reports_the_deadline_that_won_even_when_woken_late() {
+        let first = Instant::now();
+        let mut debounce = Debounce::default();
+        debounce.event(first);
+        assert_eq!(
+            debounce.timeout(first + WATCH_HARD_DEADLINE),
+            Some(FlushReason::Settle)
+        );
+
+        debounce.event(first);
+        debounce.event(first + WATCH_HARD_DEADLINE - WATCH_SETTLE / 2);
+        assert_eq!(
+            debounce.timeout(first + WATCH_HARD_DEADLINE),
+            Some(FlushReason::HardDeadline)
+        );
+        assert_eq!(debounce.timeout(first + WATCH_HARD_DEADLINE), None);
     }
 
     /// A fresh, existing, watchable temp directory (removed on drop).

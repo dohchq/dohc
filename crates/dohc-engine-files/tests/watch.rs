@@ -6,8 +6,8 @@ use dohc_engine_files::{
     IngestReason, NativeWatcher, ReconcileRun, ScanBounds, WATCH_SETTLE, apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct AcceptAll;
@@ -175,8 +175,6 @@ async fn continuous_event_stream_flushes_while_writer_is_active() {
 
     let stop_writes = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop_writes);
-    let write_gaps = Arc::new(Mutex::new((Instant::now(), Duration::ZERO)));
-    let writer_gaps = Arc::clone(&write_gaps);
     let storm_path = ws.path().join("storm.md");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let writer = std::thread::spawn(move || {
@@ -184,12 +182,6 @@ async fn continuous_event_stream_flushes_while_writer_is_active() {
         let mut sequence = 0_u64;
         while !writer_stop.load(Ordering::Acquire) {
             std::fs::write(&storm_path, sequence.to_le_bytes()).expect("storm write");
-            {
-                let mut gaps = writer_gaps.lock().expect("write gaps");
-                let now = Instant::now();
-                gaps.1 = gaps.1.max(now.duration_since(gaps.0));
-                gaps.0 = now;
-            }
             sequence = sequence.saturating_add(1);
             if let Some(started_tx) = started_tx.take() {
                 let _ = started_tx.send(());
@@ -198,32 +190,14 @@ async fn continuous_event_stream_flushes_while_writer_is_active() {
         }
     });
 
-    // Drain startup evidence while writes continue, then require a fresh dirty
-    // signal without a settle-sized gap. A stalled write makes that attempt
-    // inconclusive, so drain and retry within the overall hang guard.
+    // Callback delivery can pause while writes continue. Only an observed
+    // hard-deadline flush proves the storm exercised that wiring.
     let flushed = tokio::time::timeout(Duration::from_secs(60), async {
         started_rx.await?;
-        let mut drained = false;
+        let initial_flushes = watcher.hard_deadline_flush_count();
         loop {
-            if handle.stats().await?.dirty {
-                if drained {
-                    let gaps = write_gaps.lock().expect("write gaps");
-                    // Include an unfinished write or a writer still sleeping.
-                    if gaps.1.max(gaps.0.elapsed()) < WATCH_SETTLE {
-                        break Ok::<_, Box<dyn std::error::Error>>(());
-                    }
-                }
-                let run = handle.reconcile_if_dirty(CancellationToken::new()).await?;
-                let ReconcileRun::Completed(plan) = run else {
-                    return Err(format!("expected storm reconcile, got {run:?}").into());
-                };
-                let result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
-                handle.acknowledge_capture(plan, result).await?;
-                // Reset before confirming clean so gaps during that request
-                // cannot be erased. Keep the time of the last write to include
-                // any gap spanning the clean point.
-                write_gaps.lock().expect("write gaps").1 = Duration::ZERO;
-                drained = !handle.stats().await?.dirty;
+            if watcher.hard_deadline_flush_count() > initial_flushes {
+                break Ok::<_, Box<dyn std::error::Error>>(());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -239,7 +213,7 @@ async fn continuous_event_stream_flushes_while_writer_is_active() {
     );
 
     flushed
-        .expect("native watcher hung during continuous writes")
+        .expect("native watcher did not flush at the hard deadline during continuous writes")
         .expect("storm observation");
 }
 
