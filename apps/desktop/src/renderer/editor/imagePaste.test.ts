@@ -23,6 +23,11 @@ import {
 } from "./imagePaste";
 
 describe("slugifyBaseName", () => {
+  it("keeps a whole syllable at the pasted-image byte limit", () => {
+    expect(slugifyBaseName("界".repeat(12) + "कि.png")).toBe("界".repeat(12));
+    expect(slugifyBaseName("界".repeat(11) + "क्ष.png")).toBe("界".repeat(11));
+    expect(slugifyBaseName("कि".repeat(8) + ".png")).toBe("कि".repeat(6));
+  });
   it("lowercases, dashes non-alphanumerics, and drops the extension", () => {
     expect(slugifyBaseName("My Photo.PNG")).toBe("my-photo");
     expect(slugifyBaseName("Screen Shot 2026-07-11.jpeg")).toBe(

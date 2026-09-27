@@ -1,4 +1,4 @@
-import { isReservedWindowsName, nameByteLength } from "./names";
+import { nameByteLength } from "./names";
 // Pure @-mention scanning shared by storage/indexing and renderer surfaces.
 // Every layer uses the same token boundaries and ignored Markdown code ranges.
 
@@ -31,7 +31,7 @@ interface MentionScanOptions {
 }
 
 const HANDLE_BODY = "[\\p{L}\\p{N}][\\p{L}\\p{N}\\p{M}._-]*";
-const MENTION_RE = new RegExp(`(^|[\\s(\\[{])@(${HANDLE_BODY})`, "giu");
+const MENTION_RE = new RegExp(`(^|[\\s(\\[{])@(${HANDLE_BODY})`, "gu");
 const TERMINAL_HANDLE_PUNCTUATION_RE = /[._-]+$/u;
 
 export function normalizeHandle(handle: string): string {
@@ -101,7 +101,7 @@ export function scanMentionTokens(
     if (inCode(start)) continue;
     const parsedHandle = handle.replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
     // "@..." / "@___" trims to nothing — a bare "@" is not a mention token.
-    if (parsedHandle.length === 0 || nameByteLength(normalizeHandle(parsedHandle)) > 200 || isReservedWindowsName(parsedHandle)) continue;
+    if (parsedHandle.length === 0 || nameByteLength(normalizeHandle(parsedHandle)) > 200) continue;
     found.push({ start, end: start + 1 + parsedHandle.length, handle: parsedHandle });
   }
   return found;

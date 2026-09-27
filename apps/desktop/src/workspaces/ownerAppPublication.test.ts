@@ -127,7 +127,7 @@ describe("app without app.publish.json", () => {
   it("names a file the page links but the folder cannot publish", async () => {
     const h = harness();
     page(h, { "app/index.html": '<!doctype html><img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
-    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again.");
+    await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it without spaces or symbols, then publish again.");
   });
 
   it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {

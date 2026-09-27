@@ -1,0 +1,116 @@
+[
+  {
+    "name": "Vowel sign 200",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि",
+    "maxBytes": 200,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Combining sequence 200",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界q́̈̄",
+    "maxBytes": 200,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "ZWJ 200",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界क‍ष",
+    "maxBytes": 200,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Vowel sign 40",
+    "input": "界界界界界界界界界界界界कि",
+    "maxBytes": 40,
+    "expected": "界界界界界界界界界界界界"
+  },
+  {
+    "name": "Combining sequence 40",
+    "input": "界界界界界界界界界界界界q́̈̄",
+    "maxBytes": 40,
+    "expected": "界界界界界界界界界界界界"
+  },
+  {
+    "name": "ZWJ 40",
+    "input": "界界界界界界界界界界界界क‍ष",
+    "maxBytes": 40,
+    "expected": "界界界界界界界界界界界界"
+  },
+  {
+    "name": "Virama 200",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界क्ष",
+    "maxBytes": 200,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Virama 40",
+    "input": "界界界界界界界界界界界क्ष",
+    "maxBytes": 40,
+    "expected": "界界界界界界界界界界界"
+  },
+  {
+    "name": "Complete syllable",
+    "input": "कि",
+    "maxBytes": 6,
+    "expected": "कि"
+  },
+  {
+    "name": "Empty budget",
+    "input": "कि",
+    "maxBytes": 0,
+    "expected": ""
+  },
+  {
+    "name": "Exact ASCII budget",
+    "input": "abc",
+    "maxBytes": 3,
+    "expected": "abc"
+  },
+  {
+    "name": "Multi-scalar cluster too large",
+    "input": "q́̈",
+    "maxBytes": 4,
+    "expected": ""
+  },
+  {
+    "name": "Supplementary scalar",
+    "input": "a𐐀",
+    "maxBytes": 4,
+    "expected": "a"
+  },
+  {
+    "name": "Sync collision boundary",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि",
+    "maxBytes": 135,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Complete syllable before overflow",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि界",
+    "maxBytes": 200,
+    "expected": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि"
+  },
+  {
+    "name": "Marked syllables",
+    "input": "किकिकिकिकिकिकिकि",
+    "maxBytes": 40,
+    "expected": "किकिकिकिकिकि"
+  },
+  {
+    "name": "Virama then another mark",
+    "input": "xक़्ष",
+    "maxBytes": 10,
+    "expected": "x"
+  },
+  {
+    "name": "ZWJ then another mark",
+    "input": "xक‍़ष",
+    "maxBytes": 10,
+    "expected": "x"
+  },
+  {
+    "name": "Supplementary virama",
+    "input": "x𑀓𑁆𑀔",
+    "maxBytes": 9,
+    "expected": "x"
+  }
+]

@@ -1721,7 +1721,7 @@ fn normalize_mention_candidate(candidate: &str) -> Option<String> {
         .to_lowercase()
         .nfc()
         .collect();
-    if normalized.len() > 200 || crate::names::is_reserved_windows_name(&normalized) {
+    if normalized.len() > 200 {
         return None;
     }
     Some(normalized)

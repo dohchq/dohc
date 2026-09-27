@@ -70,6 +70,33 @@ mod diagnostic_tests {
     use super::{ApplyDisposition, ApplyOutcome, RefusalReason, ReplicationRefusal};
 
     #[test]
+    fn collision_slug_preserves_shared_name_boundaries() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-domain/tests/fixtures/name-boundaries.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            assert_eq!(
+                super::truncate_slug_base(
+                    case["input"].as_str().unwrap(),
+                    case["maxBytes"].as_u64().unwrap() as usize
+                ),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+        let prefix = "界".repeat(44);
+        let slug = super::channel_collision_slug(&format!("{prefix}कि"), "channel-id", 0);
+        assert!(slug.starts_with(&format!("{prefix}-")));
+        assert!(dohc_engine_domain::chats::is_replicated_channel_slug(&slug));
+        let slug =
+            super::channel_collision_slug(&format!("q{}", "\u{0334}".repeat(80)), "channel-id", 0);
+        assert!(slug.starts_with("channel-"));
+        assert!(dohc_engine_domain::chats::is_replicated_channel_slug(&slug));
+    }
+
+    #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
         let declined = crate::SharingDeclined {
             path: "notes/skipped.md".to_owned(),
@@ -1053,17 +1080,20 @@ fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u
     let suffix = hex(&hasher.finalize());
     const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
     let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
-    let slug = format!("{bounded_requested}-{suffix}");
+    let base = if bounded_requested.is_empty() {
+        "channel"
+    } else {
+        &bounded_requested
+    };
+    let slug = format!("{base}-{suffix}");
     debug_assert!(is_replicated_channel_slug(&slug));
     slug
 }
 
 fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
-    let mut end = max_bytes.min(value.len());
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].trim_end_matches('-').to_owned()
+    dohc_engine_domain::names::truncate_name(value, max_bytes)
+        .trim_end_matches('-')
+        .to_owned()
 }
 
 fn channel_allocation_base(name: &str) -> String {

@@ -8,7 +8,7 @@ import { parse } from "acorn";
 import * as esbuild from "esbuild";
 import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
 import { unsafeInlineScript } from "@dohc/app-browser/document";
-import { compileClosedAppPage, documentWrite, pageInput, pageNamespace } from "./closedAppPage.ts";
+import { appSourceNameAdvice, compileClosedAppPage, documentWrite, pageInput, pageNamespace } from "./closedAppPage.ts";
 
 export interface ClosedAppInput {
   path: string;
@@ -218,7 +218,7 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
           const path = posix.normalize(posix.join(inPage ? page!.base : posix.dirname(args.importer), decoded));
           const refuse = (text: string) => ({ errors: [{ text: `${importer} imports ${args.path}${text}` }] });
           if (path === ".." || path.startsWith("../")) return refuse(", which is outside the workspace.");
-          if (!isPortableNamePath(path)) return refuse(". Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again.");
+          if (!isPortableNamePath(path)) return refuse(`. ${appSourceNameAdvice(path)}`);
           if (!acceptedTypes.has(extension(path))) return refuse(`. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not ${extension(path) || "files without a type"}.`);
           if (!inputs.has(path)) return refuse(", which is not in the app. Add the file, or list it in app.publish.json.");
           return { path, namespace };

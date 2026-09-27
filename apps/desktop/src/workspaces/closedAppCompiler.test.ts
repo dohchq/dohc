@@ -380,7 +380,9 @@ describe("closed app compiler", () => {
       ['<link rel="stylesheet" href="//fonts.example.test/a.css">', "site/index.html loads //fonts.example.test/a.css from outside the app."],
       ['<script src="missing.js"></script>', "site/index.html links missing.js, which is not in the app. Add the file or fix the link."],
       ['<img src="map.svg">', "site/index.html links map.svg as an image. Use a PNG, JPEG, GIF, WebP, or AVIF file instead."],
-      ['<img src="my%20map.png">', "site/index.html links my map.png. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again."],
+      ['<img src="CON.png">', "site/index.html links CON.png. Windows reserves this file name. Choose another name, then publish again."],
+      ['<img src=".map.png">', "site/index.html links .map.png. Remove dots at the start or end of the name, then publish again."],
+      ['<img src="my%20map.png">', "site/index.html links my map.png. Rename it without spaces or symbols, then publish again."],
       ['<img srcset="missing.png 2x">', "site/index.html links missing.png, which is not in the app."],
       ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
       ['<link rel="stylesheet" href="app.css" disabled>', "site/index.html links the stylesheet app.css as disabled. Published apps apply every stylesheet."],
@@ -438,7 +440,7 @@ describe("closed app compiler", () => {
 
     it.each([
       ["url(img/missing.png)", "app/css/style.css imports img/missing.png, which is not in the app."],
-      ["url(img/my%20bg.png)", "app/css/style.css imports img/my%20bg.png. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again."],
+      ["url(img/my%20bg.png)", "app/css/style.css imports img/my%20bg.png. Rename it without spaces or symbols, then publish again."],
       ["url(img/bg.svg)", "app/css/style.css imports img/bg.svg. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .svg."],
       ["url(data:text/html,<b>x</b>)", "app/css/style.css embeds a data URL of type text/html. Use an image or a WOFF2 font instead."],
       ["url(https://example.test/a.png)", "app/css/style.css loads https://example.test/a.png from outside the app."],

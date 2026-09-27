@@ -93,5 +93,35 @@
     "name": "Unicode 17 letters",
     "input": "𖺠𖺻",
     "slug": "𖺻𖺻"
+  },
+  {
+    "name": "Hangul fillers",
+    "input": "ㅤᅟᅠﾠ",
+    "slug": ""
+  },
+  {
+    "name": "Invisible marks",
+    "input": "a️͏",
+    "slug": "a"
+  },
+  {
+    "name": "Other default ignorables",
+    "input": "a­؜឴឵᠋᠏​‍‪⁥﻿￰𛲠𝅳󠄀b",
+    "slug": "ab"
+  },
+  {
+    "name": "Vowel at byte limit",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界कि",
+    "slug": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Virama at byte limit",
+    "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界क्ष",
+    "slug": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+  },
+  {
+    "name": "Ignorable between base and mark",
+    "input": "a͏́",
+    "slug": "á"
   }
 ]

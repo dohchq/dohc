@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
-import { nameSlug, nameByteLength, isPortableNamePath } from "./names";
+import { nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
 import { scanMentionTokens, normalizeHandle, activeMentionQuery } from "./chatMentions";
 
 const cases: Array<{ name: string; input: string; slug: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/names.json", import.meta.url), "utf8"));
@@ -23,5 +23,12 @@ it("keeps complete mention offsets and normalizes lookup keys", () => {
   expect(tokens.map(token => normalizeHandle(token.handle))).toEqual(["हिन्दी", "café", "𐐨𐐩"]);
   for (const token of tokens) expect(body.slice(token.start, token.end)).toBe("@" + token.handle);
   expect(scanMentionTokens("@" + "界".repeat(67))).toEqual([]);
-  expect(scanMentionTokens("@CON")).toEqual([]);
+  expect(scanMentionTokens("@CON @nul @aux.txt").map(token => normalizeHandle(token.handle))).toEqual(["con", "nul", "aux.txt"]);
+  expect(scanMentionTokens("@\u0345abc")).toEqual([]);
+});
+
+const boundaries: Array<{ name: string; input: string; maxBytes: number; expected: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/name-boundaries.json", import.meta.url), "utf8"));
+it.each(boundaries)("shares the engine byte boundary: $name", ({ input, maxBytes, expected }) => {
+  expect(truncateName(input, maxBytes)).toBe(expected);
+  expect(nameByteLength(truncateName(input, maxBytes))).toBeLessThanOrEqual(maxBytes);
 });

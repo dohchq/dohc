@@ -1,4 +1,4 @@
-import { isPortableNamePath } from "@dohc/workspace-contracts/names";
+import { isPortableNamePath, isReservedWindowsName, nameByteLength } from "@dohc/workspace-contracts/names";
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
 import { defaultTreeAdapter, parse as parseHtml, serialize, serializeOuter, type DefaultTreeAdapterTypes } from "parse5";
@@ -202,7 +202,7 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     try { decoded = decodeURIComponent(value.split(/[?#]/, 1)[0]!); } catch { throw new Error(`${entry} links ${value}, which is not a valid file address.`); }
     const path = posix.normalize(posix.join(decoded.startsWith("/") ? posix.dirname(entry) : base, decoded));
     if (!decoded || path === ".." || path.startsWith("../")) throw new Error(outside(value));
-    if (!isPortableNamePath(path)) throw new Error(`${entry} links ${decoded}. Use a shorter name without reserved names, symbols, or leading or trailing dots, then publish again.`);
+    if (!isPortableNamePath(path)) throw new Error(`${entry} links ${decoded}. ${appSourceNameAdvice(path)}`);
     const expected = kinds[kind];
     if (!(expected.test as readonly string[]).includes(extension(path))) throw new Error(`${entry} links ${value} as ${expected.words}. Use ${expected.allowed} file instead.`);
     if (!inputs.has(path)) throw new Error(`${entry} links ${value}, which is not in the app. Add the file or fix the link.`);
@@ -379,4 +379,13 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     return page;
   };
   return { module: registry(modules), inline, stylesheets, base, used, images: embedded, finish };
+}
+
+export function appSourceNameAdvice(path: string): string {
+  if (/[^\p{L}\p{N}\p{M}_@./-]/u.test(path)) return "Rename it without spaces or symbols, then publish again.";
+  const parts = path.split("/");
+  if (parts.some(isReservedWindowsName)) return "Windows reserves this file name. Choose another name, then publish again.";
+  if (parts.some(part => part.startsWith(".") || part.endsWith("."))) return "Remove dots at the start or end of the name, then publish again.";
+  if (nameByteLength(path) > 1024 || parts.some(part => nameByteLength(part) > 255)) return "Use a shorter name, then publish again.";
+  return "Choose another file name, then publish again.";
 }

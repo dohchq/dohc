@@ -1,4 +1,7 @@
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+use unicode_normalization::{
+    UnicodeNormalization,
+    char::{canonical_combining_class, is_combining_mark},
+};
 
 pub(crate) fn is_name_letter_or_number(ch: char) -> bool {
     // Alphabetic also includes marks and enclosed letter symbols (category So).
@@ -11,6 +14,36 @@ pub(crate) fn is_name_letter_or_number(ch: char) -> bool {
 
 pub(crate) fn is_name_mark(ch: char) -> bool {
     is_combining_mark(ch)
+}
+
+fn is_default_ignorable(ch: char) -> bool {
+    // Unicode Default_Ignorable_Code_Point, matching JavaScript's \p{DI}.
+    matches!(ch,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}'..='\u{1160}'
+        | '\u{17B4}'..='\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
+}
+
+pub fn truncate_name(value: &str, max_bytes: usize) -> &str {
+    let mut boundary = 0;
+    let mut joins_next = false;
+    for (offset, ch) in value.char_indices() {
+        let mark = is_name_mark(ch) || ch == '\u{200D}';
+        // Keep marks with their base and preserve virama/ZWJ joins across intervening marks.
+        // Keep this mark-backoff rule identical to TypeScript's truncateName.
+        if !mark && !joins_next {
+            boundary = offset;
+        }
+        if offset + ch.len_utf8() > max_bytes {
+            return &value[..boundary];
+        }
+        joins_next = canonical_combining_class(ch) == 9 || ch == '\u{200D}' || (mark && joins_next);
+    }
+    value
 }
 
 pub(crate) fn is_reserved_windows_name(value: &str) -> bool {
@@ -33,6 +66,9 @@ pub fn name_slug(value: &str, max_bytes: usize) -> String {
         .collect();
     let mut slug = String::new();
     for ch in lowered.chars() {
+        if is_default_ignorable(ch) {
+            continue;
+        }
         if ch.is_whitespace() || matches!(ch, '_' | '-') {
             if !slug.is_empty() && !slug.ends_with('-') {
                 slug.push('-');
@@ -43,20 +79,13 @@ pub fn name_slug(value: &str, max_bytes: usize) -> String {
             slug.push(ch);
         }
     }
-    let mut slug: String = slug.nfc().collect();
-    let mut end = max_bytes.min(slug.len());
-    while !slug.is_char_boundary(end) {
-        end -= 1;
-    }
-    slug.truncate(end);
-    let mut slug = slug.trim_end_matches('-').to_owned();
+    let slug: String = slug.nfc().collect();
+    let mut slug = truncate_name(&slug, max_bytes)
+        .trim_end_matches('-')
+        .to_owned();
     if is_reserved_windows_name(&slug) {
         slug = format!("name-{slug}");
-        let mut end = max_bytes.min(slug.len());
-        while !slug.is_char_boundary(end) {
-            end -= 1;
-        }
-        slug.truncate(end);
+        slug = truncate_name(&slug, max_bytes).to_owned();
     }
     slug
 }
