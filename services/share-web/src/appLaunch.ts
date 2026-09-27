@@ -133,13 +133,14 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       if (issue) {
         // Untrusted bodies have their own bounded lane; they cannot occupy document builds.
         if (issuePending >= 64 || (issueByAddress.get(address) ?? 0) >= 16 ||
-            !issueAddressRate.allow(address, now()) || !issueGlobalRate.allow("issue", now())) return refusal();
+            !issueAddressRate.allow(address, now()) || !issueGlobalRate.allow("issue", now())) return rateLimited();
         issuePending++; issueByAddress.set(address, (issueByAddress.get(address) ?? 0) + 1);
       } else {
         if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return refusal();
         if (statusRequest) statusPending++; else if (collectionRequest) collectionPending++; else pending++;
       }
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
+      let namedIssue = false;
       try {
         if (issue) {
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/json" || launches.size >= MAX_LAUNCHES) return refusal();
@@ -150,9 +151,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (exact(issueBody, "discriminator,publicationId") && typeof issueBody.discriminator === "string" && isSessionDiscriminator(issueBody.discriminator)) {
             material = await options.resolveMaterial(issueBody.discriminator, request.headers.get("cookie"), signal);
           } else if (exact(issueBody, "publicationId,workspaceId") && typeof issueBody.workspaceId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(issueBody.workspaceId) && !issueBody.workspaceId.includes("\n") && options.resolveNamedMaterial) {
+            namedIssue = true;
             material = await options.resolveNamedMaterial(issueBody.workspaceId, issueBody.publicationId as string, request.headers.get("cookie"), signal);
           } else return refusal();
-          if (!material.ok) return refusal();
+          if (!material.ok) return namedIssue && material.status === 503 ? unavailable() : refusal();
           const current = await descriptor({ publicationId: body.publicationId, material }, signal);
           // The relay authorizes the resolved profile/account cookies before they get a budget.
           const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;
@@ -217,7 +219,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
       } catch (error) {
         const launch = launches.get(host);
-        return issue || !launch || !namedMaterial(launch.material) ? refusal() : error instanceof RelayRateLimited ? rateLimited() : error instanceof RelayUnavailable ? unavailable() : refusal();
+        if (error instanceof RelayRateLimited) return rateLimited();
+        return (namedIssue || (launch && namedMaterial(launch.material))) && error instanceof RelayUnavailable ? unavailable() : refusal();
       } finally {
         if (issue) {
           issuePending--; const remaining = issueByAddress.get(address)! - 1;

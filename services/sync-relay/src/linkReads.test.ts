@@ -5071,7 +5071,7 @@ describe("relay capability reads", () => {
           request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
         )
       ).status,
-     ).toBe(404);
+     ).toBe(429);
     const callsAfterPublicExhaustion = limiterCalls.map(
       (spy) => spy.mock.calls.length,
     );

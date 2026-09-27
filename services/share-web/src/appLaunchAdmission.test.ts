@@ -30,10 +30,13 @@ function fixture() {
   return { handler, issue, probes: () => probes, relayStatus(status: number) { relayStatus = status; } };
 }
 
-it("preserves relay rate refusal separately from transport unavailability", async () => {
+it("preserves relay admission while keeping unverified link launches opaque", async () => {
   const f = fixture();
   f.relayStatus(429); expect((await f.issue("profile-good")).status).toBe(429);
-  f.relayStatus(503); expect((await f.issue("profile-good")).status).toBe(503);
+  f.relayStatus(503);
+  const unavailable = await f.issue("profile-good");
+  expect(unavailable.status).toBe(404);
+  expect(await unavailable.json()).toEqual({ok: false, error: "not found"});
   f.relayStatus(200); expect((await f.issue("profile-good")).status).toBe(200);
 });
 

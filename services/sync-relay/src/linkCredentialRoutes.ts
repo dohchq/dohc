@@ -113,7 +113,7 @@ export function createLinkCredentialRoutes(
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     const addressPending = exchangeAddressInFlight.get(ip) ?? 0;
     if (addressPending >= 16 || exchangesInFlight >= 64 || !exchangeAddressProbes.allow(ip, nowMs()) ||
-        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) return refused();
+        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
     exchangeAddressInFlight.set(ip, addressPending + 1);
     exchangesInFlight++;
     try {
@@ -211,7 +211,7 @@ export function createLinkCredentialRoutes(
         );
         return jsonResponse({ ok: true, ...exchange });
       } catch (error) {
-        if (error instanceof RelayError) return refused();
+        if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) return refused();
         throw error;
       }
     } finally {

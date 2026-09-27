@@ -899,7 +899,7 @@ describe("share discussion HTTP boundary", () => {
     expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
   });
 
-  it("keeps stranger and revoked-recipient refusals private across workspace shapes", async () => {
+  it("explains removal only to the revoked recipient using the recipient workspace shape", async () => {
     const lookupUserDisplayName = vi.fn(() => "No Name");
     const test = await fixture({ lookupUserDisplayName });
     expect(
@@ -959,7 +959,10 @@ describe("share discussion HTTP boundary", () => {
             ),
           ),
         ]) {
-          expect(await genericRefusal(response)).toBe(baseline);
+          const expected = actor === COMMENTER && workspaceId === undefined
+            ? `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`
+            : baseline;
+          expect(await genericRefusal(response)).toBe(expected);
         }
         expect(discussionIdempotencyRows(test.dbPath, actor, idempotencyKey)).toBe(
           0,
