@@ -39,8 +39,9 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
       }
       if (linkRefused) {
         const code = parseLinkRefusal(value, response.status);
-        if (!code && response.status === 503) throw Error("Unavailable");
-        throw new LiveAuthorityUnavailableError(code ? LINK_REFUSALS[code].error : "Unavailable");
+        const message = code ? LINK_REFUSALS[code].error : "Unavailable";
+        if (response.status === 503) throw Error(message);
+        throw new LiveAuthorityUnavailableError(message);
       }
       return value;
     } finally {signal.removeEventListener("abort", cancel); await reader.cancel().catch(() => {}); reader.releaseLock();}
