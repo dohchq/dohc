@@ -83,7 +83,7 @@ interface Successor {
 interface LineageTransition {
   predecessorClaimId: string;
   predecessorStateVectorSha256: string;
-  predecessorFullStateSha256: string;
+  predecessorDeleteSetSha256: string;
   artifactPreimageSha256: string;
   successor: Successor | null;
 }
@@ -440,7 +440,7 @@ function lineageTransition(value: unknown): LineageTransition | null {
     [
       "predecessorClaimId",
       "predecessorStateVectorSha256",
-      "predecessorFullStateSha256",
+      "predecessorDeleteSetSha256",
       "artifactPreimageSha256",
       "successor",
     ],
@@ -451,9 +451,9 @@ function lineageTransition(value: unknown): LineageTransition | null {
       record.predecessorClaimId,
       "lineageTransition.predecessorClaimId",
     ),
-    predecessorFullStateSha256: sha256(
-      record.predecessorFullStateSha256,
-      "lineageTransition.predecessorFullStateSha256",
+    predecessorDeleteSetSha256: sha256(
+      record.predecessorDeleteSetSha256,
+      "lineageTransition.predecessorDeleteSetSha256",
     ),
     predecessorStateVectorSha256: sha256(
       record.predecessorStateVectorSha256,

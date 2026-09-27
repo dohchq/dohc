@@ -62,7 +62,10 @@ pub use owner_outbox::{
     OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
     OwnerOutboxReadPart, OwnerOutboxState,
 };
-pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
+pub use replay_parity::{
+    apply_replay_validated_batch, validate_replay_parity, validate_replay_parity_with_scratch,
+    ReplayBatch,
+};
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,
     RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,

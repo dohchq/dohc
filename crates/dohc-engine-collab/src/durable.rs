@@ -1848,8 +1848,10 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
          lineage_claim_id, parent_claim_id, disposition, content_kind, path, epoch_tag, \
-         full_state_blob_sha256, state_vector_blob_sha256, recorded_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+         full_state_blob_sha256, state_vector_blob_sha256, recorded_at_ms, updated_at_ms,last_surfaced_projection_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, ?9, ?10, ?11, ?11, \
+         (SELECT b.sha256 FROM blobs b JOIN ydoc_docs d ON d.last_settled_sha=b.sha256 \
+          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3))",
         rusqlite::params![
             key.workspace_id,
             key.version_id,

@@ -182,7 +182,7 @@ function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFix
       objectId: "object-a",
       predecessorClaimId: "a".repeat(64),
       predecessorStateVectorSha256: "b".repeat(64),
-      predecessorFullStateSha256: "c".repeat(64),
+      predecessorDeleteSetSha256: "c".repeat(64),
       artifactPreimageSha256: "c".repeat(64),
       successor: {
         lineageClaimId: shas.successor,
@@ -353,7 +353,7 @@ function compactConflictResolveFixture(
     lineageTransition: {
       predecessorClaimId: "a".repeat(64),
       predecessorStateVectorSha256: "b".repeat(64),
-      predecessorFullStateSha256: "c".repeat(64),
+      predecessorDeleteSetSha256: "c".repeat(64),
       artifactPreimageSha256: shas.current,
       successor: {
         lineageClaimId: shas.successor,

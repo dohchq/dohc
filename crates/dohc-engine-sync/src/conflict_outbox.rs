@@ -497,7 +497,7 @@ mod tests {
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),
-                predecessor_full_state_sha256: "d".repeat(64),
+                predecessor_delete_set_sha256: "d".repeat(64),
                 artifact_preimage_sha256: current_sha,
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor_sha.clone(),

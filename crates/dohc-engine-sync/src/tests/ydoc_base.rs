@@ -5160,6 +5160,11 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
         (false, true, false, false, true, 2),
         (false, true, true, false, true, 3),
         (false, true, false, false, true, 3),
+        (false, true, true, false, true, 4),
+        (false, true, false, false, true, 4),
+        (false, true, true, false, true, 5),
+        (false, true, false, false, true, 5),
+        (false, true, true, false, true, 6),
     ] {
         let (_sa, _pa, mut a) = open_store();
         let (_sb, _pb, mut b) = open_store();
@@ -5371,13 +5376,42 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                 Vec::new()
             };
             let mut crossing_updates = Vec::new();
-            if crossing_edit > 0 && crossing_edit < 3 {
+            if crossing_edit > 0 && crossing_edit != 3 && crossing_edit < 5 {
                 for store in [&mut *resolver, &mut *receiver] {
                     let doc = dohc_engine_collab::load_persisted(store, &key)
                         .unwrap()
                         .unwrap()
                         .doc;
-                    let update = if crossing_edit == 1 {
+                    if crossing_edit == 4 {
+                        let update = doc.plaintext_insert(0, "settled ");
+                        dohc_engine_collab::record_local_update(
+                            store,
+                            &mut WriterDocCache::new(),
+                            &key,
+                            &update,
+                            dohc_engine_collab::LocalAppend::default(),
+                            &NoFaults,
+                            11_002,
+                            |_tx, _outcome, _sha| Ok(()),
+                        )
+                        .unwrap();
+                        store
+                            .write_with(&NoFaults, |tx| {
+                                crate::ydoc_apply::project_and_write_in_tx(
+                                    tx,
+                                    &key,
+                                    path,
+                                    &doc,
+                                    ContentKind::Plaintext,
+                                    "settled-crossing",
+                                    0,
+                                    11_002,
+                                    None,
+                                )
+                            })
+                            .unwrap();
+                    }
+                    let update = if crossing_edit == 1 || crossing_edit == 4 {
                         doc.plaintext_insert(0, "between choices ")
                     } else {
                         doc.plaintext_delete(0, 1)
@@ -5388,7 +5422,11 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                             .unwrap()
                             .lineage_claim_id
                             .unwrap(),
-                        update.clone(),
+                        if crossing_edit == 4 {
+                            doc.encode_full_state()
+                        } else {
+                            update.clone()
+                        },
                         doc.plaintext_string(),
                     ));
                     dohc_engine_collab::record_local_update(
@@ -5408,6 +5446,125 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
             ops.retain(|op| op.recorded_at_ms == 11_000);
             assert!(!ops.is_empty());
             copy_seed_blobs(resolver, receiver);
+            if crossing_edit == 6 {
+                let resolver_claim = dohc_engine_collab::read_marker(resolver, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id;
+                let receiver_claim = dohc_engine_collab::read_marker(receiver, &key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_id;
+                let (store, winning_ops) = if resolver_claim > receiver_claim {
+                    (&mut *resolver, &crossing_ops)
+                } else {
+                    (&mut *receiver, &ops)
+                };
+                let doc = dohc_engine_collab::load_persisted(store, &key)
+                    .unwrap()
+                    .unwrap()
+                    .doc;
+                let update = doc.plaintext_insert(
+                    0,
+                    &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES),
+                );
+                dohc_engine_collab::record_local_update(
+                    store,
+                    &mut WriterDocCache::new(),
+                    &key,
+                    &update,
+                    dohc_engine_collab::LocalAppend::default(),
+                    &NoFaults,
+                    11_002,
+                    |_tx, _outcome, _sha| Ok(()),
+                )
+                .unwrap();
+                for (seq, op) in winning_ops.iter().enumerate() {
+                    let mut op = op.clone();
+                    op.origin_seq = seq as i64;
+                    let outcome = crate::apply_replication_envelope(
+                        store,
+                        &mut WriterDocCache::new(),
+                        &op,
+                        &NoFaults,
+                        &NoLiveLeases,
+                    )
+                    .unwrap();
+                    if seq == 0 {
+                        assert!(
+                            matches!(outcome.primary, ApplyDisposition::Refused(_)),
+                            "{outcome:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(outcome.primary, ApplyDisposition::Applied(_)),
+                            "{outcome:?}"
+                        );
+                    }
+                    assert_eq!(
+                        crate::read_replication_acked_seq(store, "ws", &op.origin_id).unwrap(),
+                        seq as i64
+                    );
+                    let replay = crate::apply_replication_envelope(
+                        store,
+                        &mut WriterDocCache::new(),
+                        &op,
+                        &NoFaults,
+                        &NoLiveLeases,
+                    )
+                    .unwrap();
+                    assert!(matches!(replay.primary, ApplyDisposition::Skipped));
+                }
+                assert_eq!(
+                    dohc_engine_collab::load_persisted(store, &key)
+                        .unwrap()
+                        .unwrap()
+                        .doc
+                        .plaintext_string(),
+                    doc.plaintext_string()
+                );
+                continue;
+            }
+            if crossing_edit == 5 {
+                for store in [&mut *resolver, &mut *receiver] {
+                    let input = dohc_engine_domain::RenameTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        from_path: path.into(),
+                        to_path: "notes/renamed.md".into(),
+                        moment_id: "concurrent-rename".into(),
+                        request_id: None,
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 11_002,
+                    };
+                    VersionedTextStore::new(store)
+                        .rename_text_file_with(&input, &NoFaults, |tx, result| {
+                            crate::reconcile_local_resulting_head_in_tx(
+                                tx,
+                                "ws",
+                                "main",
+                                &key.object_id,
+                                crate::ResultingHead::Text {
+                                    path: &result.after.path,
+                                    text: &result.after.text,
+                                },
+                                None,
+                                None,
+                                11_002,
+                            )
+                            .map(|_| ())
+                            .map_err(|error| {
+                                dohc_engine_domain::DomainError::Storage(
+                                    dohc_engine_storage::StorageError::corrupt_public(error),
+                                )
+                            })
+                        })
+                        .unwrap();
+                }
+            }
             for (seq, op) in ops.iter_mut().enumerate() {
                 op.origin_seq = seq as i64;
                 let applied = crate::apply_replication_envelope(
@@ -5448,6 +5605,32 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                     .unwrap()
                     .lineage_claim_id,
             );
+            if crossing_edit == 5 {
+                for store in [&mut *resolver, &mut *receiver] {
+                    let before: (String, String) = store
+                        .read_with(|conn| {
+                            conn.query_row(
+                                "SELECT path,latest_moment_id FROM snapshots WHERE object_id=?1",
+                                [&key.object_id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        before,
+                        ("notes/renamed.md".into(), "concurrent-rename".into())
+                    );
+                    assert_eq!(
+                        dohc_engine_collab::read_marker(store, &key)
+                            .unwrap()
+                            .unwrap()
+                            .path
+                            .as_deref(),
+                        Some("notes/renamed.md")
+                    );
+                }
+                continue;
+            }
             for (index, (claim, update, _)) in crossing_updates.iter().enumerate() {
                 for store in [&mut *resolver, &mut *receiver] {
                     let sha = store.put_binary_blob(update).unwrap();

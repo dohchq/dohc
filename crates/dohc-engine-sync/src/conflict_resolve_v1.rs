@@ -152,7 +152,7 @@ pub(crate) struct SuccessorV1 {
 pub(crate) struct LineageTransitionV1 {
     pub predecessor_claim_id: String,
     pub predecessor_state_vector_sha256: String,
-    pub predecessor_full_state_sha256: String,
+    pub predecessor_delete_set_sha256: String,
     pub artifact_preimage_sha256: String,
     pub successor: Option<SuccessorV1>,
 }
@@ -214,7 +214,7 @@ enum LocalLineagePlan {
         key: DocKey,
         predecessor_claim_id: String,
         predecessor_state_vector_sha256: String,
-        predecessor_full_state_sha256: String,
+        predecessor_delete_set_sha256: String,
         path: String,
         successor: SuccessorBase,
     },
@@ -222,7 +222,7 @@ enum LocalLineagePlan {
         key: DocKey,
         predecessor_claim_id: String,
         predecessor_state_vector_sha256: String,
-        predecessor_full_state_sha256: String,
+        predecessor_delete_set_sha256: String,
         artifact_preimage_sha256: String,
         last_surfaced_projection_sha256: Option<String>,
     },
@@ -793,7 +793,7 @@ fn parse_lineage_transition(value: &Value) -> Result<Option<LineageTransitionV1>
         &[
             "predecessorClaimId",
             "predecessorStateVectorSha256",
-            "predecessorFullStateSha256",
+            "predecessorDeleteSetSha256",
             "artifactPreimageSha256",
             "successor",
         ],
@@ -802,7 +802,7 @@ fn parse_lineage_transition(value: &Value) -> Result<Option<LineageTransitionV1>
     Ok(Some(LineageTransitionV1 {
         predecessor_claim_id: sha256(field(record, "predecessorClaimId")?)?,
         predecessor_state_vector_sha256: sha256(field(record, "predecessorStateVectorSha256")?)?,
-        predecessor_full_state_sha256: sha256(field(record, "predecessorFullStateSha256")?)?,
+        predecessor_delete_set_sha256: sha256(field(record, "predecessorDeleteSetSha256")?)?,
         artifact_preimage_sha256: sha256(field(record, "artifactPreimageSha256")?)?,
         successor: parse_successor(field(record, "successor")?)?,
     }))
@@ -1216,7 +1216,7 @@ fn lineage_transition_value(transition: Option<&LineageTransitionV1>) -> Value {
     json!({
         "predecessorClaimId": transition.predecessor_claim_id,
         "predecessorStateVectorSha256": transition.predecessor_state_vector_sha256,
-        "predecessorFullStateSha256": transition.predecessor_full_state_sha256,
+        "predecessorDeleteSetSha256": transition.predecessor_delete_set_sha256,
         "artifactPreimageSha256": transition.artifact_preimage_sha256,
         "successor": successor,
     })
@@ -1334,27 +1334,39 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             matched: true,
         });
     }
-    if let Some(rival) = rival.as_ref() {
+    if rival.is_some() {
+        preserve_unreviewed_local_text(tx, payload, key.as_ref(), envelope, search_policy)?;
         let key = key.as_ref().unwrap();
-        let marker = dohc_engine_collab::read_marker_in(tx, key)
-            .map_err(map_local_collab_error)?
-            .unwrap();
-        let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
-        let projection =
-            crate::project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
-        let owns_head = live.present().is_some_and(|head| {
-            head.content_kind == HeadContentKindV1::Text
-                && head.object_id == key.object_id
-                && marker.path.as_deref() == Some(payload.paths[live.path_ref()].as_str())
-                && (head.blob_sha256 == rival.result_sha
-                    || head.blob_sha256 == dohc_engine_storage::hex_sha256(projection.as_bytes()))
-        });
-        if owns_head {
-            preserve_unreviewed_local_text(tx, payload, Some(key), envelope, search_policy)?;
-            disposition = ImportedHeadDisposition::ReviewedSide;
-        } else {
-            disposition = ImportedHeadDisposition::Diverged;
+        let renamed: Option<String> = tx.query_row(
+            "SELECT s.path FROM snapshots s JOIN ydoc_docs d \
+             ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=d.path AND s.path<>?4",
+            params![key.workspace_id,key.version_id,key.object_id,payload.paths[payload.current.path_ref()]],
+            |row| row.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+        if let Some(path) = renamed {
+            for shadow in &validated.shadows {
+                crate::moment_apply::record_conflict_parent_shadow_in_tx(
+                    tx,
+                    &payload.workspace_id,
+                    shadow,
+                )?;
+            }
+            let mut review_payload = payload.clone();
+            let path_ref = intern_path(&mut review_payload.paths, &path);
+            let renamed_head = imported_live_head(tx, &review_payload, path_ref)?;
+            commit_imported_lineage(tx, payload, Some(key), envelope.recorded_at_ms)?;
+            tx.execute("UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id,key.version_id,key.object_id,path]).map_err(SyncError::persist)?;
+            let (review_id, inserted) =
+                open_divergent_result_review(tx, &review_payload, &renamed_head)?;
+            return Ok(ConflictApplyResult {
+                conflict_id: review_id,
+                inserted: Some(inserted),
+                matched: false,
+            });
         }
+        disposition = ImportedHeadDisposition::ReviewedSide;
     }
     if rival.is_none()
         && let (Some(key), Some(transition)) = (key.as_ref(), payload.lineage_transition.as_ref())
@@ -1895,8 +1907,7 @@ fn preflight_imported_lineage(
         if doc.has_pending_dependencies()
             || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
                 != successor.state_vector_blob_sha256
-            || dohc_engine_storage::hex_sha256(&doc.encode_full_state())
-                != successor.update_blob_sha256
+            || !matches_stored_lineage_state(tx, &doc, &successor.update_blob_sha256)?
         {
             return Err(SyncError::RetryableState {
                 reason: "ydoc-lineage-result-mismatch",
@@ -1969,18 +1980,17 @@ fn preflight_imported_lineage(
             reason: "ydoc-lineage-state-vector-changed",
         });
     }
-    if dohc_engine_storage::hex_sha256(&doc.encode_full_state())
-        != transition.predecessor_full_state_sha256
+    if dohc_engine_storage::hex_sha256(&doc.encode_delete_set())
+        != transition.predecessor_delete_set_sha256
     {
         return Err(SyncError::RetryableState {
-            reason: "ydoc-lineage-full-state-changed",
+            reason: "ydoc-lineage-delete-set-changed",
         });
     }
     Ok(())
 }
 
 struct RivalSuccessor {
-    result_sha: String,
     import_wins: bool,
     review_id: String,
     local_claim: String,
@@ -2053,10 +2063,6 @@ fn reviewed_rival_successor(
         return Ok(None);
     }
     Ok(Some(RivalSuccessor {
-        result_sha: local["transition"]["result"]["blobSha256"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
         import_wins: successor.lineage_claim_id < local_claim,
         review_id,
         local_claim,
@@ -2124,12 +2130,30 @@ fn reviewed_local_predecessor(
     };
     if deferred
         || doc.has_pending_dependencies()
-        || dohc_engine_storage::hex_sha256(&doc.encode_full_state()) != base_sha
+        || !matches_stored_lineage_state(tx, &doc, &base_sha)?
         || dohc_engine_storage::hex_sha256(&doc.encode_state_vector()) != vector_sha
     {
         return Ok(None);
     }
     Ok(Some((claim.clone(), vector_sha)))
+}
+
+fn matches_stored_lineage_state(
+    tx: &Transaction<'_>,
+    doc: &dohc_engine_collab::Ydoc,
+    base_sha: &str,
+) -> Result<bool, SyncError> {
+    let bytes: Vec<u8> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [base_sha],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let base = dohc_engine_collab::Ydoc::wire();
+    base.apply(&bytes).map_err(map_local_collab_error)?;
+    Ok(doc.encode_state_vector() == base.encode_state_vector()
+        && doc.encode_delete_set() == base.encode_delete_set())
 }
 
 fn imported_successor(
@@ -2665,8 +2689,8 @@ fn archive_conflicting_successor(
     tx.execute(
         "INSERT OR IGNORE INTO ydoc_inactive_lineages (workspace_id,version_id,object_id, \
          lineage_claim_id,parent_claim_id,disposition,content_kind,path,epoch_tag, \
-         full_state_blob_sha256,state_vector_blob_sha256,open_conflict_id,recorded_at_ms,updated_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,'conflicting-successor',?6,?7,?8,?9,?10,?11,?12,?12)",
+         full_state_blob_sha256,state_vector_blob_sha256,open_conflict_id,recorded_at_ms,updated_at_ms,last_surfaced_projection_sha256) \
+         VALUES (?1,?2,?3,?4,?5,'conflicting-successor',?6,?7,?8,?9,?10,?11,?12,?12,?13)",
         params![
             payload.workspace_id,
             payload.target_version_id,
@@ -2684,6 +2708,7 @@ fn archive_conflicting_successor(
             successor.state_vector_blob_sha256,
             review_conflict_id,
             now_ms,
+            successor.result_sha256,
         ],
     ).map_err(SyncError::persist)?;
     Ok(())
@@ -3179,8 +3204,8 @@ fn prepare_local_lineage_in_tx(
                 .lineage_claim_id
                 .clone()
                 .ok_or_else(|| corrupt_local("exact Y.Doc lineage is missing its claim ID"))?;
-            let predecessor_full_state_sha256 =
-                dohc_engine_storage::hex_sha256(&doc.encode_full_state());
+            let predecessor_delete_set_sha256 =
+                dohc_engine_storage::hex_sha256(&doc.encode_delete_set());
             let predecessor_state_vector = doc.encode_state_vector();
             let predecessor_state_vector_sha256 =
                 dohc_engine_storage::hex_sha256(&predecessor_state_vector);
@@ -3222,7 +3247,7 @@ fn prepare_local_lineage_in_tx(
                     key,
                     predecessor_claim_id,
                     predecessor_state_vector_sha256,
-                    predecessor_full_state_sha256,
+                    predecessor_delete_set_sha256,
                     path: payload.paths[result.path_ref].clone(),
                     successor,
                 })
@@ -3231,7 +3256,7 @@ fn prepare_local_lineage_in_tx(
                     key,
                     predecessor_claim_id,
                     predecessor_state_vector_sha256,
-                    predecessor_full_state_sha256,
+                    predecessor_delete_set_sha256,
                     artifact_preimage_sha256: current.blob_sha256.clone(),
                     last_surfaced_projection_sha256: (current.content_kind
                         == HeadContentKindV1::Text)
@@ -3247,13 +3272,13 @@ fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitio
         LocalLineagePlan::ExactSuccessor {
             predecessor_claim_id,
             predecessor_state_vector_sha256,
-            predecessor_full_state_sha256,
+            predecessor_delete_set_sha256,
             successor,
             ..
         } => Some(LineageTransitionV1 {
             predecessor_claim_id: predecessor_claim_id.clone(),
             predecessor_state_vector_sha256: predecessor_state_vector_sha256.clone(),
-            predecessor_full_state_sha256: predecessor_full_state_sha256.clone(),
+            predecessor_delete_set_sha256: predecessor_delete_set_sha256.clone(),
             artifact_preimage_sha256: successor.artifact_preimage_sha256.clone(),
             successor: Some(SuccessorV1 {
                 lineage_claim_id: successor.lineage_claim_id.clone(),
@@ -3271,13 +3296,13 @@ fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitio
         LocalLineagePlan::ExactArchive {
             predecessor_claim_id,
             predecessor_state_vector_sha256,
-            predecessor_full_state_sha256,
+            predecessor_delete_set_sha256,
             artifact_preimage_sha256,
             ..
         } => Some(LineageTransitionV1 {
             predecessor_claim_id: predecessor_claim_id.clone(),
             predecessor_state_vector_sha256: predecessor_state_vector_sha256.clone(),
-            predecessor_full_state_sha256: predecessor_full_state_sha256.clone(),
+            predecessor_delete_set_sha256: predecessor_delete_set_sha256.clone(),
             artifact_preimage_sha256: artifact_preimage_sha256.clone(),
             successor: None,
         }),
@@ -4037,7 +4062,7 @@ mod tests {
             "lineageTransition": {
                 "predecessorClaimId": "a".repeat(64),
                 "predecessorStateVectorSha256": "b".repeat(64),
-                "predecessorFullStateSha256": "c".repeat(64),
+                "predecessorDeleteSetSha256": "c".repeat(64),
                 "artifactPreimageSha256": artifact_preimage_sha,
                 "successor": {
                     "lineageClaimId": successor_sha,
@@ -4172,8 +4197,8 @@ mod tests {
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id,
                 predecessor_state_vector_sha256,
-                predecessor_full_state_sha256: dohc_engine_storage::hex_sha256(
-                    &predecessor.encode_full_state(),
+                predecessor_delete_set_sha256: dohc_engine_storage::hex_sha256(
+                    &predecessor.encode_delete_set(),
                 ),
                 artifact_preimage_sha256: current_sha,
                 successor: Some(SuccessorV1 {
@@ -5311,6 +5336,170 @@ mod tests {
     }
 
     #[test]
+    fn inactive_updates_queue_as_rows_and_compact_once_per_batch() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let active = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let active_claim = active.marker.lineage_claim_id.unwrap();
+        let state_sha = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages WHERE lineage_claim_id=?1",
+            [&claim], |row| row.get::<_, String>(0),
+        )
+                })
+                .unwrap()
+        };
+        for batch in 0..2 {
+            let before = state_sha(&store);
+            for index in 0..12 {
+                let update = old.doc.plaintext_insert(0, "late ");
+                let sha = store.put_binary_blob(&update).unwrap();
+                let seq = batch * 12 + index;
+                let op = ReplicationEnvelope {
+                    workspace_id: "ws".into(),
+                    origin_id: "batch-archive".into(),
+                    origin_seq: seq,
+                    relay_seq: Some(100 + seq),
+                    op_kind: "ydoc.update".into(),
+                    recorded_at_ms: 30 + seq,
+                    payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                        "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+                };
+                crate::router::apply_replication_envelope_in_batch(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &op,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                    true,
+                )
+                .unwrap();
+                let active_update = active.doc.plaintext_insert(0, "active ");
+                let active_sha = store.put_binary_blob(&active_update).unwrap();
+                let mut interleaved = op.clone();
+                interleaved.origin_id = "interleaved-active".into();
+                interleaved.payload["lineageClaimId"] = json!(active_claim);
+                interleaved.payload["updateBlobSha256"] = json!(active_sha);
+                crate::router::apply_replication_envelope_in_batch(
+                    &mut store,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &interleaved,
+                    &NoFaults,
+                    &crate::NoLiveLeases,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    state_sha(&store),
+                    before,
+                    "admission must only append queue rows"
+                );
+            }
+            let queued: i64 = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            assert_eq!(queued, 12);
+            assert!(
+                crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                    .unwrap()
+                    .is_empty()
+            );
+            let (queued, recovery_moments, text): (i64,i64,String) = store.read_with(|conn| Ok::<_,rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM moments WHERE object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
+                conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'", [], |row| row.get(0))?,
+            ))).unwrap();
+            assert_eq!(queued, 0);
+            assert_eq!(recovery_moments, batch + 1);
+            assert_eq!(text, old.doc.plaintext_string());
+            if batch > 0 {
+                assert!(
+                    store.get_binary_blob(&before).unwrap().is_none(),
+                    "replaced compacted state must be collected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_last_archive_update_does_not_hide_an_oversized_projection_refusal() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let old = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let claim = old.marker.lineage_claim_id.unwrap();
+        let mut poison = old.doc.encode_full_state();
+        let offset = poison
+            .windows(12)
+            .position(|bytes| bytes == b"current text")
+            .unwrap();
+        poison[offset..offset + 12].copy_from_slice(b"corrupt text");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let oversized = old
+            .doc
+            .plaintext_insert(0, &"x".repeat(dohc_engine_domain::MAX_TEXT_BYTES));
+        for (seq, bytes) in [oversized, poison].into_iter().enumerate() {
+            let sha = store.put_binary_blob(&bytes).unwrap();
+            let op = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: "archive-rejections".into(),
+                origin_seq: seq as i64,
+                relay_seq: Some(100 + seq as i64),
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 30 + seq as i64,
+                payload: json!({"versionId":"main","objectId":"object-a","path":"doc.md","contentKind":"plaintext",
+                    "updateBlobSha256":sha,"lineageClaimId":claim,"isBaseState":false}),
+            };
+            crate::router::apply_replication_envelope_in_batch(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                true,
+            )
+            .unwrap();
+        }
+        let refusals =
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults).unwrap();
+        assert_eq!(refusals.len(), 2);
+        assert_eq!(refusals[0].origin_seq, 0);
+        assert_eq!(refusals[1].origin_seq, 1);
+        assert!(refusals[1].reason.message().contains("replay validation"));
+        assert!(
+            crate::ydoc_apply::drain_inactive_ydoc_updates(&mut store, "ws", &NoFaults)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn oversized_inactive_updates_are_retained_and_refused_without_blocking_later_edits() {
         for deferred in [false, true] {
             let (_scratch, mut store, key, built) = receiver_fixture();
@@ -5403,6 +5592,64 @@ mod tests {
                 "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id LIKE 'ydoc-recovery-object-%'",[],|row| row.get(0))).unwrap();
             assert_eq!(recovered, "after limit current text");
         }
+    }
+
+    #[test]
+    fn oversized_active_content_refuses_resolution_and_acknowledges_replay() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let doc = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        let update = doc.plaintext_insert(
+            0,
+            &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES),
+        );
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            20,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .unwrap();
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Refused(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", "peer").unwrap(),
+            0
+        );
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .plaintext_string(),
+            doc.plaintext_string()
+        );
+        let replay = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(replay.primary, crate::ApplyDisposition::Skipped));
     }
 
     #[test]
@@ -6376,7 +6623,7 @@ mod tests {
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),
-                predecessor_full_state_sha256: "e".repeat(64),
+                predecessor_delete_set_sha256: "e".repeat(64),
                 artifact_preimage_sha256: current_sha,
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor_sha.clone(),

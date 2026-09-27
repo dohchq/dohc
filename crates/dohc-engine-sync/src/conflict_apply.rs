@@ -62,6 +62,18 @@ pub fn apply_conflict_envelope(
                     search_policy.as_ref(),
                     leases,
                 )
+                .map_err(|error| match error {
+                    SyncError::ProjectionTooLarge {
+                        constraint,
+                        actual_bytes,
+                        limit_bytes,
+                    } => SyncError::InputTooLarge {
+                        constraint,
+                        observed_bytes: actual_bytes,
+                        limit_bytes,
+                    },
+                    error => error,
+                })
             }
             _ => Err(SyncError::UnsupportedOperation),
         }

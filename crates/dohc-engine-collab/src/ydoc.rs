@@ -794,6 +794,11 @@ impl Ydoc {
         encode_state_vector_canonical(&txn.state_vector())
     }
 
+    /// The normalized deleted clock ranges, ordered by client and clock.
+    pub fn encode_delete_set(&self) -> Vec<u8> {
+        self.doc.transact().snapshot().delete_set.encode_v1()
+    }
+
     /// The v1 update carrying everything this doc has that `remote_sv` lacks
     /// (the sync-by-diff primitive).
     pub fn diff(&self, remote_sv: &[u8]) -> Result<Vec<u8>, CollabError> {
@@ -5644,6 +5649,55 @@ mod projection_tests {
                 .expect("scene projection")
                 .content
         );
+    }
+
+    #[test]
+    fn batch_gate_rejects_clock_redefinition_and_continues_with_valid_edits() {
+        let source = Ydoc::with_client_id(41);
+        let first = source.plaintext_insert(0, "hello");
+        let second = source.plaintext_insert(5, " world");
+        let poison = Ydoc::with_client_id(41).plaintext_insert(0, "wrong");
+        let deletion = source.plaintext_delete(0, 1);
+        let crate::ReplayBatch {
+            doc: target,
+            outcomes: result,
+        } = crate::apply_replay_validated_batch(
+            &Ydoc::wire().encode_full_state(),
+            &[first, poison, second, deletion],
+        )
+        .unwrap();
+        assert!(result[0].is_ok());
+        assert!(result[1].is_err());
+        assert!(result[2].is_ok());
+        assert!(result[3].is_ok());
+        assert_eq!(target.plaintext_string(), source.plaintext_string());
+        assert_eq!(target.encode_state_vector(), source.encode_state_vector());
+        assert_eq!(target.encode_delete_set(), source.encode_delete_set());
+    }
+
+    #[test]
+    fn delete_set_provenance_is_canonical_across_apply_order_and_gc() {
+        let first = Ydoc::with_client_id(1);
+        let second = Ydoc::with_client_id(9);
+        let a = first.plaintext_insert(0, "first");
+        let b = second.plaintext_insert(0, "second");
+        let da = first.plaintext_delete(0, 2);
+        let db = second.plaintext_delete(1, 2);
+        let forward = Ydoc::wire();
+        let reverse = Ydoc::wire();
+        for update in [&a, &b, &da, &db] {
+            forward.apply(update).unwrap();
+        }
+        for update in [&db, &da, &b, &a] {
+            reverse.apply(update).unwrap();
+        }
+        reverse.doc.transact_mut().gc(None);
+        assert_eq!(forward.encode_state_vector(), reverse.encode_state_vector());
+        assert_eq!(forward.encode_delete_set(), reverse.encode_delete_set());
+        let before = forward.encode_delete_set();
+        forward.plaintext_delete(0, 1);
+        assert_eq!(forward.encode_state_vector(), reverse.encode_state_vector());
+        assert_ne!(before, forward.encode_delete_set());
     }
 
     #[test]

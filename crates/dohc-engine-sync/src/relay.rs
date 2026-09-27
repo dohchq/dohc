@@ -1328,7 +1328,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut completed = Vec::new();
         let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
-            let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
+            if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                    .map_err(local)?;
+            }
+            let routed = crate::router::apply_replication_envelope_in_batch(
+                store, cache, op, faults, leases, true,
+            );
             match routed {
                 Err(SyncError::RetryableState { reason }) => {
                     if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
@@ -1365,7 +1371,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut still_deferred_origins = durable_origins.clone();
             let mut made_progress = false;
             for op in retryable {
-                let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
+                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                        .map_err(local)?;
+                }
+                let routed = crate::router::apply_replication_envelope_in_batch(
+                    store, cache, op, faults, leases, true,
+                );
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
@@ -1415,6 +1427,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             retryable = still_retryable;
         }
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+            .map_err(local)?;
         let mut settlements = match crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
@@ -5070,7 +5084,7 @@ mod conflict_resolve_blob_ref_tests {
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(
                     b"predecessor state vector",
                 ),
-                predecessor_full_state_sha256: dohc_engine_storage::hex_sha256(
+                predecessor_delete_set_sha256: dohc_engine_storage::hex_sha256(
                     b"predecessor full state",
                 ),
                 artifact_preimage_sha256: text_sha.clone(),
