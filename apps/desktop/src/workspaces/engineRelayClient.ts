@@ -216,6 +216,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
 export class RelayConfiguredDaemonClientSource
   implements EngineDaemonClientSource
 {
+  readonly onClientChanged?: EngineDaemonClientSource["onClientChanged"];
   private readonly wrappers = new WeakMap<
     EngineDaemonClient,
     RelayConfiguredDaemonClient
@@ -224,7 +225,9 @@ export class RelayConfiguredDaemonClientSource
   constructor(
     private readonly source: EngineDaemonClientSource,
     private readonly routes: RelayTransportRouteGuard,
-  ) {}
+  ) {
+    if (source.onClientChanged) this.onClientChanged = source.onClientChanged.bind(source);
+  }
 
   currentClient(): EngineDaemonClient {
     const client = this.source.currentClient();
