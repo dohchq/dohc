@@ -175,13 +175,13 @@ describe("Explorer render cost", () => {
     render(<Explorer {...explorerProps()} />);
     const baseline = basenameOfCalls();
 
-    // First selection: only b.md gains selected + focused flags.
+    // First selection: a.md loses the tab stop; b.md gains selection and focus.
     fireEvent.click(rowButton("b.md"));
-    expect(basenameOfCalls()).toBe(baseline + 1);
+    expect(basenameOfCalls()).toBe(baseline + 2);
 
     // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
-    expect(basenameOfCalls()).toBe(baseline + 3);
+    expect(basenameOfCalls()).toBe(baseline + 4);
   });
 
   it("mounts only a bounded window for a large tree", () => {
@@ -354,8 +354,8 @@ describe("Explorer render cost", () => {
       />,
     );
 
-    const first = rowButton("file-0000.md");
-    fireEvent.dragStart(first, {
+    const origin = rowButton("file-0001.md");
+    fireEvent.dragStart(origin, {
       dataTransfer: { effectAllowed: "none", setData: vi.fn() },
     });
 
@@ -391,13 +391,13 @@ describe("Explorer render cost", () => {
     });
     fireEvent.scroll(container);
 
-    expect(document.body.contains(first)).toBe(true);
-    fireEvent.dragEnd(first);
+    expect(document.body.contains(origin)).toBe(true);
+    fireEvent.dragEnd(origin);
     await waitFor(() => {
       expect(
         screen
           .queryAllByTestId("tree-row")
-          .some((row) => row.dataset.path === "file-0000.md"),
+          .some((row) => row.dataset.path === "file-0001.md"),
       ).toBe(false);
     });
   });
