@@ -372,7 +372,7 @@ describe("a dataset table's ⚡ panel", () => {
   const onRefunds: Automation = { ...nudge, id: "refund", name: "Log refunds", when: { kind: "record-added", table: "Refunds" } };
   const anyTable: Automation = { ...nudge, id: "any", name: "Any table" };
   const file = read([summary(onInvoices), summary(onRefunds), summary(anyTable)]);
-  const INVOICES: AutomationTable = { name: "Invoices", operations: new Set(["invoices.create", "invoices.edit"]), tables: new Set(["Invoices", "Refunds"]) };
+  const INVOICES: AutomationTable = { name: "Invoices", operations: new Set(["invoices.create", "invoices.edit"]), tables: new Set(["Invoices", "Refunds"]), actions: [] };
   const REFUNDS: AutomationTable = { ...INVOICES, name: "Refunds" };
 
   it("lists and counts the automations that watch this table or name none, and saves the whole file", async () => {
@@ -415,6 +415,78 @@ describe("a dataset table's ⚡ panel", () => {
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     expect(written[0]!.automations).toEqual([onRefunds, expect.objectContaining({ when: { kind: "record-added", table: "Invoices" } })]);
     expect(bridge.listAutomationTargets).not.toHaveBeenCalled();
+  });
+
+  it("runs an action on the record, with its id as input, says it can't be undone, and saves the step", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }, { name: "invoices.remind", label: "Remind", table: "Invoices", reversible: false }] };
+    const { written } = makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.click(screen.getByRole("button", { name: "Run an action" }));
+    const picker = screen.getByRole("combobox", { name: "Step 2, action" });
+    expect(document.activeElement).toBe(picker);
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Settle", "Remind"]);
+    expect(screen.getByText("Settle can't be undone.")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Step 2, input 1 name" }) as HTMLInputElement).value).toBe("id");
+    await user.selectOptions(picker, "invoices.remind");
+    await user.click(screen.getByRole("button", { name: "Add input" }));
+    // A name the step already has, and an empty one, are problems to fix before Save.
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Name this input.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 2, input 2 name" }), "id");
+    expect(await screen.findByText("id is in this step twice.")).toBeTruthy();
+    await user.clear(screen.getByRole("textbox", { name: "Step 2, input 2 name" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 2, input 2 name" }), "note");
+    await user.type(screen.getByRole("textbox", { name: "Step 2, note" }), "Due soon");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[1]).toEqual({ kind: "invoke", operation: "invoices.remind", input: [
+      { key: "id", value: { kind: "formula", expression: "record.id" } },
+      { key: "note", value: { kind: "literal", value: "Due soon" } },
+    ] });
+  }, 30_000);
+
+  it("keeps a saved action input's number as the file wrote it, shows it as its formula, and keeps a typed today() in view", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [{ name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false }] };
+    const saved: Automation = { ...onInvoices, id: "settle", name: "Settle it", do: [{ kind: "invoke", operation: "invoices.settle", input: [
+      { key: "amount", value: { kind: "literal", value: 12 } },
+      { key: "due", value: { kind: "formula", expression: "today()" } },
+    ] }] };
+    const { written } = makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Settle it" }));
+    expect((screen.getByRole("combobox", { name: "Step 1, amount, kind" }) as HTMLSelectElement).value).toBe("formula");
+    expect((screen.getByRole("textbox", { name: "Step 1, amount, formula" }) as HTMLInputElement).value).toBe("12");
+    expect((screen.getByRole("textbox", { name: "Step 1, due, formula" }) as HTMLInputElement).value).toBe("today()");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), " now");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do).toEqual(saved.do);
+  }, 30_000);
+
+  it("shows the label and the can't be undone line for another table's action a step runs, and offers only this table's", async () => {
+    const withActions: AutomationTable = { ...INVOICES, actions: [
+      { name: "invoices.settle", label: "Settle", table: "Invoices", reversible: false },
+      { name: "refunds.issue", label: "Issue refund", table: "Refunds", reversible: false },
+    ] };
+    const saved: Automation = { ...onInvoices, id: "refund", name: "Refund it", do: [{ kind: "invoke", operation: "refunds.issue", input: [] }] };
+    makeBridge(read([summary(saved)]));
+    const user = userEvent.setup();
+    render(<Panel table={withActions} />);
+    await user.click(await screen.findByRole("button", { name: "Refund it" }));
+    const picker = screen.getByRole("combobox", { name: "Step 1, action" });
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual(["Settle", "Issue refund (Refunds)"]);
+    expect(screen.getByText("Issue refund can't be undone.")).toBeTruthy();
+  }, 30_000);
+
+  it("offers no action step on a table without actions", async () => {
+    makeBridge(read([]));
+    const user = userEvent.setup();
+    render(<Panel table={INVOICES} />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    expect(screen.queryByRole("button", { name: "Run an action" })).toBeNull();
   });
 
   it("leaves an Add record that adds to another table as the file wrote it", async () => {

@@ -4673,7 +4673,8 @@ const PressedButton = {
 };
 export const PressAutomationButtonPayload = z.union([
   z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
-  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+  // `confirmed` holds the operation names of the actions the person was told can't be undone and chose to run.
+  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256), confirmed: z.array(z.string().max(256)).max(64).optional() }),
 ]);
 export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
 export type PressAutomationButtonResult =
