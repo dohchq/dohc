@@ -993,6 +993,19 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn chat_dispatch_latest_run_for_thread(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+    ) -> Result<Option<AgentRunRecord>, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .latest_run_for_thread(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn chat_dispatch_get_run_record(
         &self,
         workspace_id: String,

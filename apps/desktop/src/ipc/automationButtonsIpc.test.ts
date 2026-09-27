@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
-import type { CollectionAutomations } from "../automations/collectionAutomations";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 import { createPressWindows, registerAutomationButtonsIpc } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
 

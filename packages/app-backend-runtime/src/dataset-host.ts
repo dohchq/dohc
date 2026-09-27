@@ -53,15 +53,16 @@ export interface DatasetAuthority {
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
   /**
-   * Set only when an automation writes, with the depth its write declares.
-   * Attribution that grants nothing: it requires the owner caller, and owner
-   * administration refuses it.
+   * The chain depth an automation caller's writes declare, one more than the
+   * change that started its run. Required for that caller, refused for any
+   * other.
    */
-  automation?: { automationId: string; depth: number };
+  chainDepth?: number;
   /**
    * Set only when the owner's agent writes in a run an automation started,
    * with the chain depth the run's writes declare. Attribution that grants
-   * nothing, like `automation`.
+   * nothing: it requires the owner caller, and owner administration refuses
+   * it.
    */
   agent?: { depth: number };
 }
@@ -140,10 +141,13 @@ function synchronous<T>(run: () => T): T {
   return result;
 }
 function denied(): never { throw new DatasetHostError("not_authorized", "You do not have access to this Collection."); }
-function automation(value: DatasetAuthority["automation"], caller: AppBackendCaller): DatasetAuthority["automation"] {
-  if (value === undefined) return undefined;
-  if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 1 || value.depth > DATASET_AUTOMATION_CHAIN_DEPTH) denied();
-  return { automationId: text(value.automationId, 1024), depth: value.depth };
+function chainDepth(value: number | undefined, caller: AppBackendCaller): number | undefined {
+  if (caller.kind !== "automation") {
+    if (value !== undefined) denied();
+    return undefined;
+  }
+  if (value === undefined || !Number.isSafeInteger(value) || value < 1 || value > DATASET_AUTOMATION_CHAIN_DEPTH) denied();
+  return value;
 }
 /** The engine's bound on any declared chain depth. The chain stops well before it. */
 const MAX_DECLARED_DEPTH = 64;
@@ -154,7 +158,7 @@ function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): Data
 }
 /** Who made a commit, from the authority the host derived. */
 function actor(authority: DatasetAuthority): DatasetActor {
-  if (authority.automation) return { kind: "automation", ...authority.automation };
+  if (authority.caller.kind === "automation") return { kind: "automation", automationId: authority.caller.automationId, depth: authority.chainDepth! };
   if (authority.agent) return { kind: "agent", depth: authority.agent.depth };
   const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
   if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
@@ -225,13 +229,15 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
       authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
-      automation: automation(result.automation, caller), agent: agent(result.agent, caller) };
+      chainDepth: chainDepth(result.chainDepth, caller), agent: agent(result.agent, caller) };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
+    // An automation acts for its Collection, never as an app.
+    if (caller.kind === "automation" && through.kind !== "data") denied();
     return verified;
   }
   function owner(context: Context, key: { workspaceId: string; datasetId?: string }): DatasetAuthority {
     const result = authority(context, key, { kind: "data" });
-    if (result.caller.kind !== "owner" || result.automation || result.agent) denied();
+    if (result.caller.kind !== "owner" || result.agent) denied();
     return result;
   }
   function revision(key: DatasetScope): DatasetRevision {
@@ -266,6 +272,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = authority(context, key, through), approved = revision(key);
     const state = lifecycle(key);
     if (state.archived && !(includeArchived && verified.caller.kind === "owner" && through.kind === "data")) throw new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it.");
+    // The owner and an automation start from every approved operation. An
+    // automation's run checks its reach (ADR 0012) before it invokes one.
     let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"];
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
@@ -287,7 +295,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
       createFields = binding.createFields;
-    } else if (verified.caller.kind !== "owner") {
+    } else if (verified.caller.kind !== "owner" && verified.caller.kind !== "automation") {
       const row = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
       if (!row) denied();
       const grant = currentGrant(key,JSON.parse(String(row.grant_json)), approved);

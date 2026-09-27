@@ -6,7 +6,7 @@ import {
   SHARE_ACCESS_VALUES,
 } from "@dohc/security-contract/share-selector";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { ReachRoster, RosterGrant, RosterProblem } from "./automationReach";
+import type { ReachRoster, RosterGrant, RosterProblem } from "@dohc/automation-executor/automation-reach";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
 // last listed them. Grants live only on the relay, and the reach check

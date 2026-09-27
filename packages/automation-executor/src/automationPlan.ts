@@ -13,7 +13,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { automationTextParts, type Automation, type AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord, CollectionValue } from "@dohc/workspace-contracts/collection";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId } from "./recordIds";
 import type { ReachCollection, ReachStep } from "./automationReach";
 import {
   automationMessageId,
@@ -296,6 +296,7 @@ export function operationsOf(automation: Automation): string[] {
   const names = new Set<string>();
   for (const { step } of everyStep(orderSteps(automation.do))) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) names.add(step.operation);
+    if (step.kind === "invoke") names.add(step.operation);
   }
   return [...names];
 }
@@ -313,6 +314,7 @@ export function unsupportedReason(automation: Automation): string | null {
   if ("table" in automation.when && automation.when.table !== null) return DATASET;
   for (const { step } of stepsInOrder(automation)) {
     if ((step.kind === "set" || step.kind === "add-record" || step.kind === "find") && step.operation !== null) return DATASET;
+    if (step.kind === "invoke") return DATASET;
   }
   return shapeProblem(automation, (condition) => {
     const query = findQueryOf(condition);
@@ -346,6 +348,9 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
       case "run":
       case "run-file":
         return "dohc cannot run code steps yet.";
+      case "invoke":
+        formulas += step.input.filter((entry) => isFormula(entry.value)).length;
+        break;
       case "find": {
         finds += 1;
         formulas += 1;
@@ -579,6 +584,8 @@ export function fieldWritesOf(automation: Automation): Array<{ collection: strin
     } else if (step.kind === "add-record") {
       for (const { field } of step.values) writes.push({ collection: step.collection, field });
     }
+    // An invoke step runs an action, whose code decides which fields it
+    // changes, so it names none here and the ⚡ marks show none for it.
   }
   return writes;
 }
@@ -607,6 +614,11 @@ function jsonValue(value: CollectionValue): JsonValue {
 /** A record as formulas and the plan read it. */
 export interface RunRecord {
   id: string;
+  /**
+   * A dataset record's primary key as its operations take it, which formulas
+   * read as `record.id`: a number stays a number. Absent for a document.
+   */
+  key?: string | number;
   path: string;
   values: JsonObject;
 }
@@ -617,7 +629,7 @@ export function runRecordOf(record: CollectionRecord): RunRecord {
   return { id: record.id, path: record.path, values };
 }
 
-const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.id });
+const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.key ?? record.id });
 
 /**
  * `ms` as ISO 8601 with its UTC offset: on this computer's clock, or in
@@ -688,6 +700,12 @@ export interface RunInputs {
   chat: ChatDirectory | null;
   /** The person who pressed the button, or null for a change. */
   person: AutomationScope["person"];
+  /**
+   * The only keys of the trigger record formulas may read, when the run could
+   * not read the record's fields. A formula that reads another stops with an
+   * error instead of reading nothing.
+   */
+  recordKeys?: string[];
 }
 
 /**
@@ -741,6 +759,8 @@ type Slot =
   | { kind: "value"; ordinal: number; field: string }
   // One answer per record a Find returned, in order.
   | { kind: "values"; ordinal: number; field: string }
+  // One key of an action's input.
+  | { kind: "input"; ordinal: number; key: string }
   | { kind: "text"; ordinal: number }
   // A direct message's person that a formula names.
   | { kind: "person"; ordinal: number; index: number };
@@ -828,6 +848,10 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
           });
         }
       }
+      if (step.kind === "invoke") {
+        for (const { key, value } of step.input) if (isFormula(value)) add({ kind: "input", ordinal, key }, value.expression, when);
+        continue;
+      }
       if (step.kind !== "set" && step.kind !== "add-record") continue;
       const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
         ? step.records
@@ -878,6 +902,7 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
     person: person ?? author,
     bindings: bound,
     now: localIsoTime(nowMs),
+    ...(inputs.recordKeys ? { recordKeys: inputs.recordKeys } : {}),
   };
   return { scope, formulas, slots };
 }
@@ -930,7 +955,9 @@ export type PlannedEffect =
       name: string;
       /** A formula named the person, so their reach is checked once the plan names them. */
       byFormula?: boolean;
-    };
+    }
+  /** A dataset action to run, by name, with its input as the formulas gave it. */
+  | { kind: "invoke"; operation: string; input: JsonObject };
 
 export interface PlannedStep {
   ordinal: number;
@@ -959,6 +986,8 @@ function slotSubject(slot: Slot): string {
       return `The message in step ${slot.ordinal + 1}`;
     case "person":
       return `The person in step ${slot.ordinal + 1}`;
+    case "input":
+      return `The input "${slot.key}" in step ${slot.ordinal + 1}`;
     default:
       return `The formula for "${slot.field}" in step ${slot.ordinal + 1}`;
   }
@@ -1047,6 +1076,8 @@ export function planRun(
         return `${slot.kind}:${slot.ordinal}`;
       case "person":
         return `person:${slot.ordinal}:${slot.index}`;
+      case "input":
+        return `input:${slot.ordinal}:${slot.key}`;
       default:
         return slot.kind;
     }
@@ -1205,6 +1236,12 @@ export function planRun(
           }
         }
         planned.push({ ordinal, effects });
+        continue;
+      }
+      if (step.kind === "invoke") {
+        const input: JsonObject = {};
+        for (const { key: name, value } of step.input) input[name] = isFormula(value) ? (answers.get(`input:${ordinal}:${name}`) ?? null) : value.value;
+        planned.push({ ordinal, effects: [{ kind: "invoke", operation: step.operation, input }] });
         continue;
       }
       if (step.kind === "add-record") {

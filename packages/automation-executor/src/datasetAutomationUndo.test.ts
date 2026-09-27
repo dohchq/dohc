@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
-import type { LocalDatasetInvocation } from "../workspaces/localDatasetHost";
+import type { DatasetInvocation } from "./datasetAutomationRun";
 import { AppBackendRuntimeError, type JsonValue } from "@dohc/app-backend-runtime";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { RunWrite, StoredRun } from "./automationRunStore";
@@ -45,12 +45,12 @@ describe("undo of a dataset run", () => {
   });
 
   it("sends a reversible edit back with the values it replaced under the same key each time, and leaves an edit the rules do not let it undo", async () => {
-    const sent: LocalDatasetInvocation[] = [];
+    const sent: DatasetInvocation[] = [];
     const host = {
-      invokeAsOwner: async (input: LocalDatasetInvocation) => { sent.push(input); return { result: { id: "a", version: 3, priorValues: { [STATUS]: "Closed" } }, revision: 9, replayed: false }; },
+      invokeAsOwner: async (input: DatasetInvocation) => { sent.push(input); return { result: { id: "a", version: 3, priorValues: { [STATUS]: "Closed" } }, revision: 9, replayed: false }; },
       revision: () => revision, resolves: () => true,
     };
-    const undone = { reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 0 };
+    const undone = { reverted: 1, removed: 0, kept: 1, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
     expect(await undo(host, [run(EDIT)])).toEqual(undone);
     expect(sent).toEqual([expect.objectContaining({ operationId: EDIT, input: { id: "a", expectedVersion: 2, values: { [STATUS]: "Open" } }, idempotencyKey: expect.stringMatching(/^u\.[0-9a-f]{64}$/) })]);
     // An Undo that stopped part way sends the same content under the same key, so the dataset replays its receipt.
@@ -66,7 +66,7 @@ describe("undo of a dataset run", () => {
   function recordsHost(records: Record<string, { version: number; values: Record<string, JsonValue> }>) {
     const receipts = new Map<string, DatasetInvocationResult>();
     const writes: Array<Record<string, JsonValue>> = [];
-    const invokeAsOwner = async ({ operationId, input, idempotencyKey }: LocalDatasetInvocation): Promise<DatasetInvocationResult> => {
+    const invokeAsOwner = async ({ operationId, input, idempotencyKey }: DatasetInvocation): Promise<DatasetInvocationResult> => {
       if (operationId === READ) {
         const wanted = String((input as { after: { value: string } }).after.value);
         return { result: { rows: [{ id: wanted, ...structuredClone(records[wanted]!) }], nextCursor: null }, revision: 9, replayed: false };
@@ -88,7 +88,7 @@ describe("undo of a dataset run", () => {
   const edit = (operationId: string, recordId: string, fieldId: string, before: string, after: string, version: number): RunWrite =>
     ({ kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId, version, fields: [{ fieldId, field: "Field", before, after }] });
   const runOf = (keySeed: string, startedAtMs: number, writes: RunWrite[]): StoredRun => ({ ...run(EDIT), keySeed, startedAtMs, applied: [{ ordinal: 0, writes }] });
-  const none = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0 };
+  const none = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
 
   it("keeps a field someone changed after the runs' last write to it, even where it matches an earlier write", async () => {
     // The runs wrote Open → Paid → Closed. Someone then set it back to Paid.

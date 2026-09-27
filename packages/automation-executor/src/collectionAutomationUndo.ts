@@ -2,9 +2,8 @@ import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import { setCollectionRecordFields, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { StoredRun } from "./automationRunStore";
-import type { CollectionAutomationReads } from "./collectionAutomationRun";
+import type { CollectionAutomationReads, CollectionRecordWrites } from "./collectionAutomationRun";
 
 // Undo for one run of a Collection automation (AGENTS.md: every reversible
 // change gets a way back). A field goes back to what it held before the run
@@ -30,12 +29,14 @@ export interface CollectionAutomationUndone {
   missing: number;
   /** Fields a dataset edit changed whose rules do not let it be undone. */
   irreversible: number;
+  /** Dataset actions the runs ran. Their changes stay: dohc cannot reverse what an action did. */
+  actions: number;
 }
 
 export interface CollectionAutomationUndoDependencies {
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
-  withRecordWrites<T>(signal: AbortSignal, work: (context: CollectionRecordEditContext) => Promise<T>): Promise<T>;
+  withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
   /** Moves a file to the trash the way a person's delete does. */
   trash(path: string): Promise<void>;
 }
@@ -102,7 +103,7 @@ export async function undoCollectionAutomationRuns(
   signal: AbortSignal,
 ): Promise<CollectionAutomationUndone> {
   const { added, records } = changesOf(runs);
-  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0 };
+  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;
@@ -114,7 +115,7 @@ export async function undoCollectionAutomationRuns(
       continue;
     }
     const result = await dependencies.withRecordWrites(signal, (edit) =>
-      setCollectionRecordFields(edit, {
+      edit.setFields({
         recordPath: path,
         fields: Object.fromEntries(fields.map(([field, { before }]) => [field, before])),
         // Only a field that still holds what the run wrote goes back.

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { JsonValue } from "@dohc/app-backend-runtime";
+import { AppBackendRuntimeError, type JsonValue } from "@dohc/app-backend-runtime";
 import type { DatasetAutomationClaim, DatasetChangeClaimFact } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { AutomationScope } from "@dohc/app-backend-runtime/automation";
-import { NoticeNotSentError } from "../notices/noticeStore";
-import type { LocalDatasetAutomationContext, LocalDatasetInvocation } from "../workspaces/localDatasetHost";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, testMetadataDir } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   AutomationChatSessionWait,
@@ -16,6 +14,7 @@ import {
   automationThreadId,
   automationWakeThreadId,
   chatDirectoryOf,
+  NoticeNotSentError,
   type AutomationChatMessage,
   type AutomationNotice,
   type ChatDirectoryChannel,
@@ -24,7 +23,25 @@ import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore } from "./automationRunStore";
 import { datasetEffectKey } from "./datasetAutomationPlan";
-import { ACCESS_NARROWED_ERROR, RULES_CHANGED_ERROR, runDatasetAutomation, type DatasetRunHost } from "./datasetAutomationRun";
+import {
+  ACCESS_NARROWED_ERROR,
+  type DatasetAutomationRunDependencies,
+  type DatasetAutomationRunInput,
+  RULES_CHANGED_ERROR,
+  runDatasetAutomation,
+  type DatasetAutomationContext,
+  type DatasetInvocation,
+  type DatasetRunHost,
+} from "./datasetAutomationRun";
+
+// A run checks reach again before each record effect, against the roster
+// last read. Unless a test changes it, that is the roster the run began with.
+function runWithRoster(
+  dependencies: Omit<DatasetAutomationRunDependencies, "cachedRoster"> & Partial<Pick<DatasetAutomationRunDependencies, "cachedRoster">>,
+  input: DatasetAutomationRunInput,
+) {
+  return runDatasetAutomation({ cachedRoster: async () => input.roster, ...dependencies }, input);
+}
 
 // A dataset run against a scripted host: what it sends, under which key,
 // and what it does when the approved rules change under a saved plan.
@@ -71,10 +88,10 @@ const sendsNothing = {
   recipientVerdicts: async () => { throw new Error("This automation names nobody by formula."); },
 };
 
-function host(script: { resolves: () => boolean; edit: (input: LocalDatasetInvocation) => Promise<JsonValue> }) {
-  const sent: LocalDatasetInvocation[] = [];
+function host(script: { resolves: () => boolean; edit: (input: DatasetInvocation) => Promise<JsonValue> }) {
+  const sent: DatasetInvocation[] = [];
   const surface: DatasetRunHost = {
-    context: (input) => Object.freeze({ ...input }) satisfies LocalDatasetAutomationContext,
+    context: (input) => Object.freeze({ ...input }) satisfies DatasetAutomationContext,
     revision: () => revision,
     generated: () => true,
     dataGrants: () => ({ workspaceId: "workspace", grants: [] }),
@@ -114,7 +131,7 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
 
 describe("a dataset automation run", () => {
   it("resends a stopped effect under the same key with the same content, and fails once the saved rules no longer resolve", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     const input = (stopped: AbortSignal) => ({
       claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped,
@@ -127,7 +144,7 @@ describe("a dataset automation run", () => {
     // The first attempt stops while its edit is in flight: the plan is saved, the effect is not.
     const stop = new AbortController();
     const first = host({ resolves: () => true, edit: async () => { stop.abort(); throw new Error("The host closed."); } });
-    expect(await runDatasetAutomation(dependencies(first.surface), input(stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
+    expect(await runWithRoster(dependencies(first.surface), input(stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
     const edit = first.sent.find((sent) => sent.operationId === EDIT)!;
     expect(edit).toMatchObject({
       datasetId: definition.datasetId, revision: 3, revisionSha256: revision.revisionSha256,
@@ -138,7 +155,7 @@ describe("a dataset automation run", () => {
     // A resume sends that key again with the same content, without reading again.
     const second = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
     const resumed = new AbortController();
-    const resumedRun = runDatasetAutomation(dependencies(second.surface), input(resumed.signal));
+    const resumedRun = runWithRoster(dependencies(second.surface), input(resumed.signal));
     expect(await resumedRun).toEqual({ kind: "done" });
     expect(second.sent).toEqual([{ ...edit, signal: expect.any(AbortSignal) }]);
 
@@ -147,8 +164,8 @@ describe("a dataset automation run", () => {
     const later = { ...claim, claimId: "claim-2" };
     const stopAgain = new AbortController();
     const again = host({ resolves: () => true, edit: async () => { stopAgain.abort(); throw new Error("The host closed."); } });
-    expect(await runDatasetAutomation(dependencies(again.surface), { ...input(stopAgain.signal), claim: later })).toEqual({ kind: "wait", reason: "stopped" });
-    expect(await runDatasetAutomation(dependencies(third.surface), { ...input(new AbortController().signal), claim: later }))
+    expect(await runWithRoster(dependencies(again.surface), { ...input(stopAgain.signal), claim: later })).toEqual({ kind: "wait", reason: "stopped" });
+    expect(await runWithRoster(dependencies(third.surface), { ...input(new AbortController().signal), claim: later }))
       .toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
     expect(third.sent).toEqual([]);
   });
@@ -163,8 +180,8 @@ describe("the rules a dataset run uses", () => {
     const script = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
     let reads = 0;
     const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    expect(await runWithRoster({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       claim, automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
       signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -189,7 +206,7 @@ automations:
         operation: invoices.edit
 `);
     if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const sent: LocalDatasetInvocation[] = [];
+    const sent: DatasetInvocation[] = [];
     const surface: DatasetRunHost = {
       ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
       invoke: async (_context, input): Promise<DatasetInvocationResult> => {
@@ -201,8 +218,8 @@ automations:
         return { result: { rows, nextCursor: { id: "r49", value: "r49" } }, revision: 7, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
-    expect(await runDatasetAutomation({
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
+    expect(await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
       store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
@@ -248,7 +265,7 @@ automations:
         operation: items.edit
 `);
     if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const sent: LocalDatasetInvocation[] = [];
+    const sent: DatasetInvocation[] = [];
     const surface: DatasetRunHost = {
       context: (input) => Object.freeze({ ...input }),
       revision: () => ({ ...revision, definition: two }),
@@ -264,10 +281,10 @@ automations:
         return { result: { id: body.id, version: body.expectedVersion + 1, priorValues: prior }, revision: 8, replayed: false };
       },
     };
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-run-"), testMetadataDir);
     const added: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ship",
       fact: { kind: "added", datasetId: definition.datasetId, tableId: A, recordId: "1", version: 5, fields: [{ fieldId: A_STATUS, previous: null, next: "New" }] } };
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
+    expect(await runWithRoster({ withHost: async (work) => await work(surface), evaluator: { evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
       claim: added, automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
       roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
@@ -317,10 +334,10 @@ automations:
         return { result: { id: "a", version: 2, priorValues: { [STATUS]: "Open" } }, revision: 8, replayed: false };
       },
     };
-    const outcome = await runDatasetAutomation({
+    const outcome = await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "x" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
     }, {
       claim: { ...claim, fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: stamp, collection: { path: "Budget", name: "Budget" },
@@ -343,7 +360,7 @@ automations:
   });
 
   it("stops a resumed plan once an editor can no longer read a field it was planned with, and keeps what landed", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-narrowed-"), testMetadataDir);
     const stop = new AbortController();
     const host = (edit: () => Promise<JsonValue>): DatasetRunHost => ({
       context: (input) => Object.freeze({ ...input }),
@@ -364,10 +381,10 @@ automations:
       evaluator: { evaluate: async () => [{ ok: true as const, value: "x" }] }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing });
     // Planned while only the owner edits: every field was readable. It stops mid-edit.
     const first = host(async () => { stop.abort(); throw new Error("The host closed."); });
-    expect(await runDatasetAutomation(dependencies(first), input([], stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
+    expect(await runWithRoster(dependencies(first), input([], stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
     // Ana now edits the automation and cannot read Secret: the rest stops.
     const second = host(async () => { throw new Error("unreachable"); });
-    expect(await runDatasetAutomation(dependencies(second), input([ana], new AbortController().signal)))
+    expect(await runWithRoster(dependencies(second), input([ana], new AbortController().signal)))
       .toEqual({ kind: "failed", error: ACCESS_NARROWED_ERROR, timedOut: false });
   });
 
@@ -392,10 +409,10 @@ automations:
     };
     // Ana edits the automation, may use the list, and can post in Team.
     const inTeam = { grantId: "g-team", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: null, channel: { wireId: "team-wire", canPost: true } };
-    expect(await runDatasetAutomation({
+    expect(await runWithRoster({
       withHost: async (work) => await work(surface),
       evaluator: { evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "Added" }]; } },
-      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-")), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
+      store: createAutomationRunStore(await createTestScratch("dohc-dataset-reach-"), testMetadataDir), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
     }, {
       claim: { ...claim, automationId: "collection:Budget#tell", fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } },
       automation: post, collection: { path: "Budget", name: "Budget" },
@@ -447,8 +464,8 @@ describe("chat steps in a dataset run", () => {
   it("posts, sends a direct message, and notifies as the automation, one chain step deeper, each keyed by its claim, definition, and step", async () => {
     const script = edits();
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       claim: { ...told, depth: 2 }, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "done" });
 
@@ -471,8 +488,8 @@ describe("chat steps in a dataset run", () => {
 
   it("sends a message that may have landed again under the same ids, and Try again sends only what did not go", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
-    const attempt = async (spy: ReturnType<typeof chatSpy>, run: number, stopped: AbortSignal) => await runDatasetAutomation(
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const attempt = async (spy: ReturnType<typeof chatSpy>, run: number, stopped: AbortSignal) => await runWithRoster(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { claim: { ...told, run }, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped });
 
@@ -498,8 +515,8 @@ describe("chat steps in a dataset run", () => {
 
   it("waits for a session to post in a synced workspace, then posts under the same id", async () => {
     const script = edits();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
-    const attempt = async (spy: ReturnType<typeof chatSpy>) => await runDatasetAutomation(
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    const attempt = async (spy: ReturnType<typeof chatSpy>) => await runWithRoster(
       { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { claim: told, automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal });
     const signedOut = chatSpy({ write: () => { throw new AutomationChatSessionWait(); } });
@@ -521,8 +538,8 @@ describe("chat steps in a dataset run", () => {
     const surface: DatasetRunHost = { ...edits().surface, invoke: async (): Promise<DatasetInvocationResult> =>
       ({ result: { rows: [{ id: "a ", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }) };
     const spy = chatSpy();
-    expect(await runDatasetAutomation({
-      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-chat-")),
+    expect(await runWithRoster({
+      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir),
       nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
     }, {
       claim: { ...claim, automationId: "collection:Budget#notify", fact: { ...added, recordId: "a " } }, automation: notify, collection: BUDGET,
@@ -534,8 +551,8 @@ describe("chat steps in a dataset run", () => {
   it("stops before it reads anything when an editor cannot post in the Group", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("A stopped run writes nothing."); } });
     const spy = chatSpy();
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"));
-    expect(await runDatasetAutomation({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-chat-"), testMetadataDir);
+    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
       claim: told, automation: tell, collection: BUDGET, roster: owner([...ANA, BOB]), signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "failed", error: "bob@dohc.test cannot post in Team.", timedOut: false });
     expect(script.sent).toEqual([]);
@@ -561,8 +578,8 @@ describe("chat steps in a dataset run", () => {
     const surface: DatasetRunHost = { ...script.surface, revision: () => ({ ...revision, definition: withButton }) };
     const run = async (grants: RosterGrant[]) => {
       const spy = chatSpy();
-      const outcome = await runDatasetAutomation({
-        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-wake-")),
+      const outcome = await runWithRoster({
+        withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir),
         nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
       }, { claim: pressed, automation: ask, collection: BUDGET, roster: owner(grants), signal: new AbortController().signal, stopped: new AbortController().signal });
       return { outcome, messages: spy.messages };
@@ -578,11 +595,11 @@ describe("chat steps in a dataset run", () => {
   });
 
   it("does not resume a saved wake once the automation no longer resolves under the rules", async () => {
-    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"));
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-wake-"), testMetadataDir);
     let rules = withButton;
     const surface: DatasetRunHost = { ...host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } }).surface,
       revision: () => ({ ...revision, definition: rules }) };
-    const attempt = async (spy: ReturnType<typeof chatSpy>, grants: RosterGrant[], stopped: AbortSignal) => await runDatasetAutomation(
+    const attempt = async (spy: ReturnType<typeof chatSpy>, grants: RosterGrant[], stopped: AbortSignal) => await runWithRoster(
       { withHost: async (work) => await work(surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
       { claim: pressed, automation: ask, collection: BUDGET, roster: owner(grants), signal: new AbortController().signal, stopped });
     // The plan is saved, and the run stops before the wake is recorded.
@@ -594,5 +611,132 @@ describe("chat steps in a dataset run", () => {
     const resumed = chatSpy();
     expect(await attempt(resumed, [BOB], new AbortController().signal)).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
     expect(resumed.messages).toEqual([]);
+  });
+});
+
+describe("a dataset action a run invokes", () => {
+  const MARK_PAID = id(12);
+  const withAction: DatasetDefinition = {
+    ...definition,
+    tables: [{ ...definition.tables[0]!, primaryKey: "number", fields: [
+      { fieldId: id(3), name: "Number", sqlColumn: "number", type: "number", required: true, unique: true },
+      { fieldId: STATUS, name: "Status", sqlColumn: "status", type: "text", required: true, unique: false },
+    ] }],
+    operations: [...definition.operations, { operationId: MARK_PAID, name: "invoices.markPaid", label: "Mark paid", tableId: TABLE, kind: "action", access: "owner", readOnly: false, fieldIds: [STATUS] }],
+  };
+  const actionRevision = { ...revision, definition: withAction } satisfies DatasetRevision;
+  const markPaid = automationFrom(`  - id: mark
+    name: Mark
+    when: record-added
+    do:
+      - invoke: invoices.markPaid
+        input:
+          id: '=record.id'
+          note: Paid by an automation
+`);
+  const numbered: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#mark", fact: { ...added, recordId: 12 } };
+  // Operations someone wrote: the run reads nothing, and formulas see the record's id alone.
+  function actionHost(invoke: (input: DatasetInvocation) => Promise<DatasetInvocationResult>) {
+    const sent: DatasetInvocation[] = [];
+    const surface: DatasetRunHost = {
+      context: (input) => Object.freeze({ ...input }) satisfies DatasetAutomationContext,
+      revision: () => actionRevision,
+      generated: () => false,
+      dataGrants: () => ({ workspaceId: "workspace", grants: [] }),
+      resolves: () => true,
+      invoke: async (_context, input) => { sent.push(input); return await invoke(input); },
+    };
+    return { surface, sent };
+  }
+  const scopes: AutomationScope[] = [];
+  const evaluator = {
+    evaluate: async (_automationId: string, scope: AutomationScope, formulas: readonly unknown[]) => {
+      scopes.push(scope);
+      return formulas.map(() => ({ ok: true as const, value: (scope.record?.id ?? null) as JsonValue }));
+    },
+  };
+
+  it("sends the action its input once per claim, with the record's id as its operations take it, and resumes under the same key", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const dependencies = (surface: DatasetRunHost) => ({
+      withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
+      evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+    });
+    const input = (stopped: AbortSignal) => ({
+      claim: numbered, automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped,
+    });
+    const stop = new AbortController();
+    const first = actionHost(async () => { stop.abort(); throw new Error("The host closed."); });
+    expect(await runWithRoster(dependencies(first.surface), input(stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
+    // No read: the only call is the action, with a number for a number key.
+    expect(first.sent).toEqual([expect.objectContaining({
+      operationId: MARK_PAID, input: { id: 12, note: "Paid by an automation" },
+      idempotencyKey: datasetEffectKey("claim-1", `${definitionHash(markPaid)}-1`, 0, null, 0),
+    })]);
+    expect(scopes.at(-1)).toMatchObject({ record: { id: 12 }, recordKeys: ["id"] });
+    const evaluated = scopes.length;
+    // A resume sends the saved request again, without evaluating again; the host replays its receipt.
+    const second = actionHost(async () => ({ result: { id: 12 }, revision: 8, replayed: true }));
+    expect(await runWithRoster(dependencies(second.surface), input(new AbortController().signal))).toEqual({ kind: "done" });
+    expect(second.sent).toEqual([{ ...first.sent[0]!, signal: expect.any(AbortSignal) }]);
+    expect(scopes).toHaveLength(evaluated);
+    const [run] = (await store.runsOf("collection:Budget#mark", "claim-1")).runs;
+    expect(run?.applied.flatMap((effect) => effect.writes)).toEqual([
+      { kind: "dataset-action", rules: { datasetId: definition.datasetId, revision: 3, revisionSha256: revision.revisionSha256 }, operationId: MARK_PAID, tableId: TABLE, name: "Mark paid", revision: 8 },
+    ]);
+  });
+
+  it("stops a planned action only you can use once someone else can edit the automation, before it commits", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
+    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
+    let roster: ReachRoster = alone;
+    // The owner shares Budget with Ana while the run evaluates its formulas, after reach passed for the plan.
+    const sharing = { evaluate: async (automationId: string, scope: AutomationScope, formulas: readonly unknown[]) => {
+      roster = { ...alone, grants: [ana] };
+      return await evaluator.evaluate(automationId, scope, formulas);
+    } };
+    const host = actionHost(async () => { throw new Error("The action must not run."); });
+    expect(await runDatasetAutomation({
+      withHost: async (work) => await work(host.surface), evaluator: sharing, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      cachedRoster: async () => roster,
+    }, {
+      claim: numbered, automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: alone,
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    })).toEqual({ kind: "failed", error: "Only you can use invoices.markPaid in Budget, and ana@dohc.test can also edit these automations.", timedOut: false });
+    expect(host.sent).toEqual([]);
+  });
+
+  it("waits to run a planned action when it cannot check who can edit the Collection", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const host = actionHost(async () => { throw new Error("The action must not run."); });
+    expect(await runDatasetAutomation({
+      withHost: async (work) => await work(host.surface), evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      cachedRoster: async () => ({ kind: "unknown", problem: { kind: "unchecked", next: "dohc checks again when the server answers." } }),
+    }, {
+      claim: numbered, automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    })).toEqual({ kind: "wait", reason: "roster" });
+    expect(host.sent).toEqual([]);
+  });
+
+  it("fails a run the action refuses with the action's own words, and sends it again under the same key on Try again", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);
+    const dependencies = (surface: DatasetRunHost) => ({
+      withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
+      evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+    });
+    const input = (run: number) => ({
+      claim: { ...numbered, run }, automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    const refusing = actionHost(async () => { throw new AppBackendRuntimeError({ code: "already_paid", message: "This invoice is already paid." }); });
+    expect(await runWithRoster(dependencies(refusing.surface), input(1)))
+      .toEqual({ kind: "failed", error: "Mark paid refused this run: This invoice is already paid.", timedOut: false });
+    // Try again: the refusal committed nothing, so the same request runs the action again.
+    const accepting = actionHost(async () => ({ result: { id: 12 }, revision: 9, replayed: false }));
+    expect(await runWithRoster(dependencies(accepting.surface), input(2))).toEqual({ kind: "done" });
+    expect(accepting.sent).toEqual([{ ...refusing.sent[0]!, signal: expect.any(AbortSignal) }]);
   });
 });

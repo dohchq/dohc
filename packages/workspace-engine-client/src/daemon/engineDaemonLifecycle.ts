@@ -315,6 +315,7 @@ export class EngineDaemonLifecycle {
   private readonly launchingClients = new Set<EngineDaemonClient>();
   private readonly workspaceRequestTails = new Map<string, Promise<void>>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
+  private readonly clientChangedHandlers = new Set<() => void>();
   // A condemned request reports its reason as it kills. The smoke's own
   // failure path may report the same error again, or lose the race to the
   // exit it caused; either way the reason is reported once.
@@ -539,6 +540,17 @@ export class EngineDaemonLifecycle {
     return this.requireClient();
   }
 
+  onClientChanged(handler: () => void): () => void {
+    this.clientChangedHandlers.add(handler);
+    return () => { this.clientChangedHandlers.delete(handler); };
+  }
+
+  private notifyClientChanged(): void {
+    for (const handler of this.clientChangedHandlers) {
+      try { handler(); } catch { /* Observers cannot prevent client retirement or publication. */ }
+    }
+  }
+
   // Daemon-initiated events, surviving restarts: handlers registered here are
   // fanned out from every client this lifecycle launches, so a consumer never
   // has to know the daemon was replaced.
@@ -565,6 +577,7 @@ export class EngineDaemonLifecycle {
     const clients = new Set(this.launchingClients);
     if (this.client) clients.add(this.client);
     this.client = null;
+    this.notifyClientChanged();
     for (const client of clients) client.close();
     await Promise.allSettled(
       [...clients].map(async (client) => await client.waitForExit?.()),
@@ -869,6 +882,7 @@ export class EngineDaemonLifecycle {
       }
       this.client = client;
       this.running = true;
+      this.notifyClientChanged();
       this.scheduleHealthyReset(generation);
       this.startWedgeWatch(generation, client);
       if (smokeMode === "background") {
@@ -943,6 +957,7 @@ export class EngineDaemonLifecycle {
     this.clearPingTimer();
     this.running = false;
     this.client = null;
+    this.notifyClientChanged();
     // A terminal wedge already reported its verdict and then ordered this kill.
     // Tear the generation down, but do not relaunch what was just condemned.
     if (this.terminal) return;

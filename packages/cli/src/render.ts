@@ -154,6 +154,18 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "documentRead": {
+      const document = result as CliResultByVerb["documentRead"];
+      if (!document.ok) throw new DohcCliError(document.reason);
+      return document.markdown;
+    }
+    case "documentEdit":
+    case "documentCreate": {
+      const document = result as CliResultByVerb["documentEdit" | "documentCreate"];
+      if (!document.ok) throw new DohcCliError(document.reason);
+      const action = "changed" in document ? document.changed ? "Updated" : "Unchanged" : "Created";
+      return `${action} ${document.path}${"warning" in document && document.warning ? `\n${document.warning}` : ""}`;
+    }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":

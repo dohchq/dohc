@@ -1,0 +1,40 @@
+{
+  "name": "@dohc/automation-executor",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./automation-buttons": "./src/automationButtons.ts",
+    "./automation-chat": "./src/automationChat.ts",
+    "./automation-evaluator-host": "./src/automationEvaluatorHost.ts",
+    "./automation-plan": "./src/automationPlan.ts",
+    "./automation-reach": "./src/automationReach.ts",
+    "./automation-run-store": "./src/automationRunStore.ts",
+    "./automation-scheduler": "./src/automationScheduler.ts",
+    "./collection-automation-run": "./src/collectionAutomationRun.ts",
+    "./collection-automations": "./src/collectionAutomations.ts",
+    "./dataset-automation-plan": "./src/datasetAutomationPlan.ts",
+    "./dataset-automation-undo": "./src/datasetAutomationUndo.ts",
+    "./record-ids": "./src/recordIds.ts",
+    "./group-messages-notice": "./src/groupMessagesNotice.ts",
+    "./skipped-runs-notice": "./src/skippedRunsNotice.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/app-backend-runtime": "workspace:*",
+    "@dohc/security-contract": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
+    "@dohc/workspace-core": "workspace:*",
+    "@dohc/workspace-engine-client": "workspace:*",
+    "acorn": "^8.18.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

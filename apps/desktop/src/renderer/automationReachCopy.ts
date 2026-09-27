@@ -1,4 +1,4 @@
-import type { CollectionAutomationHold } from "../automations/collectionAutomations";
+import type { CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
 
 export function automationReachCopy(
   step: Pick<CollectionAutomationHold, "action" | "target">,

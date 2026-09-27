@@ -1,8 +1,5 @@
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { Automation, AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
-import { recordedShareSelector } from "../workspaces/shareViewRecords";
-import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { shareViewTakesLocalWrites } from "../workspaces/shareWriteGate";
 import { collectionAutomationId, definitionHash, unsupportedReason } from "./automationPlan";
 
 // Button fields (item 8): which automation a button runs, and who may press
@@ -25,10 +22,6 @@ export function noAccessReason(collectionName: string): string {
 /** Why a press runs nothing: what it asked for is not what the button does now. */
 export function changedSincePressed(field: string): string {
   return `${field} changed after it was pressed. Press it again.`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // The file contract loads each mapping as a Map.
@@ -70,26 +63,6 @@ export function resolveButton(
     return disabled(`The automation for ${field} has a problem. Fix it in Automations.`);
   }
   return { kind: "state", state: { kind: "no-automation", reason: NO_AUTOMATION } };
-}
-
-/**
- * Who may press a document Collection's buttons from this computer, and
- * where the press runs. A workspace that is not a share view takes hand
- * edits, so it takes presses and runs them here. A share view cannot run
- * them: its automations need the owner's list of who can edit, which only
- * the owner can read. With Edit on main over the Collection's folder or a
- * folder above it, its presses are "relayed" to the computer that runs the
- * owner's schedules (ADR 0012); the relay checks the same rule. Edit on one
- * record's file, a version share, or a lower level is not enough.
- */
-export function documentButtonAccess(shareView: unknown, collectionPath: string): "press" | "relayed" | "no-access" {
-  if (!shareViewIsPresent(shareView)) return "press";
-  const marker = isRecord(shareView) ? shareView : {};
-  const grant = recordedShareSelector(marker.grantedSelector);
-  if (!grant || !shareViewTakesLocalWrites({ access: grant.access, ended: marker.ended === true })) return "no-access";
-  if (grant.versionId !== null || grant.paths.length === 0) return "no-access";
-  const covers = grant.paths.some((path) => collectionPath === path || collectionPath.startsWith(`${path}/`));
-  return covers ? "relayed" : "no-access";
 }
 
 /**

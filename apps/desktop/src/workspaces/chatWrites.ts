@@ -4,7 +4,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
-import { AutomationChatSessionWait } from "../automations/automationChat";
+import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import {
   assertSharedChannelMessageIdentity,
   chatRelayAuthorId,

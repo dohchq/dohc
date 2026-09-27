@@ -83,6 +83,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
@@ -782,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     hideShellError,
     reportShellError,
     reportShellFailure,
+    clearKind,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -798,6 +800,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -5273,11 +5276,12 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
-                  onOpenSource={openFile}
+                  onOpenFile={(path) => openFile(path)}
+                  onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!isShareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
-                  onError={reportShellError}
-                  onNotice={showSuccessNotice}
+                  onError={collectionReports.onError}
+                  onNotice={collectionReports.onNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));

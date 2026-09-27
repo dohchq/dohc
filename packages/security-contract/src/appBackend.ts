@@ -16,7 +16,13 @@ export type AppBackendJson = null | boolean | number | string | AppBackendJson[]
 export type AppBackendCaller =
   | { kind: "link"; principalId: string; grantId: string }
   | { kind: "named"; userId: string; grantId: string; access: "view" | "comment" | "edit"; helper: boolean }
-  | { kind: "owner"; userId: string };
+  | { kind: "owner"; userId: string }
+  /**
+   * An automation running an operation for its Collection. It is not the
+   * owner, so operation code that allows only the owner refuses it.
+   * `automationId` is the engine's id, `collection:<path>#<id>`.
+   */
+  | { kind: "automation"; automationId: string };
 export interface AppBackendInvokeRequest {
   authorityRevision: number;
   operation: string;
@@ -165,6 +171,10 @@ export function parseAppBackendCaller(value: unknown): AppBackendCaller {
     exact(row, ["kind", "userId", "grantId", "access", "helper"]);
     if ((row.access !== "view" && row.access !== "comment" && row.access !== "edit") || typeof row.helper !== "boolean") throw new Error("Invalid app backend caller access.");
     return { kind: "named", userId: text(row.userId, 256), grantId: text(row.grantId, 256), access: row.access, helper: row.helper };
+  }
+  if (row.kind === "automation") {
+    exact(row, ["kind", "automationId"]);
+    return { kind: "automation", automationId: text(row.automationId, 1024) };
   }
   throw new Error("Invalid app backend caller.");
 }

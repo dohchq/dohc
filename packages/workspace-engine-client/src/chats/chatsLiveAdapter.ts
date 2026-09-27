@@ -1028,6 +1028,11 @@ export class ChatsLiveAdapter {
     return result;
   }
 
+  async latestRunForThread(workspaceId: string, threadId: string): Promise<ChatRun | null> {
+    this.assertWorkspace(workspaceId);
+    return this.request(CHATS_METHOD.dispatchLatestRunForThread, { threadId });
+  }
+
   async getRunRecord(runId: string): Promise<ChatRun | null> {
     return this.request(CHATS_METHOD.dispatchGetRunRecord, { runId });
   }

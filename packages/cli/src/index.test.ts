@@ -221,6 +221,7 @@ describe("executeCli", () => {
 
   it("sends show --peek without consuming read state", async () => {
     const request = vi.fn(async () => ({
+      dispatch: { paused: "budget", lastRun: null },
       thread: {
         id: "th_one",
         title: "One",
@@ -250,6 +251,9 @@ describe("executeCli", () => {
       args: { cwd: WORKSPACE, actor: "human", target: "th_o", peek: true },
     });
     expect(result.stdout).toContain("msg_one");
+    expect(result.stdout).toContain('dispatch: {"paused":"budget","lastRun":null}');
+    const json = await executeCli({ argv: ["chat", "show", "th_o", "--peek", "--json"], cwd: "/workspace", env: {}, request });
+    expect(JSON.parse(json.stdout)).toMatchObject({ dispatch: { paused: "budget", lastRun: null } });
   });
 
   it("lists one file's history and prints the text one change left", async () => {

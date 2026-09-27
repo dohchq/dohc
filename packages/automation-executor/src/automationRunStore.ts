@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import type { PlannedEffect } from "./automationPlan";
 import type { StoredReachVerdict } from "./reachVerdicts";
 
@@ -74,6 +73,15 @@ const EffectSchema = z.union([
     operationId: z.string(),
     tableId: z.string(),
     values: z.array(z.object({ fieldId: z.string(), field: z.string(), value: JsonValueSchema })),
+  }),
+  // An action to run with the input its formulas gave, saved before it is
+  // sent so a resumed run sends the same input under the same key.
+  z.object({
+    kind: z.literal("dataset-action"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    input: z.record(z.string(), JsonValueSchema),
   }),
   z.object({
     kind: z.literal("message"),
@@ -149,6 +157,15 @@ const WriteSchema = z.union([
     recordId: DatasetRecordIdSchema,
     version: z.number().int().positive(),
   }),
+  // An action that ran, by its label then, and the dataset revision its commit made.
+  z.object({
+    kind: z.literal("dataset-action"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    name: z.string(),
+    revision: z.number().int().nonnegative(),
+  }),
   z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
   // A post or direct message the automation wrote, and where it went.
@@ -208,7 +225,7 @@ const StoredRunSchema = z.object({
  */
 export type RunWrite = z.infer<typeof WriteSchema>;
 /** A planned effect on a dataset record, through one of its approved operations. */
-export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" }>;
+export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
 export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
 /** One step's effects, on document records or on dataset records. */
@@ -468,7 +485,23 @@ function progressText(run: StoredRun): string {
   return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
 
-export function createAutomationRunStore(rootPath: string): AutomationRunStore {
+/**
+ * Where a host keeps a workspace's metadata, the desktop's `<root>/.dohc`:
+ * made if missing, and refused when it is not a real folder the host allows.
+ * With `create: false` it makes nothing and answers null when the folder does
+ * not exist, for reads that change nothing.
+ */
+export interface MetadataDirResolver {
+  (rootPath: string): Promise<string>;
+  (rootPath: string, options: { create: false }): Promise<string | null>;
+}
+
+/**
+ * The run store of the workspace at `rootPath`, under `automations` in the
+ * folder `resolveMetadataDir` answers. Reads that change nothing make no
+ * folders.
+ */
+export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver): AutomationRunStore {
   // The file count at which each automation's folder is pruned next.
   const pruneAt = new Map<string, number>();
   // Writes queue behind each other, so two saves never race one rename.
@@ -478,7 +511,7 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     queue = next.catch(() => undefined);
     return next;
   };
-  const base = async () => realFolder(join(await resolveWorkspaceMetadataDir(rootPath), "automations"));
+  const base = async () => realFolder(join(await resolveMetadataDir(rootPath), "automations"));
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
@@ -560,8 +593,14 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
 
   return {
     async runsOf(automationId, claimId) {
-      let folder = rootPath;
-      for (const segment of [".dohc", "automations", "runs", hashName(automationId)]) {
+      let folder: string | null;
+      try {
+        folder = await resolveMetadataDir(rootPath, { create: false });
+      } catch {
+        return { runs: [], unreadable: true };
+      }
+      if (folder === null) return { runs: [], unreadable: false };
+      for (const segment of ["automations", "runs", hashName(automationId)]) {
         const found = await existingFolder(join(folder, segment));
         if (found === null) return { runs: [], unreadable: false };
         if (found === "unusable") return { runs: [], unreadable: true };

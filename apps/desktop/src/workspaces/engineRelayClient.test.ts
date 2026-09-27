@@ -2300,6 +2300,29 @@ describe("EngineRelayClient", () => {
 });
 
 describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
+  it("forwards client replacement subscriptions and preserves wrapper identity", () => {
+    const changed = new Set<() => void>();
+    const inner = {
+      client: new MockDaemon(),
+      currentClient() { return this.client; },
+      onClientChanged(handler: () => void) {
+        changed.add(handler);
+        return () => { changed.delete(handler); };
+      },
+    };
+    const source = new RelayConfiguredDaemonClientSource(inner, new RelayTransportRouteGuard());
+    const first = source.currentClient();
+    const seen: EngineDaemonClient[] = [];
+    const unsubscribe = source.onClientChanged?.(() => seen.push(source.currentClient()));
+    expect(unsubscribe).toBeTypeOf("function");
+    inner.client = new MockDaemon();
+    for (const handler of changed) handler();
+    expect(seen).toEqual([source.currentClient()]);
+    expect(seen[0]).not.toBe(first);
+    unsubscribe?.();
+    expect(changed.size).toBe(0);
+  });
+
   it("preserves the inner client's optional workspace-session capabilities through the wrap", () => {
     const seen: string[] = [];
     const unsubscribe = () => undefined;

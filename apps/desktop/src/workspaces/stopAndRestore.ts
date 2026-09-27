@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
-import { collectionAutomationId, definitionHash } from "../automations/automationPlan";
+import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
 
 // Stop and restore (ADR 0013): after the owner stops a person they shared
 // with, put back each file that person wrote directly, from the relay's

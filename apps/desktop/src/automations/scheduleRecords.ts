@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ScheduleRecord } from "./automationScheduler";
+import type { ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 
 // Each workspace's schedules this computer runs, with their marks, kept in
 // stateDir()/schedules/<workspaceId>.json while the workspace is open. After

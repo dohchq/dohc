@@ -83,6 +83,7 @@ const results = {
   },
   chat: {
     ok: true,
+    dispatch: { paused: null, lastRun: null },
     thread,
     messages: [message],
     projection: {

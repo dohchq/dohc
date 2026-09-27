@@ -1,3 +1,4 @@
+import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -23,7 +24,7 @@ import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection"
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
-import { RECORD_NOT_FOUND } from "./automations/collectionAutomationRun";
+import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -117,6 +118,7 @@ import {
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
+  chatDispatchNoticeOperations,
   type ScheduleHostResult,
   type NoticeRef,
   workspaceSearchOperations,
@@ -127,7 +129,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -202,9 +204,9 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
-import { CollectionAutomations } from "./automations/collectionAutomations";
-import { parseCollectionAutomationId } from "./automations/automationPlan";
-import { AutomationScheduler } from "./automations/automationScheduler";
+import { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import {
   computerLabel,
   computersOfAnswer,
@@ -215,15 +217,16 @@ import {
   relayUnreachable,
 } from "./automations/automationHost";
 import { createScheduleRecords } from "./automations/scheduleRecords";
-import { skippedRunsNotice } from "./automations/skippedRunsNotice";
-import { groupMessagesNotice } from "./automations/groupMessagesNotice";
+import { skippedRunsNotice } from "@dohc/automation-executor/skipped-runs-notice";
+import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { createRunNowIntents, type RunNowIntent } from "./automations/runNowIntents";
 import { readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, createRelayedPressHost, type RelayedPressHost } from "./automations/relayedPresses";
-import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
-import { createAutomationRunStore } from "./automations/automationRunStore";
-import { readChatDirectory } from "./automations/automationChat";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { resolveWorkspaceMetadataDir } from "./workspaces/workspaceMetadata";
+import { readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent } from "./automations/automationAgentWake";
 import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -1565,6 +1568,7 @@ function registerReservedPhysicalWorkspace(
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
   await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  chatDispatchNotices.clearWorkspace(workspaceId);
   notifyRenderer();
 }
 
@@ -2830,7 +2834,18 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
+const chatDispatchNotices = createChatDispatchNotices((event) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.webContents.isDestroyed()) continue;
+    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
+    window.webContents.send(CHANNELS.chatDispatchNotices, event);
+  }
+});
+
 const chatDispatchService = createChatDispatchService({
+  onDispatchNotice: (workspace, notice) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
@@ -2888,31 +2903,6 @@ const chatDispatchService = createChatDispatchService({
     }
     return release;
   },
-  authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      try {
-        const store = linkedChatStoreFor(lease);
-        const registered = canonicalWorkspaceFor(lease);
-        await assertSharedChannelWritable({
-          workspaceId: registered.workspaceId,
-          sharedChannels: registered.sharedChannels,
-          store,
-          target: { threadId },
-        });
-        const identity = await chatRelayIdentityFor(
-          workspace.workspaceId,
-          { threadId },
-          store,
-        );
-        return (
-          identity.authorUserId === verifiedUserId &&
-          (identity.joinedChannel === null || verifiedUserId !== undefined)
-        );
-      } catch (error) {
-        if (!(error instanceof SharedChannelReadOnlyError)) throw error;
-        return false;
-      }
-    }),
   onMessagePosted: (workspace, threadId) => {
     withWorkspaceAttachment(workspace, () => {
       notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -3537,7 +3527,7 @@ function createCollectionAutomationsFor(
         }
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture) throw new Error(captureRefusal("Automations"));
-        return work(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal])));
+        return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
       }),
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: (path, text, expectedContentHash) =>
@@ -3546,7 +3536,7 @@ function createCollectionAutomationsFor(
     roster: () => shareRosters.forRun(workspaceId),
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
-    store: createAutomationRunStore(rootPath),
+    store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir),
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
@@ -5482,6 +5472,11 @@ function registerIpcHandlers(): void {
       action: "take-over",
       body: { generation: input.generation },
     }),
+  });
+
+  registerOperations(operationBoundary, chatDispatchNoticeOperations, {
+    registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
+    dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
   });
 
   registerOperations(operationBoundary, noticeOperations, {

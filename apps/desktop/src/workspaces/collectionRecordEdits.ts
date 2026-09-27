@@ -1,10 +1,12 @@
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { recordIdFromBytes } from "@dohc/automation-executor/record-ids";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+import type { CollectionRecordWrites } from "@dohc/automation-executor/collection-automation-run";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   isRecordId,
@@ -51,8 +53,6 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 // caller's own signal allows longer. A healthy engine adopts within one
 // capture pass.
 const ADOPTION_DEADLINE_MS = 15_000;
-
-const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
@@ -214,19 +214,6 @@ function writableFieldEntries(
     assertWritableFieldValue(field, value);
   }
   return entries;
-}
-
-/**
- * A record id derived from `seed`, in the engine's record id shape: "rec_"
- * plus the first 16 bytes of the seed's SHA-256 in unpadded lowercase
- * base32. The same seed always names the same record, so an automation step
- * that seeds it with its claim id and step position finds the record an
- * earlier attempt created.
- */
-export function derivedRecordId(seed: string): string {
-  return recordIdFromBytes(
-    createHash("sha256").update(seed).digest().subarray(0, 16),
-  );
 }
 
 /**
@@ -435,6 +422,14 @@ export async function createCollectionRecord(
   return { path, recordId };
 }
 
+/** The record writes an automation run makes, in this edit context. */
+export function collectionRecordWrites(context: CollectionRecordEditContext): CollectionRecordWrites {
+  return {
+    setFields: (input) => setCollectionRecordFields(context, input),
+    create: (input) => createCollectionRecord(context, input),
+  };
+}
+
 function recordBasename(path: string): string {
   const segments = path.split("/");
   return segments[segments.length - 1] ?? path;
@@ -444,24 +439,6 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw new Error("The surface that owns this collection edit is no longer active.");
   }
-}
-
-// The engine's record id shape (mint_record_id in dohc-engine-domain): "rec_"
-// plus 16 bytes in unpadded lowercase base32, most significant bit first.
-function recordIdFromBytes(bytes: Uint8Array): string {
-  let id = "rec_";
-  let buffer = 0;
-  let bits = 0;
-  for (const byte of bytes) {
-    buffer = ((buffer << 8) | byte) & 0xfff;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      id += BASE32_ALPHABET[(buffer >>> bits) & 31];
-    }
-  }
-  if (bits > 0) id += BASE32_ALPHABET[(buffer << (5 - bits)) & 31];
-  return id;
 }
 
 /**
