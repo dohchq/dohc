@@ -51,6 +51,7 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
@@ -122,6 +123,7 @@ export interface WorkspaceCaptureHooks {
     detail?: string | null,
   ) => void;
   onAtomicPlacementUnavailable: () => void;
+  onRecoveryUnavailable: (unavailable: boolean) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
 }
 
@@ -191,6 +193,7 @@ export function createWorkspaceActivity(
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
@@ -281,6 +284,7 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        recoveryUnavailable: false,
         keptFiles: [],
         agentRun: null,
       };
@@ -296,6 +300,11 @@ export function createWorkspaceActivity(
               onCaptureOutcome: (failure, detail = null) =>
                 recordCaptureOutcome(entry, failure, detail),
               onAtomicPlacementUnavailable: () => markAtomicPlacementUnavailable(entry),
+              onRecoveryUnavailable: (unavailable) => {
+                if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
+                entry.recoveryUnavailable = unavailable;
+                notify({ workspaceId: workspace.workspaceId });
+              },
               onKeptFiles: (paths) => {
                 if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
                 entry.keptFiles = [...paths];

@@ -956,8 +956,18 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
         store.list_displacements_for_job("j1").expect("for job")[0].state,
         DisplacementState::Open
     );
-    assert!(store.displacement_named("6a31.0").expect("named"));
-    assert!(!store.displacement_named("6a31.1").expect("named"));
+    assert!(
+        store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.1")
+    );
 
     store
         .resolve_displacement(
@@ -986,7 +996,12 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
             10,
         )
         .expect("keep");
-    assert!(!store.displacement_named("6a31.0").expect("named"));
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
 
     assert!(
         !store

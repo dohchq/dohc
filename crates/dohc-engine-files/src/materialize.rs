@@ -50,8 +50,8 @@
 //!   path, where capture records it like any outside edit, and the job
 //!   conflicts. The file stays staged, with its row `kept` as evidence, only
 //!   when a program created the target meanwhile.
-//! - Replay resolves every open row first, newest first, including rows of
-//!   other jobs for the same path, then every staged file no row names. A
+//! - Replay resolves staged files no row names first, newest first, then
+//!   open rows, including rows of other jobs for the same path. A
 //!   write whose temp is still beside an empty target never placed its
 //!   content, so its staged file goes back. Any other staged file is judged
 //!   like a finished replace and never brings back a file the store holds. A
@@ -67,8 +67,9 @@
 //! descriptor it opened before the move, after the file was judged, writes
 //! into a deleted file. The staging rename needs the target and the
 //! workspace's `.dohc` directory on one volume; a target under another mount
-//! fails the job and leaves it pending. Secret writes keep a single rename
-//! over the target, because a staged plaintext copy is what that path must
+//! uses a preimage-checked rename or unlink: an outside write after that
+//! check can be lost. Secret writes keep a single rename over the target,
+//! because a staged plaintext copy is what that path must
 //! never leave.
 //!
 //! The guarantee covers process crashes and outside writes closed or renamed
@@ -149,11 +150,13 @@ impl DurabilityPolicy {
 /// sharing violations and racing writers at the moment each one runs. Each
 /// step is one atomic rename that never follows a link.
 pub trait AtomicReplacer: Send + Sync {
-    /// Move whatever entry is at `target` without replacing a staged file.
+    /// Move `target` to the unused name reserved by the staging allocator.
     /// Never emulate this with link/unlink: a writer can replace the source
     /// between those operations.
     fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
-        stage_no_replace(target, displaced)
+        // The actor owns staging and selected an unused name before this call.
+        // A plain rename preserves attributes and works without NOREPLACE support.
+        std::fs::rename(target, displaced)
     }
 
     /// Move `incoming` to `target` only while nothing exists at `target`.
@@ -241,32 +244,23 @@ impl AtomicReplacer for StdReplacer {}
 /// after an absence check, which a file another program creates in between
 /// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
-fn stage_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
+fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+    // Windows Permissions carries the complete attribute word. Keep the
+    // snapshot across retries: tempfile changes attributes even on failure.
+    let permissions = std::fs::symlink_metadata(incoming)?.permissions();
     // Cleanup is disabled first, so dropping the path, including on the error
     // path, never deletes `incoming`.
     let mut path = tempfile::TempPath::try_from_path(incoming)?;
     path.disable_cleanup(true);
-    path.persist_noclobber(target).map_err(|err| err.error)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
-    stage_no_replace(incoming, target).map(|()| Placement::Atomic)
-}
-
-#[cfg(not(windows))]
-fn stage_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    {
-        use rustix::fs::{CWD, RenameFlags, renameat_with};
-        renameat_with(CWD, incoming, CWD, target, RenameFlags::NOREPLACE)
-            .map_err(std::io::Error::from)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-    {
-        let _ = (incoming, target);
-        Err(std::io::Error::from(ErrorKind::Unsupported))
+    match path.persist_noclobber(target) {
+        Ok(()) => {
+            std::fs::set_permissions(target, permissions)?;
+            Ok(Placement::Atomic)
+        }
+        Err(err) => {
+            std::fs::set_permissions(incoming, permissions)?;
+            Err(err.error)
+        }
     }
 }
 
@@ -763,6 +757,9 @@ pub enum MaterializeError {
     /// sharing violations; the job is left pending for startup replay.
     #[error("atomic replace exhausted {MAX_REPLACE_ATTEMPTS} attempts (file locked)")]
     FileLocked,
+    /// Recovery cannot enumerate staged files. Replacements stay pending.
+    #[error("file recovery is unavailable")]
+    RecoveryUnavailable,
     /// The content or an on-disk file exceeded the materialization byte cap.
     #[error("materialization content {actual} bytes exceeds the cap")]
     TooLarge { actual: usize },
@@ -786,6 +783,7 @@ impl MaterializeError {
             MaterializeError::SymlinkTarget => "symlink-target",
             MaterializeError::BlockedTarget => "blocked-target",
             MaterializeError::FileLocked => "file-locked",
+            MaterializeError::RecoveryUnavailable => "recovery-unavailable",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
         }
     }
@@ -849,7 +847,9 @@ pub fn materialize_one(
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
     match materialize_one_ordinary(store, root, job, options) {
-        Err(MaterializeError::SymlinkTarget) => Ok(JobOutcome::Blocked),
+        Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable) => {
+            Ok(JobOutcome::Blocked)
+        }
         outcome => outcome,
     }
 }
@@ -1353,6 +1353,9 @@ fn swap_in_temp(
     };
     let spec = match stage_target(staging, target, job, expected, reads, options)? {
         Stage::Moved(spec) => spec,
+        Stage::CrossVolume => {
+            return materialize_cross_volume(store, target, Some(tmp), job, options);
+        }
         Stage::Conflict | Stage::Vanished => {
             return record_write_conflict(store, target, tmp, job, now_ms);
         }
@@ -1478,6 +1481,7 @@ fn materialize_delete(
     // empty name is what a delete leaves anyway.
     let spec = match stage_target(staging, target, job, expected, &mut reads, options)? {
         Stage::Moved(spec) => spec,
+        Stage::CrossVolume => return materialize_cross_volume(store, target, None, job, options),
         Stage::Conflict => {
             store.mark_materialization_conflict(&job.job_id, now_ms)?;
             return Ok(JobOutcome::Conflict);
@@ -1532,6 +1536,55 @@ fn materialize_delete(
         now_ms,
     )?;
     Ok(JobOutcome::Conflict)
+}
+
+/// Cross-volume targets use the original preimage-checked replace/unlink path.
+/// The sibling temp is on the target volume, so replacing it needs no copy.
+fn materialize_cross_volume(
+    store: &EngineStore,
+    target: &Path,
+    tmp: Option<&Path>,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+) -> Result<JobOutcome, MaterializeError> {
+    let replaced = retry_while_locked(
+        target,
+        target,
+        options.backoff,
+        MAX_REPLACE_ATTEMPTS,
+        || {
+            if !preimage_matches(&job.preimage, &read_current_no_follow(target)?) {
+                return Ok(Attempt::Done(false));
+            }
+            let result = match tmp {
+                Some(tmp) => std::fs::rename(tmp, target),
+                None => std::fs::remove_file(target),
+            };
+            match result {
+                Ok(()) => Ok(Attempt::Done(true)),
+                Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
+                Err(err) => Err(MaterializeError::io(target, &err)),
+            }
+        },
+    )?;
+    if !replaced {
+        if let Some(tmp) = tmp {
+            return record_write_conflict(store, target, tmp, job, options.now_ms);
+        }
+        store.mark_materialization_conflict(&job.job_id, options.now_ms)?;
+        return Ok(JobOutcome::Conflict);
+    }
+    sync_parent_dir(target.parent(), options.policy)?;
+    if should_crash(
+        options.faults,
+        FaultPoint::MaterializeAfterRenameBeforeComplete,
+    ) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterRenameBeforeComplete,
+        ));
+    }
+    store.mark_materialization_complete(&job.job_id, options.now_ms)?;
+    Ok(JobOutcome::Completed)
 }
 
 /// A staged file whose row is not yet resolved, with what its row expects.
@@ -1605,6 +1658,8 @@ enum Stage {
     Conflict,
     /// The target disappeared between the recheck and the rename. Nothing moved.
     Vanished,
+    /// The target is on a different volume from workspace staging.
+    CrossVolume,
 }
 
 /// Move the target into staging, with no row. Every attempt, including the
@@ -1636,6 +1691,16 @@ fn stage_target(
         options.backoff,
         MAX_REPLACE_ATTEMPTS,
         || {
+            // Capture the type and attributes before a staging rename. Deletes
+            // must never move a directory tree or a special file.
+            let metadata = match std::fs::symlink_metadata(target) {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Attempt::Done(None)),
+                Err(err) => return Err(MaterializeError::io(target, &err)),
+            };
+            if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+                return Ok(Attempt::Done(Some(false)));
+            }
             if write {
                 match reads.check(target, &preimage)? {
                     TargetHolds::Expected => {}
@@ -1643,15 +1708,26 @@ fn stage_target(
                     TargetHolds::Other => return Ok(Attempt::Done(Some(false))),
                 }
             }
-            if write {
-                refuse_read_only_target(target)?;
+            #[cfg(windows)]
+            if write && metadata.permissions().readonly() {
+                return Err(MaterializeError::io(
+                    target,
+                    &std::io::Error::from(ErrorKind::PermissionDenied),
+                ));
             }
             displace_attempt(options.replacer, target, &staged).map(|attempt| match attempt {
                 Attempt::Done(moved) => Attempt::Done(moved.then_some(true)),
                 Attempt::Locked(err) => Attempt::Locked(err),
             })
         },
-    )?;
+    );
+    let attempt = match attempt {
+        Err(MaterializeError::Io {
+            kind: ErrorKind::CrossesDevices,
+            ..
+        }) => return Ok(Stage::CrossVolume),
+        other => other?,
+    };
     Ok(match attempt {
         Some(true) => Stage::Moved(spec),
         Some(false) => Stage::Conflict,
@@ -1750,24 +1826,6 @@ fn entry_exists(path: &Path) -> Result<bool, MaterializeError> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
         Err(err) => Err(MaterializeError::io(path, &err)),
     }
-}
-
-/// Windows refuses to rename over a read-only file, and a write used to fail
-/// there. Moving the file aside would succeed, so the refusal is explicit.
-#[cfg(windows)]
-fn refuse_read_only_target(target: &Path) -> Result<(), MaterializeError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.permissions().readonly() => Err(MaterializeError::io(
-            target,
-            &std::io::Error::from(ErrorKind::PermissionDenied),
-        )),
-        _ => Ok(()),
-    }
-}
-
-#[cfg(not(windows))]
-fn refuse_read_only_target(_target: &Path) -> Result<(), MaterializeError> {
-    Ok(())
 }
 
 /// Create an expected-absent target from the temp. `false` when something is
@@ -1877,22 +1935,10 @@ fn return_displaced(
     staged: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
-    #[cfg(windows)]
-    let read_only = std::fs::symlink_metadata(staged)
-        .map(|metadata| metadata.permissions().readonly())
-        .unwrap_or(false);
     let returned = retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
         place_attempt(options.replacer, staged, target)
     })?;
     if returned {
-        // The Windows no-replace rename resets file attributes. Put the
-        // read-only bit back; archive and hidden are not restored.
-        #[cfg(windows)]
-        if read_only && let Ok(metadata) = std::fs::symlink_metadata(target) {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(true);
-            let _ = std::fs::set_permissions(target, permissions);
-        }
         sync_parent_dir(target.parent(), options.policy)?;
         sync_parent_dir(staged.parent(), options.policy)?;
     }
@@ -2300,6 +2346,7 @@ fn rowless_staged(
         Err(err) => return Err(MaterializeError::io(staging, &err)),
     };
     let mut found = Vec::new();
+    let names = store.displacement_names()?;
     for entry in entries {
         let entry = entry.map_err(|err| MaterializeError::io(staging, &err))?;
         let Ok(name) = entry.file_name().into_string() else {
@@ -2308,7 +2355,7 @@ fn rowless_staged(
         let Some(key) = staged_name_key(&name) else {
             continue;
         };
-        if store.displacement_named(&name)? {
+        if names.contains(&name) {
             continue;
         }
         let (job_id, job) = staged_job(store, key)?;
@@ -2366,6 +2413,31 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     }
 }
 
+fn unavailable_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+fn set_recovery_unavailable(root: &Path, unavailable: bool) {
+    if let Ok(mut roots) = unavailable_recovery_roots().lock() {
+        if unavailable {
+            roots.insert(root.to_owned());
+        } else {
+            roots.remove(root);
+        }
+    }
+}
+
+/// Whether the latest recovery scan could not read this workspace's staging directory.
+pub fn workspace_recovery_unavailable(root: &Path) -> bool {
+    std::fs::canonicalize(root).ok().is_some_and(|root| {
+        unavailable_recovery_roots()
+            .lock()
+            .is_ok_and(|roots| roots.contains(&root))
+    })
+}
+
 /// Resolve every staged file a crash or a failed return left under `root`:
 /// open rows, kept files whose bytes could not be read before, and staged
 /// files no row names, even when their job is finished or gone. A file that
@@ -2382,9 +2454,22 @@ pub fn recover_displacements(
 ) -> Result<(), MaterializeError> {
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let Ok(staging) = staging_dir(&canonical_root, false) else {
-        return Ok(());
+    let staging = match staging_dir(&canonical_root, false) {
+        Ok(staging) => staging,
+        Err(_) => {
+            set_recovery_unavailable(&canonical_root, true);
+            return Ok(());
+        }
     };
+    let rowless = match rowless_staged(store, &staging) {
+        Ok(rowless) => rowless,
+        Err(MaterializeError::Storage(err)) => return Err(err.into()),
+        Err(_) => {
+            set_recovery_unavailable(&canonical_root, true);
+            return Ok(());
+        }
+    };
+    set_recovery_unavailable(&canonical_root, false);
     // Only a storage failure stops the sweep; any other failure leaves that
     // file for the next one.
     let settle = |recovered: Result<bool, MaterializeError>, job_id: &str| match recovered {
@@ -2396,7 +2481,7 @@ pub fn recover_displacements(
     // Adopt unknown rowless files together before restoring any of them.
     // New rows sort after old rows, so the newest displaced bytes return first.
     let mut adopt = Vec::new();
-    for staged in rowless_staged(store, &staging)? {
+    for staged in &rowless {
         if let Some(job) = &staged.job
             && workspace_id.is_some_and(|id| !job.workspace_id.is_empty() && id != job.workspace_id)
         {
@@ -2442,37 +2527,39 @@ pub fn recover_displacements(
         sync_staged(&staging, options.policy)?;
         store.open_displacements(&adopt)?;
     }
-    for displacement in store.list_unsettled_displacements()? {
-        if let Some(workspace_id) = workspace_id
-            && !displacement.workspace_id.is_empty()
-            && displacement.workspace_id != workspace_id
-        {
+    let mut rows: std::collections::HashMap<_, _> = store
+        .list_unsettled_displacements()?
+        .into_iter()
+        .map(|row| (row.displaced_name.clone(), row))
+        .collect();
+    // The rowless snapshot precedes adoption. Settle it newest first before
+    // older rows, including known preimages that must return to an empty path.
+    for staged in rowless.iter().rev() {
+        if staged.job.as_ref().is_some_and(|job| {
+            workspace_id.is_some_and(|id| !job.workspace_id.is_empty() && id != job.workspace_id)
+        }) {
+            continue;
+        }
+        let recovered = if let Some(row) = rows.remove(&staged.name) {
+            recover_displacement(store, &canonical_root, &staging, &row, options)
+        } else if let Some(job) = &staged.job {
+            recover_staged(store, &canonical_root, &staging, &staged.name, job, options)
+        } else {
+            keep_orphan(store, &staging, staged, workspace_id.unwrap_or(""), options)
+        };
+        settle(recovered, &staged.job_id)?;
+    }
+    let mut rows: Vec<_> = rows.into_values().collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.displacement_id));
+    for displacement in rows {
+        if workspace_id.is_some_and(|id| {
+            !displacement.workspace_id.is_empty() && displacement.workspace_id != id
+        }) {
             continue;
         }
         let recovered =
             recover_displacement(store, &canonical_root, &staging, &displacement, options);
         settle(recovered, &displacement.job_id)?;
-    }
-    for staged in rowless_staged(store, &staging)? {
-        let recovered = match &staged.job {
-            Some(job)
-                if workspace_id
-                    .is_some_and(|id| !job.workspace_id.is_empty() && id != job.workspace_id) =>
-            {
-                continue;
-            }
-            Some(job) => {
-                recover_staged(store, &canonical_root, &staging, &staged.name, job, options)
-            }
-            None => keep_orphan(
-                store,
-                &staging,
-                &staged,
-                workspace_id.unwrap_or(""),
-                options,
-            ),
-        };
-        settle(recovered, &staged.job_id)?;
     }
     Ok(())
 }
@@ -2535,17 +2622,17 @@ pub fn recover_path_displacements(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let staging = staging_dir(&canonical_root, false)?;
-    for displacement in store.list_unsettled_displacements_for_path(workspace_id, path)? {
-        if recover_displacement(store, &canonical_root, &staging, &displacement, options)? {
-            conflict_if_pending(store, &displacement.job_id, options.now_ms)?;
-        }
-    }
-    for staged in rowless_staged(store, &staging)? {
+    for staged in rowless_staged(store, &staging)?.into_iter().rev() {
         if let Some(job) = &staged.job
             && job_targets(job, workspace_id, path)
             && recover_staged(store, &canonical_root, &staging, &staged.name, job, options)?
         {
             conflict_if_pending(store, &job.job_id, options.now_ms)?;
+        }
+    }
+    for displacement in store.list_unsettled_displacements_for_path(workspace_id, path)? {
+        if recover_displacement(store, &canonical_root, &staging, &displacement, options)? {
+            conflict_if_pending(store, &displacement.job_id, options.now_ms)?;
         }
     }
     Ok(())
@@ -2595,16 +2682,41 @@ fn recover_job_displacements(
     options: &MaterializeOptions<'_>,
 ) -> Result<(Staging, bool), MaterializeError> {
     // Only a job that expects a file can stage one.
-    let dir = staging_dir(root, matches!(job.preimage, Preimage::Present(_)))?;
+    let path_rows =
+        store.list_unsettled_displacements_for_path(&job.workspace_id, &job.target_path)?;
+    if matches!(job.preimage, Preimage::Absent) && path_rows.is_empty() {
+        return Ok((
+            Staging {
+                dir: root.join(STAGING_DIR),
+                taken: Vec::new(),
+            },
+            false,
+        ));
+    }
+    let dir = staging_dir(root, matches!(job.preimage, Preimage::Present(_))).map_err(|_| {
+        set_recovery_unavailable(root, true);
+        MaterializeError::RecoveryUnavailable
+    })?;
     let mut rows = store.list_displacements_for_job(&job.job_id)?;
     let mut taken: Vec<String> = rows.iter().map(|row| row.displaced_name.clone()).collect();
     // Scan entries rather than stopping at a gap: a person may have removed
     // an earlier copy. The common empty directory needs only one read_dir.
     let mut rowless = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(_) => {
+            set_recovery_unavailable(root, true);
+            return Err(MaterializeError::RecoveryUnavailable);
+        }
+    };
+    if let Some(entries) = entries {
         let key = staged_key(&job.job_id);
         for entry in entries {
-            let entry = entry.map_err(|err| MaterializeError::io(&dir, &err))?;
+            let entry = entry.map_err(|_| {
+                set_recovery_unavailable(root, true);
+                MaterializeError::RecoveryUnavailable
+            })?;
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
@@ -2617,7 +2729,7 @@ fn recover_job_displacements(
         name.rsplit_once('.')
             .and_then(|(_, n)| n.parse::<u32>().ok())
     });
-    for row in store.list_unsettled_displacements_for_path(&job.workspace_id, &job.target_path)? {
+    for row in path_rows {
         if !rows
             .iter()
             .any(|seen| seen.displacement_id == row.displacement_id)

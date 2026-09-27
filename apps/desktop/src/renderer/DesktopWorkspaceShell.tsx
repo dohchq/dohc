@@ -791,6 +791,7 @@ export function DesktopWorkspaceShell(props: {
     clearSyncFailure,
     reportDriveLimit,
     reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4591,6 +4592,21 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not show the recovery folder.", error);
     });
   }, [workspaceId, reportShellError]);
+  const retryFileRecovery = useCallback(() => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor) return;
+    void bridge().retryFileRecovery({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportRecoveryUnavailable(false, () => undefined, revealRecoveryWorkspace);
+    }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("dohc could not retry file recovery.", error, retryFileRecovery, "file-recovery-unavailable");
+    });
+  }, [workspaceId, reportRecoveryUnavailable, revealRecoveryWorkspace, reportShellError]);
+  useEffect(() => {
+    if (syncStatus?.recoveryUnavailable === undefined) return;
+    reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
+  }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles,

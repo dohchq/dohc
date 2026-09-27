@@ -13,6 +13,7 @@ export type ShellErrorKind =
   | "import-files"
   | "share-refresh"
   | "drive-no-atomic-placement"
+  | "file-recovery-unavailable"
   | "kept-files"
   | DirectWriteNoticeKind
   | SettingsFileKind;
@@ -212,6 +213,22 @@ export function useShellError(workspaceId: string) {
       ),
     [push],
   );
+  const reportRecoveryUnavailable = useCallback(
+    (unavailable: boolean, retry: () => void, openFolder: () => void) => {
+      if (!unavailable) {
+        clearKind("file-recovery-unavailable");
+        return;
+      }
+      push({
+        message: "dohc could not read the recovery folder. File recovery is waiting. Check folder access, then try again.",
+        details: [["Folder", ".dohc/engine/displaced"]],
+        retry,
+        action: { label: "Show recovery folder", run: openFolder },
+        kind: "file-recovery-unavailable",
+      });
+    },
+    [clearKind, push],
+  );
   const reportKeptFiles = useCallback(
     (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => {
       if (!notice.paths.length) {
@@ -338,6 +355,7 @@ export function useShellError(workspaceId: string) {
     clearSyncFailure,
     reportDriveLimit,
     reportKeptFiles,
+    reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,

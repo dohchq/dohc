@@ -678,14 +678,18 @@ pub(crate) fn keep_displacement(
     )
 }
 
-/// Whether any row names this staged file.
-pub(crate) fn displacement_named(conn: &Connection, name: &str) -> Result<bool, StorageError> {
-    conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM materialization_displacements WHERE displaced_name = ?1)",
-        [name],
-        |row| row.get(0),
-    )
-    .map_err(StorageError::corrupt)
+/// Names held by displacement rows, including retained copies.
+pub(crate) fn displacement_names(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>, StorageError> {
+    let mut query = conn
+        .prepare("SELECT displaced_name FROM materialization_displacements")
+        .map_err(StorageError::corrupt)?;
+    query
+        .query_map([], |row| row.get(0))
+        .map_err(StorageError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(StorageError::corrupt)
 }
 
 /// End a row and, in the same transaction, give its job a terminal status.

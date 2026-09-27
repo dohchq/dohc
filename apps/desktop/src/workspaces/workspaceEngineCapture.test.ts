@@ -90,6 +90,7 @@ interface CaptureOptions {
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   onAtomicPlacementUnavailable?: () => void;
+  onRecoveryUnavailable?: (unavailable: boolean) => void;
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -1774,13 +1775,14 @@ describe("workspaceEngineCapture batch capture", () => {
     const liveStore = createCaptureLiveStores({
       workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
     }, sessions).store;
+    const recovery = vi.fn();
     const watcherStatus = vi.fn(async () => {
       if (watcherStatus.mock.calls.length === 1) {
         entered.resolve();
         await release.promise;
         if (failFirst) throw new Error("temporary watcher failure");
       }
-      return { running: true, degraded: false, terminal: false };
+      return { running: true, degraded: false, terminal: false, recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
     });
     const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
     const outcomes: WorkspaceEngineCaptureFailure[] = [];
@@ -1795,6 +1797,7 @@ describe("workspaceEngineCapture batch capture", () => {
     });
     const engine = capture(root, {
       store: daemonStore, rustEngineSessions: sessions,
+      onRecoveryUnavailable: recovery,
       onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
     });
     try {
@@ -1812,6 +1815,7 @@ describe("workspaceEngineCapture batch capture", () => {
       await engine.flush();
       expect(watcherStatus).toHaveBeenCalledTimes(2);
       expect(outcomes.at(-1)).toBeNull();
+      expect(recovery.mock.calls).toEqual(failFirst ? [[false]] : [[true], [false]]);
       await engine.stop();
       await vi.advanceTimersByTimeAsync(2 * DAEMON_CAPTURE_HEALTH_POLL_MS);
       expect(watcherStatus).toHaveBeenCalledTimes(2);

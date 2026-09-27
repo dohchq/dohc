@@ -1650,15 +1650,32 @@ fn delete_crash_points_preserve_closed_writer_bytes() {
 }
 
 #[test]
-fn staging_refuses_to_replace_an_existing_copy() {
+fn staging_selects_an_unused_name_and_preserves_a_retained_copy() {
     let sc = Scratch::new("staging-collision");
-    let source = sc.target("source");
-    let destination = sc.target("existing");
-    std::fs::write(&source, PREIMAGE).expect("source");
-    std::fs::write(&destination, OUTSIDE).expect("existing");
-    assert!(StdReplacer.displace(&source, &destination).is_err());
-    assert_eq!(std::fs::read(source).expect("source"), PREIMAGE);
-    assert_eq!(std::fs::read(destination).expect("existing"), OUTSIDE);
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_overwrite(&sc, &mut store);
+    put_staged(&sc, "6a31.0", OUTSIDE);
+    store
+        .keep_displacement(
+            &DisplacementSpec {
+                job_id: "j1".into(),
+                workspace_id: "ws".into(),
+                target_path: "a.md".into(),
+                displaced_name: "6a31.0".into(),
+                expected_sha256: hex_sha256(PREIMAGE),
+                content_sha256: Some(hex_sha256(OURS)),
+                now_ms: 5,
+            },
+            Some(&hex_sha256(OUTSIDE)),
+        )
+        .unwrap();
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(OUTSIDE));
+    assert_eq!(read(&sc, &staged("6a31.1")).as_deref(), Some(PREIMAGE));
 }
 
 #[test]
@@ -3193,4 +3210,237 @@ fn a_rowless_staged_file_counts_as_displaced_until_it_goes_back() {
         .expect("return");
     assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
     assert!(!path_is_displaced(&store, sc.workspace(), "ws", "a.md").expect("query"));
+}
+
+#[test]
+fn unavailable_staging_does_not_stop_open_or_unrelated_creates() {
+    let sc = Scratch::new("unavailable-staging");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target(STAGING), b"unavailable directory").unwrap();
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+    assert!(dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+    assert!(drain(&store, &sc, &StdReplacer, &NoFaults).is_empty());
+    stage_overwrite(&sc, &mut store);
+    let create = spec(
+        "j2",
+        "unrelated.md",
+        &hex_sha256(OURS),
+        Preimage::Absent,
+        1,
+        11,
+    );
+    stage_job(&mut store, OURS, &create);
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Blocked, JobOutcome::Completed]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+    assert_eq!(read(&sc, "unrelated.md").as_deref(), Some(OURS));
+    assert_eq!(
+        read(&sc, STAGING).as_deref(),
+        Some(b"unavailable directory".as_slice())
+    );
+    std::fs::remove_file(sc.target(STAGING)).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert!(!dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+}
+
+#[test]
+fn delete_refuses_a_directory_and_keeps_its_tree_at_the_target() {
+    let sc = Scratch::new("delete-directory");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_delete(&sc, &mut store);
+    std::fs::remove_file(sc.target("a.md")).unwrap();
+    std::fs::create_dir(sc.target("a.md")).unwrap();
+    std::fs::write(sc.target("a.md/child"), OUTSIDE).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(read(&sc, "a.md/child").as_deref(), Some(OUTSIDE));
+    assert_nothing_displaced(&sc, &store);
+}
+
+#[test]
+fn startup_restores_a_newer_rowless_preimage_before_an_older_open_row() {
+    for path_only in [false, true] {
+        let sc = Scratch::new("newest-rowless-first");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        put_staged(&sc, "6f6c64.0", OUTSIDE);
+        store
+            .open_displacement(&DisplacementSpec {
+                job_id: "old".into(),
+                workspace_id: "ws".into(),
+                target_path: "a.md".into(),
+                displaced_name: "6f6c64.0".into(),
+                expected_sha256: hex_sha256(PREIMAGE),
+                content_sha256: Some(hex_sha256(OURS)),
+                now_ms: 1,
+            })
+            .unwrap();
+        if path_only {
+            recover_path_displacements(&store, sc.workspace(), "ws", "a.md", &sweep_options())
+                .unwrap();
+        } else {
+            recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+        }
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+        assert_eq!(read(&sc, &staged("6f6c64.0")).as_deref(), Some(OUTSIDE));
+    }
+}
+
+struct CrossVolumeStage {
+    change: bool,
+}
+impl AtomicReplacer for CrossVolumeStage {
+    fn displace(&self, target: &Path, _displaced: &Path) -> std::io::Result<()> {
+        if self.change {
+            std::fs::write(target, OUTSIDE)?;
+        }
+        Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+    }
+}
+
+#[test]
+fn cross_volume_targets_use_checked_replace_and_delete() {
+    for delete in [false, true] {
+        for change in [false, true] {
+            let sc = Scratch::new("cross-volume");
+            let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+            if delete {
+                stage_delete(&sc, &mut store);
+            } else {
+                stage_overwrite(&sc, &mut store);
+            }
+            assert_eq!(
+                drain(&store, &sc, &CrossVolumeStage { change }, &NoFaults),
+                vec![if change {
+                    JobOutcome::Conflict
+                } else {
+                    JobOutcome::Completed
+                }]
+            );
+            assert_eq!(
+                read(&sc, "a.md").as_deref(),
+                if change {
+                    Some(OUTSIDE)
+                } else if delete {
+                    None
+                } else {
+                    Some(OURS)
+                }
+            );
+            assert_nothing_displaced(&sc, &store);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_staging_and_failed_return_preserve_attributes() {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let sc = Scratch::new("windows-attributes");
+    let target = sc.target("hidden.md");
+    let staged = sc.target("staged.md");
+    let destination = sc.target("return.md");
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .attributes(0x2 | 0x20)
+        .open(&target)
+        .unwrap(); // hidden | archive
+    drop(file);
+    let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&target, permissions).unwrap();
+    let attrs = std::fs::metadata(&target).unwrap().file_attributes();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&target)
+        .unwrap();
+    assert!(StdReplacer.displace(&target, &staged).is_err());
+    assert_eq!(std::fs::metadata(&target).unwrap().file_attributes(), attrs);
+    drop(lock);
+    StdReplacer.displace(&target, &staged).unwrap();
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&staged)
+        .unwrap();
+    assert!(StdReplacer.place(&staged, &destination).is_err());
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    drop(lock);
+    StdReplacer.place(&staged, &destination).unwrap();
+    assert_eq!(
+        std::fs::metadata(&destination).unwrap().file_attributes(),
+        attrs
+    );
+    let mut permissions = std::fs::metadata(&destination).unwrap().permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&destination, permissions).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_staging_retains_a_crash_copy_until_access_returns() {
+    struct RestoreAccess(PathBuf);
+    impl Drop for RestoreAccess {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("icacls")
+                .arg(&self.0)
+                .args(["/remove:d", "*S-1-1-0", "/q"])
+                .output();
+        }
+    }
+    let sc = Scratch::new("staging-denied");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_overwrite(&sc, &mut store);
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    let directory = sc.target(STAGING);
+    let restore = RestoreAccess(directory.clone());
+    let denied = std::process::Command::new("icacls")
+        .arg(&directory)
+        .args(["/deny", "*S-1-1-0:(RD)", "/q"])
+        .output()
+        .unwrap();
+    assert!(denied.status.success(), "{denied:?}");
+    assert_eq!(
+        std::fs::read_dir(&directory).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Blocked]
+    );
+    assert!(dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+    drop(restore);
+    assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
 }

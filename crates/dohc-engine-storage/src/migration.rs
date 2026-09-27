@@ -2549,8 +2549,7 @@ CREATE TABLE automation_group_state (
 /// Files the materializer moved into its staging directory whose bytes the
 /// store does not hold. An `open` row names one until it goes back to its
 /// path, when the row is deleted. A `kept` row is the evidence of bytes
-/// another program wrote that could not go back. This build writes no
-/// `prepared` or `placed` rows.
+/// another program wrote that could not go back.
 const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
 CREATE TABLE materialization_displacements (
     displacement_id INTEGER PRIMARY KEY,
@@ -2560,7 +2559,7 @@ CREATE TABLE materialization_displacements (
     displaced_name TEXT NOT NULL,
     expected_sha256 TEXT NOT NULL,
     content_sha256 TEXT,
-    state TEXT NOT NULL CHECK (state IN ('prepared', 'open', 'placed', 'kept')),
+    state TEXT NOT NULL CHECK (state IN ('open', 'kept')),
     displaced_sha256 TEXT,
     created_at_ms INTEGER NOT NULL,
     resolved_at_ms INTEGER,

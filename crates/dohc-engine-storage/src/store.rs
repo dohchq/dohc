@@ -387,9 +387,9 @@ impl EngineStore {
         materialize::keep_displacement(&self.conn, spec, displaced_sha256)
     }
 
-    /// Whether any displacement row names this staged file.
-    pub fn displacement_named(&self, name: &str) -> Result<bool, StorageError> {
-        materialize::displacement_named(&self.conn, name)
+    /// Names held by displacement rows, including retained copies.
+    pub fn displacement_names(&self) -> Result<std::collections::HashSet<String>, StorageError> {
+        materialize::displacement_names(&self.conn)
     }
 
     /// End a displacement row and, in the same transaction, give `job` a
