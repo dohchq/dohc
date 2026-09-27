@@ -29,7 +29,7 @@ Defer app installation too if Blacksmith must receive no repository activity bef
 
 1. Install the Blacksmith GitHub App for `dohc-ai/dohc` only.
 2. Restrict its runner group's repository access to `dohc-ai/dohc`.
-3. Set the billing email and a $50 monthly spending alert in Blacksmith.
+3. Set a monitored primary email under Account, then configure a $50 monthly threshold under Spending Alerts.
 4. Plan for $100 per month. Confirm any provider-enforced cutoff before enabling automatic runs.
 5. While private, keep fork PR workflows disabled in GitHub Actions settings.
 6. Before making the repository public, require approval for all external contributors in GitHub Actions settings.
