@@ -5070,6 +5070,9 @@ mod conflict_resolve_blob_ref_tests {
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(
                     b"predecessor state vector",
                 ),
+                predecessor_full_state_sha256: dohc_engine_storage::hex_sha256(
+                    b"predecessor full state",
+                ),
                 artifact_preimage_sha256: text_sha.clone(),
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor_sha.clone(),

@@ -718,7 +718,7 @@ impl Ydoc {
     /// cross-origin missing dependency durably parked in the log). A
     /// projection taken in this state omits pending remote content.
     pub fn has_pending_dependencies(&self) -> bool {
-        self.pending_update_v1().is_some()
+        self.has_missing_updates()
     }
 
     pub(crate) fn pending_update_v1(&self) -> Option<Vec<u8>> {

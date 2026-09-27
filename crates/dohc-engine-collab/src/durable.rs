@@ -1739,7 +1739,7 @@ pub fn replace_lineage_with_successor_in_tx(
 
 /// Install a reviewed successor while guarding the receiver's alternate lineage.
 /// The successor retains its author's causal parent. The caller must establish
-/// that the alternate lineage is an unchanged side of the same review.
+/// that the alternate lineage belongs to the same review and its visible edits are preserved.
 pub fn replace_reviewed_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
@@ -1808,10 +1808,42 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         expected_predecessor_claim_id,
         expected_predecessor_state_vector_sha256,
     ));
-    let (marker, predecessor, predecessor_state_vector) =
-        load_exact_active_lineage(tx, key, local_claim, local_vector)?;
-
-    let predecessor_full_state_sha = put_binary_blob(tx, &predecessor.encode_full_state())?;
+    let (marker, predecessor, predecessor_state_vector) = if reviewed_local_predecessor.is_some() {
+        let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+        if marker.lineage_claim_id.as_deref() != Some(local_claim) {
+            return Err(CollabError::LineagePredecessorMismatch {
+                expected: local_claim.to_owned(),
+                observed: marker.lineage_claim_id,
+            });
+        }
+        let doc = load_doc_in(tx, key)?;
+        let vector = doc.encode_state_vector();
+        if crate::hex_sha256(&vector) != local_vector {
+            return Err(CollabError::LineageStateVectorMismatch {
+                expected: local_vector.to_owned(),
+                observed: crate::hex_sha256(&vector),
+            });
+        }
+        (marker, doc, vector)
+    } else {
+        load_exact_active_lineage(tx, key, local_claim, local_vector)?
+    };
+    let mut retained = vec![predecessor.encode_full_state()];
+    if predecessor.has_pending_dependencies() {
+        let mut statement = tx.prepare("SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 \
+        WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3 ORDER BY u.seq").map_err(map_sql)?;
+        retained.extend(
+            statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .map_err(map_sql)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sql)?,
+        );
+    }
+    let predecessor_full_state_sha = put_binary_blob(tx, &crate::merge_updates(&retained)?)?;
     let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \

@@ -464,6 +464,7 @@ fn apply_deferred_base(
             recorded_at_ms, search_policy,
         )? {
             record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, result.conflicts_opened)?;
+            dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id).map_err(SyncError::Storage)?;
             return Ok(result.lineage_replacement);
         }
         let unpublished_claim_id = if local_unpublished {
@@ -955,7 +956,45 @@ fn drain_deferred_ydoc(
             reason: "parked Y.Doc delta is waiting for a verified base identity",
         })?;
         if lineage_claim_id != winner_claim_id {
-            // A losing lineage's causal bytes must never enter the winner.
+            let retained = store.write_with(faults, |tx| {
+                apply_inactive_delta_in_tx(
+                    tx,
+                    key,
+                    &payload,
+                    &bytes,
+                    recorded_at_ms,
+                    search_policy.as_ref(),
+                )
+            });
+            let retained = match retained {
+                Ok(retained) => retained,
+                Err(error) => {
+                    if let Some(reason) = crate::apply::refusal_reason(&error) {
+                        refusals.push(refuse_deferred_ydoc(
+                            store,
+                            key,
+                            &origin_id,
+                            origin_seq,
+                            reason.message(),
+                            faults,
+                        )?);
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            match retained {
+                TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+                TxnOutcome::Committed(InactiveDeltaOutcome {
+                    refusal: Some(reason),
+                    ..
+                }) => {
+                    refusals.push(refuse_deferred_ydoc(
+                        store, key, &origin_id, origin_seq, reason, faults,
+                    )?);
+                }
+                TxnOutcome::Committed(_) => {}
+            }
             drained_coordinates.push((origin_id, origin_seq));
             continue;
         }
@@ -2309,8 +2348,8 @@ fn preserve_incomplete_base_in_tx(
     if !doc.has_pending_dependencies() {
         return Ok(None);
     }
-    // Keep the pending bytes in their durable log so their missing predecessor
-    // can still arrive. A projection or a full-state encode would omit them.
+    // Merge the durable updates as wire data: a full-state encode alone omits
+    // unresolved insertions and deletions.
     let local = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
     let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
         .map_err(map_collab_hard_error)?;
@@ -2325,7 +2364,7 @@ fn preserve_incomplete_base_in_tx(
     let mut recovered_paths = Vec::new();
     if open || external.is_some() {
         let preserved = if open {
-            incoming.clone()
+            local.clone()
         } else {
             tx.query_row(
                 "SELECT text FROM blobs WHERE sha256=?1",
@@ -2353,31 +2392,285 @@ fn preserve_incomplete_base_in_tx(
         )?;
         recovered_paths.push(recovery.path);
     }
-    // The active lineage belongs on incoming: later dependencies coalesce
-    // there while the complete competing base stays visible on current.
+    if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
+        let prior: Option<String> = tx
+            .query_row(
+                "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 \
+            WHERE c.workspace_id=?1 AND c.conflict_id=?2",
+                params![key.workspace_id, conflict_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        if let Some(prior) = prior.filter(|prior| prior != &incoming && prior != &local) {
+            let recovery = crate::ydoc_recovery::create_recovery_in_tx(
+                tx,
+                key,
+                &payload.path,
+                marker
+                    .lineage_claim_id
+                    .as_deref()
+                    .unwrap_or(&payload.lineage_claim_id),
+                &prior,
+                0,
+                now_ms,
+                search_policy,
+            )?;
+            recovered_paths.push(recovery.path);
+        }
+    }
+    // The winning lineage owns incoming; the losing projection stays visible.
     let opened = conflict_replaced_lineage_in_tx(
         tx,
         key,
         &payload.path,
-        &incoming,
-        snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
         &local,
+        snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
+        &incoming,
         origin_id,
         origin_seq,
         now_ms,
         search_policy,
     )?
     .unwrap_or(0);
+    let mut updates = vec![doc.encode_full_state()];
+    let mut stmt = tx.prepare(
+        "SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 \
+         WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3 ORDER BY u.seq",
+    ).map_err(SyncError::corrupt)?;
+    updates.extend(
+        stmt.query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?,
+    );
+    let retained = dohc_engine_collab::merge_updates(&updates).map_err(map_collab_hard_error)?;
+    let full_sha =
+        dohc_engine_storage::put_binary_blob(tx, &retained).map_err(SyncError::Storage)?;
+    let vector_sha = dohc_engine_storage::put_binary_blob(tx, &doc.encode_state_vector())
+        .map_err(SyncError::Storage)?;
+    let unpublished_claim = dohc_engine_storage::put_binary_blob(tx, &doc.encode_full_state())
+        .map_err(SyncError::Storage)?;
+    let claim = marker
+        .lineage_claim_id
+        .as_deref()
+        .unwrap_or(&unpublished_claim);
+    let local_sha = hex_sha256(local.as_bytes());
+    put_projection_text_blob(tx, &local, &local_sha)?;
+    tx.execute(
+        "INSERT INTO ydoc_inactive_lineages (workspace_id,version_id,object_id,lineage_claim_id, \
+         parent_claim_id,disposition,content_kind,path,epoch_tag,full_state_blob_sha256, \
+         state_vector_blob_sha256,last_surfaced_projection_sha256,open_conflict_id,recorded_at_ms,updated_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,'rejected-base',?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+        params![key.workspace_id,key.version_id,key.object_id,claim,marker.lineage_parent_claim_id,
+            marker.content_kind.as_str(),payload.path,marker.lineage_epoch_tag,full_sha,vector_sha,
+            local_sha,open_sync_conflict_id(tx,key)?,now_ms],
+    ).map_err(SyncError::persist)?;
+    if marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed {
+        tx.execute(
+            "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute("UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,settled_update_seq=NULL,seed_source_sha256=NULL \
+            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id,key.version_id,key.object_id]).map_err(SyncError::persist)?;
+    }
+    let incoming_bytes: Vec<u8> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [&payload.update_blob_sha256],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    dohc_engine_collab::claim_base_at_relay_in_tx(
+        tx,
+        key,
+        kind,
+        &incoming_bytes,
+        &incoming_doc.encode_state_vector(),
+        &dohc_engine_collab::BaseRelayCoordinate::new(origin_id, origin_seq, relay_seq)
+            .map_err(map_collab_hard_error)?,
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)?;
+    if open {
+        project_and_write_in_tx(
+            tx,
+            key,
+            &payload.path,
+            incoming_doc,
+            kind,
+            origin_id,
+            origin_seq,
+            now_ms,
+            search_policy,
+        )?;
+    }
     Ok(Some(YdocApplyResult {
         deferred: false,
         reason: Some("ydoc-base-conflict"),
         conflicts_opened: opened,
-        lineage_replacement: marker.lineage_claim_id.map(|claim| YdocLineageReplacement {
-            winner_lineage_claim_id: claim,
+        lineage_replacement: Some(YdocLineageReplacement {
+            winner_lineage_claim_id: payload.lineage_claim_id.clone(),
             recovered_paths,
         }),
         record_facts: Vec::new(),
     }))
+}
+
+struct InactiveLineage {
+    bytes: Vec<u8>,
+    kind: String,
+    surfaced: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Default)]
+struct InactiveDeltaOutcome {
+    found: bool,
+    refusal: Option<String>,
+}
+
+fn apply_inactive_delta_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    bytes: &[u8],
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<InactiveDeltaOutcome, SyncError> {
+    let archived: Option<InactiveLineage> = tx.query_row(
+        "SELECT b.bytes,l.content_kind,l.last_surfaced_projection_sha256,l.path FROM ydoc_inactive_lineages l \
+         JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256 \
+         WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 AND l.lineage_claim_id=?4",
+        params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id],
+        |row| Ok(InactiveLineage { bytes:row.get(0)?,kind:row.get(1)?,surfaced:row.get(2)?,path:row.get(3)? }),
+    ).optional().map_err(SyncError::corrupt)?;
+    let Some(InactiveLineage {
+        bytes: prior,
+        kind,
+        surfaced,
+        path,
+    }) = archived
+    else {
+        return Ok(InactiveDeltaOutcome::default());
+    };
+    let path = path.as_deref().unwrap_or(&payload.path);
+    let kind = ContentKind::parse(&kind).map_err(map_collab_hard_error)?;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&prior).map_err(map_collab_hard_error)?;
+    let surfaced = match surfaced {
+        Some(sha) => Some(sha),
+        None => match project_ydoc_with_store(tx, key, &doc, kind) {
+            Ok(projection) => Some(hex_sha256(projection.content.as_bytes())),
+            Err(
+                SyncError::ProjectionTooLarge { .. }
+                | SyncError::InvalidInput { .. }
+                | SyncError::RetryableState { .. },
+            ) => None,
+            Err(error) => return Err(error),
+        },
+    };
+    dohc_engine_collab::validate_replay_parity(&doc, bytes).map_err(|error| {
+        map_collab_payload_error(error, "inactive Y.Doc update fails replay validation")
+    })?;
+    doc.apply(bytes)
+        .map_err(|error| map_collab_payload_error(error, "inactive Y.Doc update is invalid"))?;
+    let merged = dohc_engine_collab::merge_updates(&[prior, bytes.to_vec()])
+        .map_err(map_collab_hard_error)?;
+    let full_sha = dohc_engine_storage::put_binary_blob(tx, &merged).map_err(SyncError::Storage)?;
+    let vector_sha = dohc_engine_storage::put_binary_blob(tx, &doc.encode_state_vector())
+        .map_err(SyncError::Storage)?;
+    tx.execute(
+        "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256=?5,state_vector_blob_sha256=?6, \
+        last_surfaced_projection_sha256=?7,updated_at_ms=?8 \
+        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            payload.lineage_claim_id,
+            full_sha,
+            vector_sha,
+            surfaced,
+            now_ms
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    if doc.has_pending_dependencies() {
+        return Ok(InactiveDeltaOutcome {
+            found: true,
+            refusal: None,
+        });
+    }
+    tx.execute_batch("SAVEPOINT dohc_inactive_projection")
+        .map_err(SyncError::persist)?;
+    let projection = (|| {
+        let content = project_ydoc_with_store(tx, key, &doc, kind)?.content;
+        let sha = hex_sha256(content.as_bytes());
+        if surfaced.as_deref() != Some(sha.as_str()) {
+            crate::ydoc_recovery::recover_inactive_projection_in_tx(
+                tx,
+                key,
+                path,
+                &payload.lineage_claim_id,
+                &content,
+                surfaced.as_deref().unwrap_or(""),
+                &full_sha,
+                now_ms,
+                search_policy,
+            )?;
+            tx.execute(
+                "UPDATE ydoc_inactive_lineages SET last_surfaced_projection_sha256=?5 \
+                WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    payload.lineage_claim_id,
+                    sha
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        Ok::<_, SyncError>(())
+    })();
+    let refusal = match projection {
+        Ok(()) => None,
+        Err(SyncError::ProjectionTooLarge {
+            constraint,
+            actual_bytes,
+            limit_bytes,
+        }) => Some(projection_too_large_reason(
+            kind,
+            constraint,
+            actual_bytes,
+            limit_bytes,
+        )),
+        Err(SyncError::InvalidInput { reason } | SyncError::RetryableState { reason }) => {
+            Some(reason.to_owned())
+        }
+        Err(error) => return Err(error),
+    };
+    if refusal.is_some() {
+        tx.execute_batch("ROLLBACK TO dohc_inactive_projection")
+            .map_err(SyncError::persist)?;
+    }
+    tx.execute_batch("RELEASE dohc_inactive_projection")
+        .map_err(SyncError::persist)?;
+    Ok(InactiveDeltaOutcome {
+        found: true,
+        refusal,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3549,60 +3842,87 @@ pub fn apply_ydoc_envelope(
                 };
             }
             let deferred_key = key.clone();
-            return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
-                let version_exists: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM versions \
+            return crate::apply::apply_envelope_with_mutation_outcome(
+                store,
+                envelope,
+                faults,
+                move |tx, op| {
+                    let inactive = apply_inactive_delta_in_tx(
+                        tx,
+                        &deferred_key,
+                        &payload,
+                        &bytes,
+                        op.recorded_at_ms,
+                        search_policy.as_ref(),
+                    )?;
+                    if let Some(reason) = inactive.refusal {
+                        return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                            reason,
+                        });
+                    }
+                    if inactive.found {
+                        return Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                            deferred: false,
+                            reason: Some("ydoc-inactive-lineage"),
+                            conflicts_opened: 0,
+                            lineage_replacement: None,
+                            record_facts: Vec::new(),
+                        }));
+                    }
+                    let version_exists: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM versions \
                          WHERE workspace_id=?1 AND version_id=?2)",
-                        params![deferred_key.workspace_id, deferred_key.version_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(SyncError::corrupt)?;
-                if !version_exists {
-                    return Err(SyncError::RetryableState {
-                        reason: "ydoc.update version is missing",
-                    });
-                }
-                // Validate every identity fact already knowable from this
-                // payload before its coordinate is ACKed and parked. For a
-                // genuinely new object the eventual base path is unknown; the
-                // drain repeats this gate after the base establishes it.
-                validate_retryable_ydoc_identity(tx, &deferred_key, &payload.path)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO file_objects \
+                            params![deferred_key.workspace_id, deferred_key.version_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(SyncError::corrupt)?;
+                    if !version_exists {
+                        return Err(SyncError::RetryableState {
+                            reason: "ydoc.update version is missing",
+                        });
+                    }
+                    // Validate every identity fact already knowable from this
+                    // payload before its coordinate is ACKed and parked. For a
+                    // genuinely new object the eventual base path is unknown; the
+                    // drain repeats this gate after the base establishes it.
+                    validate_retryable_ydoc_identity(tx, &deferred_key, &payload.path)?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO file_objects \
                      (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, ?3)",
-                    params![
-                        deferred_key.workspace_id,
-                        deferred_key.object_id,
-                        op.recorded_at_ms
-                    ],
-                )
-                .map_err(SyncError::persist)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO ydoc_deferred_updates
+                        params![
+                            deferred_key.workspace_id,
+                            deferred_key.object_id,
+                            op.recorded_at_ms
+                        ],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO ydoc_deferred_updates
                      (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,
                       lineage_claim_id,relay_seq)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![
-                        deferred_key.workspace_id,
-                        deferred_key.version_id,
-                        deferred_key.object_id,
-                        op.origin_id,
-                        op.origin_seq,
-                        op.recorded_at_ms,
-                        payload.lineage_claim_id,
-                        relay_seq,
-                    ],
-                )
-                .map_err(SyncError::persist)?;
-                Ok(YdocApplyResult {
-                    deferred: true,
-                    reason: Some("ydoc-lineage-absent"),
-                    conflicts_opened: 0,
-                    lineage_replacement: None,
-                    record_facts: Vec::new(),
-                })
-            });
+                        params![
+                            deferred_key.workspace_id,
+                            deferred_key.version_id,
+                            deferred_key.object_id,
+                            op.origin_id,
+                            op.origin_seq,
+                            op.recorded_at_ms,
+                            payload.lineage_claim_id,
+                            relay_seq,
+                        ],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: true,
+                        reason: Some("ydoc-lineage-absent"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                },
+            );
         };
         if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact {
             return Err(SyncError::RetryableState {
@@ -3613,15 +3933,33 @@ pub fn apply_ydoc_envelope(
             // The relay winner is already known. This coordinate still gets
             // its normal durable ack/log record, but its causal bytes must not
             // enter a different immutable lineage.
-            let outcome = crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
-                Ok(YdocApplyResult {
-                    deferred: false,
-                    reason: Some("ydoc-lineage-lost"),
-                    conflicts_opened: 0,
-                    lineage_replacement: None,
-                    record_facts: Vec::new(),
-                })
-            })?;
+            let outcome = crate::apply::apply_envelope_with_mutation_outcome(
+                store,
+                envelope,
+                faults,
+                |tx, op| {
+                    let inactive = apply_inactive_delta_in_tx(
+                        tx,
+                        &key,
+                        &payload,
+                        &bytes,
+                        op.recorded_at_ms,
+                        search_policy.as_ref(),
+                    )?;
+                    if let Some(reason) = inactive.refusal {
+                        return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                            reason,
+                        });
+                    }
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-lineage-lost"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                },
+            )?;
             // The drain above ran before this apply, so its facts lead.
             let mut outcome = merge_drained_first(
                 merge_lineage_replacements(
