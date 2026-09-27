@@ -3838,6 +3838,19 @@ export function DesktopWorkspaceShell(props: {
   const shareViewDocumentsWritable =
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
   const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
+  const shareBannerText = !shareView
+    ? ""
+    : shareViewEnded
+      ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
+      : shareViewDamaged
+        ? "dohc can't read what this share grants. Open the share again to restore it."
+        : shareViewDocumentsWritable
+          ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
+          : shareViewHasIndependentChat
+            ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
+            : shareView.access === "comment"
+              ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
+              : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
@@ -4633,18 +4646,8 @@ export function DesktopWorkspaceShell(props: {
           <Eye size={12} aria-hidden className="shrink-0" />
           {shareView.subjectName && <span className="max-w-64 truncate font-medium">{shareView.subjectName}</span>}
           {shareView.granterEmail && <span className="shrink-0 font-mono text-[11px]">{shareView.granterEmail}</span>}
-          <span className="min-w-0 flex-1 truncate" title={shareGranterName ?? undefined}>
-            {shareViewEnded
-              ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : shareViewDamaged
-                ? "dohc can't read what this share grants. Open the share again to restore it."
-                : shareViewDocumentsWritable
-                  ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
-                  : shareViewHasIndependentChat
-                    ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
-                    : shareView.access === "comment"
-                      ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
-                    : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+          <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
+            {shareBannerText}
           </span>
           {shareExcludedPaths.length > 0 ? (
             <span
