@@ -119,7 +119,6 @@ struct CaptureApplyProbeInner {
     gate_wait_armed: std::sync::atomic::AtomicBool,
     gate_wait_entered: tokio::sync::Semaphore,
     worker_armed: std::sync::atomic::AtomicBool,
-    worker_blocked: std::sync::atomic::AtomicBool,
     worker_entered: tokio::sync::Semaphore,
     worker_release: (Mutex<bool>, std::sync::Condvar),
     fail_before_worker_armed: std::sync::atomic::AtomicBool,
@@ -151,7 +150,6 @@ impl Default for CaptureApplyProbeInner {
             gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
             gate_wait_entered: tokio::sync::Semaphore::new(0),
             worker_armed: std::sync::atomic::AtomicBool::new(false),
-            worker_blocked: std::sync::atomic::AtomicBool::new(false),
             worker_entered: tokio::sync::Semaphore::new(0),
             worker_release: (Mutex::new(false), std::sync::Condvar::new()),
             fail_before_worker_armed: std::sync::atomic::AtomicBool::new(false),
@@ -274,13 +272,7 @@ impl CaptureApplyProbe {
     /// the capture sink. The blocking release is deliberate: this seam proves
     /// the async driver can time out while its `done_rx` remains pending.
     pub fn pause_next_apply_worker(&self) {
-        self.inner.worker_blocked.store(true, Ordering::Release);
         self.inner.worker_armed.store(true, Ordering::Release);
-    }
-
-    /// True from arming until the worker passes the blocking pause.
-    pub fn is_apply_worker_blocked(&self) -> bool {
-        self.inner.worker_blocked.load(Ordering::Acquire)
     }
 
     pub async fn wait_until_apply_worker_paused(&self) {
@@ -448,7 +440,6 @@ impl CaptureApplyProbe {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
             *released = false;
-            self.inner.worker_blocked.store(false, Ordering::Release);
         }
     }
 

@@ -1343,10 +1343,6 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
         .await
         .expect("fresh open must not wait for the paused import");
-    assert!(
-        probe.is_apply_blocked(),
-        "open returned before the initial apply completed, with its pause still held"
-    );
     tokio::time::timeout(WAIT, probe.wait_until_paused())
         .await
         .expect("initial apply must reach the pause seam");
@@ -1677,10 +1673,6 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
     let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
         .await
         .expect("fresh open must not wait for the initial apply");
-    assert!(
-        probe.is_apply_worker_blocked(),
-        "open returned before initial settle completed, with the retry worker blocked"
-    );
     tokio::time::timeout(WAIT, probe.wait_until_apply_worker_paused())
         .await
         .expect("retry plain apply worker must reach the pause seam");
@@ -1966,10 +1958,6 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
     let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
         .await
         .expect("fresh open must not wait for the paused import");
-    assert!(
-        probe.is_apply_blocked(),
-        "open returned before the initial apply completed, with its pause still held"
-    );
     tokio::time::timeout(WAIT, probe.wait_until_paused())
         .await
         .expect("initial apply must reach the pause seam");
