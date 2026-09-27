@@ -39,7 +39,13 @@ fn shared_name_byte_boundaries() {
     use dohc_engine_domain::names::truncate_name;
     let cases: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/name-boundaries.json")).unwrap();
-    for case in cases.as_array().unwrap() {
+    let (major, minor, patch) = unicode_segmentation::UNICODE_VERSION;
+    assert_eq!(
+        format!("{major}.{minor}.{patch}"),
+        cases["unicodeVersion"].as_str().unwrap(),
+        "Re-check the shared boundary fixtures in TypeScript and Rust before updating unicodeVersion."
+    );
+    for case in cases["cases"].as_array().unwrap() {
         let input = case["input"].as_str().unwrap();
         let expected = case["expected"].as_str().unwrap();
         let max_bytes = case["maxBytes"].as_u64().unwrap() as usize;

@@ -27,8 +27,14 @@ it("keeps complete mention offsets and normalizes lookup keys", () => {
   expect(scanMentionTokens("@\u0345abc")).toEqual([]);
 });
 
-const boundaries: Array<{ name: string; input: string; maxBytes: number; expected: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/name-boundaries.json", import.meta.url), "utf8"));
-it.each(boundaries)("shares the engine byte boundary: $name", ({ input, maxBytes, expected }) => {
+const boundaries: { unicodeVersion: string; cases: Array<{ name: string; input: string; maxBytes: number; expected: string }> } = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/fixtures/name-boundaries.json", import.meta.url), "utf8"));
+it("uses the Unicode version checked by the shared boundary fixtures", () => {
+  expect(
+    `${process.versions.unicode}.0`,
+    "Re-check the shared boundary fixtures in TypeScript and Rust before updating unicodeVersion.",
+  ).toBe(boundaries.unicodeVersion);
+});
+it.each(boundaries.cases)("shares the engine byte boundary: $name", ({ input, maxBytes, expected }) => {
   expect(truncateName(input, maxBytes)).toBe(expected);
   expect(nameByteLength(truncateName(input, maxBytes))).toBeLessThanOrEqual(maxBytes);
 });

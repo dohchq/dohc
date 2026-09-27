@@ -75,7 +75,7 @@ mod diagnostic_tests {
             "../../dohc-engine-domain/tests/fixtures/name-boundaries.json"
         ))
         .unwrap();
-        for case in cases.as_array().unwrap() {
+        for case in cases["cases"].as_array().unwrap() {
             assert_eq!(
                 super::truncate_slug_base(
                     case["input"].as_str().unwrap(),
