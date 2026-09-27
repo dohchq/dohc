@@ -12,22 +12,25 @@ import type { RegistryEntry } from "./registryStore";
 // The record also keeps that a received share was mounted in the workspace,
 // or a shared Group or direct message joined into its chats. Neither makes
 // the workspace sync, so schedules still run here, but the workspace is no
-// longer one nobody else ever had a part in.
+// longer one nobody else ever had a part in. A record from before dohc
+// kept this has no `receivedShare`, so it cannot say either way.
 
 export type SyncHistory = "never-synced" | "synced" | "unknown";
 
 interface HistoryRecord {
   synced: boolean;
-  receivedShare: boolean;
+  // Null in a record from before dohc kept it.
+  receivedShare: boolean | null;
 }
 
 const historyPath = (rootPath: string) => join(rootPath, ".dohc", "sync-history.json");
-const historyText = (synced: boolean) => `${JSON.stringify({ version: 1, synced })}\n`;
+const historyText = (synced: boolean, receivedShare?: boolean) =>
+  `${JSON.stringify({ version: 1, synced, ...(receivedShare === undefined ? {} : { receivedShare }) })}\n`;
 
 /** A new workspace that has not synced. An existing record stays. */
 export async function recordNeverSynced(rootPath: string): Promise<void> {
   try {
-    await writeFile(historyPath(rootPath), historyText(false), { flag: "wx" });
+    await writeFile(historyPath(rootPath), historyText(false, false), { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -41,19 +44,22 @@ export function recordSynced(rootPath: string): void {
 
 /**
  * A received share or a shared chat came into a workspace that never synced.
- * The record never goes back. A record that says the workspace synced, or
- * that dohc cannot read, already proves nothing, so it stays as it is.
+ * The record never goes back. A missing record, or one that says the
+ * workspace synced or that dohc cannot parse, already proves nothing, so it
+ * stays as it is. Throws when the record cannot be read or written, so the
+ * share is not kept without it.
  */
 export function recordReceivedShare(rootPath: string): void {
   let text: string;
   try {
     text = readFileSync(historyPath(rootPath), "utf8");
-  } catch {
-    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
   }
   const record = parseRecord(text);
-  if (record === null || record.synced || record.receivedShare) return;
-  writeFileSync(historyPath(rootPath), `${JSON.stringify({ version: 1, synced: false, receivedShare: true })}\n`);
+  if (record === null || record.synced || record.receivedShare === true) return;
+  writeFileSync(historyPath(rootPath), historyText(false, true));
 }
 
 function parseRecord(text: string): HistoryRecord | null {
@@ -66,8 +72,8 @@ function parseRecord(text: string): HistoryRecord | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const { version, synced, receivedShare } = parsed as { version?: unknown; synced?: unknown; receivedShare?: unknown };
   if (version !== 1 || typeof synced !== "boolean") return null;
-  if (receivedShare !== undefined && receivedShare !== true) return null;
-  return { synced, receivedShare: receivedShare === true };
+  if (receivedShare !== undefined && typeof receivedShare !== "boolean") return null;
+  return { synced, receivedShare: receivedShare ?? null };
 }
 
 async function readRecord(rootPath: string): Promise<HistoryRecord | null> {
@@ -90,9 +96,10 @@ export async function readSyncHistory(rootPath: string): Promise<SyncHistory> {
  * of evidence must agree: the registry has no server connection, received
  * share, joined chat, or mount for it; the folder's record says it never
  * synced and never took in a share; and the engine applied no change from
- * another computer. A record dohc cannot read, or an engine that does not
- * answer, proves nothing. A count of zero proves nothing alone either: a
- * store made before the count existed starts at zero.
+ * another computer. A record dohc cannot read, one from before dohc kept
+ * received shares, or an engine that does not answer, proves nothing. A
+ * count of zero proves nothing alone either: a store made before the count
+ * existed starts at zero.
  */
 export async function provedNeverShared(
   entry: RegistryEntry,
@@ -100,6 +107,6 @@ export async function provedNeverShared(
 ): Promise<boolean> {
   if (entry.remote || entry.shareView || entry.sharedChannels?.length || entry.shareMounts?.length) return false;
   const record = await readRecord(entry.rootPath);
-  if (record === null || record.synced || record.receivedShare) return false;
+  if (record === null || record.synced || record.receivedShare !== false) return false;
   return (await remoteChangesApplied()) === 0;
 }

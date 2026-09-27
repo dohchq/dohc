@@ -39,10 +39,19 @@ describe("a workspace proved never shared", () => {
   it("is never one whose record is missing or unreadable", async () => {
     expect(await provedNeverShared(entry, none), "no record").toBe(false);
     const path = join(root, ".dohc", "sync-history.json");
-    for (const text of ["{", "[]", "{\"version\": 2, \"synced\": false}", "{\"version\": 1}", "{\"version\": 1, \"synced\": false, \"receivedShare\": false}"]) {
+    for (const text of ["{", "[]", "{\"version\": 2, \"synced\": false}", "{\"version\": 1}", "{\"version\": 1, \"synced\": false, \"receivedShare\": \"no\"}"]) {
       await writeFile(path, text);
       expect(await provedNeverShared(entry, none), text).toBe(false);
     }
+  });
+
+  it("is never one whose record comes from before dohc kept received shares", async () => {
+    await writeFile(join(root, ".dohc", "sync-history.json"), "{\"version\": 1, \"synced\": false}");
+    expect(await provedNeverShared(entry, none)).toBe(false);
+    // Its schedules still run here.
+    expect(await readSyncHistory(root)).toBe("never-synced");
+    recordReceivedShare(root);
+    expect(await provedNeverShared(entry, none)).toBe(false);
   });
 
   it("is never one that synced or opened as a share, even after it is forgotten and attached again", async () => {
@@ -87,6 +96,11 @@ describe("a workspace proved never shared", () => {
     await rm(path);
     recordReceivedShare(root);
     expect(await readSyncHistory(root)).toBe("unknown");
+  });
+
+  it("refuses to keep a share whose coming in it cannot record", async () => {
+    await mkdir(join(root, ".dohc", "sync-history.json"));
+    expect(() => recordReceivedShare(root)).toThrow();
   });
 
   it("is never one whose engine applied a change from another computer, or did not answer", async () => {
