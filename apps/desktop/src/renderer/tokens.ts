@@ -14,6 +14,9 @@ export interface ThemeTokens {
   panel2: string;
   line: string;
   ink: string;
+  hover: string;
+  selected: string;
+  scrim: string;
   muted: string;
   subtle: string;
   accent: string;
@@ -34,6 +37,9 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     panel2: "#ebe8e0",
     line: "#e4e1d8",
     ink: "#1c1b18",
+    hover: "color-mix(in srgb, var(--dohc-ink) 5%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
+    scrim: "rgba(0, 0, 0, 0.20)",
     muted: "#55524a",
     // Decorative text must clear 3.0:1 on every surface it sits on —
     // panel-2 (sidebar/status bar), not just bg — in both modes (see the
@@ -44,11 +50,11 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     agent: "#5c6250",
     // Find-match highlight (search panel <mark>, pressed search toggles):
     // the editor's selection-blue family, tuned so the OPAQUE mark clears
-    // 3:1 against panel/panel-2 and the selected-row bg (line), with bold
-    // ink text on it at AA (4.38:1) — see the contrast test below. The
+    // 3:1 against panel/panel-2 and the selected-row fill, with bold
+    // ink text on it at AA (4.21:1) — see the contrast test below. The
     // graphite accent stays the only structural accent; this token means
     // exactly one thing: "your match".
-    match: "#3a7ee9",
+    match: "#397be4",
     success: "#38684e",
     warning: "#8a6420",
     danger: "#a6402c",
@@ -62,11 +68,14 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     panel2: "#181715",
     line: "#2a2925",
     ink: "#f6f4ee",
+    hover: "color-mix(in srgb, var(--dohc-ink) 5%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
+    scrim: "rgba(0, 0, 0, 0.20)",
     muted: "#a9a599",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
     agent: "#b7b8a4",
-    // Dark variant: 3:1+ vs panel/panel-2/line. Ink-on-match is 4.30:1 —
+    // Dark variant: 3:1+ vs panel/panel-2 and row fills. Ink-on-match is 4.30:1 —
     // near the physical ceiling while holding 3:1 against the selected-row
     // bg (any brighter mark erodes the ink text further); the mark text is
     // bold, which carries the remaining gap.
@@ -88,6 +97,9 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   panel2: "--dohc-panel-2",
   line: "--dohc-line",
   ink: "--dohc-ink",
+  hover: "--dohc-hover",
+  selected: "--dohc-selected",
+  scrim: "--dohc-scrim",
   muted: "--dohc-muted",
   subtle: "--dohc-subtle",
   accent: "--dohc-accent",

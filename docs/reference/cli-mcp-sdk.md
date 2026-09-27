@@ -1053,6 +1053,7 @@ Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactiv
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
 - `candidateDigest`: `SHA-256 hex`. Required.
+- `linkReads`: `({ operationId: UUID, fieldIds: UUID[] })[]`
 
 Returns `{ kind: "published", publicationId, authorityRevision, local?: true }`.
 

@@ -14,6 +14,7 @@
     "./collection": "./src/collection.ts",
     "./collection-data": "./src/collectionData.ts",
     "./collection-values": "./src/collectionValues.ts",
+    "./deep-links": "./src/deepLinks.ts",
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",

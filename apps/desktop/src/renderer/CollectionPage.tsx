@@ -48,7 +48,7 @@ import {
 import { RecordButton } from "./collections/RecordButton";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
-// The collection surface behind a dohc://collection/<path> tab: the shared
+// The collection surface behind a tab://collection/<path> tab uses the shared
 // @dohc/collection-views components bound to the desktop's collections.*
 // bridge. Reads come from the engine's index; writes ride the record's live
 // document frontmatter map — the same path agents and the PropertiesPanel

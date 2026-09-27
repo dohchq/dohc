@@ -350,7 +350,7 @@ export function LinkedChatsPanel(props: {
               setActiveThread(null);
               setMessages([]);
             }}
-            className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
           >
             <ArrowLeft size={13} aria-hidden />
           </button>
@@ -418,7 +418,7 @@ export function LinkedChatsPanel(props: {
         <button
           type="button"
           onClick={() => void refreshThreads()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -453,7 +453,7 @@ export function LinkedChatsPanel(props: {
                   data-testid="linked-chat-open"
                   data-thread-id={thread.id}
                   onClick={() => void openThread(thread)}
-                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors duration-75 hover:bg-line/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors duration-75 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                 >
                   <span className="block truncate text-[12px] font-medium text-ink">
                     {thread.title}
@@ -481,7 +481,7 @@ export function LinkedChatsPanel(props: {
               type="button"
               data-testid="linked-chat-new"
               onClick={() => setCreating(basenameOf(filePath))}
-              className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+              className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-hover hover:text-ink"
             >
               <MessageSquare size={12} aria-hidden />
               New chat

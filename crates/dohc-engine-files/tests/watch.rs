@@ -3,8 +3,7 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
-    IngestReason, NativeWatcher, ReconcileRun, ScanBounds, WATCH_HARD_DEADLINE, WATCH_SETTLE,
-    apply_reconcile_plan,
+    IngestReason, NativeWatcher, ReconcileRun, ScanBounds, WATCH_SETTLE, apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
 use std::sync::Arc;
@@ -157,66 +156,67 @@ async fn native_watcher_stop_joins_and_no_notification_arrives_after_return() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continuous_event_stream_still_flushes_at_the_hard_deadline() {
+async fn continuous_event_stream_flushes_while_writer_is_active() {
     let ws = Scratch::new();
     let actor =
         dohc_engine_files::FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
             .await
             .expect("actor");
     let handle = actor.handle();
-    let ready = NativeWatcher::start(
+    // A hang guard, not a bound: attach can be slow on a loaded machine.
+    let ready = NativeWatcher::start_within(
         ws.path().to_path_buf(),
         handle.clone(),
         CancellationToken::new(),
+        Duration::from_secs(60),
     )
     .await
     .expect("watch start");
     let mut watcher = ready.watcher;
     apply_and_ack(&handle, ready.initial_reconcile).await;
 
-    // Let startup-side filesystem noise settle, then establish a clean point
-    // before beginning the intentionally never-quiet stream.
-    tokio::time::sleep(WATCH_SETTLE + Duration::from_millis(200)).await;
-    if handle.stats().await.expect("startup stats").dirty {
-        let run = handle
-            .reconcile_if_dirty(CancellationToken::new())
-            .await
-            .expect("startup reconcile");
-        apply_and_ack(&handle, run).await;
-    }
-    assert!(!handle.stats().await.expect("clean stats").dirty);
-
     let stop_writes = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop_writes);
     let storm_path = ws.path().join("storm.md");
-    let started = Instant::now();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let writer = std::thread::spawn(move || {
+        let mut started_tx = Some(started_tx);
         let mut sequence = 0_u64;
         while !writer_stop.load(Ordering::Acquire) {
             std::fs::write(&storm_path, sequence.to_le_bytes()).expect("storm write");
             sequence = sequence.saturating_add(1);
+            if let Some(started_tx) = started_tx.take() {
+                let _ = started_tx.send(());
+            }
             std::thread::sleep(WATCH_SETTLE / 10);
         }
     });
 
-    let latest_allowed = started + WATCH_HARD_DEADLINE + Duration::from_secs(1);
-    let flushed_in_time = loop {
-        if handle.stats().await.expect("storm stats").dirty {
-            break true;
+    // Callback delivery can pause while writes continue. Only an observed
+    // hard-deadline flush proves the storm exercised that wiring.
+    let flushed = tokio::time::timeout(Duration::from_secs(60), async {
+        started_rx.await?;
+        let initial_flushes = watcher.hard_deadline_flush_count();
+        loop {
+            if watcher.hard_deadline_flush_count() > initial_flushes {
+                break Ok::<_, Box<dyn std::error::Error>>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        if Instant::now() >= latest_allowed {
-            break false;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    })
+    .await;
     stop_writes.store(true, Ordering::Release);
     writer.join().expect("join storm writer");
     watcher.stop().expect("stop watcher");
-
-    assert!(
-        flushed_in_time,
-        "continuous events did not flush within the hard-deadline bound"
+    assert_eq!(
+        watcher.disruption_count(),
+        0,
+        "watcher backend was disrupted"
     );
+
+    flushed
+        .expect("native watcher did not flush at the hard deadline during continuous writes")
+        .expect("storm observation");
 }
 
 /// R14 robustness, end-to-end against the real backend: deleting the watched

@@ -106,7 +106,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           type="button"
           data-testid={`error-boundary-${this.props.scope}-retry`}
           onClick={this.reset}
-          className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs text-muted hover:bg-line/50 hover:text-ink"
+          className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -160,7 +160,7 @@ export class AppErrorBoundary extends Component<
           // set-aside-draft warning must not turn it into an exit (#579
           // review, r7).
           onClick={requestGuardedReload}
-          className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-line/50 hover:text-ink"
+          className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-hover hover:text-ink"
         >
           Reload dohc
         </button>

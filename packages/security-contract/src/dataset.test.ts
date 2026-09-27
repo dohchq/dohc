@@ -1,11 +1,8 @@
+import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
-  effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision,
-  parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
-  datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision,
-} from "./dataset";
+import { datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
+import { effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -36,6 +33,46 @@ function revision(): DatasetRevision {
 function binding(rev = revision()): AppDatasetBinding {
   return { kind: "dataset", datasetId: rev.datasetId, revision: rev.revision, revisionSha256: rev.revisionSha256, operationIds: rev.definition.operations.map(operation => operation.operationId) };
 }
+
+it.each([false, true])("does not let a forged digest plant a generated verdict (generated: %s)", generated => {
+  const approved = revision();
+  approved.definition.name = `Cache poisoning ${generated}`;
+  if (generated) approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const forged = { ...approved, operationsSha256: generated ? "f".repeat(64) : hash(generateDatasetOperations(approved.definition)) };
+  expect(hasGeneratedDatasetRevision(forged)).toBe(!generated);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(generated);
+  expect(hasGeneratedDatasetRevision(forged)).toBe(!generated);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(generated);
+});
+
+it("does not trust a definition carrying another definition's digest", () => {
+  const approved = revision();
+  approved.definition.name = "Definition cache poisoning";
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const forged = structuredClone(approved);
+  forged.definition.operations[1]!.access = "owner";
+  expect(hasGeneratedDatasetRevision(forged)).toBe(false);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(true);
+  expect(hasGeneratedDatasetRevision(forged)).toBe(false);
+});
+
+it("keeps generated verdicts separate when inventory order shares a revision digest", () => {
+  const approved = revision();
+  approved.definition.name = "Inventory ordering";
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const reordered = structuredClone(approved);
+  reordered.definition.operations.reverse();
+  expect(hash(datasetDefinitionDigestContent(reordered.definition))).toBe(approved.definitionSha256);
+  expect(hasGeneratedDatasetRevision(reordered)).toBe(false);
+  expect(hasGeneratedDatasetRevision(approved)).toBe(true);
+  expect(hasGeneratedDatasetRevision(reordered)).toBe(false);
+});
 
 describe("dataset publication binding", () => {
   it("accepts explicit reversible edits and rejects reversal on other operation kinds", () => {
@@ -303,12 +340,15 @@ describe("dataset buttons", () => {
   it("describes a visible table's buttons, though no operation lists them", () => {
     const approved = approvedWithButton(), [submit, list] = approved.definition.operations;
     const helper = describeApprovedDataset(approved, [list!]);
-    expect(helper.tables).toEqual([{ tableId: id(2), name: "People", fields: [
+    expect(helper.tables).toEqual([{ tableId: id(2), name: "People", primaryKeyFieldId: id(3), fields: [
       { fieldId: id(3), name: "Record ID", type: "text", required: true, unique: true },
       { fieldId: id(4), name: "Name", type: "text", required: true, unique: false },
       button,
     ] }]);
     expect(parseDatasetDescription(helper)).toEqual(helper);
+    for (const primaryKeyFieldId of [id(4), id(20), id(99)]) {
+      expect(() => parseDatasetDescription({ ...helper, tables: [{ ...helper.tables[0]!, primaryKeyFieldId }] })).toThrow();
+    }
     const link = describeApprovedDataset(approved, [submit!]);
     expect(link.tables[0]!.fields.map(field => field.fieldId)).toEqual([id(4), id(20)]);
     expect(parseDatasetDescription(link)).toEqual(link);
@@ -387,4 +427,96 @@ it("permits only display names and source locations in access-preserving revisio
     const changed = structuredClone(after); change(changed);
     expect(datasetRevisionsPreserveAccess(before,changed)).toBe(false);
   }
+});
+
+it("allows only the explicitly approved link reads and their exact fields", () => {
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const request = binding(approved);
+  request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
+  const caller = { kind: "link" as const, grantId: "g", principalId: "p" };
+  expect(effectiveDatasetOperations(request, approved, caller)).toEqual([approved.definition.operations[0], { ...approved.definition.operations[1], access: "link" }]);
+  const capability = resolveAppDatasetCapability(request, approved);
+  expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
+  expect(capability.operations.find(operation => operation.operationId === id(6))?.fields).toEqual([
+    { fieldId: id(3), name: "Record ID" }, { fieldId: id(4), name: "Name" },
+  ]);
+  for (const linkReads of [
+    [{ operationId: id(5), fieldIds: [id(4)] }],
+    [{ operationId: id(7), fieldIds: [] }],
+    [{ operationId: id(99), fieldIds: [] }],
+    [{ operationId: id(6), fieldIds: [id(3), id(4), id(99)] }],
+    [{ operationId: id(6), fieldIds: [id(4)] }],
+  ]) expect(() => parseDatasetBinding({ ...request, linkReads }, approved)).toThrow();
+  expect(() => parseDatasetBinding({ ...request, operationIds: [id(5)] }, approved)).toThrow();
+  expect(effectiveDatasetOperations({ ...request, linkReads: [] }, approved, caller).map(operation => operation.name)).toEqual(["submit"]);
+});
+
+it("rejects authored reads and reads omitting the primary key even with exact field approval", () => {
+  const approved = revision(), request = binding(approved);
+  request.linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
+  expect(() => parseDatasetBinding(request, approved)).toThrow();
+  approved.definition.operations[1]!.fieldIds = [id(4)];
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  request.revisionSha256 = approved.revisionSha256;
+  request.linkReads[0]!.fieldIds = [id(4)];
+  expect(() => parseDatasetBinding(request, approved)).toThrow();
+});
+it("gives named app recipients approved reads alongside link creates without helper access", () => {
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
+  expect(effectiveDatasetOperations(request, approved, { kind: "named", userId: "u", grantId: "g", access: "view", helper: false }).map(operation => operation.name)).toEqual(["submit", "list"]);
+});
+
+it("preserves the generator marker through filtered descriptions and includes it in revision identity", () => {
+  const approved = revision();
+  const unmarkedDefinition = approved.definitionSha256;
+  const unmarkedRevision = approved.revisionSha256;
+  column(approved.definition.tables[0]!.fields[0]).generated = "record-id";
+  approved.definitionSha256 = hash(datasetDefinitionDigestContent(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  expect(approved.definitionSha256).not.toBe(unmarkedDefinition);
+  expect(approved.revisionSha256).not.toBe(unmarkedRevision);
+  const reads = approved.definition.operations.filter(operation => operation.kind === "read");
+  const described = parseDatasetDescription(describeApprovedDataset(approved, reads));
+  expect(datasetColumnFields(described.tables[0]!)[0]!.generated).toBe("record-id");
+  const hidden = parseDatasetDescription(describeApprovedDataset(approved, [{ ...reads[0]!, fieldIds: [id(4)] }]));
+  expect(hidden.tables[0]!.primaryKeyFieldId).toBeUndefined();
+  expect(datasetColumnFields(hidden.tables[0]!).every(field => !field.generated)).toBe(true);
+  const malformed = structuredClone(described);
+  delete malformed.tables[0]!.primaryKeyFieldId;
+  expect(() => parseDatasetDescription(malformed)).toThrow();
+});
+
+it("rejects generated identity markers on other fields and user-supplied keys", () => {
+  const value = definition();
+  const primary = column(value.tables[0]!.fields[0]);
+  primary.generated = "record-id";
+  expect(parseDatasetDefinition(value)).toEqual(value);
+  for (const patch of [{ type: "number" }, { required: false }, { unique: false }, { default: "fixed" }, { generated: false }]) {
+    const invalid = structuredClone(value);
+    Object.assign(invalid.tables[0]!.fields[0]!, patch);
+    expect(() => parseDatasetDefinition(invalid)).toThrow();
+  }
+  const invalid = structuredClone(value);
+  column(invalid.tables[0]!.fields[1]).generated = "record-id";
+  column(invalid.tables[0]!.fields[1]).unique = true;
+  expect(() => parseDatasetDefinition(invalid)).toThrow();
+  value.operations[0]!.fieldIds.push(primary.fieldId);
+  expect(() => parseDatasetDefinition(value)).toThrow();
+});
+
+it("does not grant an automation the app's approved link reads", () => {
+  const approved = revision();
+  approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+  approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
+  const request = { ...binding(approved), linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }] };
+  expect(effectiveDatasetOperations(request, approved, { kind: "automation", automationId: "collection:people#notify" }).map(operation => operation.name)).toEqual(["submit"]);
 });
