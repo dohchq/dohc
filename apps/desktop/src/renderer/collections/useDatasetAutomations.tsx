@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DatasetDescribedField, DatasetDescription } from "@dohc/security-contract/dataset";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import type { FindDatasetCollectionResult } from "../../ipc/bridgeContract";
@@ -13,6 +13,7 @@ import {
   useCollectionAutomations,
 } from "./AutomationsPanel";
 import type { AutomationTable } from "./automationDraft";
+import type { Automation } from "./automationSentence";
 import { useDatasetFieldMarks, type FieldMarks } from "./collectionFieldMarks";
 
 // The ⚡ button, panel, and field marks of one dataset table, which is a
@@ -60,7 +61,13 @@ export function useDatasetAutomations(props: {
   onNotice: (message: string, undo?: () => void) => void;
   onOpenFile: (path: string) => void;
   onOpenScheduleSettings: () => void;
-}): { button: ReactNode; panel: ReactNode; fieldMarks: FieldMarks } {
+}): {
+  button: ReactNode;
+  panel: ReactNode;
+  fieldMarks: FieldMarks;
+  /** Opens the panel's builder on a new automation, such as one a button starts. */
+  start: (automation: Automation) => void;
+} {
   const { workspaceId, datasetId, tableId, dataset, onError } = props;
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
   const table = useMemo((): AutomationTable | undefined => described && {
@@ -92,6 +99,14 @@ export function useDatasetAutomations(props: {
   const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);
+  const [start, setStart] = useState<{ automation: Automation; seq: number } | null>(null);
+  const starts = useRef(0);
+  const startWith = useCallback((automation: Automation) => {
+    starts.current += 1;
+    setStart({ automation, seq: starts.current });
+    setOpen(true);
+  }, []);
+  const started = useCallback(() => setStart(null), []);
   const [closeAsk, setCloseAsk] = useState(0);
   const { reload } = automations;
   // Opening the panel, or a run changing records while it is open, reads
@@ -107,7 +122,10 @@ export function useDatasetAutomations(props: {
     void find();
     void reload();
   }), [workspaceId, find, reload]);
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    setStart(null);
+  }, []);
   const fields = useMemo(() => builderFields(described?.fields ?? []), [described]);
   const full = collectionPath !== null && table !== undefined;
   // The full panel may hold a draft, so the header's button asks it to close.
@@ -126,6 +144,8 @@ export function useDatasetAutomations(props: {
       automations={automations}
       fields={fields}
       focus={null}
+      start={start}
+      onStarted={started}
       closeAsk={closeAsk}
       onClose={close}
       onOpenFile={props.onOpenFile}
@@ -149,5 +169,5 @@ export function useDatasetAutomations(props: {
       ) : found.status === "cannot-run" ? found.reason : undefined}
     </AutomationsNote>
   );
-  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null) };
+  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith };
 }
