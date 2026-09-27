@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { processSuspender } from "./suspend-process.test-helper.ts";
 import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PersistentRuntimeOptions, PreparedOperation } from "./persistent.ts";
@@ -572,53 +572,63 @@ describe("persistent dataset worker",()=>{
     });
   },60_000);
 
-  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
-    // Windows has no stop signal. PowerShell compiles its calls before the
-    // operation starts, so each later request lands in milliseconds.
-    const suspender=process.platform==="win32" ? spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",
-      `Add-Type -Namespace W -Name P -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);';
-      [Console]::Out.WriteLine('ready'); while(($line=[Console]::In.ReadLine()) -ne $null){ $verb,$id=$line.Split(' '); $handle=(Get-Process -Id $id).Handle;
-      if($verb -eq 'Suspend'){[void][W.P]::NtSuspendProcess($handle)}else{[void][W.P]::NtResumeProcess($handle)}; [Console]::Out.WriteLine('done') }`],
-    {windowsHide:true,stdio:["pipe","pipe","ignore"]}) : undefined;
-    const lines=suspender ? createInterface({input:suspender.stdout!})[Symbol.asyncIterator]() : undefined;
-    const answer=async(expected:string)=>{const line=await lines!.next();if(line.value!==expected) throw new Error(`The suspender said ${String(line.value)}.`);};
+  it.skipIf(process.platform!=="win32")("reports a suspend helper failure instead of waiting for the worker watchdog",async()=>{
+    const suspender=processSuspender();
     try {
-      if(suspender) await answer("ready");
+      await suspender.ready;
+      // Windows reserves PID 0; OpenProcess must reject it.
+      await expect(suspender.suspend(0)).rejects.toThrow("OpenProcess failed: Win32");
+      await expect(suspender.failed).rejects.toThrow("OpenProcess failed: Win32");
+    } finally {await suspender.close();}
+  },180_000);
+
+  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
+    const suspender=processSuspender();
+    try {
+      await suspender.ready;
       await fixture(async({open})=>{
-        let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
-        const signal=async(verb:"Suspend"|"Resume")=>{
-          if(!suspender){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
-          suspender.stdin!.write(`${verb} ${pid}\n`);await answer("done");
-        };
+        let didResume!:(at:number)=>void,stopFailed!:(error:Error)=>void;
+        const stopped=new Promise<number>((resolve,reject)=>{didResume=resolve;stopFailed=reject;});
+        void stopped.catch(()=>{});
+        let suspended=false,repliedAt=0;
         const launch:AppRuntimeLauncher=options=>{
-          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-          pid=child.pid!;
+          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:{...options.env,DOHC_TEST_APP_CODE_READY:"1"},stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
           child.on("message",message=>{
-            const reply=message as {progress?:string;ok?:boolean};
-            // The app code section starts right after this report: stop the worker inside it.
-            if(reply.progress==="running the Collection action" && !stall) stall=(async()=>{
-              await signal("Suspend");suspendedAt=performance.now();
-              await new Promise(resolve=>setTimeout(resolve,6_000));
-              resumedAt=performance.now();await signal("Resume");
-            })();
-            if(typeof reply.ok==="boolean") repliedAt=performance.now();
+            const reply=message as {testAppCodeReady?:boolean;ok?:boolean};
+            if(reply.testAppCodeReady) {
+              if(!suspended) {
+                suspended=true;
+                void suspender.suspend(child.pid!).then(didResume,stopFailed);
+              }
+              return;
+            }
+            if(typeof reply.ok==="boolean") repliedAt=Date.now();
             options.onMessage(message);
           });
           child.on("error",options.onError);child.on("close",options.onExit);
           return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
         };
-        // This test is about the CPU budget, not the silence watchdog. A loaded gate has stretched the 6 s stop plus
-        // the query past 50 s without a progress report, so silence is only a hang guard here, inside the 180 s limit.
+        // The worker watchdog is a hang guard; the helper has its own earlier guard.
         const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:170_000});
-        // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
-        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"});
-        await stall;
-        expect(prepared.result).toEqual([{total:50000005000000}]);
-        // Stopped for 6 s inside a 5 s budget, and not charged for it.
-        expect(suspendedAt).toBeGreaterThan(0);
-        expect(repliedAt).toBeGreaterThan(resumedAt);
+        try {
+          // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
+          const preparing=worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"}).then(prepared=>{
+            // The signal and reply share one IPC channel. A reply without the signal
+            // means suspension will never start; do not wait for it.
+            expect(suspended,"Worker did not report its armed app-code budget.").toBe(true);
+            return prepared;
+          });
+          const [prepared,resumedAt]=await Promise.race([Promise.all([preparing,stopped]),suspender.failed]);
+          expect(prepared.result).toEqual([{total:50000005000000}]);
+          // Six seconds stopped exceeds the five-second CPU budget. The reply must
+          // follow resume, even if the two processes' IPC notifications arrive out of order.
+          expect(repliedAt).toBeGreaterThanOrEqual(resumedAt);
+        } finally {
+          try {await suspender.close();}
+          finally {await worker.abort("Suspension test finished.");}
+        }
       });
-    } finally {suspender?.stdin!.end();}
+    } finally {await suspender.close();}
   },180_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{

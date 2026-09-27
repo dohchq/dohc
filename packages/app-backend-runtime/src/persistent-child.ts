@@ -201,7 +201,10 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     const session=db.createSession();
     let resultJson:string, attachedFileIds:string[], changeset:Uint8Array;
     try {
-      ({resultJson,attachedFileIds}=await appCode(()=>evaluate(db!,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true})));
+      ({resultJson,attachedFileIds}=await appCode(()=>{
+        if(process.env.DOHC_TEST_APP_CODE_READY==="1") process.send!({testAppCodeReady:true});
+        return evaluate(db!,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true});
+      }));
       db.setAuthorizer(null);changeset=session.changeset();
     } finally { session.close(); }
     if (!db.isTransaction) reject("invalid_changeset","The prepared operation transaction ended.");
