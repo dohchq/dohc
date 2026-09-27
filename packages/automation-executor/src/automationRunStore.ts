@@ -74,6 +74,15 @@ const EffectSchema = z.union([
     tableId: z.string(),
     values: z.array(z.object({ fieldId: z.string(), field: z.string(), value: JsonValueSchema })),
   }),
+  // An action to run with the input its formulas gave, saved before it is
+  // sent so a resumed run sends the same input under the same key.
+  z.object({
+    kind: z.literal("dataset-action"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    input: z.record(z.string(), JsonValueSchema),
+  }),
   z.object({
     kind: z.literal("message"),
     effectId: z.string(),
@@ -148,6 +157,15 @@ const WriteSchema = z.union([
     recordId: DatasetRecordIdSchema,
     version: z.number().int().positive(),
   }),
+  // An action that ran, by its label then, and the dataset revision its commit made.
+  z.object({
+    kind: z.literal("dataset-action"),
+    rules: DatasetRulesSchema,
+    operationId: z.string(),
+    tableId: z.string(),
+    name: z.string(),
+    revision: z.number().int().nonnegative(),
+  }),
   z.object({ kind: z.literal("dataset-kept"), recordId: DatasetRecordIdSchema, fieldId: z.string(), field: z.string(), planned: JsonValueSchema, current: JsonValueSchema }),
   z.object({ kind: z.literal("dataset-skipped"), recordId: DatasetRecordIdSchema, reason: z.string() }),
   // A post or direct message the automation wrote, and where it went.
@@ -207,7 +225,7 @@ const StoredRunSchema = z.object({
  */
 export type RunWrite = z.infer<typeof WriteSchema>;
 /** A planned effect on a dataset record, through one of its approved operations. */
-export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" }>;
+export type DatasetEffect = Extract<z.infer<typeof EffectSchema>, { kind: "dataset-edit" | "dataset-create" | "dataset-action" }>;
 export type DatasetReplan = z.infer<typeof ReplanSchema>;
 export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
 /** One step's effects, on document records or on dataset records. */

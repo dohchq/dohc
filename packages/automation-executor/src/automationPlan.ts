@@ -349,7 +349,8 @@ export function shapeProblem(automation: Automation, findProblem: (condition: st
       case "run-file":
         return "dohc cannot run code steps yet.";
       case "invoke":
-        return "dohc cannot run Collection actions from automations yet.";
+        formulas += step.input.filter((entry) => isFormula(entry.value)).length;
+        break;
       case "find": {
         finds += 1;
         formulas += 1;
@@ -583,6 +584,8 @@ export function fieldWritesOf(automation: Automation): Array<{ collection: strin
     } else if (step.kind === "add-record") {
       for (const { field } of step.values) writes.push({ collection: step.collection, field });
     }
+    // An invoke step runs an action, whose code decides which fields it
+    // changes, so it names none here and the ⚡ marks show none for it.
   }
   return writes;
 }
@@ -611,6 +614,11 @@ function jsonValue(value: CollectionValue): JsonValue {
 /** A record as formulas and the plan read it. */
 export interface RunRecord {
   id: string;
+  /**
+   * A dataset record's primary key as its operations take it, which formulas
+   * read as `record.id`: a number stays a number. Absent for a document.
+   */
+  key?: string | number;
   path: string;
   values: JsonObject;
 }
@@ -621,7 +629,7 @@ export function runRecordOf(record: CollectionRecord): RunRecord {
   return { id: record.id, path: record.path, values };
 }
 
-const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.id });
+const recordScope = (record: RunRecord): JsonObject => ({ ...record.values, id: record.key ?? record.id });
 
 /**
  * `ms` as ISO 8601 with its UTC offset: on this computer's clock, or in
@@ -751,6 +759,8 @@ type Slot =
   | { kind: "value"; ordinal: number; field: string }
   // One answer per record a Find returned, in order.
   | { kind: "values"; ordinal: number; field: string }
+  // One key of an action's input.
+  | { kind: "input"; ordinal: number; key: string }
   | { kind: "text"; ordinal: number }
   // A direct message's person that a formula names.
   | { kind: "person"; ordinal: number; index: number };
@@ -837,6 +847,10 @@ export function evaluationRequest(inputs: RunInputs, nowMs: number): EvaluationR
             if (isFormula(person)) add({ kind: "person", ordinal, index }, person.expression, when);
           });
         }
+      }
+      if (step.kind === "invoke") {
+        for (const { key, value } of step.input) if (isFormula(value)) add({ kind: "input", ordinal, key }, value.expression, when);
+        continue;
       }
       if (step.kind !== "set" && step.kind !== "add-record") continue;
       const records = step.kind === "set" && step.records !== null && bindings.get(step.records)?.kind === "find"
@@ -941,7 +955,9 @@ export type PlannedEffect =
       name: string;
       /** A formula named the person, so their reach is checked once the plan names them. */
       byFormula?: boolean;
-    };
+    }
+  /** A dataset action to run, by name, with its input as the formulas gave it. */
+  | { kind: "invoke"; operation: string; input: JsonObject };
 
 export interface PlannedStep {
   ordinal: number;
@@ -970,6 +986,8 @@ function slotSubject(slot: Slot): string {
       return `The message in step ${slot.ordinal + 1}`;
     case "person":
       return `The person in step ${slot.ordinal + 1}`;
+    case "input":
+      return `The input "${slot.key}" in step ${slot.ordinal + 1}`;
     default:
       return `The formula for "${slot.field}" in step ${slot.ordinal + 1}`;
   }
@@ -1058,6 +1076,8 @@ export function planRun(
         return `${slot.kind}:${slot.ordinal}`;
       case "person":
         return `person:${slot.ordinal}:${slot.index}`;
+      case "input":
+        return `input:${slot.ordinal}:${slot.key}`;
       default:
         return slot.kind;
     }
@@ -1216,6 +1236,12 @@ export function planRun(
           }
         }
         planned.push({ ordinal, effects });
+        continue;
+      }
+      if (step.kind === "invoke") {
+        const input: JsonObject = {};
+        for (const { key: name, value } of step.input) input[name] = isFormula(value) ? (answers.get(`input:${ordinal}:${name}`) ?? null) : value.value;
+        planned.push({ ordinal, effects: [{ kind: "invoke", operation: step.operation, input }] });
         continue;
       }
       if (step.kind === "add-record") {

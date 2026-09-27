@@ -23,6 +23,7 @@ const definition: DatasetDefinition = {
     operation(11, "invoices.status", "edit", [STATUS]),
     operation(12, "invoices.edit", "edit", [STATUS, NOTES], true),
     operation(13, "invoices.create", "create", [STATUS, NOTES]),
+    operation(14, "invoices.markPaid", "action", [STATUS]),
   ],
 };
 const generated = { definition, generated: true };
@@ -107,9 +108,18 @@ describe("dataset automation steps", () => {
     expect(() => datasetStepsOf(automation("      - set:\n          Status: Done\n        operation: invoices.status\n"), authored)).toThrow(/Set fields, Add record, and Find/);
   });
 
-  it("says it cannot run an action step yet", () => {
-    expect(datasetAutomationProblem(automation("      - invoke: invoices.status\n"), generated))
-      .toBe("dohc cannot run Collection actions from automations yet.");
+  it("runs an action a step names, on any dataset, and says why a name is not one", () => {
+    const invoking = automation("      - invoke: invoices.markPaid\n        input:\n          id: '=record.id'\n", "button: Mark paid");
+    expect(datasetAutomationProblem(invoking, generated)).toBeNull();
+    expect(datasetAutomationProblem(invoking, authored)).toBeNull();
+    expect(datasetAutomationProblem(automation("      - invoke: invoices.gone\n"), authored)).toBe("Budget has no approved action named invoices.gone.");
+    expect(datasetAutomationProblem(automation("      - invoke: invoices.edit\n"), authored))
+      .toBe("invoices.edit is an approved edit, not an action. Use a step that changes fields for it.");
+    // The action is an operation the run calls: reach checks it, and a presser must hold it.
+    expect(datasetOperationsOf(invoking, authored)).toEqual(["invoices.markPaid"]);
+    const steps = datasetReachSteps(invoking, { path: "Budget", name: "Budget" }, authored, { workspaceId: "workspace", grants: [] }, null);
+    expect(steps.flatMap((step) => step.kind === "dataset-operation" ? [step.operation.name] : [])).toEqual(["invoices.markPaid"]);
+    expect(datasetStepsOf(invoking, authored).steps.get(0)?.operation.name).toBe("invoices.markPaid");
   });
 
   it("pins a reversible edit first, then the one with the fewest fields beyond the step's", () => {

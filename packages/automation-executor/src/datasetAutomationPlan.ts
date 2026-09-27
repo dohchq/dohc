@@ -15,11 +15,12 @@ import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automatio
 //
 // Set fields, Add record, and Find run only through operations dohc
 // generated, whose reads and edits dohc knows. On a dataset whose operations
-// someone wrote, an automation runs only steps that touch no record, and the
-// run calls no operation for its own purposes: it skips the trigger record's
-// read, so formulas see the record's id and the change's facts, which the
-// host decodes from the commit. A formula that reads another of the record's
-// fields stops with an error (the evaluator's recordKeys).
+// someone wrote, an automation runs its actions (invoke steps) and the steps
+// that touch no record. It calls no other operation for its own purposes: it
+// skips the trigger record's read, so formulas see the record's id and the
+// change's facts, which the host decodes from the commit. A formula that
+// reads another of the record's fields stops with an error (the evaluator's
+// recordKeys). An action runs in its own transaction and reads what it needs.
 //
 // The ⚡ panel pins the operation each step uses when it saves. It prefers a
 // reversible edit, then the operation with the fewest fields beyond the
@@ -28,6 +29,7 @@ import type { ReachCollection, ReachDatasetGrants, ReachStep } from "./automatio
 
 type AutomationStep = Automation["do"][number];
 type RecordStep = Extract<AutomationStep, { kind: "set" | "add-record" | "find" }>;
+type InvokeStep = Extract<AutomationStep, { kind: "invoke" }>;
 type Kind = "edit" | "create" | "read";
 
 /** A dataset record's primary key value, as its operations take it. */
@@ -202,7 +204,21 @@ function resolve(
     steps.set(ordinal, { operation: chosen, table: definition.tables.find((candidate) => candidate.tableId === chosen.tableId)! });
     return null;
   };
+  // An invoke step names its action. Any table's action may run: the action
+  // decides what it changes, and reach checks it like any other operation.
+  const resolveAction = (ordinal: number, step: InvokeStep): string | null => {
+    const action = definition.operations.find((operation) => operation.name === step.operation);
+    if (action === undefined) return `${definition.name} has no approved action named ${step.operation}.`;
+    if (action.kind !== "action") return `${step.operation} is an approved ${action.kind}, not an action. Use a step that changes fields for it.`;
+    steps.set(ordinal, { operation: action, table: definition.tables.find((candidate) => candidate.tableId === action.tableId)! });
+    return null;
+  };
   for (const { ordinal, step } of ordered) {
+    if (step.kind === "invoke") {
+      const problem = resolveAction(ordinal, step);
+      if (problem !== null && !pin) return { problem };
+      continue;
+    }
     if (step.kind !== "set" && step.kind !== "add-record" && step.kind !== "find") continue;
     const problem = resolveStep(ordinal, step);
     // Pinning goes on past a step no operation fits, so the others still get theirs.

@@ -190,7 +190,8 @@ export type CollectionAutomationRunOutcome =
   // not answering, a pause or close stopped the run, or a synced workspace
   // has no session to post under. A stopped run's progress is saved, so the
   // next drain resumes it.
-  | { kind: "wait"; reason: "busy" | "engine" | "stopped" | "session" | "held" };
+  // Or who can edit the Collection could not be read just before a record effect.
+  | { kind: "wait"; reason: "busy" | "engine" | "stopped" | "session" | "held" | "roster" };
 
 export interface CollectionAutomationRunInput {
   claim: AutomationClaim;
@@ -664,6 +665,8 @@ function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
     if (effect.kind === "wake") {
       return { ordinal: step.ordinal, writes: [{ kind: "message" as const, messageId: effect.messageId, name: WAKE_TARGET_NAME }] };
     }
+    // An action's changes are its own; its record holds no fields.
+    if (effect.kind === "invoke") return { ordinal: step.ordinal, writes: [] };
     if (effect.kind === "add") {
       const path = `${effect.collectionPath}/${effect.name}.md`;
       return { ordinal: step.ordinal, writes: [
@@ -693,6 +696,8 @@ async function applyEffect(
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
   if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "notice") return await applyChatEffect(dependencies, context, effect);
+  // A document Collection's automation that names an action never runs (unsupportedReason).
+  if (effect.kind === "invoke") throw new Error("Only a dataset Collection has actions.");
   const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (edit: CollectionRecordWrites, path: string, recordId: string, fields: readonly PlannedField[]) =>
     edit.setFields({
