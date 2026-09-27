@@ -1,3 +1,4 @@
+import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
@@ -117,6 +118,7 @@ import {
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
+  chatDispatchNoticeOperations,
   type ScheduleHostResult,
   type NoticeRef,
   workspaceSearchOperations,
@@ -1564,6 +1566,7 @@ function registerReservedPhysicalWorkspace(
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
   await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  chatDispatchNotices.clearWorkspace(workspaceId);
   notifyRenderer();
 }
 
@@ -2829,7 +2832,18 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
+const chatDispatchNotices = createChatDispatchNotices((event) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.webContents.isDestroyed()) continue;
+    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
+    window.webContents.send(CHANNELS.chatDispatchNotices, event);
+  }
+});
+
 const chatDispatchService = createChatDispatchService({
+  onDispatchNotice: (workspace, notice) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
@@ -2887,31 +2901,6 @@ const chatDispatchService = createChatDispatchService({
     }
     return release;
   },
-  authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      try {
-        const store = linkedChatStoreFor(lease);
-        const registered = canonicalWorkspaceFor(lease);
-        await assertSharedChannelWritable({
-          workspaceId: registered.workspaceId,
-          sharedChannels: registered.sharedChannels,
-          store,
-          target: { threadId },
-        });
-        const identity = await chatRelayIdentityFor(
-          workspace.workspaceId,
-          { threadId },
-          store,
-        );
-        return (
-          identity.authorUserId === verifiedUserId &&
-          (identity.joinedChannel === null || verifiedUserId !== undefined)
-        );
-      } catch (error) {
-        if (!(error instanceof SharedChannelReadOnlyError)) throw error;
-        return false;
-      }
-    }),
   onMessagePosted: (workspace, threadId) => {
     withWorkspaceAttachment(workspace, () => {
       notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -5512,6 +5501,11 @@ function registerIpcHandlers(): void {
       action: "take-over",
       body: { generation: input.generation },
     }),
+  });
+
+  registerOperations(operationBoundary, chatDispatchNoticeOperations, {
+    registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
+    dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
   });
 
   registerOperations(operationBoundary, noticeOperations, {

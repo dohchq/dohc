@@ -58,6 +58,7 @@ export const CHATS_METHOD = {
   dispatchRunIdForMessage: "chats.dispatch.runIdForMessage",
   dispatchRunRecordsForThread: "chats.dispatch.runRecordsForThread",
   dispatchGetRunRecord: "chats.dispatch.getRunRecord",
+  dispatchLatestRunForThread: "chats.dispatch.latestRunForThread",
   dispatchIsThreadPaused: "chats.dispatch.isThreadPaused",
   dispatchGetThreadPauseState: "chats.dispatch.getThreadPauseState",
   dispatchRecentCount: "chats.dispatch.recentCount",
@@ -407,6 +408,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchRunIdForMessage]: ChatDispatchMessageParams;
   [CHATS_METHOD.dispatchRunRecordsForThread]: ChatDispatchThreadRunsParams;
   [CHATS_METHOD.dispatchGetRunRecord]: ChatDispatchRunParams;
+  [CHATS_METHOD.dispatchLatestRunForThread]: ChatThreadParams;
   [CHATS_METHOD.dispatchIsThreadPaused]: ChatThreadParams;
   [CHATS_METHOD.dispatchGetThreadPauseState]: ChatThreadParams;
   [CHATS_METHOD.dispatchRecentCount]: ChatDispatchRecentCountParams;
@@ -840,6 +842,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchRunIdForMessage]: Schema.NullOr(Schema.String),
   [CHATS_METHOD.dispatchRunRecordsForThread]: RunRecordsPageSchema,
   [CHATS_METHOD.dispatchGetRunRecord]: Schema.NullOr(ChatRunSchema),
+  [CHATS_METHOD.dispatchLatestRunForThread]: Schema.NullOr(ChatRunSchema),
   [CHATS_METHOD.dispatchIsThreadPaused]: Schema.Boolean,
   [CHATS_METHOD.dispatchGetThreadPauseState]: Schema.NullOr(
     ChatThreadPauseSchema,

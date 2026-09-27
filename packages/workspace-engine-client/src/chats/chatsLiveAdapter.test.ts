@@ -149,6 +149,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.dispatchRunIdForMessage, params: { messageId: "m" } },
   { method: CHATS_METHOD.dispatchRunRecordsForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.dispatchGetRunRecord, params: { runId: "r" } },
+  { method: CHATS_METHOD.dispatchLatestRunForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.dispatchIsThreadPaused, params: { threadId: "t" } },
   { method: CHATS_METHOD.dispatchGetThreadPauseState, params: { threadId: "t" } },
   { method: CHATS_METHOD.dispatchRecentCount, params: { threadId: "t", sinceMs: 0 } },
@@ -450,8 +451,8 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 61 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(61);
+  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(62);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),

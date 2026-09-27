@@ -1,3 +1,5 @@
+import { readThreadDispatchState } from "./threadDispatchState";
+import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import type {
@@ -15,6 +17,7 @@ type RunnerThreadStore = Pick<
 
 interface RunnerThreadContextInput {
   store: RunnerThreadStore;
+  dispatchStore: AwaitableAgentDispatchStore;
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
 }
@@ -78,6 +81,7 @@ export async function buildRunnerThreadContext(
     ]),
   );
   const markdownInput: CliResultByVerb["show"] = {
+    dispatch: await readThreadDispatchState(input.dispatchStore, input.workspaceId, input.threadId),
     thread: {
       id: thread.id,
       title: thread.title,

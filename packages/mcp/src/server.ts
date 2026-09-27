@@ -393,7 +393,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread: its messages (with author kind and display name) and a read-only text projection.",
+        "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
       },
