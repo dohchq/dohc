@@ -3395,6 +3395,56 @@ fn cross_volume_targets_use_checked_replace_and_delete() {
 
 #[cfg(windows)]
 #[test]
+fn windows_recovery_finishes_a_returned_readonly_link_without_keeping_a_copy() {
+    use std::os::windows::fs::MetadataExt;
+    for journaled in [false, true] {
+        let sc = Scratch::new("returned-readonly-link");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        let staged = sc.target(&staged("6a31.0"));
+        std::fs::write(&staged, OUTSIDE).unwrap();
+        let mut permissions = std::fs::metadata(&staged).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&staged, permissions).unwrap();
+        let attrs = std::fs::metadata(&staged).unwrap().file_attributes();
+        if journaled {
+            store
+                .open_displacement(&DisplacementSpec {
+                    job_id: "j1".into(),
+                    workspace_id: "ws".into(),
+                    target_path: "a.md".into(),
+                    displaced_name: "6a31.0".into(),
+                    expected_sha256: hex_sha256(PREIMAGE),
+                    content_sha256: Some(hex_sha256(OURS)),
+                    now_ms: 20,
+                })
+                .unwrap();
+        }
+        // The return claimed its destination, then stopped before unlinking.
+        std::fs::hard_link(&staged, sc.target("a.md")).unwrap();
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 30).unwrap();
+        for _ in 0..2 {
+            recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+            assert_nothing_displaced(&sc, &store);
+            assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+            assert_eq!(
+                std::fs::metadata(sc.target("a.md"))
+                    .unwrap()
+                    .file_attributes(),
+                attrs
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_staging_and_failed_return_preserve_attributes() {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     let sc = Scratch::new("windows-attributes");
@@ -3432,10 +3482,12 @@ fn windows_staging_and_failed_return_preserve_attributes() {
         .open(&staged)
         .unwrap();
     // The link claims the destination even while this handle prevents
-    // removal of the staging name. Placement must still report success.
-    StdReplacer.place(&staged, &destination).unwrap();
+    // removal of the staging name. Retry must finish removing that name.
+    assert!(StdReplacer.place(&staged, &destination).is_err());
     assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
     drop(lock);
+    StdReplacer.place(&staged, &destination).unwrap();
+    assert!(!staged.exists());
     assert_eq!(
         std::fs::metadata(&destination).unwrap().file_attributes(),
         attrs

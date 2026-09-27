@@ -232,8 +232,9 @@ impl AtomicReplacer for StdReplacer {}
 /// Rename `incoming` to `target` without replacing an existing entry.
 ///
 /// Windows claims the target with a hard link, then removes the incoming name.
-/// Attributes never change, including if the process stops between those steps.
-/// Filesystems without hard links fail closed.
+/// Read-only links use the standard library's ignore-readonly deletion. If a
+/// drive refuses it, cleanup temporarily clears and then restores attributes.
+/// Filesystems without hard links use the check-then-rename fallback below.
 ///
 /// Linux and macOS ask the kernel for an exclusive rename. Other Unix
 /// systems, and filesystems that refuse the flag, claim the name with a hard
@@ -244,36 +245,112 @@ impl AtomicReplacer for StdReplacer {}
 /// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
 fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
-    place_with_hard_link(incoming, target, || std::fs::remove_file(incoming))
+    place_with_hard_link(
+        incoming,
+        target,
+        || std::fs::hard_link(incoming, target),
+        || remove_placement_link(incoming),
+    )
 }
 
 #[cfg(windows)]
 fn place_with_hard_link(
     incoming: &Path,
     target: &Path,
+    link: impl FnOnce() -> std::io::Result<()>,
     remove_incoming: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<Placement> {
-    std::fs::hard_link(incoming, target)?;
-    // Placement already succeeded. A crash or failed unlink leaves another
-    // name for the same file, without changing its attributes.
-    let _ = remove_incoming();
+    match link() {
+        Ok(()) => {}
+        Err(err) if hard_links_unsupported(&err) => return check_then_rename(incoming, target),
+        Err(err)
+            if err.kind() == ErrorKind::AlreadyExists && placement_is_linked(incoming, target)? => {
+        }
+        Err(err) => return Err(err),
+    }
+    // A retry can find the target already claimed. It must finish the unlink
+    // before recovery may discard the row that owns the staging name.
+    remove_incoming()?;
     Ok(Placement::Atomic)
+}
+
+#[cfg(windows)]
+fn placement_is_linked(incoming: &Path, target: &Path) -> std::io::Result<bool> {
+    for path in [incoming, target] {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+            return Ok(false);
+        }
+    }
+    same_file::is_same_file(incoming, target)
+}
+
+#[cfg(windows)]
+fn remove_placement_link(incoming: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(incoming) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            if !std::fs::symlink_metadata(incoming)?
+                .permissions()
+                .readonly()
+            {
+                return Err(err);
+            }
+        }
+        Err(err) => return Err(err),
+    }
+    remove_readonly_placement_link(incoming, || std::fs::remove_file(incoming))
+}
+
+#[cfg(windows)]
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "Windows-only attribute restoration; Unix permission bits are never changed"
+)]
+fn remove_readonly_placement_link(
+    incoming: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Pin the inode so restoration cannot change a replacement at either name.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0x80 | 0x100) // FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
+        .custom_flags(0x0020_0000) // FILE_FLAG_OPEN_REPARSE_POINT
+        .open(incoming)?;
+    let original = file.metadata()?.permissions();
+    let mut writable = original.clone();
+    writable.set_readonly(false);
+    file.set_permissions(writable)?;
+    let removed = remove();
+    file.set_permissions(original)?;
+    removed
+}
+
+#[cfg(windows)]
+fn hard_links_unsupported(err: &std::io::Error) -> bool {
+    err.kind() == ErrorKind::Unsupported || matches!(err.raw_os_error(), Some(1 | 50))
+}
+
+fn check_then_rename(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            std::fs::rename(incoming, target).map_err(CheckThenRenameFailed::wrap)?;
+            Ok(Placement::CheckThenRename)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(not(windows))]
 fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
     match rename_no_replace_atomic(incoming, target) {
         Ok(()) => Ok(Placement::Atomic),
-        Err(err) if err.kind() == ErrorKind::Unsupported => {
-            match std::fs::symlink_metadata(target) {
-                Ok(_) => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
-                Err(err) if err.kind() == ErrorKind::NotFound => {
-                    std::fs::rename(incoming, target).map_err(CheckThenRenameFailed::wrap)?;
-                    Ok(Placement::CheckThenRename)
-                }
-                Err(err) => Err(err),
-            }
-        }
+        Err(err) if err.kind() == ErrorKind::Unsupported => check_then_rename(incoming, target),
         Err(err) => Err(err),
     }
 }
@@ -1833,6 +1910,10 @@ fn create_from_temp(
 ) -> Result<bool, MaterializeError> {
     retry_while_locked(target, tmp, options.backoff, MAX_REPLACE_ATTEMPTS, || {
         if !matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
+            #[cfg(windows)]
+            if placement_is_linked(tmp, target).map_err(|err| MaterializeError::io(tmp, &err))? {
+                return place_attempt(options.replacer, tmp, target);
+            }
             return Ok(Attempt::Done(false));
         }
         place_attempt(options.replacer, tmp, target)
@@ -2826,6 +2907,10 @@ fn recover_staged(
     let target = resolve_target(root, &job.target_path)?;
     ensure_target_symlink_free(root, &target)?;
     let staged = staging.join(name);
+    #[cfg(windows)]
+    if placement_is_linked(&staged, &target).map_err(|err| MaterializeError::io(&staged, &err))? {
+        return return_displaced(&target, &staged, options).map(|returned| !returned);
+    }
     let write = job.operation == MaterializationOperation::Write;
     if write
         && !entry_exists(&target)?
@@ -2903,6 +2988,21 @@ fn recover_displacement(
     }
     let target = resolve_target(root, &displacement.target_path)?;
     ensure_target_symlink_free(root, &target)?;
+    #[cfg(windows)]
+    if placement_is_linked(&moved.path, &target)
+        .map_err(|err| MaterializeError::io(&moved.path, &err))?
+    {
+        if return_displaced(&target, &moved.path, options)? {
+            store.resolve_displacement(
+                moved.displacement_id,
+                DisplacementResolution::Discard,
+                None,
+                options.now_ms,
+            )?;
+            return Ok(false);
+        }
+        return Ok(true);
+    }
     if displacement.state == DisplacementState::Open
         && !entry_exists(&target)?
         && return_displaced(&target, &moved.path, options)?
@@ -4628,6 +4728,93 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_readonly_unlink_fallback_restores_attributes_on_success_and_failure() {
+        use std::os::windows::fs::MetadataExt;
+        for fail in [true, false] {
+            let scratch = Scratch::new("readonly-unlink");
+            let incoming = scratch.root.join("staged.md");
+            let target = scratch.root.join("target.md");
+            std::fs::write(&incoming, b"outside").unwrap();
+            let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&incoming, permissions).unwrap();
+            let attrs = std::fs::metadata(&incoming).unwrap().file_attributes();
+            std::fs::hard_link(&incoming, &target).unwrap();
+            let result = remove_readonly_placement_link(&incoming, || {
+                assert!(!std::fs::metadata(&incoming)?.permissions().readonly());
+                if fail {
+                    Err(std::io::Error::from_raw_os_error(32))
+                } else {
+                    std::fs::remove_file(&incoming)
+                }
+            });
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(incoming.exists(), fail);
+            assert_eq!(std::fs::metadata(&target).unwrap().file_attributes(), attrs);
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unsupported_hard_links_create_overwrite_and_return() {
+        struct UnsupportedLinks(fn() -> std::io::Error);
+        impl AtomicReplacer for UnsupportedLinks {
+            fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+                place_with_hard_link(
+                    incoming,
+                    target,
+                    || Err((self.0)()),
+                    || std::fs::remove_file(incoming),
+                )
+            }
+        }
+        for error in [
+            (|| std::io::Error::from_raw_os_error(50)) as fn() -> std::io::Error,
+            || std::io::Error::from_raw_os_error(1),
+            || std::io::Error::from(ErrorKind::Unsupported),
+        ] {
+            let replacer = UnsupportedLinks(error);
+            for overwrite in [false, true] {
+                let scratch = Scratch::new("unsupported-links");
+                let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+                enqueue_write_job(&mut store, "write", "notes.md", b"new", 1);
+                let mut job = store.load_materialization_job("write").unwrap().unwrap();
+                let target = scratch.root.join("notes.md");
+                if overwrite {
+                    std::fs::write(&target, b"old").unwrap();
+                    job.preimage = Preimage::Present(store.put_binary_blob(b"old").unwrap());
+                }
+                assert_eq!(
+                    materialize_one(&store, &scratch.root, &job, &options_with(&replacer)).unwrap(),
+                    JobOutcome::Completed
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), b"new");
+                assert!(store.list_unsettled_displacements().unwrap().is_empty());
+                assert!(workspace_lacks_atomic_placement(&scratch.root));
+            }
+            let scratch = Scratch::new("unsupported-return");
+            let root = std::fs::canonicalize(&scratch.root).unwrap();
+            let staged = root.join("staged.md");
+            let target = root.join("notes.md");
+            std::fs::write(&staged, b"outside").unwrap();
+            let mut permissions = std::fs::metadata(&staged).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&staged, permissions).unwrap();
+            assert!(return_displaced(&target, &staged, &options_with(&replacer)).unwrap());
+            assert!(!staged.exists());
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+            assert!(std::fs::metadata(&target).unwrap().permissions().readonly());
+            assert!(workspace_lacks_atomic_placement(&scratch.root));
+            std::fs::write(&staged, b"another file").unwrap();
+            assert!(!return_displaced(&target, &staged, &options_with(&replacer)).unwrap());
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+            assert_eq!(std::fs::read(&staged).unwrap(), b"another file");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_crash_after_target_claim_preserves_attributes() {
         use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
         let scratch = Scratch::new("attribute-crash");
@@ -4650,12 +4837,17 @@ mod tests {
 
         // Stop between claiming the target and removing the staged name.
         // Nothing after this boundary may be needed to restore attributes.
-        let placed = place_with_hard_link(&incoming, &target, || {
-            assert_eq!(std::fs::metadata(&target)?.file_attributes(), attributes);
-            Err(std::io::Error::from(ErrorKind::Interrupted))
-        })
-        .expect("placement succeeded before the interruption");
-        assert_eq!(placed, Placement::Atomic);
+        let placed = place_with_hard_link(
+            &incoming,
+            &target,
+            || std::fs::hard_link(&incoming, &target),
+            || {
+                assert_eq!(std::fs::metadata(&target)?.file_attributes(), attributes);
+                Err(std::io::Error::from(ErrorKind::Interrupted))
+            },
+        )
+        .expect_err("unlink failure must be retried");
+        assert_eq!(placed.kind(), ErrorKind::Interrupted);
         for path in [&incoming, &target] {
             assert_eq!(std::fs::read(path).unwrap(), b"outside bytes");
             assert_eq!(
@@ -4663,9 +4855,11 @@ mod tests {
                 attributes
             );
         }
+        rename_no_replace(&incoming, &target).expect("retry finishes the unlink");
+        assert!(!incoming.exists());
         assert_eq!(
-            rename_no_replace(&incoming, &target).unwrap_err().kind(),
-            ErrorKind::AlreadyExists
+            std::fs::metadata(&target).unwrap().file_attributes(),
+            attributes
         );
         std::fs::set_permissions(&target, original_permissions).unwrap();
     }
