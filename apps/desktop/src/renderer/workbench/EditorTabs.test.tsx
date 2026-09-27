@@ -4,9 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cornerRadius, EditorTabs } from "./EditorTabs";
 import {
   CHATS_TAB_PATH,
+  GRAPH_TAB_PATH,
+  HISTORY_TAB_PATH,
+  chatTabPath,
+  collectionTabPath,
   momentDiffTabPath,
   siteTabPath,
   transactionalCollectionTabPath,
+  versionCompareTabPath,
 } from "./workbenchState";
 
 beforeEach(() => {
@@ -45,13 +50,58 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it.each([
+    ["notes/旅.md", "tab-notes/旅.md"],
+    ["notes/tab://example.md", "tab-notes/tab://example.md"],
+    ["notes/dohc://example.md", "tab-notes/dohc://example.md"],
+    [GRAPH_TAB_PATH, "tab-dohc://graph"],
+    [HISTORY_TAB_PATH, "tab-dohc://history"],
+    [CHATS_TAB_PATH, "tab-dohc://chats"],
+    [chatTabPath({ kind: "new" }), "tab-dohc://chats/new"],
+    [chatTabPath({ kind: "channel", id: "team/one" }), "tab-dohc://chats/channel/team%2Fone"],
+    [chatTabPath({ kind: "dm", id: "person one" }), "tab-dohc://chats/dm/person%20one"],
+    [siteTabPath("apps/trip"), "tab-dohc://app/apps%2Ftrip"],
+    [collectionTabPath("notes/旅"), "tab-dohc://collection/notes%2F%E6%97%85"],
+    [versionCompareTabPath("try/one"), "tab-dohc://versions/compare/try%2Fone"],
+    [momentDiffTabPath("moment one"), "tab-dohc://moment-diff/moment%20one"],
+    ["tab://collection/a/b", "tab-dohc://collection/a/b"],
+    ["tab://collection/a%2fb", "tab-dohc://collection/a%2fb"],
+    ["tab://versions/compare/a%2fb", "tab-dohc://versions/compare/a%2fb"],
+    ["tab://moment-diff/%E0", "tab-dohc://moment-diff/%E0"],
+    [
+      transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"),
+      "tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002",
+    ],
+  ])("keeps the pinned selector for %s", (path, testId) => {
+    const onActivate = vi.fn();
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={onActivate}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+    const tab = screen.getByTestId(testId);
+    fireEvent.keyDown(tab, { key: "Enter" });
+    expect(onActivate).toHaveBeenCalledWith("left", path);
+  });
+
   it("names data Collection tabs from discovery without changing their stable identity",()=>{
     const path=transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002");
     const props={groupId:"left",groupNumber:1,tabs:[{path}],activeTab:path,activeTabDirty:false,recoveryPaths:new Set<string>(),onActivate:noop,onClose:noop,onContextMenu:noop,onMove:noop,onMoveToGroup:noop,onCreateGroupRight:noop};
     const mounted=render(<EditorTabs {...props}/>);
-    expect(screen.getByTestId(`tab-${path}`).textContent).toContain("Collection");
+    expect(screen.getByTestId("tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002").textContent).toContain("Collection");
     mounted.rerender(<EditorTabs {...props} tabLabels={new Map([[path,"Registrations"]])}/>);
-    const tab=screen.getByTestId(`tab-${path}`);expect(tab.textContent).toContain("Registrations");expect(tab.title).toBe("Collection: Registrations");expect(tab.textContent).not.toContain("00000000");
+    const tab=screen.getByTestId("tab-dohc://data-collection/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002");expect(tab.textContent).toContain("Registrations");expect(tab.title).toBe("Collection: Registrations");expect(tab.textContent).not.toContain("00000000");
   });
   it("names current history changes after their file, never the internal moment id", () => {
     const path = momentDiffTabPath("moment-ydoc-internal-hash");

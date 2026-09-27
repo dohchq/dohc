@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { RelayUnauthorizedError, RelayWorkspaceUnavailableError } from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
 import { registerCloudIpcHandlers } from "./cloudIpc";
 import { type SyncStatusResult } from "./bridgeContract";
@@ -190,6 +190,7 @@ describe("registered cloud handlers", () => {
     await expect(result).resolves.toEqual({ status: "complete", email: incoming.email });
     expect(h.cache.snapshot().credentials).toBe(incoming);
     expect(h.steps).toEqual(["clear", "stop", "close-relay", "refresh", "reconcile"]);
+    expect(h.closeRelay).toHaveBeenCalledWith({ accountChanged: true });
     expect(h.ready).toHaveBeenCalledWith("ready");
   });
 
@@ -205,6 +206,7 @@ describe("registered cloud handlers", () => {
     held.reject(new Error("store failed"));
     await expect(result).rejects.toThrow("store failed");
     expect(h.steps).toEqual(["clear", "stop", "close-relay", "notify"]);
+    expect(h.closeRelay).toHaveBeenCalledWith({ accountChanged: true });
   });
 
   it("waits for daemon startup and rejects a secret-status result from a retired physical workspace", async () => {
@@ -275,10 +277,22 @@ describe("registered cloud handlers", () => {
     await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "phrase" })).resolves.toEqual(status);
     expect(h.bindRelay).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "existing", rootPath: h.workspace.rootPath, attachmentId: expect.any(Symbol),
+      accountId: credentials.userId,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }));
     expect(h.enroll).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }));
     expect(h.steps).toEqual(["claim", "enroll", "remote", "enable"]);
+  });
+
+  it.each([
+    new RelayWorkspaceUnavailableError(),
+    new RelayClaimRefusedError("Another account already claimed this workspace."),
+  ])("preserves the enrollment claim failure: %s", async (error) => {
+    const h = await harness();
+    h.claim.mockRejectedValueOnce(error);
+    await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toBe(error);
+    expect(h.enroll).not.toHaveBeenCalled();
+    expect(h.enable).not.toHaveBeenCalled();
   });
 
   it("rejects received views and an existing remote owned by another account before claiming", async () => {
@@ -341,6 +355,7 @@ describe("registered cloud handlers", () => {
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
     expect(h.registry.has("joined")).toBe(false);
+    h.cache.set({ ...credentials, userId: "account-b", token: "account-b-token" });
     held.resolve({ hasContent: true, identity: null });
     await expect(result).resolves.toEqual({ workspace: {
       workspaceId: "joined", rootPath: h.joinPayload.rootPath, kind: "personal", mode: "local-first",
@@ -349,6 +364,10 @@ describe("registered cloud handlers", () => {
     expect(h.enable).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "joined" }), { joinBootstrap: true });
     expect(h.registry.get("joined")?.joinBootstrapPending).toBeUndefined();
     expect(h.bindRelay.mock.calls[0]?.[0]).not.toHaveProperty("attachmentId");
+    expect(h.bindRelay).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: credentials.userId,
+      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+    }));
   });
 
   it("keeps a failed-cleanup registration and directs recovery through Forget before rejoining", async () => {

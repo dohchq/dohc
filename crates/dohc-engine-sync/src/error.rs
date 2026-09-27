@@ -299,6 +299,7 @@ impl RelayError {
             | RelayError::EpochSuperseded
             | RelayError::IdentityNotRecognized
             | RelayError::IdentityRequired
+            | RelayError::ClaimRefused(_)
             | RelayError::StreamIdentityMismatch
             | RelayError::AuthorshipMismatch
             | RelayError::UnknownChatOperation
@@ -401,6 +402,8 @@ pub enum RelayError {
     IdentityNotRecognized,
     #[error("replication identity is required")]
     IdentityRequired,
+    #[error("sync identity claim refused: {0}")]
+    ClaimRefused(Box<RelayError>),
     #[error("replication stream identity does not match")]
     StreamIdentityMismatch,
     #[error("relay authorship check failed")]

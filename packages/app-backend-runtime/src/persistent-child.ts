@@ -201,7 +201,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     const session=db.createSession();
     let resultJson:string, attachedFileIds:string[], changeset:Uint8Array;
     try {
-      ({resultJson,attachedFileIds}=await appCode(()=>evaluate(db!,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true})));
+      if(command.guest.tables.some(table=>!config.tables.includes(table))) reject("invalid_input","Operation tables exceed Collection access.");
+      ({resultJson,attachedFileIds}=await appCode(()=>evaluate(db!,{...command.guest,limits:config.limits},{persistentConnection:true,schemaTables:config.tables})));
       db.setAuthorizer(null);changeset=session.changeset();
     } finally { session.close(); }
     if (!db.isTransaction) reject("invalid_changeset","The prepared operation transaction ended.");

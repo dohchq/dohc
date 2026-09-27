@@ -11,6 +11,8 @@ export type GuestRequest = Omit<Extract<ChildRequest, { kind: "evaluate" }>, "ki
 export interface GuestOptions {
   // Reused connections retain counters from prior operations and host metadata writes.
   persistentConnection?: boolean;
+  /** Full schema inventory for connection metadata; grants remain request.tables. */
+  schemaTables?: readonly string[];
 }
 
 interface AuthorizationOptions extends GuestOptions {
@@ -159,7 +161,7 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
   if(options.persistentConnection && !persistentRowidTables.has(db)) {
     db.setAuthorizer(null);
     const tables=new Set<string>();
-    for(const table of request.tables) {
+    for(const table of options.schemaTables ?? request.tables) {
       const primary=db.prepare(`PRAGMA table_info("${table}")`).all().filter(column=>Number(column.pk)>0);
       if(primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !db.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk")) tables.add(table.toLowerCase());
     }

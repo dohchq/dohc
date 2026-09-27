@@ -41,7 +41,7 @@ export function registerCloudIpcHandlers<
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   loadAndCacheCurrentCredentials(): Promise<CloudCredentials | null>;
-  closeAllRelayTransportWorkspaces(): Promise<void>;
+  closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void>;
   activity: {
     stopEngines(): Promise<void>;
     enableCloud(workspace: RegistryEntry, options?: { joinBootstrap?: boolean }): Promise<unknown>;
@@ -69,6 +69,7 @@ export function registerCloudIpcHandlers<
   assertWritableWorkspace(workspace: RegistryEntry): void;
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
+    accountId: string;
     relay: { baseUrl: string; token: string };
   }): EngineRelayWorkspaceClient;
   enrollWorkspaceKeyEnvelope: typeof enrollWorkspaceKeyEnvelope;
@@ -123,7 +124,7 @@ export function registerCloudIpcHandlers<
         clearCachedCredentials: () => clearCachedCredentials(),
         stopEngines: async () => await activity.stopEngines(),
         closeRelayTransportWorkspaces: async () =>
-          await closeAllRelayTransportWorkspaces(),
+          await closeAllRelayTransportWorkspaces({ accountChanged: true }),
         refreshCredentialCache: async () => await refreshCredentialCache(),
         // Attach engines to already-open cloud-enabled workspaces that were
         // opened local-only because no session existed yet.
@@ -182,7 +183,7 @@ export function registerCloudIpcHandlers<
       clearCachedCredentials: () => clearCachedCredentials(),
       logout: () => cloudLogin().logout(),
       stopEngines: () => activity.stopEngines(),
-      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
       // Scope-free: logout changes every workspace's sync state at once.
       notifyWorkspaceActivity: () => notifyRenderer(),
       // Logout is a one-event transition to a known state: signed out. The
@@ -225,20 +226,12 @@ export function registerCloudIpcHandlers<
         };
         const daemonRelay = relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
+          accountId: credentials.userId,
           rootPath: workspace.rootPath,
           attachmentId: workspace.attachmentId,
           relay,
         });
-        try {
-          await daemonRelay.claim();
-        } catch (error) {
-          if (error instanceof RelayWorkspaceUnavailableError) {
-            throw new Error(
-              "This workspace id is already claimed by another account",
-            );
-          }
-          throw error;
-        }
+        await daemonRelay.claim();
         operation.assertCurrent();
         const sessions = currentEngineSessions();
         if (!sessions) {
@@ -357,6 +350,7 @@ export function registerCloudIpcHandlers<
         // activity session opens.
         const daemonRelay = relayClientForWorkspace({
           workspaceId: parsed.workspaceId,
+          accountId: credentials.userId,
           rootPath: created.rootPath,
           relay,
         });

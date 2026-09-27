@@ -196,9 +196,18 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
         }
-        // The same code as a relay that answered "not found", so retries treat
-        // them alike. The message is what lets the desktop tell a person which
-        // one happened: the server could not be reached at all.
+        RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
+            let mut wire = map_runtime(RuntimeError::Relay((**reason).clone()));
+            wire.message = "relay-claim-refused".to_owned();
+            wire.retry = dohc_engine_protocol::Retryability::No;
+            return wire;
+        }
+        RuntimeError::Relay(RelayError::WorkspaceUnavailable) => {
+            return WireError::new(
+                ErrorCode::WorkspaceUnavailable,
+                "relay-workspace-unavailable",
+            );
+        }
         RuntimeError::Relay(RelayError::Partitioned) => {
             return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
         }
@@ -300,6 +309,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
         RelayError::BlobInvalid => ErrorCode::BlobInvalid,
         RelayError::IdentityRequired => ErrorCode::IdentityRequired,
+        RelayError::ClaimRefused(reason) => map_relay_code(*reason),
         RelayError::StreamIdentityMismatch => ErrorCode::StreamIdentityMismatch,
         RelayError::AuthorshipMismatch => ErrorCode::AuthorshipMismatch,
         RelayError::UnknownChatOperation => ErrorCode::UnknownChatOperation,
@@ -965,7 +975,12 @@ mod tests {
         assert_eq!(unreachable.message, "relay-unreachable");
         let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
         assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);
-        assert_ne!(missing.message, "relay-unreachable");
+        assert_eq!(missing.message, "relay-workspace-unavailable");
+        assert_ne!(
+            map_runtime(RuntimeError::ActorUnavailable).message,
+            missing.message
+        );
+        assert_ne!(workspace_unavailable().message, missing.message);
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,
@@ -997,6 +1012,27 @@ mod tests {
 
     #[test]
     fn relay_refusal_messages_preserve_recovery_meaning() {
+        let required = map_runtime(RuntimeError::Relay(RelayError::IdentityRequired));
+        assert_eq!(
+            serde_json::to_value(&required).unwrap()["code"],
+            "IDENTITY_REQUIRED"
+        );
+        assert_ne!(required.message, "relay-claim-refused");
+        for refusal in [
+            RelayError::WorkspaceUnavailable,
+            RelayError::EpochSuperseded,
+            RelayError::IdentityNotRecognized,
+            RelayError::IdentityRequired,
+            RelayError::StreamIdentityMismatch,
+        ] {
+            let original = map_runtime(RuntimeError::Relay(refusal.clone()));
+            let saved = map_runtime(RuntimeError::Relay(RelayError::ClaimRefused(Box::new(
+                refusal,
+            ))));
+            assert_eq!(saved.code, original.code);
+            assert_eq!(saved.message, "relay-claim-refused");
+            assert_eq!(saved.retry, dohc_engine_protocol::Retryability::No);
+        }
         let origin = map_runtime(RuntimeError::Relay(RelayError::OriginDiverged));
         assert_eq!(origin.code, ErrorCode::InvalidParams);
         assert_eq!(

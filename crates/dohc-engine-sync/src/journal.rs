@@ -292,8 +292,8 @@ pub fn journal_local_replication_op(
     let outcome = store.write_with(faults, |tx| {
         tx.execute(
             "INSERT OR IGNORE INTO sync_identity \
-             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms, claim_state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
             params![workspace_id, origin_id, replication_epoch, stream_identity, now_ms],
         )
         .map_err(SyncError::persist)?;
@@ -376,6 +376,51 @@ pub fn adopt_join_identity(
     created_at_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    create_sync_identity(
+        store,
+        workspace_id,
+        new_origin_id,
+        replication_epoch,
+        stream_identity,
+        created_at_ms,
+        None,
+        faults,
+    )
+}
+
+/// Persist a locally minted identity before contacting the relay to claim it.
+pub fn create_claim_identity(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    new_origin_id: &str,
+    replication_epoch: &str,
+    stream_identity: &str,
+    created_at_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    create_sync_identity(
+        store,
+        workspace_id,
+        new_origin_id,
+        replication_epoch,
+        stream_identity,
+        created_at_ms,
+        Some("pending"),
+        faults,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_sync_identity(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    new_origin_id: &str,
+    replication_epoch: &str,
+    stream_identity: &str,
+    created_at_ms: i64,
+    claim_state: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     relay_identity_component(
         new_origin_id,
@@ -402,6 +447,10 @@ pub fn adopt_join_identity(
             .map_err(SyncError::corrupt)?;
         if let Some((_, epoch, stream)) = current {
             if epoch == replication_epoch && stream == stream_identity {
+                if claim_state.is_none() {
+                    tx.execute("UPDATE sync_identity SET claim_state=NULL, claim_account_id=NULL WHERE workspace_id=?1", [workspace_id])
+                        .map_err(SyncError::persist)?;
+                }
                 return Ok(AdoptJoinIdentityOutcome::AlreadyMatched);
             }
             return Err(SyncError::InvalidInput {
@@ -438,14 +487,15 @@ pub fn adopt_join_identity(
 
         tx.execute(
             "INSERT INTO sync_identity \
-             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms, claim_state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 workspace_id,
                 new_origin_id,
                 replication_epoch,
                 stream_identity,
-                created_at_ms
+                created_at_ms,
+                claim_state
             ],
         )
         .map_err(SyncError::persist)?;

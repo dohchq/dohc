@@ -604,6 +604,29 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
+    pub fn latest_run_for_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<AgentRunRecord>, DomainError> {
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
+                            started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
+                            failure_note_posted FROM agent_run_records \
+                     WHERE workspace_id = ?1 AND thread_id = ?2 \
+                     ORDER BY started_at_ms DESC, run_id DESC LIMIT 1",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(params![workspace_id, thread_id], |row| map_run_row(row, 0))
+                .map_err(DomainError::sql_corrupt)?;
+            Ok(collect(rows)?.pop())
+        })
+    }
+
     pub fn get_run_record(
         &self,
         workspace_id: &str,

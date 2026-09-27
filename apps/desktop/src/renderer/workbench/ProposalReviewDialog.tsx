@@ -133,7 +133,7 @@ function ProposalFileSection(props: {
         data-testid="proposal-review-file-toggle"
         aria-expanded={open}
         onClick={toggle}
-        className="flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-line/40"
+        className="flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
           {file.path}
@@ -305,7 +305,7 @@ export function ProposalReviewDialog(props: {
             data-testid="proposal-review-later"
             disabled={settling}
             onClick={props.onClose}
-            className="mr-auto h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="mr-auto h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             Finish later
           </button>
@@ -320,7 +320,7 @@ export function ProposalReviewDialog(props: {
             data-testid="proposal-review-decline"
             disabled={settling}
             onClick={() => void settle("decline")}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             Decline
           </button>

@@ -20,6 +20,7 @@ const engineering = {
 };
 
 const showResult: ShowResult = {
+  dispatch: { paused: null, lastRun: null },
   thread: {
     id: "th_8f2k1c",
     title: "Conflict handling should feel like a doc editor",
@@ -49,10 +50,29 @@ const showResult: ShowResult = {
 };
 
 describe("markdown renderers", () => {
+  it("renders thread content without live dispatch metadata", () => {
+    const { thread, messages } = showResult;
+    const markdown = renderThreadMarkdown({ thread, messages });
+    expect(markdown).not.toContain("dispatch:");
+    expect(markdown).toContain(messages[0]!.body);
+    expect(markdown).toContain("needs-decision(open)");
+    expect(markdown).toContain("[attach: q3-plan.md]");
+  });
+
+  it("renders a no-reply failure in show", () => {
+    const dispatch: ShowResult["dispatch"] = {
+      paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 },
+    };
+    expect(renderShowMarkdown({ ...showResult, dispatch })).toContain(
+      'dispatch: {"paused":null,"lastRun":{"state":"failed","failureReason":"no-reply","exitCode":0}}',
+    );
+  });
+
   it("renders the canonical thread form with every message id", () => {
     expect(renderShowMarkdown(showResult)).toMatchInlineSnapshot(`
       "# Conflict handling should feel like a doc editor
       thread: th_8f2k1c · #engineering · 1 comments · open decisions: 1
+      dispatch: {"paused":null,"lastRun":null}
 
       **Sam Rivera** · 2026-07-03T04:05:06.000Z · msg_root · needs-decision(open)
       Right now versioning pops a merge dialog...

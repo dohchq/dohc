@@ -43,8 +43,11 @@ export const preloadBundledRuntimeDeps = [
   "zod",
 ];
 
+// Electron starts dist/main/main.js, the small entry module that counts the
+// launch and then imports the app's main module, dist/main/app.js.
 export const mainBuildEntries = {
-  main: "src/main.ts",
+  main: "src/entry.ts",
+  app: "src/main.ts",
   "workspace-database-worker":
     "src/workspaces/workspaceDatabaseThread.ts",
   "document-projection-worker":

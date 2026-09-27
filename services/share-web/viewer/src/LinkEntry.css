@@ -1,0 +1,9 @@
+.link-entry {
+  padding: 16px clamp(20px, 4vw, 32px);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.link-entry p { margin: 8px 0; }
+.link-entry summary { cursor: pointer; }

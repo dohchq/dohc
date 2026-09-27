@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { CliActor } from "./protocol";
+import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -16,6 +16,8 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "documentRead"; path: string }
+  | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
@@ -183,6 +185,63 @@ const decisionFlags: readonly CliFlag[] = [
 ];
 export const DASH_RULE = "options first, then --, then text that starts with a dash";
 const stdinNote = "Use - as the body to read it from stdin.";
+
+const documentTextFlags: readonly CliFlag[] = [
+  { name: "--text", value: "markdown", text: "Use this Markdown as the body. An empty string is allowed." },
+  { name: "--agent", value: "name", text: "Record this agent name with the change." },
+];
+
+function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"): CliCommandBody {
+  const [path, body, ...extra] = input.operands;
+  if (!path) fail("document requires a path");
+  noExtraArgs(extra, "document");
+  const text = lastValue(input, "--text");
+  if (body !== undefined && (body !== "-" || text !== undefined)) fail("use either - for stdin or --text <markdown>");
+  if (verb === "documentEdit" && body === undefined && text === undefined) fail("document edit requires - for stdin or --text <markdown>");
+  const find = lastValue(input, "--find");
+  const agent = lastValue(input, "--agent");
+  const requestId = lastValue(input, "--request-id");
+  if (find !== undefined && !documentEditTextSchema.min(1).safeParse(find).success) fail("--find requires non-empty Markdown of at most 256 KiB");
+  if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name; use 1 to 64 letters, numbers, spaces, dots, underscores, or hyphens, starting with a letter or number");
+  if (requestId !== undefined && !requestIdSchema.safeParse(requestId).success) fail("--request-id requires 1 to 64 printable ASCII characters");
+  return { verb, path, text: text ?? "", stdin: body === "-",
+    ...(find === undefined ? {} : { find }), ...(agent === undefined ? {} : { agent }),
+    ...(requestId === undefined ? {} : { requestId }) };
+}
+
+const DOCUMENT_VERBS = {
+  read: {
+    summary: "Read the current Markdown, including edits in an open editor.",
+    operands: "<path>",
+    notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
+    parse: ({ operands }) => {
+      const [path, ...extra] = operands;
+      if (!path) fail("document read requires a path");
+      noExtraArgs(extra, "document read");
+      return { verb: "documentRead", path };
+    },
+  },
+  edit: {
+    summary: "Replace matching text or append Markdown through the live document.",
+    operands: "<path> [-]",
+    flags: [...documentTextFlags,
+      { name: "--find", value: "markdown", text: "Replace this exact, unique match. Omit to append." },
+      { name: "--request-id", value: "key", text: "Reuse this key when retrying the same edit, as with dohc_edit_document." },
+    ],
+    notes: [stdinNote, "Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8.",
+      "Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind.",
+      "Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
+    parse: (input) => documentWrite(input, "documentEdit"),
+  },
+  create: {
+    summary: "Create a Markdown document without overwriting an existing file.",
+    operands: "<path> [-]",
+    flags: documentTextFlags,
+    notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
+      "The path must end in .md or .markdown. Frontmatter is refused."],
+    parse: (input) => documentWrite(input, "documentCreate"),
+  },
+} satisfies Record<string, CliVerbSpec>;
 
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
   const options = allValues(input, "--option");
@@ -659,6 +718,12 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  document: {
+    summary: "Read, edit, and create live Markdown documents.",
+    notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
+      "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
+    verbs: DOCUMENT_VERBS,
+  },
   chat: {
     summary: "Read and post in Groups and threads.",
     notes: [
@@ -691,7 +756,7 @@ export const GLOBAL_FLAGS: readonly CliFlag[] = [
 ];
 
 const VALUE_FLAGS = new Set(
-  [...Object.values(CHAT_VERBS), ...Object.values(HISTORY_VERBS)].flatMap((verb: CliVerbSpec) =>
+  Object.values(CLI_COMMANDS).flatMap((command) => Object.values(command.verbs)).flatMap((verb) =>
     (verb.flags ?? []).filter((flag) => flag.value).map((flag) => flag.name),
   ),
 );
@@ -749,7 +814,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

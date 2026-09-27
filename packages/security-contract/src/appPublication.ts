@@ -3,7 +3,7 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 import { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
-export { parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability, type AppDatasetCapability } from "./dataset";
+export { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
   APP_COLLECTION_CURSOR_BYTES,APP_COLLECTION_PAGE_BYTES,APP_COLLECTION_RESPONSE_BYTES,

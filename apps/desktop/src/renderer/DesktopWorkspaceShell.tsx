@@ -83,6 +83,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
+import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
@@ -782,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     hideShellError,
     reportShellError,
     reportShellFailure,
+    clearKind,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -798,6 +800,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
   } = useShellError(workspaceId);
+  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
   // polls and subscriptions off onError, so a fresh arrow per shell render
@@ -4241,7 +4244,7 @@ export function DesktopWorkspaceShell(props: {
               reportShellError("Could not refresh history.", error),
             )
           }
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -4893,7 +4896,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open history in tab"
                   title="Open history in tab"
                   onClick={openHistoryTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
@@ -4904,7 +4907,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open graph in tab"
                   title="Open graph in tab"
                   onClick={openGraphTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
@@ -4915,7 +4918,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Refresh apps"
                   title="Refresh apps"
                   onClick={refreshSites}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <RefreshCw size={13} aria-hidden />
                 </button>
@@ -5382,21 +5385,21 @@ export function DesktopWorkspaceShell(props: {
                   <button
                     type="button"
                     onClick={() => setNewFileOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl N · new file
                   </button>
                   <button
                     type="button"
                     onClick={() => setPaletteOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl K · commands
                   </button>
                   <button
                     type="button"
                     onClick={() => setQuickOpenOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
                   >
                     Ctrl P · go to
                   </button>
@@ -5444,7 +5447,7 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open chats in tab"
                   title="Open chats in tab"
                   onClick={openChatsTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>

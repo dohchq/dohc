@@ -41,7 +41,7 @@ function Act(props: { onClick: () => void; children: ReactNode; danger?: boolean
     <button
       type="button"
       onClick={props.onClick}
-      className={`h-7 rounded-md border border-line px-2.5 text-[11px] transition-colors hover:bg-line/50 ${
+      className={`h-7 rounded-md border border-line px-2.5 text-[11px] transition-colors hover:bg-hover ${
         props.danger ? "text-danger hover:text-danger" : "text-muted hover:text-ink"
       }`}
     >

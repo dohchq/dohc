@@ -6,6 +6,7 @@ import {relayLinkRefusal} from "./linkRefusal";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
+import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 
@@ -89,7 +90,8 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   const jsonResponse = (response: Response) => json(response, options.signal);
   const server = new McpServer({ name: "dohc-share", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.registerTool("dohc_share_status", { description: "Read the current share permissions and release state.", inputSchema: z.object({}) }, async () => {
-    return text(metadata);
+    const summary = shareLinkSummary(metadata, Boolean(options.linkLive && options.liveLimits));
+    return text({ ...metadata, summary: `${summary.permissions} ${summary.included} ${summary.history}` });
   });
   server.registerTool("dohc_list_files", {
     description: "List files visible through this shared link. Paths are relative to the share.",

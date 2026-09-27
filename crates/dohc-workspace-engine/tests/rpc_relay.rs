@@ -468,7 +468,7 @@ async fn seed_main(
     .await;
 }
 
-async fn seed_sync_identity(
+async fn seed_local_identity(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
     id: &mut u64,
@@ -484,6 +484,23 @@ async fn seed_sync_identity(
             "kind": "channel",
             "nowMs": 10,
         }),
+    )
+    .await;
+}
+
+async fn seed_sync_identity(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    workspace_id: &str,
+) {
+    seed_local_identity(transport, handle, id).await;
+    call(
+        transport,
+        handle,
+        id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
     )
     .await;
 }
@@ -599,7 +616,7 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
         }),
     )
     .await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     call(
         &transport,
         &handle,
@@ -662,7 +679,7 @@ async fn first_push_publishes_an_idle_open_document_and_its_next_edit_succeeds()
         json!({ "sessionId": session_id, "updateBase64": update }),
     )
     .await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     let first = call(
         &transport,
         &handle,
@@ -899,7 +916,7 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
     let b = open_uncaptured_workspace(&b_transport, &b_scratch, &relay, workspace_id).await;
     let mut b_id = 1;
     seed_main(&b_transport, &b, &mut b_id, workspace_id).await;
-    seed_sync_identity(&b_transport, &b, &mut b_id).await;
+    seed_sync_identity(&b_transport, &b, &mut b_id, workspace_id).await;
     call(
         &b_transport,
         &b,
@@ -962,6 +979,14 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
             "kind": "channel",
             "nowMs": 10,
         }),
+    )
+    .await;
+    call(
+        &a_transport,
+        &a,
+        &mut a_id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
     )
     .await;
     pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
@@ -1119,7 +1144,7 @@ async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_wor
             json!({ "sessionId": session_id, "updateBase64": first_edit }),
         )
         .await;
-        seed_sync_identity(&transport, &handle, &mut id).await;
+        seed_sync_identity(&transport, &handle, &mut id, &workspace_id).await;
 
         id += 1;
         let pushing = Arc::clone(&transport);
@@ -1184,6 +1209,43 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         &mut id,
         "chats.channels.create",
         json!({ "channelId": "channel", "name": "Shared", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "first-thread", "messageId": "first-message",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+            "body": "Written before sync setup", "needsDecision": false, "nowMs": 20,
+        }),
+    )
+    .await;
+
+    id += 1;
+    let missing = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "sync.push",
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::IdentityRequired);
+    assert!(relay.state.lock().unwrap().requests.is_empty());
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
     )
     .await;
 
@@ -1447,7 +1509,7 @@ async fn join_identity_adoption_is_local_idempotent_and_refuses_non_pristine_reb
         .expect("retried origin");
     assert_eq!(retried_origin, identity.0);
 
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_local_identity(&transport, &handle, &mut id).await;
     id += 1;
     let refused = transport
         .call(
@@ -1533,7 +1595,7 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
 
     let pull = call(
         &transport,
@@ -1591,7 +1653,7 @@ async fn slow_relay_pull_does_not_block_a_concurrent_workspace_write() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
 
     let pulling_transport = Arc::clone(&transport);
     let pulling_handle = handle.clone();
@@ -1657,7 +1719,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
     let mut id = 1;
     let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     let first = call(
         &transport,
         &handle,
@@ -1816,7 +1878,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
     let transport = InProcessTransport::new(service);
     let mut id = 1;
     let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     flush_capture(&transport, &handle, &mut id).await;
 
     let first = call(
@@ -1917,7 +1979,7 @@ async fn commit_cursor_accepts_only_the_server_issued_pending_token() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     let pull = call(
         &transport,
         &handle,
@@ -2022,7 +2084,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
-    seed_sync_identity(&transport, &handle, &mut id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
     let first = call(
         &transport,
         &handle,
@@ -2093,6 +2155,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ),
         ("sync.probe", json!({ "workspaceId": "other" })),
         ("sync.claim", json!({ "workspaceId": "other" })),
+        ("sync.resetClaimRefusal", json!({ "workspaceId": "other" })),
         (
             "sync.adoptJoinIdentity",
             json!({
@@ -2140,6 +2203,105 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_change_resets_only_refused_claims_without_contacting_relay() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "reset-refusal";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_local_identity(&transport, &handle, &mut id).await;
+    let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
+    for state in [Some("workspace-unavailable"), Some("pending"), None] {
+        db.execute(
+            "UPDATE sync_identity SET claim_state=?1 WHERE workspace_id=?2",
+            rusqlite::params![state, workspace_id],
+        )
+        .unwrap();
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.resetClaimRefusal",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await;
+        let actual: Option<String> = db
+            .query_row(
+                "SELECT claim_state FROM sync_identity WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual.as_deref(), state.map(|_| "pending"));
+    }
+    assert!(relay.state.lock().unwrap().requests.is_empty());
+    db.execute(
+        "UPDATE sync_identity SET claim_state='workspace-unavailable', claim_account_id='account-a' WHERE workspace_id=?1",
+        [workspace_id],
+    )
+    .unwrap();
+    close(&transport, &handle, &mut id).await;
+    id += 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.resetClaimRefusal",
+        json!({ "workspaceId": workspace_id, "accountId": "account-a" }),
+    )
+    .await;
+    assert_eq!(
+        db.query_row(
+            "SELECT claim_state FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "workspace-unavailable"
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.resetClaimRefusal",
+        json!({ "workspaceId": workspace_id, "accountId": "account-b" }),
+    )
+    .await;
+    id += 1;
+    let missing = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "sync.push",
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::IdentityRequired);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() {
     let workspace_id = "rpc-shared-channel";
     let relay = FakeRelay::start(RelayState::default());
@@ -2172,6 +2334,14 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
             "needsDecision": false,
             "nowMs": 20,
         }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
     )
     .await;
     call(

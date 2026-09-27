@@ -1977,7 +1977,7 @@ export function MarkdownView(props: {
                 aria-pressed={showSource}
                 title="Toggle markdown source (Ctrl+/)"
                 onClick={toggleSourceView}
-                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
                 {showSource ? "Editor" : "Source"}
               </button>
@@ -2181,7 +2181,7 @@ export function MarkdownView(props: {
                 }
                 toggleEditorMode();
               }}
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               {surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>

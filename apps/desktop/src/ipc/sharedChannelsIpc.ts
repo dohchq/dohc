@@ -15,6 +15,7 @@ import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryS
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
+import { pushWithIdentity } from "../workspaces/pushWithIdentity";
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import {
@@ -65,8 +66,9 @@ export function registerSharedChannelsIpcHandlers<
   setWorkspaceSharedChannels(workspaceId: string, channels: JoinedSharedChannel[]): unknown;
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
+    accountId: string;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel"> & { push(): Promise<unknown> };
+  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel" | "claim"> & { push(): Promise<unknown> };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   normalizeServerUrl(url: string): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
@@ -162,12 +164,13 @@ export function registerSharedChannelsIpcHandlers<
         // handler resuming; nothing runs on a session that is already gone.
         assertCurrentShareSession();
         if (channel.folderPath && credentials.relayUrl) {
-          await relayClientForWorkspace({
+          await pushWithIdentity(relayClientForWorkspace({
             workspaceId: workspace.workspaceId,
+            accountId: credentials.userId,
             rootPath: workspace.rootPath,
             attachmentId: operation.workspace.attachmentId,
             relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-          }).push();
+          }));
           assertCurrentShareSession();
         }
         const created = await awaitCredentialGeneration({
@@ -330,6 +333,7 @@ export function registerSharedChannelsIpcHandlers<
         }
         const result = await relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
+          accountId: input.recipientUserId,
           rootPath: workspace.rootPath,
           attachmentId: workspace.attachmentId,
           relay,

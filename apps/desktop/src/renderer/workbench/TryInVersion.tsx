@@ -232,7 +232,7 @@ export function TryInVersionReviewCard(props: {
           title="Keep working in this version"
           disabled={busy !== null}
           onClick={() => void dismiss()}
-          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-subtle hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
         >
           <X size={13} aria-hidden />
         </button>
