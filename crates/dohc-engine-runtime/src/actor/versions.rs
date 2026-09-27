@@ -957,7 +957,7 @@ impl ActorHandle {
             // run first, and the page runs in batches that each hold no two
             // paths that alias or where one is inside the other. Aliases keep
             // their page order, matching sequential replay. Every probe sees
-            // earlier batches; each batch shares one displacement commit.
+            // earlier batches.
             let mut changes = changes;
             changes.retain(|change| change.version_id == active);
             let first: Vec<bool> = changes

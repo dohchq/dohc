@@ -361,7 +361,7 @@ describe("createCaptureLiveStores", () => {
               degraded: false,
               terminal: false,
               phase: "ready",
-              noAtomicPlacement: false,
+              noAtomicPlacement: false, keptFiles: [],
             }
           : { settled: false, running: true, degraded: true },
     }));
@@ -386,7 +386,7 @@ describe("createCaptureLiveStores", () => {
                 degraded: false,
                 terminal: false,
                 phase: "importing",
-                noAtomicPlacement: false,
+                noAtomicPlacement: false, keptFiles: [],
               }
             : { settled: false, running: true, degraded: false },
       };

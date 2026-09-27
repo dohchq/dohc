@@ -35,13 +35,18 @@ pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireErro
 }
 
 impl EngineService {
-    pub(super) fn watcher_status(
+    pub(super) async fn watcher_status(
         &self,
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
         // A write here found a filesystem with no atomic no-replace rename.
         let no_atomic_placement = dohc_engine_files::workspace_lacks_atomic_placement(&open.root);
+        let kept_files = open
+            .actor
+            .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
+            .await
+            .unwrap_or_default();
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -55,6 +60,7 @@ impl EngineService {
                     "terminal": snapshot.terminal,
                     "phase": snapshot.phase.as_str(),
                     "noAtomicPlacement": no_atomic_placement,
+                    "keptFiles": kept_files,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -65,6 +71,7 @@ impl EngineService {
                 "terminal": false,
                 "phase": "degraded",
                 "noAtomicPlacement": no_atomic_placement,
+                "keptFiles": kept_files,
             }),
         })
     }

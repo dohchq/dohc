@@ -51,6 +51,7 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  keptFiles: readonly (readonly [string, string])[];
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -121,6 +122,7 @@ export interface WorkspaceCaptureHooks {
     detail?: string | null,
   ) => void;
   onAtomicPlacementUnavailable: () => void;
+  onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -189,6 +191,7 @@ export function createWorkspaceActivity(
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
@@ -278,6 +281,7 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        keptFiles: [],
         agentRun: null,
       };
       state.entry = entry;
@@ -292,6 +296,11 @@ export function createWorkspaceActivity(
               onCaptureOutcome: (failure, detail = null) =>
                 recordCaptureOutcome(entry, failure, detail),
               onAtomicPlacementUnavailable: () => markAtomicPlacementUnavailable(entry),
+              onKeptFiles: (paths) => {
+                if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
+                entry.keptFiles = [...paths];
+                notify({ workspaceId: workspace.workspaceId });
+              },
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.

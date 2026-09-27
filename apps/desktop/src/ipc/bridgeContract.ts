@@ -361,6 +361,11 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
+  recoveryCopies: z.boolean().optional(),
+});
+export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
+
 // Who asked for a sync pass now. A person's retry counts toward the attempts
 // a failure's notice weighs; a retry on reconnecting or waking does not.
 export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
@@ -1245,6 +1250,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // made at the same moment. Optional, unlike its neighbours: an omitted
   // warning reads as "no warning", which is the safe reading.
   atomicPlacementUnavailable: z.boolean().optional(),
+  keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way, and the engine keeps retrying with backoff.
   syncFailure: z
@@ -5764,7 +5770,7 @@ export interface DohcDesktopBridge
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
   forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
-  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: RevealWorkspaceFolderPayload): Promise<void>;
   // Opens (or focuses) a window for the workspace and leaves this window as
   // it is. The manager window closes itself after.
   openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;

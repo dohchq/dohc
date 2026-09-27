@@ -84,6 +84,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
@@ -789,6 +790,7 @@ export function DesktopWorkspaceShell(props: {
     reportSyncFailure,
     clearSyncFailure,
     reportDriveLimit,
+    reportKeptFiles,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4582,6 +4584,19 @@ export function DesktopWorkspaceShell(props: {
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
     report: reportDriveLimit,
   });
+  const revealRecoveryWorkspace = useCallback(() => {
+    const askedFor = workspaceId;
+    void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      reportShellError("Could not show the recovery folder.", error);
+    });
+  }, [workspaceId, reportShellError]);
+  const keptFilesNotice = useKeptFilesNotice({
+    workspaceId,
+    paths: syncStatus?.keptFiles,
+    report: reportKeptFiles,
+    openFolder: revealRecoveryWorkspace,
+  });
   // A dismissed sync failure stays dismissed until it ends, and a dismissed
   // drive limit for the session, across remounts.
   const dismissWorkspaceError = useCallback(
@@ -4589,9 +4604,10 @@ export function DesktopWorkspaceShell(props: {
       const kind = shellErrors.find((error) => error.id === id)?.kind;
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "kept-files") keptFilesNotice.noteDismissed();
       dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, shellErrors, syncFailureNotice],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, syncFailureNotice],
   );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>

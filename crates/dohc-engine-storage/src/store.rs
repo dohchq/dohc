@@ -317,6 +317,20 @@ impl EngineStore {
         materialize::list_pending_jobs(&self.conn)
     }
 
+    /// Retained jobs, including terminal jobs, for resolving staged identities.
+    pub fn list_materialization_jobs(&self) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::list_jobs(&self.conn, false)
+    }
+
+    /// Whether a pending job could explain a path's rowless staged file.
+    pub fn has_pending_materialization_for_path(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        materialize::has_pending_job_for_path(&self.conn, workspace_id, path)
+    }
+
     /// Load a single materialization job by id.
     pub fn load_materialization_job(
         &self,
@@ -353,39 +367,29 @@ impl EngineStore {
         materialize::pending_job_count(&self.conn)
     }
 
-    /// Record, before the move, that the materializer is about to move a
-    /// target aside. Returns the id later transitions name.
+    /// Record, in one synced commit, that a staged file holds bytes the store
+    /// does not have. Returns the id later transitions name.
     pub fn open_displacement(&self, spec: &DisplacementSpec) -> Result<i64, StorageError> {
         materialize::open_displacement(&self.conn, spec)
     }
 
-    /// Record, in one synced transaction, that each of these jobs may move its
-    /// target aside. One fsync covers a whole batch, before any of its renames.
-    pub fn prepare_displacements(&self, specs: &[DisplacementSpec]) -> Result<(), StorageError> {
-        materialize::prepare_displacements(&self.conn, specs)
+    /// Adopt unknown staged files with one FULL commit.
+    pub fn open_displacements(&self, specs: &[DisplacementSpec]) -> Result<Vec<i64>, StorageError> {
+        materialize::open_displacements(&self.conn, specs)
     }
 
-    /// The prepared row of one job, if its batch wrote one.
-    pub fn prepared_displacement(
+    /// Record a staged file that stays where it is as a kept row.
+    pub fn keep_displacement(
         &self,
-        job_id: &str,
-    ) -> Result<Option<Displacement>, StorageError> {
-        materialize::prepared_displacement(&self.conn, job_id)
+        spec: &DisplacementSpec,
+        displaced_sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        materialize::keep_displacement(&self.conn, spec, displaced_sha256)
     }
 
-    /// Delete these displacement rows in one transaction.
-    pub fn discard_displacements(&self, ids: &[i64]) -> Result<(), StorageError> {
-        materialize::discard_displacements(&self.conn, ids)
-    }
-
-    /// Every prepared row, newest first.
-    pub fn list_prepared_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
-        materialize::list_prepared_displacements(&self.conn)
-    }
-
-    /// Record that the job's content is at the target.
-    pub fn mark_displacement_placed(&self, displacement_id: i64) -> Result<(), StorageError> {
-        materialize::mark_displacement_placed(&self.conn, displacement_id)
+    /// Whether any displacement row names this staged file.
+    pub fn displacement_named(&self, name: &str) -> Result<bool, StorageError> {
+        materialize::displacement_named(&self.conn, name)
     }
 
     /// End a displacement row and, in the same transaction, give `job` a
@@ -400,14 +404,13 @@ impl EngineStore {
         materialize::resolve_displacement(&self.conn, displacement_id, resolution, job, now_ms)
     }
 
-    /// Open and placed displacements, and kept ones whose bytes could not be
-    /// read: the rows a replay resolves or inspects again, newest first.
+    /// Open displacements, and kept ones whose bytes could not be read: the
+    /// rows a replay resolves or inspects again, newest first.
     pub fn list_unsettled_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
         materialize::list_unsettled_displacements(&self.conn)
     }
 
-    /// The open and placed displacements of one path, from any job, newest
-    /// first.
+    /// The open displacements of one path, from any job, newest first.
     pub fn list_unsettled_displacements_for_path(
         &self,
         workspace_id: &str,
@@ -433,8 +436,8 @@ impl EngineStore {
         materialize::list_kept_displacements(&self.conn, workspace_id)
     }
 
-    /// Whether an unfinished replace moved `path` aside, so that its absence
-    /// on disk is not a delete.
+    /// Whether an open row says a replace moved bytes the store lacks off
+    /// `path`, so that its absence on disk is not a delete.
     pub fn path_is_displaced(&self, workspace_id: &str, path: &str) -> Result<bool, StorageError> {
         materialize::path_is_displaced(&self.conn, workspace_id, path)
     }

@@ -22,26 +22,20 @@
 //! Each boundary has a named fault point so a crash-injection test can prove the
 //! recovery contract by reopening and replaying.
 //!
-//! **Displace, then place.** No filesystem offers a content compare-and-swap,
+//! **Stage, then place.** No filesystem offers a content compare-and-swap,
 //! so another program can write the target after step 4 read it. An ordinary
 //! write or delete therefore never renames over the target or unlinks it:
 //!
-//! - An `open` row in `materialization_displacements` names the job's
-//!   `.dohc-write-*.displaced` sibling before anything moves. That one commit
-//!   syncs the WAL, so no rename into a displaced name outlives its row, even
-//!   after an operating-system crash. A batch of jobs (a replay, a sync page)
-//!   writes all its rows `prepared` in one such commit before its first
-//!   rename, one fsync for the batch, and discards the ones it did not use.
-//!   Later commits keep the engine's `synchronous = NORMAL`; recovery handles
-//!   losing them.
-//! - One rename moves whatever is at the target name to that sibling. A file
-//!   another program renamed over the target after the check moves with it, and
-//!   bytes written in place move with the file they were written to.
-//! - A write renames its temp into the empty name at once, without replacing,
-//!   and the row turns `placed`. The target name is empty only between those
-//!   two renames. If a program created the name in between, its file stays and
-//!   the job conflicts.
-//! - Then the displaced file is read. It is known only when it holds the
+//! - One rename moves whatever is at the target name into the workspace's
+//!   staging directory, `.dohc/engine/displaced`, under a name that spells
+//!   the job id. No row is written first: recovery finds a staged file by
+//!   scanning that directory and learns its job from the name. A file
+//!   another program renamed over the target after the check moves with it,
+//!   and bytes written in place move with the file they were written to.
+//! - A write renames its temp into the empty name at once, without replacing.
+//!   The target name is empty only between those two renames. If a program
+//!   created the name in between, its file stays and the job conflicts.
+//! - Then the staged file is read. It is known only when it holds the
 //!   preimage or the job's own content and the store holds that blob. Any
 //!   other stored blob, such as an older head `git checkout` restored, is an
 //!   outside change, and so is a preimage the store never had, which a version
@@ -49,17 +43,19 @@
 //!   against an empty preimage: a writer that truncated the file is still
 //!   writing. On Windows a file another handle still has open for writing is
 //!   never known.
-//! - A known file is deleted. Anything else goes back: the job's content moves
-//!   aside to the conflict sibling, the displaced file returns to its path,
-//!   where capture records it like any outside edit, and the job conflicts.
-//!   The file stays displaced, with its row `kept` as evidence, only when a
-//!   program created the target meanwhile.
-//! - Replay resolves every unfinished row first, newest first, including rows
-//!   of other jobs for the same path. The last file moved off a path held its
-//!   newest bytes, so it goes back first, and an older displaced file then
-//!   finds the name taken and stays displaced. A write that stopped before `placed` gets the
-//!   displaced file back. A `placed` row is judged like a finished replace and
-//!   never brings back a file the store holds. A file a replace could not
+//! - A known file is deleted, and the job ends in one ordinary commit. Any
+//!   other file first gets an `open` row in `materialization_displacements`,
+//!   in a commit that syncs the WAL, and then goes back: the job's content
+//!   moves aside to the conflict sibling, the staged file returns to its
+//!   path, where capture records it like any outside edit, and the job
+//!   conflicts. The file stays staged, with its row `kept` as evidence, only
+//!   when a program created the target meanwhile.
+//! - Replay resolves every open row first, newest first, including rows of
+//!   other jobs for the same path, then every staged file no row names. A
+//!   write whose temp is still beside an empty target never placed its
+//!   content, so its staged file goes back. Any other staged file is judged
+//!   like a finished replace and never brings back a file the store holds. A
+//!   staged file no job identifies stays, kept. A file a replace could not
 //!   return is tried again whenever the actor is asked to confirm that path is
 //!   gone.
 //!
@@ -69,8 +65,16 @@
 //! where materialization runs, so the engine never records the empty name as
 //! a delete. POSIX has no share modes, so a program that writes through a
 //! descriptor it opened before the move, after the file was judged, writes
-//! into a deleted file. Secret writes keep a single rename over the target,
-//! because a displaced plaintext copy is what that path must never leave.
+//! into a deleted file. The staging rename needs the target and the
+//! workspace's `.dohc` directory on one volume; a target under another mount
+//! fails the job and leaves it pending. Secret writes keep a single rename
+//! over the target, because a staged plaintext copy is what that path must
+//! never leave.
+//!
+//! The guarantee covers process crashes and outside writes closed or renamed
+//! into place before inspection. Power loss protection for a known preimage
+//! comes from the same history durability as an in-place overwrite on main.
+//! Unknown retained bytes get a FULL row before recovery moves them again.
 //!
 //! Every materialization first canonicalizes the workspace root, then rejects
 //! symlinks/reparse points in each existing below-root target component.
@@ -145,9 +149,11 @@ impl DurabilityPolicy {
 /// sharing violations and racing writers at the moment each one runs. Each
 /// step is one atomic rename that never follows a link.
 pub trait AtomicReplacer: Send + Sync {
-    /// Move whatever entry is at `target` to the unused name `displaced`.
+    /// Move whatever entry is at `target` without replacing a staged file.
+    /// Never emulate this with link/unlink: a writer can replace the source
+    /// between those operations.
     fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
-        std::fs::rename(target, displaced)
+        stage_no_replace(target, displaced)
     }
 
     /// Move `incoming` to `target` only while nothing exists at `target`.
@@ -235,13 +241,33 @@ impl AtomicReplacer for StdReplacer {}
 /// after an absence check, which a file another program creates in between
 /// can lose, and reports [`Placement::CheckThenRename`].
 #[cfg(windows)]
-fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+fn stage_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
     // Cleanup is disabled first, so dropping the path, including on the error
     // path, never deletes `incoming`.
     let mut path = tempfile::TempPath::try_from_path(incoming)?;
     path.disable_cleanup(true);
     path.persist_noclobber(target).map_err(|err| err.error)?;
-    Ok(Placement::Atomic)
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_no_replace(incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+    stage_no_replace(incoming, target).map(|()| Placement::Atomic)
+}
+
+#[cfg(not(windows))]
+fn stage_no_replace(incoming: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        renameat_with(CWD, incoming, CWD, target, RenameFlags::NOREPLACE)
+            .map_err(std::io::Error::from)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (incoming, target);
+        Err(std::io::Error::from(ErrorKind::Unsupported))
+    }
 }
 
 #[cfg(not(windows))]
@@ -799,18 +825,9 @@ pub fn run_pending_jobs(
 ) -> Result<Vec<JobResult>, MaterializeError> {
     recover_displacements(store, root, None, options)?;
     let jobs = store.list_pending_materialization_jobs()?;
-    if jobs.len() > 1 {
-        prepare_displacements(store, root, &jobs, options.now_ms)?;
-    }
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
-        let outcome = match materialize_one(store, root, &job, options) {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                finish_prepared_displacements(store, root)?;
-                return Err(err);
-            }
-        };
+        let outcome = materialize_one(store, root, &job, options)?;
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
             job_id: job.job_id,
@@ -821,7 +838,6 @@ pub fn run_pending_jobs(
             return Ok(results);
         }
     }
-    finish_prepared_displacements(store, root)?;
     Ok(results)
 }
 
@@ -861,7 +877,8 @@ fn materialize_one_ordinary(
     // first, so every check below sees the target as it was or as it ended.
     // Bytes the store lacks that cannot return to their path make the job
     // conflict, so the person is told.
-    if recover_job_displacements(store, &canonical_root, &target, job, options)? {
+    let (staging, kept) = recover_job_displacements(store, &canonical_root, job, options)?;
+    if kept {
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
@@ -879,7 +896,7 @@ fn materialize_one_ordinary(
     }
 
     if job.operation == MaterializationOperation::Delete {
-        return materialize_delete(store, &canonical_root, &target, job, options);
+        return materialize_delete(store, &canonical_root, &staging, &target, job, options);
     }
 
     // Load the content blob (integrity-verified on read).
@@ -894,7 +911,15 @@ fn materialize_one_ordinary(
             actual: content.len(),
         });
     }
-    materialize_ordinary_write(store, &canonical_root, &target, job, &content, options)
+    materialize_ordinary_write(
+        store,
+        &canonical_root,
+        &staging,
+        &target,
+        job,
+        &content,
+        options,
+    )
 }
 
 /// Execute a secret write through the same atomic-replace pipeline without
@@ -1225,10 +1250,11 @@ fn materialize_secret_write(
 }
 
 /// Write an ordinary job's content without overwriting bytes the preimage
-/// check did not see (module docs, "Displace, then place").
+/// check did not see (module docs, "Stage, then place").
 fn materialize_ordinary_write(
     store: &EngineStore,
     root: &Path,
+    staging: &Staging,
     target: &Path,
     job: &MaterializationJob,
     content: &[u8],
@@ -1248,8 +1274,11 @@ fn materialize_ordinary_write(
     // batch running.
     prepare_target_parent_symlink_free(root, target)?;
     // Step 1 (idempotent replay): the target already equals the desired content.
-    if let CurrentTarget::Present(bytes) = read_current_no_follow(target)?
-        && hex_sha256(&bytes) == job.content_sha256
+    // The staging recheck reuses this read while the target's size and time
+    // stay the same.
+    let mut reads = TargetReads::default();
+    if let TargetHash::Sha(sha) = reads.read(target)?
+        && sha == job.content_sha256
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1284,7 +1313,7 @@ fn materialize_ordinary_write(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
-    let outcome = swap_in_temp(store, target, &tmp, job, options);
+    let outcome = swap_in_temp(store, staging, target, &tmp, job, &mut reads, options);
     if outcome.is_err() {
         let _ = std::fs::remove_file(&tmp); // best-effort cleanup
     }
@@ -1293,9 +1322,11 @@ fn materialize_ordinary_write(
 
 fn swap_in_temp(
     store: &EngineStore,
+    staging: &Staging,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
+    reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions {
@@ -1320,64 +1351,75 @@ fn swap_in_temp(
         }
         Preimage::Present(expected) => expected,
     };
-    let moved = match displace_target(
-        store,
-        target,
-        job,
-        expected,
-        Some(&job.content_sha256),
-        options,
-    )? {
-        Displace::Moved(moved) => moved,
-        Displace::Conflict | Displace::Vanished => {
+    let spec = match stage_target(staging, target, job, expected, reads, options)? {
+        Stage::Moved(spec) => spec,
+        Stage::Conflict | Stage::Vanished => {
             return record_write_conflict(store, target, tmp, job, now_ms);
         }
-        Displace::Crashed(point) => return Ok(JobOutcome::Crashed(point)),
     };
+    let staged = staging.dir.join(&spec.displaced_name);
     if should_crash(faults, FaultPoint::MaterializeAfterDisplaceBeforePlace) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterDisplaceBeforePlace,
         ));
     }
     // Place first, so the target name is empty only between two renames. The
-    // displaced file is judged afterwards, with the name occupied.
-    if !place_after_displace(store, target, tmp, &moved, options)? {
+    // staged file is judged afterwards, with the name occupied.
+    if !place_after_stage(store, target, tmp, &spec, &staging.dir, options)? {
         // A program created the target between the two renames. Its file
-        // stays where it is, and the displaced file cannot go back.
-        settle_in_place(store, &moved, options)?;
+        // stays where it is, and the staged file cannot go back.
+        match inspect_displaced(store, &staged, expected, Some(&job.content_sha256))? {
+            Inspected::Known { .. } | Inspected::Missing => {
+                let _ = std::fs::remove_file(&staged);
+            }
+            other => {
+                sync_staged(&staging.dir, policy)?;
+                store.keep_displacement(&spec, keep_sha256(&other))?;
+            }
+        }
         return record_write_conflict(store, target, tmp, job, now_ms);
     }
-    store.mark_displacement_placed(moved.displacement_id)?;
-    // Make the renames durable (POSIX) before the displaced file is judged.
-    sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
-        // Placed but not marked complete. Startup replay judges the displaced
+        // Placed but not marked complete. Startup replay judges the staged
         // file, then step 1 short-circuits and marks complete: exactly once,
         // no second write.
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
         ));
     }
-    match moved.inspect(store)? {
-        Inspected::Known | Inspected::Missing => {
-            delete_displaced(
-                store,
-                &moved,
-                true,
-                Some((&job.job_id, JobStatus::Complete)),
-                now_ms,
-            )?;
-            Ok(JobOutcome::Completed)
-        }
-        unknown => {
-            // Another program wrote the file after the check. Its bytes go
-            // back to their path, where capture records them like any outside
-            // edit; the job's content moves to the conflict sibling.
-            swap_back(store, target, &moved, &unknown, options)?;
-            store.mark_materialization_conflict(&job.job_id, now_ms)?;
-            Ok(JobOutcome::Conflict)
-        }
+    let inspected = inspect_displaced(store, &staged, expected, Some(&job.content_sha256))?;
+    if should_crash(faults, FaultPoint::MaterializeAfterDisplacedHash) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterDisplacedHash,
+        ));
     }
+    if matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
+        // No row names the file. One that cannot be deleted now is found
+        // again by the next sweep.
+        let _ = std::fs::remove_file(&staged);
+        if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
+            return Ok(JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterKnownCopyDeletion,
+            ));
+        }
+        sync_parent_dir(target.parent(), policy)?;
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::Completed);
+    }
+    // Another program wrote the file after the check. Its bytes go back to
+    // their path, where capture records them like any outside edit; the
+    // job's content moves to the conflict sibling.
+    sync_staged(&staging.dir, policy)?;
+    sync_parent_dir(target.parent(), policy)?;
+    let moved = Moved::open(store, spec, &staging.dir)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterDisplacementJournal) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterDisplacementJournal,
+        ));
+    }
+    swap_back(store, target, &moved, &inspected, options)?;
+    store.mark_materialization_conflict(&job.job_id, now_ms)?;
+    Ok(JobOutcome::Conflict)
 }
 
 /// Keep the target as it is and move the job's content to a `.conflict`
@@ -1401,6 +1443,7 @@ fn record_write_conflict(
 fn materialize_delete(
     store: &EngineStore,
     root: &Path,
+    staging: &Staging,
     target: &Path,
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
@@ -1415,56 +1458,69 @@ fn materialize_delete(
     // and the parent-directory durability open for this ordinary delete. A
     // refusal is converted to Blocked by the ordinary entry boundary.
     ensure_target_symlink_free(root, target)?;
-    if matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
-    }
+    let mut reads = TargetReads::default();
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
     let Preimage::Present(expected) = &job.preimage else {
+        if !entry_exists(target)? {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
         // A delete that expected nothing found someone else's file.
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     };
-    // A delete moves the file aside instead of unlinking it, and unlinks it
-    // only once it is known to hold the preimage the store has. An empty name
-    // is what a delete leaves anyway.
-    let moved = match displace_target(store, target, job, expected, None, options)? {
-        Displace::Moved(moved) => moved,
-        Displace::Conflict => {
+    // A delete moves the file into staging instead of unlinking it, and
+    // unlinks it only once it is known to hold the preimage the store has. An
+    // empty name is what a delete leaves anyway.
+    let spec = match stage_target(staging, target, job, expected, &mut reads, options)? {
+        Stage::Moved(spec) => spec,
+        Stage::Conflict => {
             store.mark_materialization_conflict(&job.job_id, now_ms)?;
             return Ok(JobOutcome::Conflict);
         }
-        Displace::Vanished => {
+        Stage::Vanished => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
-        Displace::Crashed(point) => return Ok(JobOutcome::Crashed(point)),
     };
-    // Make the rename durable before anything is resolved.
-    sync_parent_dir(target.parent(), policy)?;
+    let staged = staging.dir.join(&spec.displaced_name);
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
         ));
     }
-    let inspected = moved.inspect(store)?;
-    if matches!(inspected, Inspected::Known | Inspected::Missing) {
-        delete_displaced(
-            store,
-            &moved,
-            false,
-            Some((&job.job_id, JobStatus::Complete)),
-            now_ms,
-        )?;
+    let inspected = inspect_displaced(store, &staged, expected, None)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterDisplacedHash) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterDisplacedHash,
+        ));
+    }
+    if matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
+        let _ = std::fs::remove_file(&staged);
+        if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
+            return Ok(JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterKnownCopyDeletion,
+            ));
+        }
+        sync_parent_dir(target.parent(), policy)?;
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Completed);
     }
     // Bytes the store does not have go back to their path, and the delete
     // conflicts, as it would had the recheck seen them.
-    let resolution = if return_displaced(target, &moved, options)? {
+    sync_staged(&staging.dir, policy)?;
+    sync_parent_dir(target.parent(), policy)?;
+    let moved = Moved::open(store, spec, &staging.dir)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterDisplacementJournal) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterDisplacementJournal,
+        ));
+    }
+    let resolution = if return_displaced(target, &moved.path, options)? {
         DisplacementResolution::Discard
     } else {
         keep_resolution(&inspected)
@@ -1478,7 +1534,7 @@ fn materialize_delete(
     Ok(JobOutcome::Conflict)
 }
 
-/// A displaced file whose row is not yet resolved, with what its row expects.
+/// A staged file whose row is not yet resolved, with what its row expects.
 struct Moved {
     displacement_id: i64,
     path: PathBuf,
@@ -1490,10 +1546,10 @@ struct Moved {
 }
 
 impl Moved {
-    fn from_row(row: &Displacement, target: &Path) -> Self {
+    fn from_row(row: &Displacement, staging: &Path) -> Self {
         Moved {
             displacement_id: row.displacement_id,
-            path: sibling_with_name(target, &row.displaced_name),
+            path: staging.join(&row.displaced_name),
             job_id: row.job_id.clone(),
             workspace_id: row.workspace_id.clone(),
             target_path: row.target_path.clone(),
@@ -1502,7 +1558,26 @@ impl Moved {
         }
     }
 
-    /// Read the displaced file and judge it against what the row expects.
+    /// Write the synced open row for a staged file whose bytes the store
+    /// lacks, before anything moves it again.
+    fn open(
+        store: &EngineStore,
+        spec: DisplacementSpec,
+        staging: &Path,
+    ) -> Result<Self, MaterializeError> {
+        let displacement_id = store.open_displacement(&spec)?;
+        Ok(Moved {
+            displacement_id,
+            path: staging.join(&spec.displaced_name),
+            job_id: spec.job_id,
+            workspace_id: spec.workspace_id,
+            target_path: spec.target_path,
+            expected_sha256: spec.expected_sha256,
+            content_sha256: spec.content_sha256,
+        })
+    }
+
+    /// Read the staged file and judge it against what the row expects.
     fn inspect(&self, store: &EngineStore) -> Result<Inspected, MaterializeError> {
         inspect_displaced(
             store,
@@ -1513,122 +1588,75 @@ impl Moved {
     }
 }
 
-/// How [`displace_target`] ended.
-enum Displace {
-    /// The target now lives at the displaced file.
-    Moved(Moved),
+/// The workspace's staging directory, and the staged names a job's rows
+/// hold. A kept row holds its name even after a person removes its file, so
+/// a later staged file never takes a name a row already means.
+struct Staging {
+    dir: PathBuf,
+    taken: Vec<String>,
+}
+
+/// How [`stage_target`] ended.
+enum Stage {
+    /// The target now lives at the staged file this spec names. No row
+    /// names it yet.
+    Moved(DisplacementSpec),
     /// A recheck found content other than the preimage. Nothing moved.
     Conflict,
     /// The target disappeared between the recheck and the rename. Nothing moved.
     Vanished,
-    Crashed(FaultPoint),
 }
 
-/// Record the displacement, then move the target aside. Every attempt,
-/// including the first, rechecks the preimage, so a file changed while a
-/// sharing violation held the rename back conflicts instead of moving.
-fn displace_target(
-    store: &EngineStore,
+/// Move the target into staging, with no row. Every attempt, including the
+/// first, rechecks the preimage, so a file changed while a sharing violation
+/// held the rename back conflicts instead of moving.
+fn stage_target(
+    staging: &Staging,
     target: &Path,
     job: &MaterializationJob,
     expected: &str,
-    content: Option<&str>,
+    reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
-) -> Result<Displace, MaterializeError> {
-    // A batch synced a row for this job before any of its renames. Use it
-    // when it expects these bytes and names a free file; otherwise sync one
-    // now.
-    let prepared = match store.prepared_displacement(&job.job_id)? {
-        Some(row)
-            if row.target_path == job.target_path
-                && row.expected_sha256 == expected
-                && row.content_sha256.as_deref() == content
-                && !entry_exists(&sibling_with_name(target, &row.displaced_name))? =>
-        {
-            Some(row)
-        }
-        Some(stale) => {
-            store.discard_displacements(&[stale.displacement_id])?;
-            None
-        }
-        None => None,
-    };
-    let (displacement_id, displaced_name) = match prepared {
-        Some(row) => (row.displacement_id, row.displaced_name),
-        None => {
-            let displaced_name = unused_displaced_name(target, &job.job_id)?;
-            let id = store.open_displacement(&DisplacementSpec {
-                job_id: job.job_id.clone(),
-                workspace_id: job.workspace_id.clone(),
-                target_path: job.target_path.clone(),
-                displaced_name: displaced_name.clone(),
-                expected_sha256: expected.to_owned(),
-                content_sha256: content.map(str::to_owned),
-                now_ms: options.now_ms,
-            })?;
-            (id, displaced_name)
-        }
-    };
+) -> Result<Stage, MaterializeError> {
+    let write = job.operation == MaterializationOperation::Write;
     let spec = DisplacementSpec {
         job_id: job.job_id.clone(),
         workspace_id: job.workspace_id.clone(),
         target_path: job.target_path.clone(),
-        displaced_name,
+        displaced_name: unused_staged_name(&staging.dir, &job.job_id, &staging.taken)?,
         expected_sha256: expected.to_owned(),
-        content_sha256: content.map(str::to_owned),
+        content_sha256: write.then(|| job.content_sha256.clone()),
         now_ms: options.now_ms,
     };
-    let moved = Moved {
-        displacement_id,
-        path: sibling_with_name(target, &spec.displaced_name),
-        job_id: spec.job_id,
-        workspace_id: spec.workspace_id,
-        target_path: spec.target_path,
-        expected_sha256: spec.expected_sha256,
-        content_sha256: spec.content_sha256,
-    };
-    if should_crash(
-        options.faults,
-        FaultPoint::MaterializeAfterDisplacementJournal,
-    ) {
-        return Ok(Displace::Crashed(
-            FaultPoint::MaterializeAfterDisplacementJournal,
-        ));
-    }
+    let staged = staging.dir.join(&spec.displaced_name);
     let preimage = Preimage::Present(expected.to_owned());
-    let mut reads = TargetReads::default();
     let attempt = retry_while_locked(
         target,
         target,
         options.backoff,
         MAX_REPLACE_ATTEMPTS,
         || {
-            if reads.check(target, &preimage)? != TargetHolds::Expected {
-                return Ok(Attempt::Done(Some(false)));
+            if write {
+                match reads.check(target, &preimage)? {
+                    TargetHolds::Expected => {}
+                    TargetHolds::Nothing => return Ok(Attempt::Done(None)),
+                    TargetHolds::Other => return Ok(Attempt::Done(Some(false))),
+                }
             }
-            if content.is_some() {
+            if write {
                 refuse_read_only_target(target)?;
             }
-            displace_attempt(options.replacer, target, &moved.path).map(|attempt| match attempt {
+            displace_attempt(options.replacer, target, &staged).map(|attempt| match attempt {
                 Attempt::Done(moved) => Attempt::Done(moved.then_some(true)),
                 Attempt::Locked(err) => Attempt::Locked(err),
             })
         },
-    );
-    let outcome = match attempt {
-        Ok(Some(true)) => return Ok(Displace::Moved(moved)),
-        Ok(Some(false)) => Ok(Displace::Conflict),
-        Ok(None) => Ok(Displace::Vanished),
-        Err(err) => Err(err),
-    };
-    // Nothing moved: the row has nothing to resolve.
-    store.resolve_displacement(
-        displacement_id,
-        DisplacementResolution::Discard,
-        None,
-        options.now_ms,
     )?;
-    outcome
+    Ok(match attempt {
+        Some(true) => Stage::Moved(spec),
+        Some(false) => Stage::Conflict,
+        None => Stage::Vanished,
+    })
 }
 
 /// What a retry loop's check found at the target.
@@ -1639,39 +1667,59 @@ enum TargetHolds {
     Other,
 }
 
-/// The last read of a target in one retry loop: its size, its modification
-/// time, and what it held. A retry reads and hashes the target again only when
-/// the size or time changed, so a locked large file is not hashed on every
-/// try. A change the size and time miss is still caught, because whatever
-/// the loop moves is read and judged again after the move.
+/// What a target held when it was last read.
+#[derive(Clone, PartialEq, Eq)]
+enum TargetHash {
+    Absent,
+    Sha(String),
+    /// Present but over the cap or not a regular file.
+    Other,
+}
+
+/// The last read of a target in one job: its size, its modification time,
+/// and the hash of what it held. A later read or retry reads and hashes the
+/// target again only when the size or time changed, so the staging recheck
+/// reuses the job's first read and a locked large file is not hashed on
+/// every try. A change the size and time miss is still caught, because
+/// whatever the job moves is read and judged again after the move.
 #[derive(Default)]
 struct TargetReads {
-    last: Option<((u64, Option<std::time::SystemTime>), TargetHolds)>,
+    last: Option<((u64, Option<std::time::SystemTime>), TargetHash)>,
 }
 
 impl TargetReads {
+    fn read(&mut self, target: &Path) -> Result<TargetHash, MaterializeError> {
+        let stamp = std::fs::symlink_metadata(target)
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok()));
+        if let (Some(stamp), Some((last, hash))) = (stamp, &self.last)
+            && stamp == *last
+        {
+            return Ok(hash.clone());
+        }
+        let hash = match read_current_no_follow(target)? {
+            CurrentTarget::Absent => TargetHash::Absent,
+            CurrentTarget::Present(bytes) => TargetHash::Sha(hex_sha256(&bytes)),
+            CurrentTarget::Oversized => TargetHash::Other,
+        };
+        if let Some(stamp) = stamp {
+            self.last = Some((stamp, hash.clone()));
+        }
+        Ok(hash)
+    }
+
     fn check(
         &mut self,
         target: &Path,
         expected: &Preimage,
     ) -> Result<TargetHolds, MaterializeError> {
-        let stamp = std::fs::symlink_metadata(target)
-            .ok()
-            .map(|metadata| (metadata.len(), metadata.modified().ok()));
-        if let (Some(stamp), Some((last, holds))) = (stamp, self.last)
-            && stamp == last
-        {
-            return Ok(holds);
-        }
-        let holds = match read_current_no_follow(target)? {
-            CurrentTarget::Absent => TargetHolds::Nothing,
-            current if preimage_matches(expected, &current) => TargetHolds::Expected,
+        Ok(match (self.read(target)?, expected) {
+            (TargetHash::Absent, _) => TargetHolds::Nothing,
+            (TargetHash::Sha(sha), Preimage::Present(expected)) if sha == *expected => {
+                TargetHolds::Expected
+            }
             _ => TargetHolds::Other,
-        };
-        if let Some(stamp) = stamp {
-            self.last = Some((stamp, holds));
-        }
-        Ok(holds)
+        })
     }
 }
 
@@ -1686,7 +1734,10 @@ fn displace_attempt(
         Ok(()) => Ok(Attempt::Done(true)),
         // A rename can report failure after it happened: an NFS client that
         // retransmits it gets ENOENT back. The displaced name decides.
-        Err(_) if entry_exists(displaced)? => Ok(Attempt::Done(true)),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            Err(MaterializeError::io(displaced, &err))
+        }
+        Err(_) if !entry_exists(target)? && entry_exists(displaced)? => Ok(Attempt::Done(true)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(Attempt::Done(false)),
         Err(err) if is_transient_lock(&err) => Ok(Attempt::Locked(err)),
         Err(err) => Err(MaterializeError::io(target, &err)),
@@ -1734,26 +1785,28 @@ fn create_from_temp(
     })
 }
 
-/// Rename the temp to the name the displace emptied. `false` when a program
-/// created the target in between. On any other failure the displaced file is
-/// moved back, so the target name is not left empty.
-fn place_after_displace(
+/// Rename the temp to the name staging emptied. `false` when a program
+/// created the target in between. On any other failure the staged file is
+/// moved back, so the target name is not left empty. One that cannot go back
+/// gets an open row, so recovery returns it once the temp is gone.
+fn place_after_stage(
     store: &EngineStore,
     target: &Path,
     tmp: &Path,
-    moved: &Moved,
+    spec: &DisplacementSpec,
+    staging: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
     let placed = retry_while_locked(target, tmp, options.backoff, MAX_REPLACE_ATTEMPTS, || {
         place_attempt(options.replacer, tmp, target)
     });
-    if placed.is_err() && matches!(return_displaced(target, moved, options), Ok(true)) {
-        store.resolve_displacement(
-            moved.displacement_id,
-            DisplacementResolution::Discard,
-            None,
-            options.now_ms,
-        )?;
+    if placed.is_err()
+        && !matches!(
+            return_displaced(target, &staging.join(&spec.displaced_name), options),
+            Ok(true)
+        )
+    {
+        store.open_displacement(spec)?;
     }
     placed
 }
@@ -1817,24 +1870,20 @@ pub fn workspace_lacks_atomic_placement(root: &Path) -> bool {
 /// sees the file missing until it succeeds.
 const RETURN_ATTEMPTS: u32 = 10;
 
-/// Move a displaced file back to its empty target name. `false` when a
-/// program created the target meanwhile, so the file stays displaced.
+/// Move a staged file back to its empty target name. `false` when a
+/// program created the target meanwhile, so the file stays staged.
 fn return_displaced(
     target: &Path,
-    moved: &Moved,
+    staged: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
     #[cfg(windows)]
-    let read_only = std::fs::symlink_metadata(&moved.path)
+    let read_only = std::fs::symlink_metadata(staged)
         .map(|metadata| metadata.permissions().readonly())
         .unwrap_or(false);
-    let returned = retry_while_locked(
-        target,
-        &moved.path,
-        options.backoff,
-        RETURN_ATTEMPTS,
-        || place_attempt(options.replacer, &moved.path, target),
-    )?;
+    let returned = retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
+        place_attempt(options.replacer, staged, target)
+    })?;
     if returned {
         // The Windows no-replace rename resets file attributes. Put the
         // read-only bit back; archive and hidden are not restored.
@@ -1845,6 +1894,7 @@ fn return_displaced(
             let _ = std::fs::set_permissions(target, permissions);
         }
         sync_parent_dir(target.parent(), options.policy)?;
+        sync_parent_dir(staged.parent(), options.policy)?;
     }
     Ok(returned)
 }
@@ -1882,14 +1932,17 @@ fn swap_back(
         None => None,
     };
     if let Some(aside) = &aside
-        && !matches!(aside.inspect(store)?, Inspected::Known | Inspected::Missing)
+        && !matches!(
+            aside.inspect(store)?,
+            Inspected::Known { .. } | Inspected::Missing
+        )
     {
         // Someone else's file landed between the check and the move. Put it
         // back where it was; the displaced file stays displaced. Its row is
         // kept first, so a put-back that fails leaves only the newer file's
         // open row, which the next recovery returns.
         keep_moved(store)?;
-        let back = if return_displaced(target, aside, options)? {
+        let back = if return_displaced(target, &aside.path, options)? {
             DisplacementResolution::Discard
         } else {
             DisplacementResolution::Keep {
@@ -1899,7 +1952,7 @@ fn swap_back(
         store.resolve_displacement(aside.displacement_id, back, None, options.now_ms)?;
         return Ok(true);
     }
-    let returned = return_displaced(target, moved, options)?;
+    let returned = return_displaced(target, &moved.path, options)?;
     if returned {
         store.resolve_displacement(
             moved.displacement_id,
@@ -1940,9 +1993,9 @@ enum Aside {
     Other,
 }
 
-/// Move the job's content off the target to a fresh displaced name, with an
-/// open row that expects it. Every attempt first checks that the target
-/// still holds the job's content, so a newer file saved there is never moved.
+/// Move the job's content off the target into staging, with an open row that
+/// expects it. Every attempt first checks that the target still holds the
+/// job's content, so a newer file saved there is never moved.
 fn move_aside(
     store: &EngineStore,
     target: &Path,
@@ -1950,25 +2003,23 @@ fn move_aside(
     content: &str,
     options: &MaterializeOptions<'_>,
 ) -> Result<Aside, MaterializeError> {
+    let staging = moved.path.parent().unwrap_or(Path::new(""));
+    let taken: Vec<String> = store
+        .list_displacements_for_job(&moved.job_id)?
+        .into_iter()
+        .map(|row| row.displaced_name)
+        .collect();
     let spec = DisplacementSpec {
         job_id: moved.job_id.clone(),
         workspace_id: moved.workspace_id.clone(),
         target_path: moved.target_path.clone(),
-        displaced_name: unused_displaced_name(target, &moved.job_id)?,
+        displaced_name: unused_staged_name(staging, &moved.job_id, &taken)?,
         expected_sha256: content.to_owned(),
         content_sha256: Some(content.to_owned()),
         now_ms: options.now_ms,
     };
-    let displacement_id = store.open_displacement(&spec)?;
-    let aside = Moved {
-        displacement_id,
-        path: sibling_with_name(target, &spec.displaced_name),
-        job_id: spec.job_id,
-        workspace_id: spec.workspace_id,
-        target_path: spec.target_path,
-        expected_sha256: spec.expected_sha256,
-        content_sha256: spec.content_sha256,
-    };
+    let aside = Moved::open(store, spec, staging)?;
+    let displacement_id = aside.displacement_id;
     let ours = Preimage::Present(content.to_owned());
     let mut reads = TargetReads::default();
     let attempt = retry_while_locked(target, target, options.backoff, RETURN_ATTEMPTS, || {
@@ -1986,6 +2037,8 @@ fn move_aside(
         })
     });
     if let Ok(Some(true)) = attempt {
+        sync_staged(staging, options.policy)?;
+        sync_parent_dir(target.parent(), options.policy)?;
         return Ok(Aside::Moved(aside));
     }
     store.resolve_displacement(
@@ -2000,81 +2053,17 @@ fn move_aside(
     }
 }
 
-/// Judge a displaced file that cannot go back because the target name is
-/// taken: delete it when its bytes are known, keep it otherwise.
-fn settle_in_place(
-    store: &EngineStore,
-    moved: &Moved,
-    options: &MaterializeOptions<'_>,
-) -> Result<bool, MaterializeError> {
-    match moved.inspect(store)? {
-        Inspected::Known | Inspected::Missing => {
-            delete_displaced(store, moved, false, None, options.now_ms)?;
-            Ok(false)
-        }
-        other => {
-            store.resolve_displacement(
-                moved.displacement_id,
-                keep_resolution(&other),
-                None,
-                options.now_ms,
-            )?;
-            Ok(true)
-        }
-    }
-}
-
-/// Delete a displaced file whose bytes the store holds, then end its row and
-/// give `job` its status in one transaction. A write's row is marked placed
-/// first, so a failed delete never leaves an open row that replay would move
-/// back. A delete's row has nothing to move back, so it is marked only when
-/// the file stays, and a delete ends in one commit.
-fn delete_displaced(
-    store: &EngineStore,
-    moved: &Moved,
-    placed: bool,
-    job: Option<(&str, JobStatus)>,
-    now_ms: i64,
-) -> Result<(), MaterializeError> {
-    let is_delete = moved.content_sha256.is_none();
-    if !placed && !is_delete {
-        store.mark_displacement_placed(moved.displacement_id)?;
-    }
-    match std::fs::remove_file(&moved.path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        // The placed row stays for the next replay to delete the file.
-        Err(_) => {
-            if !placed && is_delete {
-                store.mark_displacement_placed(moved.displacement_id)?;
-            }
-            if let Some((job_id, status)) = job {
-                match status {
-                    JobStatus::Conflict => store.mark_materialization_conflict(job_id, now_ms)?,
-                    _ => store.mark_materialization_complete(job_id, now_ms)?,
-                }
-            }
-            return Ok(());
-        }
-    }
-    // No directory sync. A delete lost to power failure leaves only bytes
-    // the store has.
-    store.resolve_displacement(
-        moved.displacement_id,
-        DisplacementResolution::Discard,
-        job,
-        now_ms,
-    )?;
-    Ok(())
-}
-
 /// An unreadable file is kept with no hash, which replay inspects again.
 fn keep_resolution(inspected: &Inspected) -> DisplacementResolution<'_> {
     DisplacementResolution::Keep {
-        displaced_sha256: match inspected {
-            Inspected::Unknown { sha256 } => Some(sha256),
-            _ => None,
-        },
+        displaced_sha256: keep_sha256(inspected),
+    }
+}
+
+fn keep_sha256(inspected: &Inspected) -> Option<&str> {
+    match inspected {
+        Inspected::Unknown { sha256 } => Some(sha256),
+        _ => None,
     }
 }
 
@@ -2084,7 +2073,9 @@ enum Inspected {
     /// A regular file within the cap holding one of the expected hashes, whose
     /// bytes the store holds, and which no other handle had open for writing
     /// when it was read.
-    Known,
+    Known {
+        _guard: std::fs::File,
+    },
     /// Bytes that are not one of the expected hashes, or that the store does
     /// not hold.
     Unknown {
@@ -2123,7 +2114,7 @@ fn inspect_displaced(
     {
         return Ok(Inspected::Unreadable);
     }
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
     if (&file)
         .take(MAX_MATERIALIZE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -2140,7 +2131,7 @@ fn inspect_displaced(
         expected_bytes && store.holds_content(&sha256)?
     };
     if known {
-        Ok(Inspected::Known)
+        Ok(Inspected::Known { _guard: file })
     } else {
         Ok(Inspected::Unknown { sha256 })
     }
@@ -2181,124 +2172,171 @@ fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-/// The `n`th displaced name for a job, beside `target`. The names are fixed
-/// per job, so replay can find a displaced file no row names.
-fn displaced_name(job_id: &str, n: u32) -> String {
-    let job = filesystem_job_component(job_id);
-    match n {
-        0 => format!(".dohc-write-{job}.displaced"),
-        n => format!(".dohc-write-{job}.{n}.displaced"),
-    }
+/// Where a replace stages the file it moves off its path, below the
+/// workspace root. Capture never reads under `.dohc`, and the directory is on
+/// the workspace's volume, so staging is one plain rename.
+const STAGING_DIR: &str = ".dohc/engine/displaced";
+
+fn sync_staged(staging: &Path, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
+    sync_parent_dir(Some(staging), policy)?;
+    // Include newly created staging ancestors before source removal is synced.
+    sync_parent_dir(staging.parent(), policy)?;
+    sync_parent_dir(staging.parent().and_then(Path::parent), policy)
 }
 
-/// The first displaced name for this job with nothing at it. A kept file
-/// from an earlier run of the same job id holds its name, and the next run
-/// takes the next one.
-fn unused_displaced_name(target: &Path, job_id: &str) -> Result<String, MaterializeError> {
+/// The staging directory under an already-canonicalized root. Every
+/// component must be a real directory; `create` makes the missing ones.
+fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = root.join(STAGING_DIR);
+    if create {
+        walk_target_components(root, &dir, ensure_real_directory)?;
+    } else {
+        ensure_target_symlink_free(root, &dir)?;
+    }
+    Ok(dir)
+}
+
+/// How many staged files one job can hold before its replace refuses.
+const MAX_DISPLACED_NAMES: u32 = 64;
+
+/// Job ids up to this many bytes are spelled out in staged names.
+const MAX_SPELLED_JOB_ID: usize = 100;
+
+/// The part of a staged name that names its job: the id's bytes in lowercase
+/// hex, which recovery decodes back to the id, or `h` and the id's hash when
+/// the id is too long for a file name.
+fn staged_key(job_id: &str) -> String {
+    use std::fmt::Write;
+    if job_id.len() > MAX_SPELLED_JOB_ID {
+        return format!("h{}", hex_sha256(job_id.as_bytes()));
+    }
+    let mut key = String::with_capacity(job_id.len() * 2);
+    for byte in job_id.bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
+}
+
+/// The `n`th staged name for a job. The names are fixed per job, so recovery
+/// can find a staged file no row names.
+fn staged_name(job_id: &str, n: u32) -> String {
+    format!("{}.{n}", staged_key(job_id))
+}
+
+/// Split a staged name into its job key, or `None` for a name no replace
+/// makes.
+fn staged_name_key(name: &str) -> Option<&str> {
+    let (key, n) = name.rsplit_once('.')?;
+    let n_ok = !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+        && (n == "0" || !n.starts_with('0'))
+        && n.parse::<u32>().is_ok_and(|n| n < MAX_DISPLACED_NAMES);
+    let lower_hex = |s: &str| s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let key_ok = match key.strip_prefix('h') {
+        Some(hash) => hash.len() == 64 && lower_hex(hash),
+        None => !key.is_empty() && key.len() % 2 == 0 && lower_hex(key),
+    };
+    (n_ok && key_ok).then_some(key)
+}
+
+fn is_staged_name(name: &str) -> bool {
+    staged_name_key(name).is_some()
+}
+
+/// The job a staged name spells, and its id, when the store still has it. A
+/// hashed key also matches completed jobs whose staged cleanup was interrupted.
+fn staged_job(
+    store: &EngineStore,
+    key: &str,
+) -> Result<(Option<String>, Option<MaterializationJob>), MaterializeError> {
+    if key.starts_with('h') {
+        let job = store
+            .list_materialization_jobs()?
+            .into_iter()
+            .find(|job| staged_key(&job.job_id) == key);
+        return Ok((job.as_ref().map(|job| job.job_id.clone()), job));
+    }
+    let bytes: Option<Vec<u8>> = (0..key.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&key[i..i + 2], 16).ok())
+        .collect();
+    let Some(job_id) = bytes.and_then(|bytes| String::from_utf8(bytes).ok()) else {
+        return Ok((None, None));
+    };
+    if staged_key(&job_id) != key {
+        return Ok((None, None));
+    }
+    let job = store.load_materialization_job(&job_id)?;
+    Ok((Some(job_id), job))
+}
+
+/// The first staged name for this job that no row holds and no file uses.
+fn unused_staged_name(
+    staging: &Path,
+    job_id: &str,
+    taken: &[String],
+) -> Result<String, MaterializeError> {
     for n in 0..MAX_DISPLACED_NAMES {
-        let name = displaced_name(job_id, n);
-        if !entry_exists(&sibling_with_name(target, &name))? {
+        let name = staged_name(job_id, n);
+        if !taken.contains(&name) && !entry_exists(&staging.join(&name))? {
             return Ok(name);
         }
     }
     Err(MaterializeError::io(
-        target,
+        staging,
         &std::io::Error::from(ErrorKind::AlreadyExists),
     ))
 }
 
-/// How many displaced files one job can hold before its replace refuses.
-const MAX_DISPLACED_NAMES: u32 = 64;
-
-fn is_displaced_name(name: &str) -> bool {
-    name.starts_with(".dohc-write-")
-        && name.ends_with(".displaced")
-        && !name.contains(['/', '\\', ':'])
-}
-
-/// Write one synced displacement row for every job in `jobs` that can move
-/// its target aside (an ordinary overwrite or delete of a file it expects),
-/// so the batch pays one fsync instead of one per job. Run it after
-/// [`recover_displacements`] and before the jobs, and
-/// [`finish_prepared_displacements`] after them.
-pub fn prepare_displacements(
+/// The files in `staging` no row names, with the id and job their names
+/// spell. A name no replace makes is left alone.
+fn rowless_staged(
     store: &EngineStore,
-    root: &Path,
-    jobs: &[MaterializationJob],
-    now_ms: i64,
-) -> Result<(), MaterializeError> {
-    let canonical_root =
-        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let mut specs = Vec::new();
-    for job in jobs {
-        let Preimage::Present(expected) = &job.preimage else {
-            continue;
-        };
-        if job.job_id.starts_with("secret-mat_")
-            || job.job_id.starts_with("version-switch-secret-mat_")
-        {
-            continue;
-        }
-        let Ok(target) = resolve_target(&canonical_root, &job.target_path) else {
-            continue;
-        };
-        let Ok(displaced_name) = unused_displaced_name(&target, &job.job_id) else {
-            continue;
-        };
-        specs.push(DisplacementSpec {
-            job_id: job.job_id.clone(),
-            workspace_id: job.workspace_id.clone(),
-            target_path: job.target_path.clone(),
-            displaced_name,
-            expected_sha256: expected.clone(),
-            content_sha256: (job.operation == MaterializationOperation::Write)
-                .then(|| job.content_sha256.clone()),
-            now_ms,
-        });
-    }
-    store.prepare_displacements(&specs)?;
-    Ok(())
-}
-
-/// Discard, in one transaction, the prepared rows whose job never moved its
-/// target: it was already materialized, superseded, blocked or in conflict.
-pub fn finish_prepared_displacements(
-    store: &EngineStore,
-    root: &Path,
-) -> Result<(), MaterializeError> {
-    let prepared = store.list_prepared_displacements()?;
-    if prepared.is_empty() {
-        return Ok(());
-    }
-    let canonical_root =
-        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let mut unused = Vec::new();
-    for row in prepared {
-        if proven_unmoved(&canonical_root, &row) {
-            unused.push(row.displacement_id);
-        }
-    }
-    store.discard_displacements(&unused)?;
-    Ok(())
-}
-
-/// Whether a prepared row's file is provably not at its displaced name. The
-/// path is checked the way recovery checks it: a name recovery would refuse,
-/// or an ancestor that is now a link, proves nothing, and the row stays.
-fn proven_unmoved(root: &Path, row: &Displacement) -> bool {
-    if !is_displaced_name(&row.displaced_name) {
-        return false;
-    }
-    let Ok(target) = resolve_target(root, &row.target_path) else {
-        return false;
+    staging: &Path,
+) -> Result<Vec<RowlessStaged>, MaterializeError> {
+    let entries = match std::fs::read_dir(staging) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(MaterializeError::io(staging, &err)),
     };
-    if ensure_target_symlink_free(root, &target).is_err() {
-        return false;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| MaterializeError::io(staging, &err))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some(key) = staged_name_key(&name) else {
+            continue;
+        };
+        if store.displacement_named(&name)? {
+            continue;
+        }
+        let (job_id, job) = staged_job(store, key)?;
+        let job_id = job_id.unwrap_or_else(|| key.to_owned());
+        found.push(RowlessStaged { name, job_id, job });
     }
-    matches!(
-        std::fs::symlink_metadata(sibling_with_name(&target, &row.displaced_name)),
-        Err(err) if err.kind() == ErrorKind::NotFound
-    )
+    found.sort_by_key(|staged| {
+        (
+            staged
+                .job
+                .as_ref()
+                .map(|job| job.created_at_ms)
+                .unwrap_or_default(),
+            staged
+                .name
+                .rsplit_once('.')
+                .and_then(|(_, n)| n.parse::<u32>().ok()),
+        )
+    });
+    Ok(found)
+}
+
+/// A staged file no row names.
+struct RowlessStaged {
+    name: String,
+    /// The id its name spells, or its key when the name spells none.
+    job_id: String,
+    job: Option<MaterializationJob>,
 }
 
 /// Remove the directory at `rel` when it is empty, so a file can take its
@@ -2328,41 +2366,144 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     }
 }
 
-/// Resolve every displacement a crash left unresolved under `root`,
-/// including rows whose job will not run again, and inspect kept files whose
-/// bytes could not be read before. A file that stays displaced makes its
-/// still-pending job conflict, so the person is told. `workspace_id` narrows
-/// the sweep the way the replay it precedes is narrowed; `None` sweeps every
-/// row. A row whose path is blocked or unreadable stays for the next sweep.
+/// Resolve every staged file a crash or a failed return left under `root`:
+/// open rows, kept files whose bytes could not be read before, and staged
+/// files no row names, even when their job is finished or gone. A file that
+/// stays staged makes its still-pending job conflict, so the person is told.
+/// `workspace_id` narrows the sweep the way the replay it precedes is
+/// narrowed; `None` sweeps everything. A file whose path is blocked or
+/// unreadable stays for the next sweep, and a staging directory that is not
+/// a real directory is not swept.
 pub fn recover_displacements(
     store: &EngineStore,
     root: &Path,
     workspace_id: Option<&str>,
     options: &MaterializeOptions<'_>,
 ) -> Result<(), MaterializeError> {
-    let displacements = store.list_unsettled_displacements()?;
-    if displacements.is_empty() {
-        return Ok(());
-    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    for displacement in displacements {
+    let Ok(staging) = staging_dir(&canonical_root, false) else {
+        return Ok(());
+    };
+    // Only a storage failure stops the sweep; any other failure leaves that
+    // file for the next one.
+    let settle = |recovered: Result<bool, MaterializeError>, job_id: &str| match recovered {
+        Ok(true) => conflict_if_pending(store, job_id, options.now_ms),
+        Ok(false) => Ok(()),
+        Err(MaterializeError::Storage(err)) => Err(err.into()),
+        Err(_) => Ok(()),
+    };
+    // Adopt unknown rowless files together before restoring any of them.
+    // New rows sort after old rows, so the newest displaced bytes return first.
+    let mut adopt = Vec::new();
+    for staged in rowless_staged(store, &staging)? {
+        if let Some(job) = &staged.job
+            && workspace_id.is_some_and(|id| !job.workspace_id.is_empty() && id != job.workspace_id)
+        {
+            continue;
+        }
+        let spec = DisplacementSpec {
+            job_id: staged.job_id.clone(),
+            workspace_id: staged.job.as_ref().map_or_else(
+                || workspace_id.unwrap_or("").to_owned(),
+                |job| job.workspace_id.clone(),
+            ),
+            target_path: staged
+                .job
+                .as_ref()
+                .map_or_else(String::new, |job| job.target_path.clone()),
+            displaced_name: staged.name.clone(),
+            expected_sha256: staged
+                .job
+                .as_ref()
+                .and_then(|job| match &job.preimage {
+                    Preimage::Present(hash) => Some(hash.clone()),
+                    Preimage::Absent => None,
+                })
+                .unwrap_or_default(),
+            content_sha256: staged
+                .job
+                .as_ref()
+                .filter(|job| job.operation == MaterializationOperation::Write)
+                .map(|job| job.content_sha256.clone()),
+            now_ms: options.now_ms,
+        };
+        let inspected = inspect_displaced(
+            store,
+            &staging.join(&staged.name),
+            &spec.expected_sha256,
+            spec.content_sha256.as_deref(),
+        )?;
+        if !matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
+            adopt.push(spec);
+        }
+    }
+    if !adopt.is_empty() {
+        sync_staged(&staging, options.policy)?;
+        store.open_displacements(&adopt)?;
+    }
+    for displacement in store.list_unsettled_displacements()? {
         if let Some(workspace_id) = workspace_id
             && !displacement.workspace_id.is_empty()
             && displacement.workspace_id != workspace_id
         {
             continue;
         }
-        // Only a storage failure stops the sweep; any other failure leaves
-        // that row for the next one.
-        match recover_displacement(store, &canonical_root, &displacement, options) {
-            Ok(true) => conflict_if_pending(store, &displacement.job_id, options.now_ms)?,
-            Ok(false) => {}
-            Err(MaterializeError::Storage(err)) => return Err(err.into()),
-            Err(_) => {}
-        }
+        let recovered =
+            recover_displacement(store, &canonical_root, &staging, &displacement, options);
+        settle(recovered, &displacement.job_id)?;
+    }
+    for staged in rowless_staged(store, &staging)? {
+        let recovered = match &staged.job {
+            Some(job)
+                if workspace_id
+                    .is_some_and(|id| !job.workspace_id.is_empty() && id != job.workspace_id) =>
+            {
+                continue;
+            }
+            Some(job) => {
+                recover_staged(store, &canonical_root, &staging, &staged.name, job, options)
+            }
+            None => keep_orphan(
+                store,
+                &staging,
+                &staged,
+                workspace_id.unwrap_or(""),
+                options,
+            ),
+        };
+        settle(recovered, &staged.job_id)?;
     }
     Ok(())
+}
+
+/// Keep a staged file no job identifies where it is, with a kept row as the
+/// evidence. `true` unless the file is gone.
+fn keep_orphan(
+    store: &EngineStore,
+    staging: &Path,
+    staged: &RowlessStaged,
+    workspace_id: &str,
+    options: &MaterializeOptions<'_>,
+) -> Result<bool, MaterializeError> {
+    // An empty expected hash matches nothing, so the file is never known.
+    let inspected = inspect_displaced(store, &staging.join(&staged.name), "", None)?;
+    if matches!(inspected, Inspected::Missing) {
+        return Ok(false);
+    }
+    store.keep_displacement(
+        &DisplacementSpec {
+            job_id: staged.job_id.clone(),
+            workspace_id: workspace_id.to_owned(),
+            target_path: String::new(),
+            displaced_name: staged.name.clone(),
+            expected_sha256: String::new(),
+            content_sha256: None,
+            now_ms: options.now_ms,
+        },
+        keep_sha256(&inspected),
+    )?;
+    Ok(true)
 }
 
 fn conflict_if_pending(
@@ -2379,9 +2520,9 @@ fn conflict_if_pending(
     Ok(())
 }
 
-/// Resolve the unfinished displacements of one path, from any job. The actor
+/// Resolve the unfinished staged files of one path, from any job. The actor
 /// runs this, without backoff sleeps, before it refuses an absence it cannot
-/// confirm, so a displaced file that could not go back when its replace ran
+/// confirm, so a staged file that could not go back when its replace ran
 /// gets another try as soon as capture or a delete looks at the path. The
 /// sweep keeps retrying with backoff.
 pub fn recover_path_displacements(
@@ -2391,61 +2532,91 @@ pub fn recover_path_displacements(
     path: &str,
     options: &MaterializeOptions<'_>,
 ) -> Result<(), MaterializeError> {
-    let displacements = store.list_unsettled_displacements_for_path(workspace_id, path)?;
-    if displacements.is_empty() {
-        return Ok(());
-    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    for displacement in displacements {
-        if recover_displacement(store, &canonical_root, &displacement, options)? {
+    let staging = staging_dir(&canonical_root, false)?;
+    for displacement in store.list_unsettled_displacements_for_path(workspace_id, path)? {
+        if recover_displacement(store, &canonical_root, &staging, &displacement, options)? {
             conflict_if_pending(store, &displacement.job_id, options.now_ms)?;
+        }
+    }
+    for staged in rowless_staged(store, &staging)? {
+        if let Some(job) = &staged.job
+            && job_targets(job, workspace_id, path)
+            && recover_staged(store, &canonical_root, &staging, &staged.name, job, options)?
+        {
+            conflict_if_pending(store, &job.job_id, options.now_ms)?;
         }
     }
     Ok(())
 }
 
-/// Resolve this job's unresolved displacements, and any other job's for the
-/// same path, before it runs, including a displaced file whose row a power
-/// failure lost. `true` when one of them held bytes the store does not have
-/// and could not go back to its path.
+/// Whether a replace left `path`'s file staged where it may still go back:
+/// an open row names it, or a pending job that targets it staged a file no
+/// row names yet. Capture must not record such a path as deleted.
+pub fn path_is_displaced(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, MaterializeError> {
+    if store.path_is_displaced(workspace_id, path)? {
+        return Ok(true);
+    }
+    if !store.has_pending_materialization_for_path(workspace_id, path)? {
+        return Ok(false);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let staging = staging_dir(&canonical_root, false)?;
+    Ok(rowless_staged(store, &staging)?.iter().any(|staged| {
+        staged.job.as_ref().is_some_and(|job| {
+            job.status == JobStatus::Pending && job_targets(job, workspace_id, path)
+        })
+    }))
+}
+
+fn job_targets(job: &MaterializationJob, workspace_id: &str, path: &str) -> bool {
+    job.target_path == path
+        && (workspace_id.is_empty()
+            || job.workspace_id.is_empty()
+            || job.workspace_id == workspace_id)
+}
+
+/// Resolve this job's staged files, and any other job's open rows for the
+/// same path, before it runs, including a staged file no row names because
+/// the run that staged it stopped. Returns the staging directory with the
+/// names this job's rows hold, and `true` when a file held bytes the store
+/// does not have and could not go back to its path.
 fn recover_job_displacements(
     store: &EngineStore,
     root: &Path,
-    target: &Path,
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
-) -> Result<bool, MaterializeError> {
+) -> Result<(Staging, bool), MaterializeError> {
+    // Only a job that expects a file can stage one.
+    let dir = staging_dir(root, matches!(job.preimage, Preimage::Present(_)))?;
     let mut rows = store.list_displacements_for_job(&job.job_id)?;
-    // Opening a row syncs it before its rename, so a displaced file no row
-    // names is one whose delete a power failure undid after its row ended,
-    // or one a drive that ignores flushes kept. Adopt it as an open row and
-    // judge it like any other.
-    for n in 0..MAX_DISPLACED_NAMES {
-        let name = displaced_name(&job.job_id, n);
-        if !entry_exists(&sibling_with_name(target, &name))? {
-            break;
+    let mut taken: Vec<String> = rows.iter().map(|row| row.displaced_name.clone()).collect();
+    // Scan entries rather than stopping at a gap: a person may have removed
+    // an earlier copy. The common empty directory needs only one read_dir.
+    let mut rowless = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let key = staged_key(&job.job_id);
+        for entry in entries {
+            let entry = entry.map_err(|err| MaterializeError::io(&dir, &err))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if staged_name_key(&name) == Some(key.as_str()) && !taken.contains(&name) {
+                rowless.push(name);
+            }
         }
-        if rows.iter().any(|row| row.displaced_name == name) {
-            continue;
-        }
-        let expected = match &job.preimage {
-            Preimage::Present(sha) => sha.clone(),
-            Preimage::Absent => String::new(),
-        };
-        let content =
-            (job.operation == MaterializationOperation::Write).then(|| job.content_sha256.clone());
-        store.open_displacement(&DisplacementSpec {
-            job_id: job.job_id.clone(),
-            workspace_id: job.workspace_id.clone(),
-            target_path: job.target_path.clone(),
-            displaced_name: name,
-            expected_sha256: expected,
-            content_sha256: content,
-            now_ms: options.now_ms,
-        })?;
-        rows = store.list_displacements_for_job(&job.job_id)?;
     }
+    rowless.sort_by_key(|name| {
+        name.rsplit_once('.')
+            .and_then(|(_, n)| n.parse::<u32>().ok())
+    });
     for row in store.list_unsettled_displacements_for_path(&job.workspace_id, &job.target_path)? {
         if !rows
             .iter()
@@ -2454,43 +2625,101 @@ fn recover_job_displacements(
             rows.push(row);
         }
     }
-    // Newest first: the last file moved off the path held its newest bytes.
-    rows.sort_by_key(|row| std::cmp::Reverse(row.displacement_id));
-    let mut kept = false;
-    for row in rows {
-        let unsettled = row.state != DisplacementState::Kept || row.displaced_sha256.is_none();
-        // A prepared row whose file has not moved belongs to the batch this
-        // job runs in: it is this job's row to use, not one to recover.
-        let unused_prepared = row.state == DisplacementState::Prepared
-            && !entry_exists(&sibling_with_name(target, &row.displaced_name))?;
-        if unused_prepared {
-            continue;
-        }
-        if unsettled {
-            kept |= recover_displacement(store, root, &row, options)?;
-        }
+    rows.retain(|row| row.state == DisplacementState::Open || row.displaced_sha256.is_none());
+    if rows.is_empty() && rowless.is_empty() {
+        return Ok((Staging { dir, taken }, false));
     }
-    Ok(kept)
+    // Newest first: the last file moved off the path held its newest bytes.
+    // A file no row names was staged by the last run, after every row.
+    let mut kept = false;
+    for name in rowless.iter().rev() {
+        kept |= recover_staged(store, root, &dir, name, job, options)?;
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(row.displacement_id));
+    for row in rows {
+        kept |= recover_displacement(store, root, &dir, &row, options)?;
+    }
+    taken = store
+        .list_displacements_for_job(&job.job_id)?
+        .into_iter()
+        .map(|row| row.displaced_name)
+        .collect();
+    Ok((Staging { dir, taken }, kept))
 }
 
-/// Resolve one displacement a crash left unresolved, or inspect a kept file
-/// again. A write that stopped before its content was placed, with the
-/// target name empty, gets the displaced file back and runs again against it.
-/// Any other displaced file is deleted when its bytes are known, and
-/// otherwise goes back to its path, moving what is there aside. Returns
-/// `true` when a file stays displaced.
+/// Settle a staged file no row names, for the job its name spells. A write
+/// whose temp is still beside an empty target never placed its content, so
+/// the file goes back and the job runs again against it. Any other staged
+/// file is judged like a finished replace: deleted when its bytes are known,
+/// otherwise given an open row and put back. Returns `true` when it stays
+/// staged.
+fn recover_staged(
+    store: &EngineStore,
+    root: &Path,
+    staging: &Path,
+    name: &str,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+) -> Result<bool, MaterializeError> {
+    let target = resolve_target(root, &job.target_path)?;
+    ensure_target_symlink_free(root, &target)?;
+    let staged = staging.join(name);
+    let write = job.operation == MaterializationOperation::Write;
+    if write
+        && !entry_exists(&target)?
+        && entry_exists(&temp_sibling(&target, &job.job_id))?
+        && return_displaced(&target, &staged, options)?
+    {
+        return Ok(false);
+    }
+    let spec = DisplacementSpec {
+        job_id: job.job_id.clone(),
+        workspace_id: job.workspace_id.clone(),
+        target_path: job.target_path.clone(),
+        displaced_name: name.to_owned(),
+        expected_sha256: match &job.preimage {
+            Preimage::Present(sha) => sha.clone(),
+            Preimage::Absent => String::new(),
+        },
+        content_sha256: write.then(|| job.content_sha256.clone()),
+        now_ms: options.now_ms,
+    };
+    match inspect_displaced(
+        store,
+        &staged,
+        &spec.expected_sha256,
+        spec.content_sha256.as_deref(),
+    )? {
+        Inspected::Known { .. } | Inspected::Missing => {
+            // Nothing names the file; one that cannot be deleted now is
+            // found again by the next sweep.
+            let _ = std::fs::remove_file(&staged);
+            Ok(false)
+        }
+        unknown => {
+            let moved = Moved::open(store, spec, staging)?;
+            swap_back(store, &target, &moved, &unknown, options)
+        }
+    }
+}
+
+/// Resolve one open row, or inspect a kept file again. An open row names
+/// bytes the store lacks, so its file goes back to an empty target name and
+/// the job, if pending, runs again against it. Otherwise the file is deleted
+/// when its bytes are now known, and goes back to its path, moving what is
+/// there aside, when they are not. A file no job identifies stays where it
+/// is. Returns `true` when a file stays staged.
 fn recover_displacement(
     store: &EngineStore,
     root: &Path,
+    staging: &Path,
     displacement: &Displacement,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
-    if !is_displaced_name(&displacement.displaced_name) {
+    if !is_staged_name(&displacement.displaced_name) {
         return Err(MaterializeError::UnsafeTargetPath);
     }
-    let target = resolve_target(root, &displacement.target_path)?;
-    ensure_target_symlink_free(root, &target)?;
-    let moved = Moved::from_row(displacement, &target);
+    let moved = Moved::from_row(displacement, staging);
     if !entry_exists(&moved.path)? {
         store.resolve_displacement(
             moved.displacement_id,
@@ -2500,13 +2729,22 @@ fn recover_displacement(
         )?;
         return Ok(false);
     }
-    let target_exists = entry_exists(&target)?;
-    let unplaced_write = matches!(
-        displacement.state,
-        DisplacementState::Open | DisplacementState::Prepared
-    ) && moved.content_sha256.is_some();
-    // Undo an interrupted write; the job reruns against the file.
-    if unplaced_write && !target_exists && return_displaced(&target, &moved, options)? {
+    if displacement.target_path.is_empty() {
+        let inspected = moved.inspect(store)?;
+        store.resolve_displacement(
+            moved.displacement_id,
+            keep_resolution(&inspected),
+            None,
+            options.now_ms,
+        )?;
+        return Ok(true);
+    }
+    let target = resolve_target(root, &displacement.target_path)?;
+    ensure_target_symlink_free(root, &target)?;
+    if displacement.state == DisplacementState::Open
+        && !entry_exists(&target)?
+        && return_displaced(&target, &moved.path, options)?
+    {
         store.resolve_displacement(
             moved.displacement_id,
             DisplacementResolution::Discard,
@@ -2516,11 +2754,14 @@ fn recover_displacement(
         return Ok(false);
     }
     match moved.inspect(store)? {
-        Inspected::Known | Inspected::Missing => {
-            delete_displaced(
-                store,
-                &moved,
-                displacement.state == DisplacementState::Placed,
+        Inspected::Known { .. } | Inspected::Missing => {
+            // The row ends even when the delete fails: an open row would send
+            // known bytes back to an empty path. The next sweep finds the
+            // file by name and deletes it.
+            let _ = std::fs::remove_file(&moved.path);
+            store.resolve_displacement(
+                moved.displacement_id,
+                DisplacementResolution::Discard,
                 None,
                 options.now_ms,
             )?;

@@ -2546,11 +2546,11 @@ CREATE TABLE automation_group_state (
 ) STRICT;
 ";
 
-/// Files the materializer moved off a target before writing or deleting it.
-/// An `open` row (or, for a batch, a `prepared` row) is written before the
-/// move, turns `placed` once the job's content is at the target, and is
-/// deleted when nothing is left at the displaced name. A `kept` row is the
-/// evidence of bytes another program wrote that the engine has not captured.
+/// Files the materializer moved into its staging directory whose bytes the
+/// store does not hold. An `open` row names one until it goes back to its
+/// path, when the row is deleted. A `kept` row is the evidence of bytes
+/// another program wrote that could not go back. This build writes no
+/// `prepared` or `placed` rows.
 const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
 CREATE TABLE materialization_displacements (
     displacement_id INTEGER PRIMARY KEY,
