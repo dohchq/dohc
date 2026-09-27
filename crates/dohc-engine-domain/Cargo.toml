@@ -33,6 +33,7 @@ thiserror = "2"
 # (matrix 4.1b) and base64url feed cursors (matrix 4.8, byte-parity with the TS
 # `Buffer.from(..., "base64url")` encode/decode).
 unicode-normalization = "0.1"
+unicode-segmentation = "1.13"
 base64 = "0.23"
 # Collection schemas need an ordered YAML 1.2 value tree so the parser can
 # salvage valid Fields and Views while reporting invalid siblings.

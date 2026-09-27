@@ -105,12 +105,150 @@
     "name": "ZWJ then another mark",
     "input": "xक‍़ष",
     "maxBytes": 10,
-    "expected": "x"
+    "expected": "xक‍़"
   },
   {
     "name": "Supplementary virama",
     "input": "x𑀓𑁆𑀔",
     "maxBytes": 9,
-    "expected": "x"
+    "expected": "x𑀓𑁆"
+  },
+  {
+    "name": "Emoji modifier ZWJ exceeds base budget",
+    "input": "👩🏽‍💻",
+    "maxBytes": 4,
+    "expected": ""
+  },
+  {
+    "name": "Emoji modifier ZWJ exceeds modifier budget",
+    "input": "👩🏽‍💻",
+    "maxBytes": 8,
+    "expected": ""
+  },
+  {
+    "name": "Emoji modifier ZWJ one byte short",
+    "input": "👩🏽‍💻",
+    "maxBytes": 14,
+    "expected": ""
+  },
+  {
+    "name": "Emoji modifier ZWJ exact budget",
+    "input": "👩🏽‍💻",
+    "maxBytes": 15,
+    "expected": "👩🏽‍💻"
+  },
+  {
+    "name": "Emoji modifier ZWJ after prefix",
+    "input": "a👩🏽‍💻b",
+    "maxBytes": 15,
+    "expected": "a"
+  },
+  {
+    "name": "Emoji modifier ZWJ before overflow",
+    "input": "a👩🏽‍💻b",
+    "maxBytes": 16,
+    "expected": "a👩🏽‍💻"
+  },
+  {
+    "name": "Multiple emoji modifiers and ZWJ",
+    "input": "👩🏽‍🤝‍👨🏻",
+    "maxBytes": 25,
+    "expected": ""
+  },
+  {
+    "name": "Multiple emoji modifiers and ZWJ exact budget",
+    "input": "👩🏽‍🤝‍👨🏻",
+    "maxBytes": 26,
+    "expected": "👩🏽‍🤝‍👨🏻"
+  },
+  {
+    "name": "Flag pair exceeds scalar budget",
+    "input": "🇵🇭",
+    "maxBytes": 4,
+    "expected": ""
+  },
+  {
+    "name": "Flag pair exact budget",
+    "input": "🇵🇭",
+    "maxBytes": 8,
+    "expected": "🇵🇭"
+  },
+  {
+    "name": "Consecutive flag pairs",
+    "input": "🇵🇭🇯🇵",
+    "maxBytes": 12,
+    "expected": "🇵🇭"
+  },
+  {
+    "name": "Odd regional indicator",
+    "input": "🇵🇭🇯",
+    "maxBytes": 12,
+    "expected": "🇵🇭🇯"
+  },
+  {
+    "name": "Consecutive Hangul leading jamo",
+    "input": "ᄀᄀ",
+    "maxBytes": 3,
+    "expected": ""
+  },
+  {
+    "name": "Consecutive Hangul leading jamo exact budget",
+    "input": "ᄀᄀ",
+    "maxBytes": 6,
+    "expected": "ᄀᄀ"
+  },
+  {
+    "name": "Hangul leading vowel trailing jamo",
+    "input": "각",
+    "maxBytes": 6,
+    "expected": ""
+  },
+  {
+    "name": "Hangul leading vowel trailing jamo exact budget",
+    "input": "각",
+    "maxBytes": 9,
+    "expected": "각"
+  },
+  {
+    "name": "Hangul consecutive syllables",
+    "input": "각나",
+    "maxBytes": 12,
+    "expected": "각"
+  },
+  {
+    "name": "Virama conjunct one byte short",
+    "input": "क्ष",
+    "maxBytes": 8,
+    "expected": ""
+  },
+  {
+    "name": "Virama conjunct exact budget",
+    "input": "क्ष",
+    "maxBytes": 9,
+    "expected": "क्ष"
+  },
+  {
+    "name": "Virama ZWJ conjunct one byte short",
+    "input": "क्‍ष",
+    "maxBytes": 11,
+    "expected": ""
+  },
+  {
+    "name": "Virama ZWJ conjunct exact budget",
+    "input": "क्‍ष",
+    "maxBytes": 12,
+    "expected": "क्‍ष"
+  },
+  {
+    "name": "Virama then another mark exact budget",
+    "input": "xक़्ष",
+    "maxBytes": 13,
+    "expected": "xक़्ष"
+  },
+  {
+    "name": "Empty input",
+    "input": "",
+    "maxBytes": 0,
+    "expected": ""
   }
 ]

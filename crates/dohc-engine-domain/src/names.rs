@@ -1,7 +1,5 @@
-use unicode_normalization::{
-    UnicodeNormalization,
-    char::{canonical_combining_class, is_combining_mark},
-};
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) fn is_name_letter_or_number(ch: char) -> bool {
     // Alphabetic also includes marks and enclosed letter symbols (category So).
@@ -29,19 +27,10 @@ fn is_default_ignorable(ch: char) -> bool {
 }
 
 pub fn truncate_name(value: &str, max_bytes: usize) -> &str {
-    let mut boundary = 0;
-    let mut joins_next = false;
-    for (offset, ch) in value.char_indices() {
-        let mark = is_name_mark(ch) || ch == '\u{200D}';
-        // Keep marks with their base and preserve virama/ZWJ joins across intervening marks.
-        // Keep this mark-backoff rule identical to TypeScript's truncateName.
-        if !mark && !joins_next {
-            boundary = offset;
+    for (offset, grapheme) in value.grapheme_indices(true) {
+        if offset + grapheme.len() > max_bytes {
+            return &value[..offset];
         }
-        if offset + ch.len_utf8() > max_bytes {
-            return &value[..boundary];
-        }
-        joins_next = canonical_combining_class(ch) == 9 || ch == '\u{200D}' || (mark && joins_next);
     }
     value
 }
