@@ -884,8 +884,35 @@ fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
     }
 }
 
-/// A row moves open, placed, then kept or deleted, and its job's status
-/// changes in the same transaction as the row's end.
+#[test]
+fn displacement_group_commit_rolls_back_every_row_on_failure() {
+    let sc = Scratch::new("displacement-batch");
+    let store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let one = displacement_spec("j1", "6a31.0");
+    let mut invalid = displacement_spec("j2", "6a32.0");
+    invalid.displaced_name = one.displaced_name.clone();
+    // Duplicate names may not be unique in old stores; force a trigger error
+    // after the first insertion to prove transaction-wide rollback.
+    let conn = Connection::open(sc.db_path()).expect("connection");
+    conn.execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON materialization_displacements WHEN NEW.job_id = 'j2' BEGIN SELECT RAISE(ABORT, 'injected'); END;").expect("trigger");
+    assert!(store.open_displacements(&[one.clone(), invalid]).is_err());
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("rows")
+            .is_empty()
+    );
+    conn.execute_batch("DROP TRIGGER reject_second")
+        .expect("drop trigger");
+    let ids = store
+        .open_displacements(&[one, displacement_spec("j2", "6a32.0")])
+        .expect("batch");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(store.list_unsettled_displacements().expect("rows").len(), 2);
+}
+
+/// A row moves open, then kept or deleted, and its job's status changes in
+/// the same transaction as the row's end. A row can also start kept.
 #[test]
 fn a_displacement_resolves_with_its_job_in_one_transaction() {
     let sc = Scratch::new("displacements");
@@ -909,11 +936,11 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
             Ok::<_, StorageError>(())
         })
         .expect("enqueue");
-    let placed = store
-        .open_displacement(&displacement_spec("j1", ".dohc-write-j1.displaced"))
-        .expect("open placed");
+    let returned = store
+        .open_displacement(&displacement_spec("j1", "6a31.0"))
+        .expect("open returned");
     let kept = store
-        .open_displacement(&displacement_spec("j2", ".dohc-write-j2.displaced"))
+        .open_displacement(&displacement_spec("j2", "6a32.0"))
         .expect("open kept");
     assert!(
         store
@@ -925,15 +952,26 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
         1,
         "opening a row syncs that one commit and leaves the session at NORMAL"
     );
-    store.mark_displacement_placed(placed).expect("placed");
     assert_eq!(
         store.list_displacements_for_job("j1").expect("for job")[0].state,
-        DisplacementState::Placed
+        DisplacementState::Open
+    );
+    assert!(
+        store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.1")
     );
 
     store
         .resolve_displacement(
-            placed,
+            returned,
             DisplacementResolution::Discard,
             Some(("j1", JobStatus::Complete)),
             9,
@@ -958,6 +996,12 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
             10,
         )
         .expect("keep");
+    assert!(
+        !store
+            .displacement_names()
+            .expect("names")
+            .contains("6a31.0")
+    );
 
     assert!(
         !store
@@ -970,13 +1014,31 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
             .expect("unsettled")
             .is_empty()
     );
+
+    // A staged file that stays where it is starts kept, in an ordinary
+    // commit. With no hash it stays unsettled, so a sweep reads it again.
+    store
+        .keep_displacement(&displacement_spec("j3", "6a33.0"), None)
+        .expect("keep unread");
+    assert_eq!(
+        store.list_unsettled_displacements().expect("unsettled")[0].job_id,
+        "j3"
+    );
+    assert!(
+        !store
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced"),
+        "a kept file is not going back"
+    );
     let evidence = store.list_kept_displacements("ws").expect("kept");
-    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence.len(), 2);
     assert_eq!(evidence[0].displacement_id, kept);
     assert_eq!(
         evidence[0].displaced_sha256.as_deref(),
         Some(outside.as_str())
     );
+    assert_eq!(evidence[1].state, DisplacementState::Kept);
+    assert_eq!(evidence[1].displaced_sha256, None);
     assert!(
         store
             .list_kept_displacements("other")

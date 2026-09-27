@@ -8,14 +8,14 @@
 use dohc_engine_files::{
     AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, KeptCopySave,
     MaterializeOptions, NoBackoff, Placement, ReplaceBackoff, StdReplacer, backoff_delay,
-    finish_prepared_displacements, materialize_secret_one, recover_displacements,
+    materialize_one, materialize_secret_one, path_is_displaced, recover_displacements,
     recover_path_displacements, run_pending_jobs, save_kept_displacement,
     workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
-    DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
-    NoFaults, Preimage, StorageError, cancel_pending_jobs_for_path, enqueue_delete_job,
-    enqueue_job, hex_sha256,
+    DisplacementSpec, DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus,
+    MaterializationJobSpec, NoFaults, Preimage, StorageError, cancel_pending_jobs_for_path,
+    enqueue_delete_job, enqueue_job, hex_sha256,
 };
 use dohc_engine_testkit::{
     ScriptedFaults,
@@ -1125,16 +1125,20 @@ fn every_materialize_fault_point_has_a_live_call_site() {
     // Registry consistency: arming each materialize.* point crashes the pipeline
     // at that point — no dead/inert fault points. A new materialize FaultPoint
     // that is not wired would fail here.
-    // The displacement points only exist on an overwrite, so every point runs
-    // against a target that holds the job's preimage.
+    // The displacement points only exist on an overwrite, and the journal
+    // point only once the staged bytes are unknown, so every point runs
+    // against a target that holds the job's preimage until another program
+    // writes it just before the move.
     let points = [
         FaultPoint::MaterializeAfterJobCommit,
         FaultPoint::MaterializeAfterTempWrite,
         FaultPoint::MaterializeAfterFlushBeforeRename,
         FaultPoint::MaterializeBeforePreimageRevalidate,
-        FaultPoint::MaterializeAfterDisplacementJournal,
         FaultPoint::MaterializeAfterDisplaceBeforePlace,
         FaultPoint::MaterializeAfterRenameBeforeComplete,
+        FaultPoint::MaterializeAfterDisplacedHash,
+        FaultPoint::MaterializeAfterDisplacementJournal,
+        FaultPoint::MaterializeAfterKnownCopyDeletion,
     ];
     for (i, point) in points.into_iter().enumerate() {
         let sc = Scratch::new(&format!("live-{i}"));
@@ -1152,13 +1156,21 @@ fn every_materialize_fault_point_has_a_live_call_site() {
         );
         stage_job(&mut store, content.as_bytes(), &job);
 
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
         let faults = ScriptedFaults::crash_at(point);
         let results = run_pending_jobs(
             &store,
             sc.workspace(),
             &MaterializeOptions {
                 policy: DurabilityPolicy::none(),
-                replacer: &StdReplacer,
+                replacer: if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                    &StdReplacer
+                } else {
+                    &racer
+                },
                 backoff: &NoBackoff,
                 now_ms: 20,
                 faults: faults.as_ref(),
@@ -1239,13 +1251,28 @@ fn stage_delete(sc: &Scratch, store: &mut EngineStore) {
         .expect("enqueue delete");
 }
 
+const STAGING: &str = ".dohc/engine/displaced";
+
+/// The workspace-relative path of a staged file.
+fn staged(name: &str) -> String {
+    format!("{STAGING}/{name}")
+}
+
+/// Every staged file, as workspace-relative paths.
 fn displaced_files(sc: &Scratch) -> Vec<String> {
-    std::fs::read_dir(sc.workspace())
-        .expect("workspace entries")
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".displaced"))
-        .collect()
+    match std::fs::read_dir(sc.target(STAGING)) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries
+            .expect("staging entries")
+            .filter_map(Result::ok)
+            .map(|entry| staged(&entry.file_name().to_string_lossy()))
+            .collect(),
+    }
+}
+
+/// A move into staging, as the paths a replacer sees.
+fn is_staged(path: &Path) -> bool {
+    path.parent().is_some_and(|dir| dir.ends_with("displaced"))
 }
 
 fn job_status(store: &EngineStore) -> JobStatus {
@@ -1260,7 +1287,7 @@ fn read(sc: &Scratch, rel: &str) -> Option<Vec<u8>> {
     std::fs::read(sc.target(rel)).ok()
 }
 
-/// Nothing is left beside the target and no displacement row remains.
+/// Nothing is left in staging and no displacement row remains.
 fn assert_nothing_displaced(sc: &Scratch, store: &EngineStore) {
     assert!(displaced_files(sc).is_empty(), "{:?}", displaced_files(sc));
     assert!(
@@ -1453,7 +1480,10 @@ fn a_displaced_file_that_cannot_return_is_kept_and_conflicts() {
         kept[0].displaced_sha256.as_deref(),
         Some(hex_sha256(OUTSIDE).as_str())
     );
-    assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
+    assert_eq!(
+        read(&sc, &staged(&kept[0].displaced_name)).as_deref(),
+        Some(OUTSIDE)
+    );
     assert_eq!(job_status(&store), JobStatus::Conflict);
 }
 
@@ -1539,17 +1569,17 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     );
 }
 
-/// Keep `bytes` at a hidden displaced name beside `rel`, with its kept row.
+/// Keep bytes in staging for a workspace path, with its kept row.
 fn keep_displaced(sc: &Scratch, store: &EngineStore, rel: &str, bytes: &[u8]) -> i64 {
     let target = sc.target(rel);
     std::fs::create_dir_all(target.parent().expect("parent")).expect("parents");
-    std::fs::write(target.with_file_name(".dohc-write-job.displaced"), bytes).expect("kept file");
+    put_staged(sc, "6a6f62.0", bytes);
     let id = store
         .open_displacement(&dohc_engine_storage::DisplacementSpec {
             job_id: "job".to_owned(),
             workspace_id: "ws".to_owned(),
             target_path: rel.to_owned(),
-            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
             expected_sha256: hex_sha256(b"before"),
             content_sha256: Some(hex_sha256(b"ours")),
             now_ms: 10,
@@ -1581,7 +1611,6 @@ fn kept_copy_options() -> MaterializeOptions<'static> {
 /// A save that stopped after it linked the copy, before the hidden name went,
 /// finishes on the next try: the copy is the kept file itself, so no second
 /// copy appears and the hidden name goes.
-#[cfg(unix)]
 #[test]
 fn a_kept_copy_linked_before_a_crash_is_finished_not_copied_again() {
     let sc = Scratch::new("kept-copy-crash");
@@ -1589,7 +1618,7 @@ fn a_kept_copy_linked_before_a_crash_is_finished_not_copied_again() {
     let id = keep_displaced(&sc, &store, "notes/r.md", b"kept bytes");
     // The link landed; the unlink of the hidden name did not.
     std::fs::hard_link(
-        sc.target("notes/.dohc-write-job.displaced"),
+        sc.target(&staged("6a6f62.0")),
         sc.target("notes/r (kept copy).md"),
     )
     .expect("linked copy");
@@ -1604,7 +1633,7 @@ fn a_kept_copy_linked_before_a_crash_is_finished_not_copied_again() {
         Some(&b"kept bytes"[..])
     );
     assert!(!sc.target("notes/r (kept copy 2).md").exists());
-    assert!(!sc.target("notes/.dohc-write-job.displaced").exists());
+    assert!(!sc.target(&staged("6a6f62.0")).exists());
     assert!(
         store
             .list_kept_displacements("ws")
@@ -1637,7 +1666,7 @@ fn a_different_file_with_the_same_bytes_is_not_taken_for_the_kept_copy() {
         read(&sc, "notes/r (kept copy 2).md").as_deref(),
         Some(&b"kept bytes"[..])
     );
-    assert!(!sc.target("notes/.dohc-write-job.displaced").exists());
+    assert!(!sc.target(&staged("6a6f62.0")).exists());
     assert!(
         store
             .list_kept_displacements("ws")
@@ -1685,7 +1714,7 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
         KeptCopySave::NoValidName
     );
     assert_eq!(
-        std::fs::read(sc.target(&full).with_file_name(".dohc-write-job.displaced")).expect("kept"),
+        std::fs::read(sc.target(&staged("6a6f62.0"))).expect("kept"),
         b"full"
     );
     assert_eq!(
@@ -1699,30 +1728,305 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     );
 }
 
+/// A replace that finds nothing unexpected writes no displacement row: the
+/// staged file is found by its name alone.
 #[test]
-fn crash_after_displacement_journal_replays_to_completion() {
-    let sc = Scratch::new("crash-after-journal");
+fn a_clean_replace_stages_without_a_row() {
+    let sc = Scratch::new("no-row");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+
+    assert_eq!(displaced_files(&sc), vec![staged("6a31.0")]);
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("unsettled")
+            .is_empty()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_known_staged_file_denies_writers_until_it_is_removed() {
+    struct WriteAfterHash(PathBuf, AtomicBool, AtomicBool);
+    impl FaultInjector for WriteAfterHash {
+        fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == FaultPoint::MaterializeAfterDisplacedHash {
+                self.1.store(true, Ordering::SeqCst);
+                let err = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.0)
+                    .expect_err("inspection must keep denying writers through removal");
+                assert_eq!(err.raw_os_error(), Some(32));
+                std::fs::hard_link(&self.0, self.0.with_extension("guard"))
+                    .expect("alias to the inspected file");
+            }
+            if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                self.2.store(true, Ordering::SeqCst);
+                // The name is gone. Its alias still identifies the same file,
+                // and must remain write-denied until inspection closes.
+                let err = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.0.with_extension("guard"))
+                    .expect_err("guard through deletion");
+                assert_eq!(err.raw_os_error(), Some(32));
+            }
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+    for delete in [false, true] {
+        let sc = Scratch::new("hash-delete-guard");
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        if delete {
+            stage_delete(&sc, &mut store);
+        } else {
+            stage_overwrite(&sc, &mut store);
+        }
+        let faults = WriteAfterHash(
+            sc.target(&staged("6a31.0")),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+        );
+        assert_eq!(
+            drain(&store, &sc, &StdReplacer, &faults),
+            vec![JobOutcome::Completed]
+        );
+        assert!(faults.1.load(Ordering::SeqCst));
+        assert!(faults.2.load(Ordering::SeqCst));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(faults.0.with_extension("guard"))
+            .expect("guard released after completion");
+        std::fs::remove_file(faults.0.with_extension("guard")).expect("remove test alias");
+        assert_nothing_displaced(&sc, &store);
+    }
+}
+
+#[test]
+fn crash_after_known_copy_deletion_replays_from_history() {
+    for delete in [false, true] {
+        let sc = Scratch::new("known-copy-deleted");
+        {
+            let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+            if delete {
+                stage_delete(&sc, &mut store);
+            } else {
+                stage_overwrite(&sc, &mut store);
+            }
+            let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterKnownCopyDeletion);
+            assert_eq!(
+                drain(&store, &sc, &StdReplacer, faults.as_ref()),
+                vec![JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterKnownCopyDeletion
+                )]
+            );
+            assert_eq!(job_status(&store), JobStatus::Pending);
+            assert_nothing_displaced(&sc, &store);
+        }
+        let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+        assert_eq!(
+            store
+                .get_binary_blob(&hex_sha256(PREIMAGE))
+                .expect("history")
+                .as_deref(),
+            Some(PREIMAGE)
+        );
+        assert_eq!(
+            drain(&store, &sc, &StdReplacer, &NoFaults),
+            vec![JobOutcome::AlreadyMaterialized]
+        );
+        assert_eq!(
+            read(&sc, "a.md").as_deref(),
+            if delete { None } else { Some(OURS) }
+        );
+        assert_nothing_displaced(&sc, &store);
+    }
+}
+
+#[test]
+fn delete_crash_points_preserve_closed_writer_bytes() {
+    for point in [
+        FaultPoint::MaterializeAfterRenameBeforeComplete,
+        FaultPoint::MaterializeAfterDisplacedHash,
+        FaultPoint::MaterializeAfterDisplacementJournal,
+    ] {
+        for rename in [false, true] {
+            let sc = Scratch::new("delete-crash-outside");
+            {
+                let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+                stage_delete(&sc, &mut store);
+                let target = sc.target("a.md");
+                let writer = RaceBefore::new(
+                    RenameStep::Displace,
+                    Box::new(move || {
+                        if rename {
+                            let tmp = target.with_extension("save");
+                            std::fs::write(&tmp, OUTSIDE).expect("save");
+                            std::fs::rename(&tmp, &target).expect("rename save");
+                        } else {
+                            std::fs::write(&target, OUTSIDE).expect("closed write");
+                        }
+                    }),
+                );
+                let faults = ScriptedFaults::crash_at(point);
+                assert_eq!(
+                    drain(&store, &sc, &writer, faults.as_ref()),
+                    vec![JobOutcome::Crashed(point)]
+                );
+                assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(OUTSIDE));
+            }
+            let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+            assert_eq!(
+                drain(&store, &sc, &StdReplacer, &NoFaults),
+                vec![JobOutcome::Conflict]
+            );
+            assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+            assert_nothing_displaced(&sc, &store);
+        }
+    }
+}
+
+#[test]
+fn staging_selects_an_unused_name_and_preserves_a_retained_copy() {
+    let sc = Scratch::new("staging-collision");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_overwrite(&sc, &mut store);
+    put_staged(&sc, "6a31.0", OUTSIDE);
+    store
+        .keep_displacement(
+            &DisplacementSpec {
+                job_id: "j1".into(),
+                workspace_id: "ws".into(),
+                target_path: "a.md".into(),
+                displaced_name: "6a31.0".into(),
+                expected_sha256: hex_sha256(PREIMAGE),
+                content_sha256: Some(hex_sha256(OURS)),
+                now_ms: 5,
+            },
+            Some(&hex_sha256(OUTSIDE)),
+        )
+        .unwrap();
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(OUTSIDE));
+    assert_eq!(read(&sc, &staged("6a31.1")).as_deref(), Some(PREIMAGE));
+}
+
+#[test]
+fn direct_replay_finds_a_rowless_copy_after_a_gap() {
+    let sc = Scratch::new("rowless-gap");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    std::fs::create_dir_all(sc.target(STAGING)).expect("staging");
+    std::fs::write(sc.target(&staged("6a31.3")), OUTSIDE).expect("outside copy");
+    std::fs::write(sc.target("a.md"), OURS).expect("placed content");
+    let job = store
+        .load_materialization_job("j1")
+        .expect("load")
+        .expect("job");
+    materialize_one(&store, sc.workspace(), &job, &sweep_options()).expect("replay");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+}
+
+/// The staged file was read and not yet judged. Replay reads it again: known
+/// bytes are deleted and the job completes.
+#[test]
+fn crash_after_hashing_a_known_staged_file_deletes_it_on_replay() {
+    let sc = Scratch::new("crash-after-hash-known");
     {
         let mut store = EngineStore::open(&sc.db(), 1).expect("open");
         stage_overwrite(&sc, &mut store);
-        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
-        assert_eq!(
-            drain(&store, &sc, &StdReplacer, faults.as_ref()),
-            vec![JobOutcome::Crashed(
-                FaultPoint::MaterializeAfterDisplacementJournal
-            )]
-        );
-        assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
-        assert_eq!(store.list_unsettled_displacements().expect("open").len(), 1);
-        assert!(displaced_files(&sc).is_empty());
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacedHash);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+        assert_eq!(displaced_files(&sc).len(), 1);
     }
     let store = EngineStore::open(&sc.db(), 30).expect("reopen");
     assert_eq!(
         drain(&store, &sc, &StdReplacer, &NoFaults),
-        vec![JobOutcome::Completed]
+        vec![JobOutcome::AlreadyMaterialized]
     );
     assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
     assert_nothing_displaced(&sc, &store);
+}
+
+/// The staged file held an outside change and no row names it yet. Replay
+/// reads it again, writes the row, swaps it back, and the job conflicts.
+#[test]
+fn crash_after_hashing_an_outside_change_returns_it_on_replay() {
+    let sc = Scratch::new("crash-after-hash-outside");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacedHash);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(
+            store
+                .list_unsettled_displacements()
+                .expect("unsettled")
+                .is_empty()
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_outside_change_returned(&sc, &store);
+}
+
+/// The synced row names the outside change before it moves again. Replay
+/// swaps it back from the row.
+#[test]
+fn crash_after_the_displacement_row_returns_the_outside_change() {
+    let sc = Scratch::new("crash-after-journal");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
+        assert_eq!(
+            drain(&store, &sc, &racer, faults.as_ref()),
+            vec![JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterDisplacementJournal
+            )]
+        );
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+        let rows = store.list_unsettled_displacements().expect("unsettled");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, DisplacementState::Open);
+        assert_eq!(
+            read(&sc, &staged(&rows[0].displaced_name)).as_deref(),
+            Some(OUTSIDE)
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_outside_change_returned(&sc, &store);
 }
 
 #[test]
@@ -1779,8 +2083,9 @@ fn crash_between_displace_and_place_returns_an_outside_change_to_its_path() {
     assert_outside_change_returned(&sc, &store);
 }
 
-/// A power failure can lose the unsynced row while the rename survives.
-/// Replay finds the displaced file by its name and puts it back.
+/// A staged file has no row until its bytes turn out unknown, and a power
+/// failure can lose a row while the rename survives. Replay finds the staged
+/// file by its name and puts it back.
 #[test]
 fn a_displaced_file_whose_row_was_lost_is_found_and_returned() {
     let sc = Scratch::new("orphan");
@@ -2130,7 +2435,7 @@ struct ReturnsFail;
 
 impl AtomicReplacer for ReturnsFail {
     fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
-        if incoming.to_string_lossy().ends_with(".displaced") {
+        if is_staged(incoming) {
             return Err(std::io::Error::other("injected return failure"));
         }
         StdReplacer.place(incoming, target)
@@ -2207,7 +2512,7 @@ impl RecordRenames {
                 .expect("name")
                 .to_string_lossy()
                 .into_owned();
-            if name.ends_with(".displaced") {
+            if is_staged(path) {
                 "displaced".to_owned()
             } else if name.ends_with(".tmp") {
                 "temp".to_owned()
@@ -2320,8 +2625,9 @@ fn a_newer_save_after_a_crash_is_never_moved_aside() {
     );
     let kept = store.list_kept_displacements("ws").expect("kept");
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
-    assert_eq!(displaced_files(&sc), vec![kept[0].displaced_name.clone()]);
+    let kept_file = staged(&kept[0].displaced_name);
+    assert_eq!(read(&sc, &kept_file).as_deref(), Some(OUTSIDE));
+    assert_eq!(displaced_files(&sc), vec![kept_file]);
     assert_eq!(job_status(&store), JobStatus::Conflict);
 }
 
@@ -2379,7 +2685,10 @@ fn a_failed_conflict_copy_keeps_the_jobs_content() {
         kept[0].displaced_sha256.as_deref(),
         Some(hex_sha256(OURS).as_str())
     );
-    assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OURS));
+    assert_eq!(
+        read(&sc, &staged(&kept[0].displaced_name)).as_deref(),
+        Some(OURS)
+    );
     assert_eq!(job_status(&store), JobStatus::Conflict);
 }
 
@@ -2493,7 +2802,7 @@ impl AtomicReplacer for TwoSaves {
     }
 
     fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
-        if self.lock_put_backs && incoming.to_string_lossy().ends_with(".displaced") {
+        if self.lock_put_backs && is_staged(incoming) {
             return Err(transient_lock_error());
         }
         StdReplacer.place(incoming, target)
@@ -2510,8 +2819,9 @@ fn assert_newer_save_shown(sc: &Scratch, store: &EngineStore) {
     );
     let kept = store.list_kept_displacements("ws").expect("kept");
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert_eq!(read(sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
-    assert_eq!(displaced_files(sc), vec![kept[0].displaced_name.clone()]);
+    let kept_file = staged(&kept[0].displaced_name);
+    assert_eq!(read(sc, &kept_file).as_deref(), Some(OUTSIDE));
+    assert_eq!(displaced_files(sc), vec![kept_file]);
     assert!(
         store
             .list_unsettled_displacements()
@@ -2610,7 +2920,7 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
     let rows = store.list_unsettled_displacements().expect("unsettled");
     assert_eq!(
         rows.iter().map(|row| row.state).collect::<Vec<_>>(),
-        vec![DisplacementState::Open, DisplacementState::Placed],
+        vec![DisplacementState::Open, DisplacementState::Open],
         "the newer save's synced row survived; the later keep was lost"
     );
     drain(&store, &sc, &StdReplacer, &NoFaults);
@@ -2812,53 +3122,50 @@ fn stage_overwrites(sc: &Scratch, store: &mut EngineStore, n: usize) {
     }
 }
 
-/// Counts, at the first rename of a batch, the rows its one synced commit
-/// wrote.
-struct CountPreparedAtFirstRename {
+/// Records the most displacement rows the store held at any rename.
+struct CountRowsAtRenames {
     db: PathBuf,
-    prepared_then: Mutex<Option<i64>>,
+    most: Mutex<i64>,
 }
 
-impl AtomicReplacer for CountPreparedAtFirstRename {
+impl AtomicReplacer for CountRowsAtRenames {
     fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
-        let mut seen = self.prepared_then.lock().unwrap();
-        if seen.is_none() {
-            let conn = rusqlite::Connection::open_with_flags(
-                &self.db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("read the store");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM materialization_displacements",
+                [],
+                |row| row.get(0),
             )
-            .expect("read the store");
-            *seen = Some(
-                conn.query_row(
-                    "SELECT COUNT(*) FROM materialization_displacements WHERE state = 'prepared'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("count prepared rows"),
-            );
-        }
-        drop(seen);
+            .expect("count rows");
+        let mut most = self.most.lock().unwrap();
+        *most = (*most).max(rows);
+        drop(most);
         StdReplacer.displace(target, displaced)
     }
 }
 
-/// A batch writes every job's displacement row in one synced commit before
-/// its first rename, uses them, and leaves none behind.
+/// Overwrites of files that hold their preimage write no displacement row,
+/// so a batch pays no synced commit per file.
 #[test]
-fn a_batch_writes_every_displacement_row_before_its_first_rename() {
-    let sc = Scratch::new("batch-prepared");
+fn a_batch_of_clean_overwrites_writes_no_displacement_row() {
+    let sc = Scratch::new("batch-no-rows");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     stage_overwrites(&sc, &mut store, 3);
-    let replacer = CountPreparedAtFirstRename {
+    let replacer = CountRowsAtRenames {
         db: sc.db(),
-        prepared_then: Mutex::new(None),
+        most: Mutex::new(0),
     };
 
     assert_eq!(
         drain(&store, &sc, &replacer, &NoFaults),
         vec![JobOutcome::Completed; 3]
     );
-    assert_eq!(*replacer.prepared_then.lock().unwrap(), Some(3));
+    assert_eq!(*replacer.most.lock().unwrap(), 0);
     for i in 0..3 {
         assert_eq!(
             read(&sc, &format!("f{i}.md")).as_deref(),
@@ -2868,8 +3175,8 @@ fn a_batch_writes_every_displacement_row_before_its_first_rename() {
     assert_nothing_displaced(&sc, &store);
 }
 
-/// A crash mid-batch leaves the prepared rows of jobs that never ran. Replay
-/// discards them, puts the interrupted job's file back, and runs every job.
+/// A crash mid-batch leaves one staged file and no row. Replay finds it by
+/// name, puts it back, and runs every job.
 #[test]
 fn a_crash_mid_batch_recovers_every_job() {
     let sc = Scratch::new("batch-crash");
@@ -2881,13 +3188,12 @@ fn a_crash_mid_batch_recovers_every_job() {
             drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
             [JobOutcome::Crashed(_)]
         ));
-        assert_eq!(
+        assert_eq!(displaced_files(&sc).len(), 1);
+        assert!(
             store
                 .list_unsettled_displacements()
                 .expect("unsettled")
-                .len(),
-            3,
-            "one moved file and two unused prepared rows"
+                .is_empty()
         );
     }
     let store = EngineStore::open(&sc.db(), 30).expect("reopen");
@@ -2904,47 +3210,654 @@ fn a_crash_mid_batch_recovers_every_job() {
     assert_nothing_displaced(&sc, &store);
 }
 
-/// While dohc is stopped, another program swaps the directory holding a
-/// displaced file for a link to an empty directory. Cleanup cannot prove the
-/// file is gone through the link, so the row stays, and the file is found
-/// again once the directory is back.
+fn sweep_options() -> MaterializeOptions<'static> {
+    MaterializeOptions {
+        policy: DurabilityPolicy::none(),
+        replacer: &StdReplacer,
+        backoff: &NoBackoff,
+        now_ms: 40,
+        faults: &NoFaults,
+    }
+}
+
+/// Leave a file in staging under `name`, as a crash or another program would.
+fn put_staged(sc: &Scratch, name: &str, bytes: &[u8]) {
+    std::fs::create_dir_all(sc.target(STAGING)).expect("staging");
+    std::fs::write(sc.target(&staged(name)), bytes).expect("staged file");
+}
+
+/// A staged file whose job the store no longer has is never deleted, even
+/// when the store holds its bytes: nothing says which path they came from.
+/// It stays with a kept row, and later sweeps leave it alone.
 #[test]
-fn cleanup_keeps_a_prepared_row_behind_a_substituted_linked_ancestor() {
-    let sc = Scratch::new("prepared-linked-ancestor");
-    let elsewhere = Scratch::new("prepared-linked-elsewhere");
+fn a_staged_file_whose_job_is_gone_is_kept() {
+    let sc = Scratch::new("orphan-kept");
     let store = EngineStore::open(&sc.db(), 1).expect("open");
-    std::fs::create_dir(sc.target("dir")).expect("dir");
-    std::fs::write(sc.target("dir/.dohc-write-j1.displaced"), PREIMAGE).expect("moved file");
+    store.put_binary_blob(PREIMAGE).expect("blob");
+    // The name spells the job id "gone".
+    put_staged(&sc, "676f6e65.0", PREIMAGE);
+
+    for _ in 0..2 {
+        recover_displacements(&store, sc.workspace(), Some("ws"), &sweep_options()).expect("sweep");
+    }
+    assert_eq!(read(&sc, &staged("676f6e65.0")).as_deref(), Some(PREIMAGE));
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].job_id, "gone");
+    assert_eq!(kept[0].target_path, "");
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(PREIMAGE).as_str())
+    );
+}
+
+/// A known file left staged after its job finished, as a delete that failed
+/// leaves it, goes with the next sweep.
+#[test]
+fn a_finished_jobs_known_staged_file_is_deleted() {
+    let sc = Scratch::new("finished-leftover");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    put_staged(&sc, "6a31.0", PREIMAGE);
+
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).expect("sweep");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+    assert_nothing_displaced(&sc, &store);
+    assert_eq!(job_status(&store), JobStatus::Complete);
+}
+
+/// A crash left a write between its renames with an outside change staged,
+/// and a program created the target before restart. The new file stays; the
+/// staged change cannot go back, so it stays with a kept row and the job
+/// conflicts.
+#[test]
+fn a_name_taken_before_recovery_keeps_the_staged_file() {
+    let sc = Scratch::new("recover-occupied");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(!sc.target("a.md").exists());
+    }
+    std::fs::write(sc.target("a.md"), CREATED).expect("a program creates the file");
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert!(drain(&store, &sc, &StdReplacer, &NoFaults).is_empty());
+
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(CREATED));
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(OUTSIDE).as_str())
+    );
+    assert_eq!(
+        read(&sc, &staged(&kept[0].displaced_name)).as_deref(),
+        Some(OUTSIDE)
+    );
+    assert_eq!(job_status(&store), JobStatus::Conflict);
+}
+
+/// A program still has the staged file open for writing when recovery runs,
+/// and a newer save holds the name. The file stays under a kept row with no
+/// hash; once the program closes it, the next sweep reads it.
+#[cfg(windows)]
+#[test]
+fn a_staged_file_open_for_writing_is_read_again_once_closed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let sc = Scratch::new("recover-open-writer");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+    }
+    std::fs::write(sc.target("a.md"), NEWER).expect("a newer save");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(0x1 | 0x2 | 0x4) // read | write | delete
+        .open(sc.target(&staged("6a31.0")))
+        .expect("open for writing");
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert!(drain(&store, &sc, &StdReplacer, &NoFaults).is_empty());
+    let unsettled = store.list_unsettled_displacements().expect("unsettled");
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert_eq!(unsettled[0].state, DisplacementState::Kept);
+    assert_eq!(unsettled[0].displaced_sha256, None);
+
+    drop(writer);
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).expect("sweep");
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("unsettled")
+            .is_empty()
+    );
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(OUTSIDE).as_str())
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(NEWER));
+    assert_eq!(job_status(&store), JobStatus::Conflict);
+}
+
+/// A kept row holds its staged name after a person removes the file, so the
+/// next run stages under the name after it. A job that runs without the
+/// startup sweep still finds a file its stopped run staged past the gap.
+#[test]
+fn a_staged_file_past_an_emptied_kept_name_is_found() {
+    let sc = Scratch::new("name-gap");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
     store
-        .prepare_displacements(&[dohc_engine_storage::DisplacementSpec {
-            job_id: "j1".to_owned(),
-            workspace_id: "ws".to_owned(),
-            target_path: "dir/a.md".to_owned(),
-            displaced_name: ".dohc-write-j1.displaced".to_owned(),
-            expected_sha256: hex_sha256(PREIMAGE),
-            content_sha256: Some(hex_sha256(OURS)),
-            now_ms: 1,
-        }])
-        .expect("prepare");
-    std::fs::rename(sc.target("dir"), sc.target("dir-real")).expect("move dir away");
-    if !try_make_dir_alias(elsewhere.workspace(), &sc.target("dir")).expect("alias") {
+        .keep_displacement(
+            &DisplacementSpec {
+                job_id: "j1".to_owned(),
+                workspace_id: "ws".to_owned(),
+                target_path: "a.md".to_owned(),
+                displaced_name: "6a31.0".to_owned(),
+                expected_sha256: hex_sha256(PREIMAGE),
+                content_sha256: Some(hex_sha256(OURS)),
+                now_ms: 5,
+            },
+            Some(&hex_sha256(OUTSIDE)),
+        )
+        .expect("a kept row whose file a person removed");
+    let racer = RaceBefore::new(
+        RenameStep::Displace,
+        write_in_place(sc.target("a.md"), OUTSIDE),
+    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+    assert!(matches!(
+        drain(&store, &sc, &racer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    assert_eq!(displaced_files(&sc), vec![staged("6a31.1")]);
+
+    let job = store
+        .load_materialization_job("j1")
+        .expect("load")
+        .expect("job");
+    assert_eq!(
+        materialize_one(&store, sc.workspace(), &job, &sweep_options()).expect("run"),
+        JobOutcome::Conflict
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+    assert_eq!(read(&sc, "a.md.j1.conflict").as_deref(), Some(OURS));
+    assert!(displaced_files(&sc).is_empty());
+    assert_eq!(
+        store.list_kept_displacements("ws").expect("kept").len(),
+        1,
+        "the emptied name's row stays"
+    );
+}
+
+/// The staging directory is a link to somewhere else. A replace moves
+/// nothing through it: the job is blocked and the file stays.
+#[test]
+fn a_linked_staging_directory_blocks_the_replace() {
+    let sc = Scratch::new("staging-linked");
+    let elsewhere = Scratch::new("staging-linked-elsewhere");
+    if !try_make_dir_alias(elsewhere.workspace(), &sc.target(STAGING)).expect("alias") {
         eprintln!("skipping: directory alias creation is unavailable");
         return;
     }
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
 
-    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
     assert_eq!(
-        store.list_prepared_displacements().expect("prepared").len(),
-        1,
-        "the row stays while the ancestor is a link"
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Blocked]
     );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+    assert!(!elsewhere.target("6a31.0").exists());
+    assert_eq!(job_status(&store), JobStatus::Pending);
+}
 
-    remove_dir_alias(&sc.target("dir"));
-    std::fs::rename(sc.target("dir-real"), sc.target("dir")).expect("dir back");
-    finish_prepared_displacements(&store, sc.workspace()).expect("cleanup");
-    assert_eq!(
-        store.list_prepared_displacements().expect("prepared").len(),
+/// Capture must not record a path as deleted while its file sits staged with
+/// no row. It counts as displaced until it goes back.
+#[test]
+fn a_rowless_staged_file_counts_as_displaced_until_it_goes_back() {
+    let sc = Scratch::new("rowless-displaced");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    assert!(!store.path_is_displaced("ws", "a.md").expect("rows"));
+    assert!(path_is_displaced(&store, sc.workspace(), "ws", "a.md").expect("query"));
+
+    recover_path_displacements(&store, sc.workspace(), "ws", "a.md", &sweep_options())
+        .expect("return");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+    assert!(!path_is_displaced(&store, sc.workspace(), "ws", "a.md").expect("query"));
+}
+
+#[test]
+fn unavailable_staging_does_not_stop_open_or_unrelated_creates() {
+    let sc = Scratch::new("unavailable-staging");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target(STAGING), b"unavailable directory").unwrap();
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+    assert!(dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+    assert!(drain(&store, &sc, &StdReplacer, &NoFaults).is_empty());
+    stage_overwrite(&sc, &mut store);
+    let create = spec(
+        "j2",
+        "unrelated.md",
+        &hex_sha256(OURS),
+        Preimage::Absent,
         1,
-        "the moved file is there, so the row is not unused"
+        11,
     );
+    stage_job(&mut store, OURS, &create);
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Blocked, JobOutcome::Completed]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+    assert_eq!(read(&sc, "unrelated.md").as_deref(), Some(OURS));
+    assert_eq!(
+        read(&sc, STAGING).as_deref(),
+        Some(b"unavailable directory".as_slice())
+    );
+    std::fs::remove_file(sc.target(STAGING)).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert!(!dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+}
+
+#[test]
+fn delete_refuses_a_directory_and_keeps_its_tree_at_the_target() {
+    let sc = Scratch::new("delete-directory");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_delete(&sc, &mut store);
+    std::fs::remove_file(sc.target("a.md")).unwrap();
+    std::fs::create_dir(sc.target("a.md")).unwrap();
+    std::fs::write(sc.target("a.md/child"), OUTSIDE).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(read(&sc, "a.md/child").as_deref(), Some(OUTSIDE));
+    assert_nothing_displaced(&sc, &store);
+}
+
+#[test]
+fn startup_restores_a_newer_rowless_preimage_before_an_older_open_row() {
+    for path_only in [false, true] {
+        let sc = Scratch::new("newest-rowless-first");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        put_staged(&sc, "6f6c64.0", OUTSIDE);
+        store
+            .open_displacement(&DisplacementSpec {
+                job_id: "old".into(),
+                workspace_id: "ws".into(),
+                target_path: "a.md".into(),
+                displaced_name: "6f6c64.0".into(),
+                expected_sha256: hex_sha256(PREIMAGE),
+                content_sha256: Some(hex_sha256(OURS)),
+                now_ms: 1,
+            })
+            .unwrap();
+        if path_only {
+            recover_path_displacements(&store, sc.workspace(), "ws", "a.md", &sweep_options())
+                .unwrap();
+        } else {
+            recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+        }
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
+        assert_eq!(read(&sc, &staged("6f6c64.0")).as_deref(), Some(OUTSIDE));
+    }
+}
+
+#[test]
+fn newest_staged_copy_returns_first_after_a_crash_during_adoption() {
+    for recovery in ["workspace", "path", "job"] {
+        let sc = Scratch::new("adoption-order-crash");
+        {
+            let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+            stage_overwrite(&sc, &mut store);
+            let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+            assert!(matches!(
+                drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+                [JobOutcome::Crashed(_)]
+            ));
+            // The older known preimage has no row. Only the newer outside
+            // bytes will be adopted, while the write sibling still exists.
+            put_staged(&sc, "6a31.1", OUTSIDE);
+            let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
+            let options = MaterializeOptions {
+                faults: faults.as_ref(),
+                ..sweep_options()
+            };
+            assert!(recover_displacements(&store, sc.workspace(), None, &options).is_err());
+            let rows = store.list_unsettled_displacements().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].displaced_name, "6a31.1");
+            assert!(read(&sc, "a.md").is_none());
+            assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+        }
+        let store = EngineStore::open(&sc.db(), 50).unwrap();
+        match recovery {
+            "workspace" => {
+                recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap()
+            }
+            "path" => {
+                recover_path_displacements(&store, sc.workspace(), "ws", "a.md", &sweep_options())
+                    .unwrap()
+            }
+            _ => {
+                drain(&store, &sc, &StdReplacer, &NoFaults);
+            }
+        }
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE), "{recovery}");
+        assert_nothing_displaced(&sc, &store);
+    }
+}
+
+struct CrossVolumeStage {
+    change: bool,
+}
+impl AtomicReplacer for CrossVolumeStage {
+    fn displace(&self, target: &Path, _displaced: &Path) -> std::io::Result<()> {
+        if self.change {
+            std::fs::write(target, OUTSIDE)?;
+        }
+        Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+    }
+}
+
+#[test]
+fn cross_volume_targets_use_checked_replace_and_delete() {
+    for delete in [false, true] {
+        for change in [false, true] {
+            let sc = Scratch::new("cross-volume");
+            let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+            if delete {
+                stage_delete(&sc, &mut store);
+            } else {
+                stage_overwrite(&sc, &mut store);
+            }
+            assert_eq!(
+                drain(&store, &sc, &CrossVolumeStage { change }, &NoFaults),
+                vec![if change {
+                    JobOutcome::Conflict
+                } else {
+                    JobOutcome::Completed
+                }]
+            );
+            assert_eq!(
+                read(&sc, "a.md").as_deref(),
+                if change {
+                    Some(OUTSIDE)
+                } else if delete {
+                    None
+                } else {
+                    Some(OURS)
+                }
+            );
+            assert_nothing_displaced(&sc, &store);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_recovery_finishes_a_returned_readonly_link_without_keeping_a_copy() {
+    use std::os::windows::fs::MetadataExt;
+    for journaled in [false, true] {
+        let sc = Scratch::new("returned-readonly-link");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        let staged = sc.target(&staged("6a31.0"));
+        std::fs::write(&staged, OUTSIDE).unwrap();
+        let mut permissions = std::fs::metadata(&staged).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&staged, permissions).unwrap();
+        let attrs = std::fs::metadata(&staged).unwrap().file_attributes();
+        if journaled {
+            store
+                .open_displacement(&DisplacementSpec {
+                    job_id: "j1".into(),
+                    workspace_id: "ws".into(),
+                    target_path: "a.md".into(),
+                    displaced_name: "6a31.0".into(),
+                    expected_sha256: hex_sha256(PREIMAGE),
+                    content_sha256: Some(hex_sha256(OURS)),
+                    now_ms: 20,
+                })
+                .unwrap();
+        }
+        // The return claimed its destination, then stopped before unlinking.
+        std::fs::hard_link(&staged, sc.target("a.md")).unwrap();
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 30).unwrap();
+        for _ in 0..2 {
+            recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+            assert_nothing_displaced(&sc, &store);
+            assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+            assert_eq!(
+                std::fs::metadata(sc.target("a.md"))
+                    .unwrap()
+                    .file_attributes(),
+                attrs
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_staging_and_failed_return_preserve_attributes() {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let sc = Scratch::new("windows-attributes");
+    let target = sc.target("hidden.md");
+    let staged = sc.target("staged.md");
+    let destination = sc.target("return.md");
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .attributes(0x2 | 0x20)
+        .open(&target)
+        .unwrap(); // hidden | archive
+    drop(file);
+    let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&target, permissions).unwrap();
+    let attrs = std::fs::metadata(&target).unwrap().file_attributes();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&target)
+        .unwrap();
+    assert!(StdReplacer.displace(&target, &staged).is_err());
+    assert_eq!(std::fs::metadata(&target).unwrap().file_attributes(), attrs);
+    drop(lock);
+    StdReplacer.displace(&target, &staged).unwrap();
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    std::fs::write(&destination, b"occupied").unwrap();
+    assert!(StdReplacer.place(&staged, &destination).is_err());
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    std::fs::remove_file(&destination).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&staged)
+        .unwrap();
+    // The link claims the destination even while this handle prevents
+    // removal of the staging name. Retry must finish removing that name.
+    assert!(StdReplacer.place(&staged, &destination).is_err());
+    assert_eq!(std::fs::metadata(&staged).unwrap().file_attributes(), attrs);
+    drop(lock);
+    StdReplacer.place(&staged, &destination).unwrap();
+    assert!(!staged.exists());
+    assert_eq!(
+        std::fs::metadata(&destination).unwrap().file_attributes(),
+        attrs
+    );
+    let mut permissions = std::fs::metadata(&destination).unwrap().permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&destination, permissions).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_staging_retains_a_crash_copy_until_access_returns() {
+    struct RestoreAccess(PathBuf);
+    impl Drop for RestoreAccess {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("icacls")
+                .arg(&self.0)
+                .args(["/remove:d", "*S-1-1-0", "/q"])
+                .output();
+        }
+    }
+    let sc = Scratch::new("staging-denied");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_overwrite(&sc, &mut store);
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    assert!(matches!(
+        drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+        [JobOutcome::Crashed(_)]
+    ));
+    let directory = sc.target(STAGING);
+    let restore = RestoreAccess(directory.clone());
+    let denied = std::process::Command::new("icacls")
+        .arg(&directory)
+        .args(["/deny", "*S-1-1-0:(RD)", "/q"])
+        .output()
+        .unwrap();
+    assert!(denied.status.success(), "{denied:?}");
+    assert_eq!(
+        std::fs::read_dir(&directory).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    recover_displacements(&store, sc.workspace(), None, &sweep_options()).unwrap();
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Blocked]
+    );
+    assert!(dohc_engine_files::workspace_recovery_unavailable(
+        sc.workspace()
+    ));
+    drop(restore);
+    assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+}
+
+#[test]
+fn an_adopted_staged_copy_can_be_saved_beside_its_known_path() {
+    let sc = Scratch::new("adopted-kept-save");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    put_staged(&sc, "6a31.0", OUTSIDE);
+    std::fs::write(sc.target("a.md"), CREATED).expect("new target");
+    recover_displacements(&store, sc.workspace(), Some("ws"), &kept_copy_options()).expect("adopt");
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        save_kept_displacement(
+            &store,
+            sc.workspace(),
+            "ws",
+            kept[0].displacement_id,
+            &kept_copy_options()
+        )
+        .expect("save"),
+        KeptCopySave::Saved("a (kept copy).md".into())
+    );
+    assert_eq!(read(&sc, "a (kept copy).md").as_deref(), Some(OUTSIDE));
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(CREATED));
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_adopted_orphan_stays_available_in_the_recovery_folder() {
+    let sc = Scratch::new("orphan-kept-save");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    put_staged(&sc, "6a6f62.0", OUTSIDE);
+    recover_displacements(&store, sc.workspace(), Some("ws"), &kept_copy_options()).expect("adopt");
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].target_path.is_empty());
+    assert_eq!(
+        save_kept_displacement(
+            &store,
+            sc.workspace(),
+            "ws",
+            kept[0].displacement_id,
+            &kept_copy_options()
+        )
+        .expect("save"),
+        KeptCopySave::NoValidName
+    );
+    assert_eq!(read(&sc, &staged("6a6f62.0")).as_deref(), Some(OUTSIDE));
+    assert_eq!(store.list_kept_displacements("ws").expect("kept").len(), 1);
+}
+
+#[test]
+fn known_staged_bytes_are_deleted_without_becoming_kept_copies() {
+    let sc = Scratch::new("known-not-kept");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+    assert_nothing_displaced(&sc, &store);
 }

@@ -444,7 +444,7 @@ impl EngineService {
                 self.collections_list_pending_adoptions(&ctx, request.workspace, request.params)
                     .await?
             }
-            "watcher.status" => self.watcher_status(request.workspace)?,
+            "watcher.status" => self.watcher_status(request.workspace).await?,
             "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
             "keptCopies.save" => {
                 self.kept_copies_save(request.workspace, request.params)

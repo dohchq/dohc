@@ -32,7 +32,7 @@ const ready: WatcherStatusResult = {
   terminal: false,
   running: true,
   degraded: false,
-  noAtomicPlacement: false,
+  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
 };
 
 async function harness() {

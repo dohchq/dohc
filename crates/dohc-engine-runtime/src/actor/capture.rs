@@ -1100,10 +1100,16 @@ pub(super) fn confirm_absent_on_disk(
     let Some(root_dir) = root_dir else {
         return Err(refuse("absence-unconfirmed"));
     };
-    if store.path_is_displaced(workspace_id, path)? {
-        // A replace could not put a displaced file back when it ran. Try
-        // again now, without sleeping on the actor thread; the sweep retries
-        // with backoff. The check below then sees a file that returned.
+    let displaced =
+        || match dohc_engine_files::path_is_displaced(store, root_dir, workspace_id, path) {
+            Err(dohc_engine_files::MaterializeError::Storage(err)) => Err(RuntimeError::from(err)),
+            Err(_) => Err(refuse("absence-unconfirmed")),
+            Ok(displaced) => Ok(displaced),
+        };
+    if displaced()? {
+        // A replace could not put a staged file back when it ran. Try again
+        // now, without sleeping on the actor thread; the sweep retries with
+        // backoff. The check below then sees a file that returned.
         let _ = dohc_engine_files::recover_path_displacements(
             store,
             root_dir,
@@ -1117,7 +1123,7 @@ pub(super) fn confirm_absent_on_disk(
                 faults: &dohc_engine_storage::NoFaults,
             },
         );
-        if store.path_is_displaced(workspace_id, path)? {
+        if displaced()? {
             return Err(refuse("path-displaced-by-replace"));
         }
     }

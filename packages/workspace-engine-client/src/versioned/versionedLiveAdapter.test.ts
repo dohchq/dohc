@@ -363,7 +363,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false,
+      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
     },
   },
   {

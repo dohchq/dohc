@@ -166,3 +166,12 @@ describe("useKeptCopyNotices", () => {
     expect(h.result.current.shellErrors[0]!.id).toBe(row.id);
   });
 });
+
+it("leaves adopted copies without an original path to the recovery-folder notice", async () => {
+  const h = harness([
+    { id: 1, path: "", keptAtMs: 1 },
+    { id: 2, path: "a.md", keptAtMs: 2 },
+  ]);
+  await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
+  expect(h.result.current.shellErrors[0]!.message).toBe(keptCopyMessage("a.md"));
+});

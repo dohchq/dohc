@@ -8,8 +8,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
-    finish_prepared_displacements, materialize_one, materialize_secret_delete_one,
-    materialize_secret_one, prepare_displacements, recover_displacements, save_kept_displacement,
+    materialize_one, materialize_secret_delete_one, materialize_secret_one, recover_displacements,
+    save_kept_displacement,
 };
 use dohc_engine_storage::{
     Displacement, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
@@ -573,18 +573,7 @@ pub(super) fn replay_pending_materializations(
         },
     )?;
     let jobs = store.list_pending_materialization_jobs()?;
-    // One synced commit writes the displacement rows of every overwrite and
-    // delete this replay may run, before any of their renames.
-    let batch: Vec<MaterializationJob> = jobs
-        .iter()
-        .filter(|job| selected.is_none_or(|selected| selected.contains(&job.job_id)))
-        .filter(|job| job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
-        .cloned()
-        .collect();
-    if batch.len() > 1 {
-        prepare_displacements(store, root_dir, &batch, now_ms)?;
-    }
-    let replayed = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
+    (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             completed: 0,
             failed: 0,
@@ -851,9 +840,7 @@ pub(super) fn replay_pending_materializations(
             }
         }
         Ok(summary)
-    })();
-    finish_prepared_displacements(store, root_dir)?;
-    replayed
+    })()
 }
 
 pub(super) fn materialize_pending_job(

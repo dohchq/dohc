@@ -40,6 +40,8 @@ export function captureForWorkspace(
       // must be user-visible, not console-only.
       onCaptureOutcome: hooks.onCaptureOutcome,
       onAtomicPlacementUnavailable: hooks.onAtomicPlacementUnavailable,
+      onKeptFiles: hooks.onKeptFiles,
+      onRecoveryUnavailable: hooks.onRecoveryUnavailable,
       rustEngineSessions,
       ...testSeams,
     }),

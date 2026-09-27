@@ -1158,6 +1158,8 @@ const WorkspaceResultSchemas = {
     // refuses to replace (FAT, exFAT, some SMB and FUSE mounts). Writes still
     // happen, but a file another program changes at that moment can be lost.
     noAtomicPlacement: Schema.Boolean,
+    recoveryUnavailable: Schema.Boolean,
+    keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
   }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(

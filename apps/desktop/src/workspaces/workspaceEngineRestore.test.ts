@@ -181,7 +181,8 @@ describe("engine restore", () => {
     const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "original\n");
     const loopback = new VersionedLoopbackEngine();
-    const hidden = join(root, ".dohc-write-doc.displaced");
+    const hidden = join(root, ".dohc", "engine", "displaced", "646f63.0");
+    await mkdir(dirname(hidden), { recursive: true });
     let armed = false;
     const engine = createWorkspaceEngineCapture({
       workspaceId: "engine-restore-test",

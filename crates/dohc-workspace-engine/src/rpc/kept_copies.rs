@@ -24,8 +24,7 @@ struct KeptCopiesSaveParams {
 
 impl EngineService {
     /// `keptCopies.list`: files a replace moved aside because another program
-    /// changed them meanwhile, oldest first. Each still sits at a hidden name
-    /// beside its path until `keptCopies.save` makes it a visible copy.
+    /// changed them meanwhile, oldest first. Each stays in staging until `keptCopies.save` makes it a visible copy.
     pub(super) async fn kept_copies_list(
         &self,
         ctx: &RequestContext,

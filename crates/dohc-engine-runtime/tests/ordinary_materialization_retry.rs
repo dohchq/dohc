@@ -590,3 +590,26 @@ async fn case_only_rename_changed_bytes_delete_first() {
 async fn case_only_rename_changed_bytes_write_first() {
     case_only_rename_matches_sequential_replay("new", true).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_replay_tolerates_unavailable_staging_without_pending_jobs() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    std::fs::write(
+        scratch.path().join(".dohc/engine/displaced"),
+        b"not a directory",
+    )
+    .unwrap();
+    assert_eq!(
+        actor
+            .materialize_replay_pending(scratch.path().to_path_buf(), "workspace".into(), 2)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(dohc_engine_files::workspace_recovery_unavailable(
+        scratch.path()
+    ));
+}

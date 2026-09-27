@@ -2511,7 +2511,7 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
     write_file(scratch.path(), "notes/a.md", b"a newer save");
     write_file(
         scratch.path(),
-        "notes/.dohc-write-job.displaced",
+        ".dohc/engine/displaced/6a6f62.0",
         b"bytes another program wrote",
     );
     let store =
@@ -2522,7 +2522,7 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
             job_id: "job".to_owned(),
             workspace_id: workspace_id.clone(),
             target_path: "notes/a.md".to_owned(),
-            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
             expected_sha256: dohc_engine_storage::hex_sha256(b"ours before"),
             content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
             now_ms: 10,
@@ -2574,7 +2574,7 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
     assert!(
         !scratch
             .path()
-            .join("notes/.dohc-write-job.displaced")
+            .join(".dohc/engine/displaced/6a6f62.0")
             .exists()
     );
     assert_eq!(

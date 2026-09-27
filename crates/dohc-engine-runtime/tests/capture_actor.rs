@@ -1351,13 +1351,13 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
     );
     supervisor.close(&db).expect("close actor");
 
-    // A replace moved the target aside and could not put it back: the file
-    // sits at its displaced name with the target name empty.
-    std::fs::rename(
-        scratch.path().join("notes/a.md"),
-        scratch.path().join("notes/.dohc-write-job.displaced"),
-    )
-    .expect("empty the name");
+    // A replace staged the target and could not put it back: the file sits
+    // in staging, under the name that spells job `job`, with the target name
+    // empty.
+    let staging = scratch.path().join(".dohc/engine/displaced");
+    std::fs::create_dir_all(&staging).expect("staging dir");
+    std::fs::rename(scratch.path().join("notes/a.md"), staging.join("6a6f62.0"))
+        .expect("empty the name");
     let store = EngineStore::open(&db, 15).expect("store");
     store.put_binary_blob(b"ours").expect("job content");
     store
@@ -1365,7 +1365,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
             job_id: "job".to_owned(),
             workspace_id: WORKSPACE_ID.to_owned(),
             target_path: "notes/a.md".to_owned(),
-            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            displaced_name: "6a6f62.0".to_owned(),
             expected_sha256: dohc_engine_storage::hex_sha256(b"captured"),
             content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
             now_ms: 15,
@@ -1382,12 +1382,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
         "captured",
         "the refused confirmation put the displaced file back"
     );
-    assert!(
-        !scratch
-            .path()
-            .join("notes/.dohc-write-job.displaced")
-            .exists()
-    );
+    assert!(!staging.join("6a6f62.0").exists());
     supervisor.close(&db).expect("close actor");
 
     std::fs::remove_file(scratch.path().join("notes/a.md")).expect("a real delete");
