@@ -397,8 +397,11 @@ export type CollectionAutomationSummary =
     }
   | { valid: false; id: string | null; name: string | null; diagnostics: AutomationDiagnostic[] };
 
+// `you` is this computer's person as a step names them, in a workspace
+// proved never shared (automationReach.ts). The builder writes it for
+// "You", and never shows it.
 export type CollectionAutomationsFile =
-  | { status: "missing" }
+  | { status: "missing"; you?: string }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
   | {
       status: "read";
@@ -412,6 +415,7 @@ export type CollectionAutomationsFile =
        * can edit.
        */
       addsStay: string[];
+      you?: string;
     };
 
 /** One field that switched-on automations set, with their names in file order. */
@@ -1369,11 +1373,12 @@ export class CollectionAutomations {
     const unapproved = await this.maybeDataset(collectionPath);
     const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
-    if (!indexed || collectionId === null) return { status: "missing" };
+    const roster = await this.options.cachedRoster();
+    const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
+    if (!indexed || collectionId === null) return { status: "missing", ...you };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
     const unsupported = (automation: Automation) =>
       unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
-    const roster = await this.options.cachedRoster();
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
     // Only the computer that keeps a dataset can run its schedules and Group messages.
     const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
@@ -1394,7 +1399,7 @@ export class CollectionAutomations {
       const [newest] = (await this.claimPage(automationId, { limit: 1 }))?.claims ?? [];
       return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
     })));
-    const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
+    const automations = file.entries.map((entry): CollectionAutomationSummary => {
       if (entry.status === "invalid") {
         return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
       }
@@ -1434,7 +1439,7 @@ export class CollectionAutomations {
     const addsStay = dataset === undefined ? [] : dataset.definition.tables
       .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants).length === 0)
       .map((table) => table.name);
-    return { status: "read", contentHash: indexed.contentHash, automations, addsStay };
+    return { status: "read", contentHash: indexed.contentHash, automations, addsStay, ...you };
   }
 
   /**

@@ -51,6 +51,7 @@ type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | nul
 type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
 type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
+type YourStep = Extract<AutomationStep, { kind: "notify" | "wake-agent" }>;
 type FieldValue = SetStep["values"][number];
 type Reach = ValidAutomationSummary["reach"];
 
@@ -456,6 +457,19 @@ function editableStep(step: AutomationStep, table: AutomationTable | null): SetS
   return table === null || (step.collection === null && (step.operation === null || table.operations.has(step.operation))) ? step : null;
 }
 
+/**
+ * A step for this computer's person that the builder edits: notify you, or
+ * wake your agent. `you` is how steps name that person, which the builder
+ * writes and never shows; null where no step can name them that way.
+ */
+function yourStep(step: AutomationStep, you: string | null): YourStep | null {
+  if (you === null) return null;
+  if (step.kind === "wake-agent") return step.person === you ? step : null;
+  if (step.kind !== "notify" || step.to.length !== 1) return null;
+  const [person] = step.to;
+  return person?.kind === "literal" && person.value === you ? step : null;
+}
+
 type ConditionMode = "always" | "rows" | "formula";
 interface ConditionEntry { key: number; row: ConditionRow }
 
@@ -502,6 +516,8 @@ export function AutomationBuilder(props: {
   saving: boolean;
   /** The file has entries dohc cannot read, so nothing can be saved now. */
   readOnly: boolean;
+  /** How a step names this computer's person, in a workspace proved never shared; otherwise null. */
+  you: string | null;
   /** Someone asked to leave: Back, Close, Cancel, or a notice. */
   leaveRequested: boolean;
   onLeave: () => void;
@@ -694,6 +710,8 @@ export function AutomationBuilder(props: {
       const error = syntaxErrors.get(expression);
       if (error !== undefined && !problems.has(`do/${index}`)) problems.set(`do/${index}`, error.replace(/^This formula/u, `The formula for ${key}`));
     }
+    const yours = yourStep(step, props.you);
+    if (yours !== null && yours.text.trim() === "") problems.set(`do/${index}`, "Write a message.");
     const editable = editableStep(step, table);
     if (editable === null) return;
     if (rows.length === 0) problems.set(`do/${index}/values`, editable.kind === "set" ? "Add a field to set." : "Add a field.");
@@ -978,6 +996,7 @@ export function AutomationBuilder(props: {
             const chosen = action === null ? undefined : table?.actions.find((candidate) => candidate.name === action.operation);
             // This table's actions, and the one the step runs when the file names another table's.
             const offered = (table?.actions ?? []).filter((candidate) => candidate.table === table?.name || candidate === chosen);
+            const yours = yourStep(step, props.you);
             const targetPath = targetOf(step);
             const targetStopped = step.kind === "add-record" && targetPath !== collectionPath
               ? (targets?.find((target) => target.path === targetPath)?.stopped ?? null)
@@ -991,6 +1010,8 @@ export function AutomationBuilder(props: {
                       : editable?.kind === "add-record" ? "Add a record"
                       : action !== null ? "Run an action"
                       : step.kind === "run" || step.kind === "run-file" ? "Run code"
+                      : yours?.kind === "notify" ? "Notify you"
+                      : yours?.kind === "wake-agent" ? "Wake your agent"
                       : `Step ${index + 1}`}
                   </span>
                   <IconButton
@@ -1115,6 +1136,15 @@ export function AutomationBuilder(props: {
                     <code className="min-w-0 flex-1 truncate rounded bg-panel-2 px-1 font-mono text-[11px] text-ink" title={step.file}>{step.file}</code>
                     <SecondaryButton size="compact" onClick={() => props.onOpenFile(`${collectionPath}/${step.file}`)}>Open file</SecondaryButton>
                   </div>
+                ) : yours !== null ? (
+                  <input
+                    aria-label={`Step ${index + 1}, message`}
+                    data-focus={`step-${key}-first`}
+                    value={yours.text}
+                    placeholder="Message"
+                    onChange={(event) => setStep(key, (current) => ({ ...current, step: { ...yours, text: event.target.value } }))}
+                    className={inputClass}
+                  />
                 ) : editable === null ? (
                   <p className="m-0 break-words text-[12px] leading-snug text-muted">
                     <Sentence parts={stepParts(step)} />
@@ -1234,6 +1264,26 @@ export function AutomationBuilder(props: {
                 <Plus size={12} aria-hidden />
                 Run an action
               </SecondaryButton>
+            ) : null}
+            {props.you !== null ? (
+              <>
+                <SecondaryButton
+                  size="compact"
+                  className="flex items-center gap-1"
+                  onClick={() => addStep({ kind: "notify", text: "", to: [{ kind: "literal", value: props.you! }] })}
+                >
+                  <Plus size={12} aria-hidden />
+                  Notify you
+                </SecondaryButton>
+                <SecondaryButton
+                  size="compact"
+                  className="flex items-center gap-1"
+                  onClick={() => addStep({ kind: "wake-agent", text: "", person: props.you! })}
+                >
+                  <Plus size={12} aria-hidden />
+                  Wake your agent
+                </SecondaryButton>
+              </>
             ) : null}
           </div>
         </section>

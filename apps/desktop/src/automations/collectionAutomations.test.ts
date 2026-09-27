@@ -3686,6 +3686,17 @@ describe("Collection automations that wake your agent", () => {
       ]);
     });
 
+    it("tells the builder how steps name you only there", async () => {
+      const w = await world({ collections: ["Tasks", "Notes"], automations: { Tasks: local } });
+      w.setRoster(provedLocal);
+      await w.executor.open();
+      expect(await w.executor.automationsIn("Tasks")).toMatchObject({ status: "read", you: "install-here" });
+      expect(await w.executor.automationsIn("Notes")).toEqual({ status: "missing", you: "install-here" });
+      w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+      expect(await w.executor.automationsIn("Tasks")).not.toHaveProperty("you");
+      expect(await w.executor.automationsIn("Notes")).toEqual({ status: "missing" });
+    });
+
     it("refuses a step for another computer's id or an account, and starts no direct message", async () => {
       const step = (id: string, action: string) => [
         `  - id: ${id}`,

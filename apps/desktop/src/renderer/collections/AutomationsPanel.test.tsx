@@ -1040,6 +1040,40 @@ describe("the builder", () => {
     expect(await screen.findByTestId("automation-when-status-becomes-done-set-finished-on-to-today")).toBeTruthy();
   });
 
+  it("notifies you and wakes your agent in a workspace never shared, and never shows how steps name you", async () => {
+    const { written } = makeBridge({ status: "missing", you: "install-here" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await user.click(screen.getByRole("button", { name: "Notify you" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Write a message.")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Step 1, message" }), "Task done");
+    await user.click(screen.getByRole("button", { name: "Wake your agent" }));
+    await user.type(screen.getByRole("textbox", { name: "Step 2, message" }), "Plan the next task");
+    expect(screen.getByTestId("builder-step-0").textContent).toContain("Notify you");
+    expect(screen.getByTestId("builder-step-1").textContent).toContain("Wake your agent");
+    expect(document.body.innerHTML).not.toContain("install-here");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.do).toEqual([
+      { kind: "notify", text: "Task done", to: [{ kind: "literal", value: "install-here" }] },
+      { kind: "wake-agent", text: "Plan the next task", person: "install-here" },
+    ]);
+  });
+
+  it("offers no step for you where steps cannot name you", async () => {
+    makeBridge({ status: "missing" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    expect(screen.queryByRole("button", { name: "Notify you" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Wake your agent" })).toBeNull();
+  });
+
   it("edits conditions as rows, keeps a number while it is typed, and keeps steps it cannot edit", async () => {
     const find = { kind: "find" as const, condition: 'record.Status == "Doing"', collection: null, as: "open", operation: null };
     const edited: Automation = { ...stamp, if: "record.Points == 3", do: [...stamp.do, find] };

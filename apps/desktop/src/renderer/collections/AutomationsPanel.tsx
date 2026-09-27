@@ -890,6 +890,7 @@ export function AutomationsPanel(props: {
             takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
             saving={saving}
             readOnly={editable === null}
+            you={(file?.status === "read" || file?.status === "missing" ? file.you : undefined) ?? null}
             leaveRequested={leaving !== null}
             onLeave={() => {
               forgetDraft();
