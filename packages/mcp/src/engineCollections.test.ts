@@ -13,7 +13,10 @@ import {
   createRecord,
   DOHC_TRANSPORT_UNAVAILABLE_REASON,
   queryCollection,
+  listAutomationRuns,
+  readAutomationRun,
   readRecord,
+  retryAutomationRun,
   setRecordFields,
   type ToolContext,
 } from "./tools";
@@ -326,6 +329,73 @@ describe("desktop CLI collection proxy", () => {
       // The record folder holds exactly the file the test wrote: no fallback
       // file write happened.
       await expect(readdir(join(base.root, "tasks"))).resolves.toEqual(["task.md"]);
+    });
+  });
+});
+
+describe("desktop CLI automation proxy", () => {
+  const run = {
+    run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+    trigger: { kind: "changed" as const, recordId: "rec_1", by: "human" as const, depth: 0 },
+    definitionChanged: true, chainStopped: false, undone: false,
+  };
+  const answers = {
+    automationRuns: { ok: true, runs: [{ ...run, changes: 1 }] },
+    automationRun: { ok: true, run: { ...run, steps: [{ step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] }], failedStep: 2, startsOver: false } },
+  } satisfies { [Verb in Extract<CliVerb, "automationRuns" | "automationRun">]: CliResultByVerb[Verb] };
+
+  it("maps the automation tools to their CLI verbs, and passes on a refused retry of a changed automation", async () => {
+    await withWorkspace(async (base) => {
+      await mkdir(join(base.root, "tasks"), { recursive: true });
+      const requests: CliRequestWithoutToken[] = [];
+      const ctx: ToolContext = {
+        ...base,
+        request: vi.fn(async (request: CliRequestWithoutToken) => {
+          requests.push(request);
+          if (request.verb === "automationRetry") {
+            return request.args.startOver
+              ? { ok: true, status: "queued" }
+              : { ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed." };
+          }
+          return answers[request.verb as keyof typeof answers];
+        }),
+      };
+      const automation = { collectionPath: "tasks", automation: "stamp" };
+
+      await expect(listAutomationRuns(ctx, automation)).resolves.toEqual(answers.automationRuns);
+      await expect(readAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual(answers.automationRun);
+      await expect(retryAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual({
+        ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed.",
+      });
+      await expect(retryAutomationRun(ctx, { ...automation, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+
+      const common = { cwd: base.root, actor: "agent", collectionPath: "tasks", automation: "stamp" };
+      expect(requests.map((request) => ({ verb: request.verb, args: request.args }))).toEqual([
+        { verb: "automationRuns", args: common },
+        { verb: "automationRun", args: { ...common, run: "atc_1" } },
+        { verb: "automationRetry", args: { ...common, run: "atc_1", startOver: false } },
+        { verb: "automationRetry", args: { ...common, run: "atc_1", startOver: true } },
+      ]);
+    });
+  });
+
+  it("passes on a refused retry from the wrong computer with the notice that names the right one", async () => {
+    await withWorkspace(async (base) => {
+      await mkdir(join(base.root, "tasks"), { recursive: true });
+      const refused = {
+        ok: false,
+        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      };
+      const ctx: ToolContext = { ...base, request: vi.fn(async () => refused) };
+      await expect(retryAutomationRun(ctx, { collectionPath: "tasks", automation: "stamp", run: "atc_1" })).resolves.toEqual(refused);
+      await expect(listAutomationRuns(ctx, { collectionPath: "../outside", automation: "stamp" }))
+        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      // Try again changes records, so a mounted share is refused as any write is.
+      await mkdir(join(base.root, "shared-with-me", "trip"), { recursive: true });
+      await expect(retryAutomationRun(ctx, { collectionPath: "shared-with-me/trip", automation: "stamp", run: "atc_1" }))
+        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      expect(ctx.request).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -7,33 +7,54 @@ import type { ReactNode } from "react";
 import type { AutomationRunSettledEvent, FindDatasetCollectionResult, ListCollectionAutomationsResult } from "../ipc/bridgeContract";
 import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollection";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
+import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPanel";
 import type { TransactionalButtons } from "./TransactionalCollectionPage";
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
   listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
-  onAutomationFailuresChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
+  onAutomationRunsChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
-  onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined) }));
+  onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
+  checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [] })),
+  readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
+  writeCollectionAutomations: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
   {props.onHistory && <button onClick={props.onHistory}>History</button>}
+  {props.onReviewSchema && <button onClick={props.onReviewSchema}>Fields and names</button>}
   {props.onTransferCsv && <button onClick={props.onTransferCsv}>Import or export CSV</button>}
   {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
 </> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
-afterEach(() => { cleanup(); resetAutomationButtonsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
+// A builder left with changes keeps its draft for the next panel, so each test starts with none.
+afterEach(() => { cleanup(); resetAutomationButtonsForTests(); resetKeptAutomationDraftsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
 
 describe("a dataset table's buttons", () => {
   const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
   const settle = (event: AutomationRunSettledEvent) => { for (const listener of backend.settled) listener(event); };
+
+  it("asks before a button runs an action that can't be undone, and presses naming the actions it agreed to", async () => {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.onAutomationRunSettled.mockImplementation((listener: (event: AutomationRunSettledEvent) => void) => { backend.settled.push(listener); return () => undefined; });
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Confirm", table: "Registrations", state: { kind: "ready", automationId: "collection:Fundraiser#confirm", irreversible: [{ name: "registrations.receipt", label: "Send receipt" }] } },
+    ] });
+    backend.pressAutomationButton.mockResolvedValue({ busy: false, claimId: "claim-2", settled: null });
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    const button = await screen.findByRole("button", { name: "Confirm for record 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ field: "Confirm", confirmed: ["registrations.receipt"] })));
+  });
 
   it("presses with the dataset, the table's name, and the record's key as JSON, runs until settled, says what ran, and reads the records again", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
@@ -51,7 +72,7 @@ describe("a dataset table's buttons", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith({
-      workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String),
+      workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String), confirmed: [],
     }));
     await waitFor(() => expect(button.getAttribute("aria-busy")).toBe("true"));
     const version = () => Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));
@@ -265,6 +286,26 @@ it("does not report permanent deletion in a different workspace", async () => {
   expect(screen.queryByText("Collection deleted")).toBeNull();
 });
 
+// A dataset whose Registrations table has a Confirm action, and the approval that adds a Confirm button.
+function buttonApproval() {
+  const CONFIRM = { operationId: id(7), tableId: id(2), name: "registrations.confirm", label: "Confirm", kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [] };
+  const before: DatasetDescription = { ...dataset, operations: [...dataset.operations, CONFIRM] };
+  const after: DatasetDescription = { ...before, revision: 2, revisionSha256: "e".repeat(64),
+    tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
+  const definition = { formatVersion: 1 as const, datasetId: id(1), name: "Fundraiser", schemaPath: "Fundraiser/schema.sql", operationsPath: "Fundraiser/operations.js",
+    tables: [{ tableId: id(2), name: "Registrations", sqlName: "registrations", primaryKey: "name", fields: [{ fieldId: id(3), name: "Name", sqlColumn: "name", type: "text" as const, required: true, unique: true }] }],
+    operations: [{ operationId: id(9), name: "read", label: "Read", tableId: id(2), kind: "read" as const, access: "owner" as const, readOnly: true, fieldIds: [id(3)] }] };
+  const previousRevision = { datasetId: id(1), revision: 1, revisionSha256: before.revisionSha256, definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64), definition };
+  const nextRevision = { ...structuredClone(previousRevision), revision: 2, revisionSha256: after.revisionSha256 };
+  nextRevision.definition.tables[0]!.fields.push({ fieldId: id(8), name: "Confirm", type: "button" } as never);
+  const expected = { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: before.revisionSha256 };
+  const preparation = { preparationId: id(10), previousRevision, revision: nextRevision, expected, sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64),
+    schemaSql: "schema", operationSource: "source", migrationSql: "SELECT 1;", expiresAtMs: Date.now() + 600_000,
+    candidate: { candidateId: id(11), expected, approvedRevisionHash: after.revisionSha256, checkpointSha256: "a".repeat(64), expiresAtMs: Date.now() + 600_000,
+      preview: { tables: [{ table: "registrations", beforeRows: 0, afterRows: 0, changedRows: 0 }], firstPage: { changes: [], nextCursor: null } } } };
+  return { before, after, preparation, CONFIRM };
+}
+
 describe("a dataset table's ⚡ panel", () => {
   const onTable = (automationId: string, table: string): Extract<ListCollectionAutomationsResult, { status: "read" }>["automations"][number] => ({
     valid: true, automationId: `collection:Fundraiser#${automationId}`, definitionHash: "0123456789abcdef", cannotRun: null,
@@ -303,6 +344,115 @@ describe("a dataset table's ⚡ panel", () => {
     expect(backend.listCollectionAutomations).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Close automations" }));
     expect(screen.queryByTestId("collection-automations-panel")).toBeNull();
+  });
+
+  it("opens the builder on a button nothing uses from Fields and names, with the button as its trigger", async () => {
+    const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
+    expect(within(panel).getByRole("combobox", { name: "Trigger" }).textContent).toContain("When someone clicks Confirm");
+  });
+
+  it("adds an action as a button, closes Fields after approval, and opens the builder on it, saving nothing before Save", async () => {
+    const { before, after, preparation } = buttonApproval();
+    let current = before;
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      if (input.action === "describe") return { kind: "description", dataset: current };
+      if (input.action === "prepareSchemaChange") return { kind: "migration-prepared", ...preparation };
+      if (input.action === "approveMigration") { current = after; return { kind: "migrated" }; }
+      throw new Error(`Unexpected ${input.action}`);
+    });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add as button: Confirm" }));
+    // A button changes only names, so its review asks for no confirmation checkbox.
+    fireEvent.click(await screen.findByRole("button", { name: "Approve change" }));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Fields and names" })).toBeNull());
+    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
+    expect((within(panel).getByRole("combobox", { name: "Step 1, action" }) as HTMLSelectElement).value).toBe("registrations.confirm");
+    expect((within(panel).getByRole("textbox", { name: "Step 1, input 1 name" }) as HTMLInputElement).value).toBe("id");
+    expect((within(panel).getByRole("textbox", { name: "Step 1, id, formula" }) as HTMLInputElement).value).toBe("record.id");
+    expect(document.activeElement).toBe(within(panel).getByRole("textbox", { name: "Name" }));
+    expect(screen.queryByRole("heading", { name: "Review Collection change" })).toBeNull();
+    expect(backend.writeCollectionAutomations).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("fills in the action named for a button nothing uses when Choose what it does opens the builder", async () => {
+    const { before } = buttonApproval();
+    const withButton: DatasetDescription = { ...before, tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    const name = within(panel).getByRole("textbox", { name: "Name" });
+    await waitFor(() => expect(document.activeElement).toBe(name));
+    expect((within(panel).getByRole("combobox", { name: "Step 1, action" }) as HTMLSelectElement).value).toBe("registrations.confirm");
+    expect((within(panel).getByRole("textbox", { name: "Step 1, input 1 name" }) as HTMLInputElement).value).toBe("id");
+    expect((within(panel).getByRole("textbox", { name: "Step 1, id, formula" }) as HTMLInputElement).value).toBe("record.id");
+  });
+
+  it("fills in no step for a button whose name two actions share", async () => {
+    const { before, CONFIRM } = buttonApproval();
+    const twice: DatasetDescription = { ...before, operations: [...before.operations, { ...CONFIRM, operationId: id(12), name: "registrations.confirmAgain" }],
+      tables: [{ ...before.tables[0]!, fields: [...before.tables[0]!.fields, { fieldId: id(8), name: "Confirm", type: "button" }] }] };
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: twice });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
+    expect(within(panel).queryByRole("combobox", { name: "Step 1, action" })).toBeNull();
+  });
+
+  it("neither refreshes nor opens the builder when the page closed before an approval finished", async () => {
+    const { before, after, preparation } = buttonApproval();
+    const approved = Promise.withResolvers<{ kind: "migrated" }>();
+    let current = before;
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      if (input.action === "describe") return { kind: "description", dataset: current };
+      if (input.action === "prepareSchemaChange") return { kind: "migration-prepared", ...preparation };
+      if (input.action === "approveMigration") { current = after; return await approved.promise; }
+      throw new Error(`Unexpected ${input.action}`);
+    });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [] });
+    const onError = vi.fn();
+    const { unmount } = render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add as button: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve change" }));
+    await waitFor(() => expect(backend.dataset.mock.calls.some(([input]) => input.action === "approveMigration")).toBe(true));
+    const describes = backend.dataset.mock.calls.filter(([input]) => input.action === "describe").length;
+    unmount();
+    await act(async () => approved.resolve({ kind: "migrated" }));
+    expect(backend.dataset.mock.calls.filter(([input]) => input.action === "describe")).toHaveLength(describes);
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("says when dohc could not find the automations, through the error hook and in the panel, and tries again", async () => {

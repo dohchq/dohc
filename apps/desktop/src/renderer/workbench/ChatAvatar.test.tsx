@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IDENTITY_HUES } from "../tokens";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { ChatAvatar, identityHue } from "./ChatAvatar";
+import { setChosenColors } from "./chosenColors";
 
 afterEach(() => {
+  setChosenColors(DEFAULT_USER_SETTINGS.appearance);
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -61,5 +64,23 @@ describe("ChatAvatar hue", () => {
     expect(avatar.className).not.toMatch(/\b(border|hue|agent|rounded)/u);
     expect(avatar.textContent).toBe("");
     expect(avatar.querySelector("svg.lucide-zap")).not.toBeNull();
+  });
+
+  it("draws you and your agent in the colors the settings file chose, and repaints on a change", () => {
+    const ownHue = IDENTITY_HUES.find((hue) => hue !== identityHue("Ada"))!;
+    render(<ChatAvatar name="Ada" kind="human" own />);
+    // Another person with your name keeps the hue dohc picks.
+    render(<ChatAvatar name="Ada" kind="human" className="other" />);
+    render(<ChatAvatar name="Nova" kind="agent" own />);
+    act(() => setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: ownHue, yourAgentColor: "plum" }));
+    const [yours, theirs] = screen.getAllByTitle("Ada");
+    expect(yours!.className).toContain(`text-hue-${ownHue}`);
+    expect(theirs!.className).toContain(`text-hue-${identityHue("Ada")}`);
+    expect(screen.getByTitle("Nova").className).toContain("text-hue-plum");
+    expect(screen.getByTitle("Nova").className).not.toContain("text-agent");
+
+    act(() => setChosenColors(DEFAULT_USER_SETTINGS.appearance));
+    expect(screen.getAllByTitle("Ada")[0]!.className).toContain(`text-hue-${identityHue("Ada")}`);
+    expect(screen.getByTitle("Nova").className).toContain("text-agent");
   });
 });

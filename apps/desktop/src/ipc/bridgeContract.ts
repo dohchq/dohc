@@ -4484,55 +4484,6 @@ export const DismissShareSkipsPayload = z.object({
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
-// ---- Automation failures (ADR 0008) ----
-// The engine's failed automation claims are the durable record; main serves
-// them minus what the owner acknowledged. One notice per automation: the
-// newest error and a generation (the automation's failed-claim count).
-export const ListAutomationFailuresPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-});
-export type ListAutomationFailuresPayload = z.infer<
-  typeof ListAutomationFailuresPayload
->;
-
-export const AutomationFailureNotice = z.object({
-  automationId: z.string().min(1),
-  // The newest failed claim: the one a Try again re-runs.
-  claimId: z.string().min(1),
-  // A chain stop never ran, and no Try again can run it.
-  chainStopped: z.boolean(),
-  // The automation's name in its automations.yaml, when dohc can read it.
-  name: z.string().nullable(),
-  error: z.string(),
-  updatedAtMs: z.number().int(),
-  generation: z.number().int().nonnegative(),
-  // A dataset automation's failures count per instance of its dataset, which
-  // a delete and remake or a restore replaces; null for a document Collection.
-  datasetInstance: z.string().min(1).max(2048).nullable(),
-});
-export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
-
-export const ListAutomationFailuresResult = z.object({
-  failures: z.array(AutomationFailureNotice),
-});
-export type ListAutomationFailuresResult = z.infer<
-  typeof ListAutomationFailuresResult
->;
-
-// Acknowledging an automation's failures up to the generation on screen.
-// Deletes nothing: the engine's claim rows stay, and a failure recorded
-// after the render has a higher generation, so it speaks up again.
-export const DismissAutomationFailurePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  automationId: z.string().min(1),
-  generation: z.number().int().nonnegative(),
-  // The notice's dataset instance. A dismissal of an earlier instance changes nothing.
-  datasetInstance: z.string().min(1).max(2048).nullable(),
-});
-export type DismissAutomationFailurePayload = z.infer<
-  typeof DismissAutomationFailurePayload
->;
-
 // ---- Collection automations (the ⚡ panel) ----
 // Main parses and writes automations.yaml, so the renderer never loads the
 // file contract. A shared view holds no executor, so it answers
@@ -4769,7 +4720,8 @@ const PressedButton = {
 };
 export const PressAutomationButtonPayload = z.union([
   z.strictObject({ ...PressedButton, collectionPath: PATH_STRING }),
-  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256) }),
+  // `confirmed` holds the operation names of the actions the person was told can't be undone and chose to run.
+  z.strictObject({ ...PressedButton, datasetId: z.uuid(), table: z.string().min(1).max(256), confirmed: z.array(z.string().max(256)).max(64).optional() }),
 ]);
 export type PressAutomationButtonPayload = z.infer<typeof PressAutomationButtonPayload>;
 export type PressAutomationButtonResult =
@@ -5441,6 +5393,9 @@ export const NoticeRow = z.object({
   target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
   readAtMs: z.number().int().nonnegative().nullable(),
+  // This person posted it from this computer. Try again on a failed run
+  // works only here, where the run's claim is.
+  postedHere: z.boolean(),
 });
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
@@ -5473,6 +5428,18 @@ export const RunSkippedScheduleNowPayload = z.object({
 });
 // `note` is null once the run started on this computer, or says why not.
 export const RunSkippedScheduleNowResult = z.object({ note: z.string().max(500).nullable() });
+// Try again on a failed run's notice, from the list for `account`.
+// `startOver` confirms running a changed automation from the beginning.
+export const RetryAutomationNoticePayload = z.object({
+  account: NoticeAccountKey,
+  notice: NoticeRef,
+  startOver: z.boolean(),
+});
+export const RetryAutomationNoticeResult = z.union([
+  z.object({ status: z.literal("queued"), press: z.boolean() }),
+  z.object({ status: z.enum(["definition-changed", "progress-gone"]), repeatsMessages: z.boolean() }),
+  z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
+]);
 
 // Which of the owner's computers runs a workspace's schedules.
 const ScheduleHostWorkspace = z.object({ workspaceId: z.string().min(1).max(256) });
@@ -5566,6 +5533,10 @@ export const noticeOperations = {
   runSkippedScheduleNow: {
     channel: "desktop:run-skipped-schedule-now",
     payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
+  },
+  retryAutomationNotice: {
+    channel: "desktop:retry-automation-notice",
+    payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6037,15 +6008,6 @@ export interface DohcDesktopBridge
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
-  // Automation failures (ADR 0008): the unacknowledged failure rows for the
-  // workspace's automations, and the acknowledgment that hides them without
-  // deleting the engine's claim rows.
-  listAutomationFailures(
-    payload: ListAutomationFailuresPayload,
-  ): Promise<ListAutomationFailuresResult>;
-  dismissAutomationFailure(
-    payload: DismissAutomationFailurePayload,
-  ): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
@@ -6239,11 +6201,10 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  // Live push: an automation claim failed (settled here, or recorded by the
-  // engine at the depth cap). A poke, not the record — the subscriber
-  // re-lists through listAutomationFailures, guarded by its own workspace.
-  // Returns an unsubscribe function.
-  onAutomationFailuresChanged(
+  // Live push: an automation claim failed or a retry queued one, so run
+  // history changed. A poke, not the record; the subscriber reads the runs
+  // again, guarded by its own workspace. Returns an unsubscribe function.
+  onAutomationRunsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
   // Live push: the crash report changed. A poke, not the report; the

@@ -29,8 +29,10 @@ export interface CollectionAutomationUndone {
   missing: number;
   /** Fields a dataset edit changed whose rules do not let it be undone. */
   irreversible: number;
-  /** Dataset actions the runs ran. Their changes stay: dohc cannot reverse what an action did. */
+  /** Dataset actions the runs ran whose rules give no reverse. Their changes stay. */
   actions: number;
+  /** Dataset actions their reverse actions undid. */
+  actionsReversed: number;
 }
 
 export interface CollectionAutomationUndoDependencies {
@@ -103,7 +105,7 @@ export async function undoCollectionAutomationRuns(
   signal: AbortSignal,
 ): Promise<CollectionAutomationUndone> {
   const { added, records } = changesOf(runs);
-  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0 };
+  const undone: CollectionAutomationUndone = { reverted: 0, removed: 0, kept: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
   for (const record of records.values()) {
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId)) continue;

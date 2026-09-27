@@ -13,6 +13,7 @@ import type {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   CLI_REQUEST_DEADLINE_MS,
+  type CliAutomationsPort,
   type CliRegistryWorkspace,
   type CliRunMessageLink,
   type CliServerHandle,
@@ -62,6 +63,8 @@ interface DesktopCliServerDependencies<State> {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  /** The executor calls the Automations panel makes, for one workspace. */
+  automations(workspace: RegistryEntry): CliAutomationsPort;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
@@ -194,6 +197,7 @@ export function createDesktopCliServer<State>(
           return dependencies.ownerAppPublication!(request);
         }) } : {}),
       rootPath: workspace.rootPath,
+      automations: dependencies.automations(workspace),
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),

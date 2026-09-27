@@ -15,8 +15,14 @@ import {
   type CliShowMessage,
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
+import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import type {
+  CollectionAutomationRun,
+  CollectionAutomationRunDetail,
+} from "@dohc/automation-executor/collection-automations";
 import {
   createLocalChangeAuthor,
+  isSharedWithMePath,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
@@ -78,6 +84,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import type { AutomationRunRetry } from "../automations/automationNotices";
 import {
   LiveDocumentEditAppliedError,
   type LiveDocumentEditOrigin,
@@ -212,6 +219,15 @@ export interface CliKeptCopiesPort {
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
+// The Automations panel's run history and Try again, for the automation
+// verbs. Main answers with the same executor calls the panel's IPC makes,
+// so a run is listed, read, and tried again under the same rules.
+export interface CliAutomationsPort {
+  runs(automationId: string): Promise<CollectionAutomationRun[]>;
+  run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
+  retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -238,6 +254,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   documents?: CliDocumentsPort;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
+  automations?: CliAutomationsPort;
 }
 
 export interface CliRunMessageLink {
@@ -588,6 +605,53 @@ function keptCopiesUnavailable() {
   return {
     ok: false as const,
     reason: "kept copies are not available in this workspace",
+  };
+}
+
+// A shared view keeps no runs: the owner's computer runs its automations.
+const SHARED_VIEW_AUTOMATIONS =
+  "A shared view has no automation runs. The owner's computer runs this workspace's automations.";
+
+const START_OVER = {
+  "definition-changed": "This automation changed since the run failed.",
+  "progress-gone": "dohc no longer has this run's progress.",
+} as const;
+
+// Try again as the panel answers it, in words for an agent: a run that
+// would start over needs startOver, as the panel's confirmation asks.
+function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["automationRetry"] {
+  switch (result.status) {
+    case "queued":
+      return { ok: true, status: "queued" };
+    case "definition-changed":
+    case "progress-gone":
+      return {
+        ok: false,
+        status: result.status,
+        repeatsMessages: result.repeatsMessages,
+        reason: [
+          START_OVER[result.status],
+          "Running it again starts from the first step and can repeat changes it already made.",
+          ...(result.repeatsMessages ? ["Posts, direct messages, and notices it already sent may be sent again."] : []),
+          "To do that, try again with --start-over, or startOver: true.",
+        ].join(" "),
+      };
+    case "refused":
+      return { ok: false, reason: result.reason, ...(result.notice ? { notice: result.notice } : {}) };
+  }
+}
+
+function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
+  return {
+    run: run.claimId,
+    state: run.state,
+    error: run.error,
+    createdAtMs: run.createdAtMs,
+    updatedAtMs: run.updatedAtMs,
+    trigger: run.trigger,
+    definitionChanged: run.definitionChanged,
+    chainStopped: run.chainStopped,
+    undone: run.undone,
   };
 }
 
@@ -2213,6 +2277,56 @@ async function dispatch(
           error,
           `failed to create a record in: ${request.args.collectionPath}`,
         );
+      }
+    }
+
+    case "automationRuns":
+    case "automationRun":
+    case "automationRetry": {
+      if (context.readOnly) return { ok: false as const, reason: SHARED_VIEW_AUTOMATIONS };
+      const automations = context.automations;
+      if (!automations) return { ok: false as const, reason: "automations are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
+      if (isSharedWithMePath(validated.normalized)) {
+        return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
+      }
+      const automationId = collectionAutomationId(validated.normalized, request.args.automation);
+      try {
+        if (request.verb === "automationRuns") {
+          const runs = await automations.runs(automationId);
+          const listed: CliResultByVerb["automationRuns"] = {
+            ok: true,
+            runs: runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
+          };
+          return listed;
+        }
+        if (request.verb === "automationRun") {
+          const run = await automations.run(automationId, request.args.run);
+          if (run === null) {
+            return {
+              ok: false as const,
+              reason: `This computer has no run ${request.args.run} of this automation. Each computer keeps the runs of the automations it ran.`,
+            };
+          }
+          const read: CliResultByVerb["automationRun"] = {
+            ok: true,
+            run: {
+              ...automationRunFields(run),
+              steps: run.steps.map((step) => ({ step: step.step, changes: step.writes })),
+              failedStep: run.failedStep,
+              startsOver: run.startsOver,
+            },
+          };
+          return read;
+        }
+        return automationRetryResult(await automations.retry({
+          automationId,
+          claimId: request.args.run,
+          startOver: request.args.startOver,
+        }));
+      } catch (error) {
+        return mcpFailure(error, `failed to reach the runs of ${automationId}`);
       }
     }
 

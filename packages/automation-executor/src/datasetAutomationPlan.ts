@@ -339,6 +339,23 @@ export function datasetFieldWritesOf(automation: Automation, rules: DatasetRules
   });
 }
 
+/**
+ * The actions an automation's steps run that dohc cannot undo, once each,
+ * in step order, inside If branches too: those the rules give no reverse
+ * action. Labels need not be unique, so an action whose label another shares
+ * reads with its name.
+ */
+export function datasetIrreversibleActions(automation: Automation, definition: DatasetDefinition): Array<{ name: string; label: string }> {
+  const actions = new Map<string, DatasetOperation>();
+  for (const { step } of stepsInOrder(automation)) {
+    if (step.kind !== "invoke") continue;
+    const action = definition.operations.find((operation) => operation.name === step.operation && operation.kind === "action");
+    if (action !== undefined && action.reversedBy === undefined) actions.set(action.name, action);
+  }
+  const shared = (label: string) => definition.operations.filter((operation) => operation.kind === "action" && operation.label === label).length > 1;
+  return [...actions.values()].map((action) => ({ name: action.name, label: shared(action.label) ? `${action.label} (${action.name})` : action.label }));
+}
+
 /** The table and Button field a button automation's trigger names in the rules, or null. */
 export function datasetButtonOf(automation: Automation, definition: DatasetDefinition): { tableId: string; fieldId: string } | null {
   const trigger = automation.when;

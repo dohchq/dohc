@@ -2678,15 +2678,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 18,
-        id: "v2-materialization-displacements",
-        sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
         ordinal: 19,
         id: "v2-sync-identity-claim-state",
         sql: "ALTER TABLE sync_identity ADD COLUMN claim_state TEXT CHECK (claim_state IN ('pending','workspace-unavailable','epoch-superseded','identity-not-recognized','identity-required','stream-identity-mismatch')); ALTER TABLE sync_identity ADD COLUMN claim_account_id TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 20,
+        id: "v2-materialization-displacements",
+        sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3019,12 +3019,12 @@ mod tests {
                 "5b2247e5582d3fdb328eae4d4af88ae7c2e9be8acf0e2dd8aa6ccfa81d23afe8",
             ),
             (
-                "v2-materialization-displacements",
-                "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
-            ),
-            (
                 "v2-sync-identity-claim-state",
                 "3cf872e265017c043dd394e9a67c6a3108cec735d06c7cab6f89d00b164feaee",
+            ),
+            (
+                "v2-materialization-displacements",
+                "2887eaf2ca3af9e0361b7dce143eddaf80e94c60dfaf46bcb2b29443c735a36b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3067,7 +3067,10 @@ mod tests {
         let path = dir.join("engine.db");
         let mut conn = open_bare(&path);
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS.len() - 1;
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-sync-identity-claim-state")
+            .expect("sync identity claim migration");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('ws','origin','epoch','stream',1)", []).unwrap();
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();

@@ -161,6 +161,21 @@ export interface AutomationTable {
   name: string;
   operations: ReadonlySet<string>;
   tables: ReadonlySet<string>;
+  /**
+   * The dataset's actions, by name, label, and table; `reversible` when the
+   * rules name a reverse. A new step offers this table's; a step the file
+   * wrote may run another table's.
+   */
+  actions: ReadonlyArray<{ name: string; label: string; table: string; reversible: boolean }>;
+}
+
+/**
+ * A new automation that a Button field starts: named for the button, with
+ * its trigger filled in and `steps` to start from. `table` is the dataset
+ * table the button is on, or null for a document Collection.
+ */
+export function buttonAutomation(field: string, table: string | null, steps: Automation["do"]): Automation {
+  return { id: "", name: field, enabled: true, when: { kind: "button", field, table }, if: null, do: steps };
 }
 
 /**

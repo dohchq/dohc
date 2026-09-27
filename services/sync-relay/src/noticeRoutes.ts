@@ -40,7 +40,7 @@ const DEFAULT_NOTICE_PAGE = 100;
 // route acts for the authenticated caller, who is the sender of a post and
 // the owner of the list it pulls or marks.
 export function createNoticeRoutes(
-  storage: Pick<SyncRelayStorage, "postNotice" | "readNoticeChanges" | "markNotices">,
+  storage: Pick<SyncRelayStorage, "postNotice" | "readNoticeChanges" | "markNotices" | "getShare">,
   nowMs: () => number,
   lookupUserDisplayName: ((userId: string) => Promise<string | null> | string | null) | undefined,
   claimPendingShares: (userId: string, signal?: AbortSignal) => Promise<void>,
@@ -64,7 +64,14 @@ export function createNoticeRoutes(
       return jsonResponse({ ok: true, ...page }, 200);
     }
     if (route.route === "notices" && request.method === "POST") {
-      const notice = parsePostNotice(await readJsonObject(request));
+      const { toWorkspaceOwner, ...posted } = parsePostNotice(await readJsonObject(request));
+      // The share names the owner. The placement check below still decides
+      // whether the sender may post through it.
+      const recipientUserId = toWorkspaceOwner
+        ? storage.getShare(posted.reach.shareId!)?.granterUserId
+        : posted.recipientUserId;
+      if (recipientUserId === undefined) throw relayError("notice_refused");
+      const notice = { ...posted, recipientUserId };
       if (notice.recipientUserId === userId) {
         if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {
           throw badRequest(`noticeId must not start with ${NOTICE_FROM_PREFIX}`);
@@ -97,7 +104,8 @@ export function createNoticeRoutes(
   };
 }
 
-type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs">;
+type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs" | "recipientUserId"> &
+  ({ recipientUserId: string; toWorkspaceOwner: false } | { recipientUserId?: undefined; toWorkspaceOwner: true });
 
 function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (
@@ -110,10 +118,16 @@ function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
   if (!isNoticeBody(body.body)) throw badRequest("body is invalid");
   if (!isNoticeTarget(body.target)) throw badRequest("target is invalid");
+  const reach = parseReach(body);
+  if (body.toWorkspaceOwner !== undefined && (body.toWorkspaceOwner !== true || body.recipientUserId !== undefined || reach.shareId === undefined)) {
+    throw badRequest("toWorkspaceOwner takes a shareId and no recipientUserId");
+  }
   return {
+    ...(body.toWorkspaceOwner === true
+      ? { toWorkspaceOwner: true as const }
+      : { toWorkspaceOwner: false as const, recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS) }),
     noticeId: body.noticeId,
-    recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS),
-    reach: parseReach(body),
+    reach,
     kind: body.kind as PostableNoticeKind,
     title: body.title,
     body: body.body,

@@ -103,3 +103,26 @@ it("keeps a label-only review short and does not demand a destructive-change con
   fireEvent.click(screen.getByRole("button",{name:"Approve change"}));
   await waitFor(()=>expect(props.onApprove).toHaveBeenCalledOnce());
 });
+
+it("adds an action as a button, and after approval opens what runs it; a button nothing uses offers Choose what it does", async () => {
+  const withAction: DatasetDescription = { ...dataset,
+    operations: [{ operationId: id(13), name: "people.welcome", label: "Welcome", tableId: id(2), kind: "action", access: "owner", readOnly: false, fieldIds: [] }],
+    tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(14), name: "Archive", type: "button" }] }] };
+  const onButtonAdded = vi.fn(), onChooseButton = vi.fn();
+  const { props } = setup({ dataset: withAction, onButtonAdded, onChooseButton, buttonStates: new Map([["Archive", { kind: "no-automation", reason: "No automation uses this button." }]]) });
+  fireEvent.click(screen.getByRole("button", { name: "Choose what it does: Archive" }));
+  expect(onChooseButton).toHaveBeenCalledWith("Archive");
+  fireEvent.click(screen.getByRole("button", { name: "Add as button: Welcome" }));
+  await waitFor(() => expect(props.onPrepare).toHaveBeenCalledWith({ kind: "addButton", tableId: id(2), name: "Welcome" }, expect.any(AbortSignal)));
+  fireEvent.click(await screen.findByRole("checkbox", { name: /I reviewed this change/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Approve change" }));
+  await waitFor(() => expect(onButtonAdded).toHaveBeenCalledWith("Welcome"));
+  expect(props.onApprove).toHaveBeenCalledOnce();
+});
+
+it("offers no button for an action a field is already named for", () => {
+  const named: DatasetDescription = { ...dataset,
+    operations: [{ operationId: id(13), name: "people.welcome", label: "Name", tableId: id(2), kind: "action", access: "owner", readOnly: false, fieldIds: [] }] };
+  setup({ dataset: named, onButtonAdded: vi.fn() });
+  expect(screen.queryByRole("button", { name: /^Add as button/ })).toBeNull();
+});

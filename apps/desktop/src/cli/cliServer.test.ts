@@ -1283,6 +1283,78 @@ describe("CLI socket server", () => {
     ]);
   });
 
+  it("answers the automation verbs from the Automations panel's calls", async () => {
+    const AUTOMATION = "collection:tasks#stamp";
+    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, depth: 1 };
+    const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
+    const run = {
+      claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+      trigger, definitionChanged: true, chainStopped: false, undone: false,
+    };
+    const retries: unknown[] = [];
+    const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
+      { status: "definition-changed", repeatsMessages: true },
+      { status: "queued", press: false },
+      {
+        status: "refused",
+        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      },
+    ];
+    context.automations = {
+      runs: vi.fn(async () => [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }]),
+      run: vi.fn(async (_automationId: string, claimId: string) =>
+        claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      retry: vi.fn(async (input) => {
+        retries.push(input);
+        return answers.shift()!;
+      }),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp" };
+
+    await expect(invoke("automationRuns", args)).resolves.toEqual({
+      ok: true,
+      runs: [{
+        run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
+        trigger, definitionChanged: true, chainStopped: false, undone: false, changes: 2,
+      }],
+    });
+    expect(context.automations.runs).toHaveBeenCalledWith(AUTOMATION);
+    await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
+      ok: true,
+      run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_9" })).resolves.toEqual({
+      ok: false,
+      reason: "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
+    });
+
+    // A changed automation is refused until the caller confirms starting over.
+    const refused = await invoke("automationRetry", { ...args, run: "atc_1", startOver: false });
+    expect(refused).toMatchObject({ ok: false, status: "definition-changed", repeatsMessages: true });
+    expect("reason" in refused && refused.reason).toContain("This automation changed since the run failed.");
+    expect("reason" in refused && refused.reason).toContain("Posts, direct messages, and notices it already sent may be sent again.");
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+    expect(retries).toEqual([
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: false },
+      { automationId: AUTOMATION, claimId: "atc_1", startOver: true },
+    ]);
+    // Another computer's run is refused with the notice that names that computer.
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: false })).resolves.toEqual({
+      ok: false,
+      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+    });
+
+    await expect(invoke("automationRuns", { ...args, collectionPath: "../tasks" })).resolves.toMatchObject({ ok: false });
+    context.readOnly = true;
+    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({
+      ok: false,
+      reason: "A shared view has no automation runs. The owner's computer runs this workspace's automations.",
+    });
+    expect(retries).toHaveLength(3);
+  });
+
   it("routes collection writes through the write seam with a server-derived author", async () => {
     const seamCalls: Array<
       | { kind: "setFields"; input: Parameters<CliCollectionWriteSeam["setFields"]>[0] }
