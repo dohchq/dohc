@@ -61,7 +61,10 @@ type CliCommandBody =
     }
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
-  | { verb: "moment"; id: string; side: "before" | "after" };
+  | { verb: "moment"; id: string; side: "before" | "after" }
+  | { verb: "automationRuns"; collectionPath: string; automation: string }
+  | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
+  | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean };
 
 export type ParsedCliCommand = ParsedCliBase & CliCommandBody;
 
@@ -452,6 +455,53 @@ const HISTORY_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+/** The Collection and automation every automation verb starts with, and one run when the verb takes one. */
+function automationOperands(input: VerbInput, verb: string, takesRun: boolean): { collectionPath: string; automation: string; run: string } {
+  const [collectionPath, automation, run = "", ...extra] = input.operands;
+  if (!collectionPath || !automation) fail(`automation ${verb} requires a Collection and an automation id`);
+  if (takesRun && !run) fail(`automation ${verb} requires a run id`);
+  noExtraArgs(takesRun ? extra : input.operands.slice(2), `automation ${verb}`);
+  return { collectionPath, automation, run };
+}
+
+const AUTOMATION_VERBS = {
+  runs: {
+    summary: "List an automation's runs on this computer, newest first.",
+    operands: "<collection> <automation>",
+    notes: ["Lists the 20 newest runs, as the Automations panel does. Each line starts with the run's ID."],
+    parse: (input) => {
+      const { collectionPath, automation } = automationOperands(input, "runs", false);
+      return { verb: "automationRuns", collectionPath, automation };
+    },
+  },
+  run: {
+    summary: "Show one run: what started it, what each step changed, and why it failed.",
+    operands: "<collection> <automation> <run>",
+    notes: [
+      "Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
+    ],
+    parse: (input) => {
+      const { collectionPath, automation, run } = automationOperands(input, "run", true);
+      return { verb: "automationRun", collectionPath, automation, run };
+    },
+  },
+  retry: {
+    summary: "Try a failed run again. It resumes after the last step that finished.",
+    operands: "<collection> <automation> <run>",
+    flags: [
+      {
+        name: "--start-over",
+        text: "Run it from the first step when the automation changed since the run failed. This can repeat changes the run already made.",
+      },
+    ],
+    notes: ["Only the computer that ran it can try a run again. Anywhere else, the command names that computer."],
+    parse: (input) => {
+      const { collectionPath, automation, run } = automationOperands(input, "retry", true);
+      return { verb: "automationRetry", collectionPath, automation, run, startOver: input.flags.has("--start-over") };
+    },
+  },
+} satisfies Record<string, CliVerbSpec>;
+
 interface JsonVerbHelp {
   summary: string;
   notes?: readonly string[];
@@ -746,6 +796,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     summary: "Read the changes History records for files.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
+  },
+  automation: {
+    summary: "Read an automation's runs and try a failed run again.",
+    notes: [
+      "Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml.",
+      "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
+    ],
+    verbs: AUTOMATION_VERBS,
   },
 };
 

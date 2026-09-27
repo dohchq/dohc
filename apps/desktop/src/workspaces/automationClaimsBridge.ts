@@ -13,10 +13,9 @@ import {
  *
  * A pending claim wakes the executor's drain. A claim inserted already
  * failed — the depth cap's `chain-stopped` stop report — is not drainable
- * work, so it instead pokes the owner-visible failure surface to re-read
- * `automations.failures`. A pending claim past its first run is an owner
- * retry: it wakes the drain and pokes the failure surface, whose failure
- * it cleared.
+ * work, so it instead tells the executor, which sends the failure's notice.
+ * A pending claim past its first run is an owner retry: it wakes the drain
+ * and tells the executor too, so run history shows the cleared failure.
  */
 export function bridgeAutomationClaimsToExecutors(
   daemon: { onEvent(handler: (event: Event) => void): () => void },

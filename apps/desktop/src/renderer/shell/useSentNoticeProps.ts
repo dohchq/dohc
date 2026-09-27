@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo } from "react";
 import type { GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
+import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { workspaceName } from "../Titlebar";
-import type { SentNotice } from "../workbench/NoticeCenter";
+import { AUTOMATION_NOTICE_KINDS, type SentNotice } from "../workbench/NoticeCenter";
 import { sentNoticeFolder, sentNoticePlace } from "./sentNoticePlace";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 
@@ -13,6 +14,9 @@ export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
 // Open beside it is the way to try again.
 export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
+
+// Main dismisses a failed run's notice once its run is queued again.
+const nothingToReread = () => undefined;
 
 // A share a notice named, for the Open a share surface, and the notice's
 // file, to open once the share is added.
@@ -33,11 +37,12 @@ export function useSentNoticeProps(input: {
   workspaceId: string;
   workspaces: readonly WorkspaceSummary[];
   openFile: (path: string) => void;
+  openAutomation: (automationId: string) => void;
   onSwitchWorkspace: (workspace: WorkspaceSummary, openPath?: string) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 }) {
-  const { sentNotices, workspaceId, workspaces, openFile, onSwitchWorkspace, onOpenShare, reportShellError } = input;
+  const { sentNotices, workspaceId, workspaces, openFile, openAutomation, onSwitchWorkspace, onOpenShare, reportShellError } = input;
 
   const describe = useCallback(
     (notice: NoticeRow): SentNotice => {
@@ -81,6 +86,17 @@ export function useSentNoticeProps(input: {
       (await bridge().runSkippedScheduleNow({ account, notice: sentNoticeRef(notice) })).note,
     [account],
   );
+  const requestRetry = useCallback(
+    (notice: NoticeRow, startOver: boolean) =>
+      bridge().retryAutomationNotice({ account, notice: sentNoticeRef(notice), startOver }),
+    [account],
+  );
+  const noticeRetry = useAutomationRetry({
+    workspaceId,
+    request: requestRetry,
+    onError: reportShellError,
+    onQueued: nothingToReread,
+  });
 
   const read = useCallback(
     (notices: readonly NoticeRow[]) => {
@@ -113,6 +129,8 @@ export function useSentNoticeProps(input: {
         case "workspace":
           if (place.workspace.workspaceId !== workspaceId) {
             onSwitchWorkspace(place.workspace, place.path ?? undefined);
+          } else if (place.mount === null && notice.target?.automation && AUTOMATION_NOTICE_KINDS.has(notice.kind)) {
+            openAutomation(notice.target.automation);
           } else if (place.path !== null) {
             openFile(place.path);
           }
@@ -135,7 +153,7 @@ export function useSentNoticeProps(input: {
         }
       }
     },
-    [onOpenShare, onSwitchWorkspace, openFile, read, workspaceId, workspaces],
+    [onOpenShare, onSwitchWorkspace, openAutomation, openFile, read, workspaceId, workspaces],
   );
 
   const onDismissSentNotice = useCallback(
@@ -166,5 +184,8 @@ export function useSentNoticeProps(input: {
     onDismissSentNotice,
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
+    onRetrySentNotice: noticeRetry.retry,
+    // The confirmation Try again asks for before a run starts over.
+    retryDialog: noticeRetry.dialog,
   };
 }

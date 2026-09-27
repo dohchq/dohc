@@ -22,6 +22,7 @@ function notice(noticeId: string, overrides: Partial<NoticeRow> = {}): NoticeRow
     target: {},
     createdAtMs: Date.now() - 1_000,
     readAtMs: null,
+    postedHere: false,
     ...overrides,
   };
 }

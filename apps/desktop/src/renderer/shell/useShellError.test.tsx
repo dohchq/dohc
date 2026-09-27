@@ -17,7 +17,7 @@ describe("useShellError", () => {
     const { result, rerender } = renderHook(({workspace}) => useShellError(workspace), {initialProps: {workspace: "ws-a"}});
     const notice = { noticeId: "refusal-1", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "A change needs your review",
-      body: 'dohc could not apply the resolution for "doc.md". Review its conflict.', target: {}, createdAtMs: 1, readAtMs: null };
+      body: 'dohc could not apply the resolution for "doc.md". Review its conflict.', target: {}, createdAtMs: 1, readAtMs: null, postedHere: true };
     act(() => result.current.showSyncRefusals([notice], retry));
     expect(result.current.shellErrors[0]).toMatchObject({message: notice.body, seen: false, retry});
     act(() => result.current.hideShellError(notice.noticeId));

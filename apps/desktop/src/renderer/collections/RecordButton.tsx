@@ -1,7 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { LoaderCircle } from "lucide-react";
-import { SecondaryButton } from "../ui/controls";
+import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import type { IrreversibleAction } from "@dohc/automation-executor/automation-buttons";
 import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 
 // One Button field on one record: a native button named for the field and
@@ -9,9 +10,14 @@ import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 // pointer sees on hover and the keyboard sees on focus. The words sit in the
 // page's body, outside table rows that move by transform and cells that
 // clip, and stay inside the window.
+//
+// A button whose run changes what dohc cannot undo, such as a dataset action,
+// asks first in the same place: Run runs it, and Cancel or Escape returns to
+// the button (AGENTS.md: warn before an irreversible action runs).
 
 const EDGE = 8;
 const GAP = 4;
+const list = new Intl.ListFormat("en", { type: "conjunction" });
 
 export function RecordButton(props: {
   buttons: AutomationButtons;
@@ -31,7 +37,29 @@ export function RecordButton(props: {
   const pointer = useRef(false);
   const description = note ?? (state !== null && state.kind !== "ready" ? state.reason : null);
   const blocked = running || state === null || state.kind !== "ready";
-  const open = description !== null && (hovered || focused);
+  const irreversible = state?.kind === "ready" ? state.irreversible ?? [] : [];
+  const [asking, setAsking] = useState<readonly IrreversibleAction[] | null>(null);
+  const confirmId = useId();
+  const warningId = useId();
+  const open = asking !== null || (description !== null && (hovered || focused));
+  const run = useRef<HTMLButtonElement>(null);
+  const press = (confirmed: readonly IrreversibleAction[] = []) => void props.buttons.press(props.field, { id: props.recordId, label: props.recordLabel }, undefined, confirmed.map((action) => action.name));
+  // Closing the question gives focus back to the button when focus was in
+  // it, so it never falls to the page.
+  const stopAsking = () => {
+    const inside = words.current?.contains(document.activeElement) ?? false;
+    setAsking(null);
+    if (inside || document.activeElement === document.body) button.current?.focus();
+  };
+  // The question is about the actions it named: when the button can no
+  // longer run, or would run other actions, it goes away.
+  const warned = irreversible.map((action) => action.name).join("\u0000");
+  useEffect(() => {
+    if (asking !== null && (blocked || asking.map((action) => action.name).join("\u0000") !== warned)) stopAsking();
+  }, [blocked, warned]);
+  useEffect(() => {
+    if (asking !== null) run.current?.focus();
+  }, [asking !== null]);
 
   useLayoutEffect(() => {
     if (!open || !button.current || !words.current) return;
@@ -41,7 +69,7 @@ export function RecordButton(props: {
     const below = anchor.bottom + GAP;
     const top = below + size.height + EDGE <= window.innerHeight ? below : Math.max(EDGE, anchor.top - GAP - size.height);
     setPlace({ position: "fixed", left, top });
-  }, [open, description]);
+  }, [open, description, asking !== null]);
 
   useEffect(() => {
     if (!open) {
@@ -52,6 +80,7 @@ export function RecordButton(props: {
     const close = () => {
       setHovered(false);
       setFocused(false);
+      if (asking !== null) stopAsking();
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
@@ -64,7 +93,7 @@ export function RecordButton(props: {
       window.removeEventListener("resize", close);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [open, asking !== null]);
 
   return (
     <span className="inline-flex min-w-0 max-w-full" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
@@ -86,15 +115,19 @@ export function RecordButton(props: {
         onKeyDown={(event) => {
           // A held key presses once.
           if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
-          if (event.key === "Escape" && open) {
+          if (event.key === "Escape" && open && asking === null) {
             // Escape closes the words, not the surface around the button.
             event.stopPropagation();
             setFocused(false);
             setHovered(false);
           }
         }}
+        aria-expanded={irreversible.length === 0 ? undefined : asking !== null}
+        aria-controls={asking !== null ? confirmId : undefined}
         onClick={() => {
-          if (!blocked) void props.buttons.press(props.field, { id: props.recordId, label: props.recordLabel });
+          if (blocked) return;
+          if (irreversible.length === 0) press();
+          else setAsking((current) => (current === null ? irreversible : null));
         }}
       >
         {/* An invisible copy of the label, with room for the spinner, sits under the label, so the button keeps its width while it runs. */}
@@ -105,7 +138,54 @@ export function RecordButton(props: {
           </span>
         </span>
       </SecondaryButton>
-      {description === null ? null : createPortal(
+      {asking !== null ? createPortal(
+        <span
+          ref={words}
+          id={confirmId}
+          role="dialog"
+          aria-label={`Run ${props.field} for ${props.recordLabel}`}
+          aria-describedby={warningId}
+          style={place}
+          onKeyDown={(event) => {
+            // A held key opened the question; it does not answer it.
+            if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
+            // Tab stays in the question, which sits at the end of the page.
+            if (event.key === "Tab") {
+              const controls = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
+              const at = controls.indexOf(document.activeElement as HTMLElement);
+              const next = controls[(at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length];
+              if (next) {
+                event.preventDefault();
+                next.focus();
+              }
+            }
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              stopAsking();
+            }
+          }}
+          onBlur={(event) => {
+            // Focus that leaves both the question and its button answers Cancel.
+            const next = event.relatedTarget;
+            if (next instanceof Node && (event.currentTarget.contains(next) || next === button.current)) return;
+            if (next === null) stopAsking();
+            else setAsking(null);
+          }}
+          className="dohc-popover dohc-pop-in z-50 flex w-max max-w-64 flex-col gap-2 rounded-lg border border-line bg-panel p-2 text-left text-[12px] font-normal text-ink"
+        >
+          <span id={warningId}>{list.format(asking.map((action) => action.label))} can't be undone.</span>
+          <span className="flex justify-end gap-1.5">
+            <SecondaryButton size="compact" onClick={stopAsking}>Cancel</SecondaryButton>
+            <PrimaryButton ref={run} size="compact" onClick={() => {
+              const confirmed = asking;
+              setAsking(null);
+              button.current?.focus();
+              if (!blocked) press(confirmed);
+            }}>Run</PrimaryButton>
+          </span>
+        </span>,
+        document.body,
+      ) : description === null ? null : createPortal(
         <span
           ref={words}
           id={id}

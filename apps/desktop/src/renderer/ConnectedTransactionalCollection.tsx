@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RecordButton } from "./collections/RecordButton";
-import { useAutomationButtons } from "./collections/useAutomationButtons";
+import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
+import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
@@ -66,6 +67,9 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
   const request = useRef(0);
+  // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
+  const pageOpen = useRef(true);
+  useEffect(() => { pageOpen.current = true; return () => { pageOpen.current = false; }; }, []);
   const refresh = useCallback(async () => {
     const sequence = ++request.current;
     setLoading(true);
@@ -118,6 +122,21 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     // A dataset record's id goes to main as JSON, since the table's key can be a number.
     render: (field, row) => <RecordButton buttons={buttons} field={field} recordId={JSON.stringify(row.id)} recordLabel={`record ${String(row.id)}`} />,
   }, [buttons, buttonFields]);
+  const buttonStates = useButtonStates(editingFields ? buttons : null);
+  // Choose what a button does: the ⚡ builder opens on an automation that
+  // the button starts, which runs the table's action of the same name on
+  // the pressed record when there is exactly one. The approval that adds a button
+  // can refresh the rules and open a new Fields dialog first, so the page
+  // closes whichever is open.
+  const chooseButton = (field: string) => {
+    if (!table || !dataset || !pageOpen.current) return;
+    setEditingFields(false);
+    // Labels need not be unique, so only one action of that name fills the step in.
+    const named = dataset.operations.filter(operation => operation.tableId === table.tableId && operation.kind === "action" && !operation.readOnly && operation.label === field);
+    const action = named.length === 1 ? named[0] : undefined;
+    automations.start(buttonAutomation(field, table.name, action === undefined ? []
+      : [{ kind: "invoke", operation: action.name, input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }]));
+  };
   const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, refreshKey: recordsVersion, onError,
     onRecordsChanged: () => setRecordsVersion(value => value + 1),
     onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings });
@@ -299,6 +318,9 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      buttonStates={buttonStates}
+      onChooseButton={table ? chooseButton : undefined}
+      onButtonAdded={table ? chooseButton : undefined}
       onLoadPreview={loadMigrationPreview}
       onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
@@ -311,8 +333,10 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onApprove={async (input, signal) => {
         signal.throwIfAborted();
         const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        signal.throwIfAborted();
         if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
+        // The change is approved even if its review closed meanwhile, so what
+        // follows it still happens, but only while this page is open.
+        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
         await refresh();
       }}
       onDiscard={async (input, signal) => {
@@ -334,8 +358,10 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onApprove={async (input, signal) => {
         signal.throwIfAborted();
         const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        signal.throwIfAborted();
         if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
+        // The change is approved even if its review closed meanwhile, so what
+        // follows it still happens, but only while this page is open.
+        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
         await refresh();
       }}
       onDiscard={async (input, signal) => {

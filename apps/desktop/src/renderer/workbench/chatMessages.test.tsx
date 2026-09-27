@@ -16,6 +16,10 @@ import {
   type ReactionToggleContext,
 } from "./chatMessages";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { AgentSettingsProvider } from "./AgentBadge";
+import { identityHue } from "./ChatAvatar";
+import { setChosenColors } from "./chosenColors";
 
 // Real implementations, spied: every message-body render runs the file-token
 // scan, so its call count shows whether a message actually re-rendered.
@@ -79,6 +83,32 @@ describe("ChatComposer Enter-to-send", () => {
 });
 
 describe("chat authorship display", () => {
+  it("renders its rows again for a new name, and not for any other settings save", () => {
+    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" });
+    const messages: ChatMessageRecord[] = [{
+      id: "m1", threadId: "thread", authorKind: "human", authorDisplayName: "Ada",
+      body: "Hello", createdAtMs: new Date(2026, 8, 17, 12).getTime(),
+    }];
+    const listRef = createRef<ChatMessageListHandle>();
+    // The same list element throughout, so only the settings change.
+    const list = (
+      <ChatMessageList testIdPrefix="test-chat" messages={messages} loading={false} emptyLabel="No messages" listRef={listRef} />
+    );
+    const save = (settings: typeof DEFAULT_USER_SETTINGS) =>
+      <AgentSettingsProvider settings={settings}>{list}</AgentSettingsProvider>;
+    const { rerender } = render(save(DEFAULT_USER_SETTINGS));
+    expect(screen.getByTitle("Ada").className).toContain(`text-hue-${identityHue("Ada")}`);
+    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+
+    // A save that hides a sidebar view is a new settings object.
+    rerender(save({ ...DEFAULT_USER_SETTINGS, sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: ["graph"] } }));
+    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+
+    rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
+    expect(screen.getByTitle("Ada").className).toContain("text-hue-plum");
+    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+  });
+
   it.each([
     { name: "same identity after a rename", firstId: "a", secondId: "a", secondName: "Renamed", continues: true },
     { name: "different identities with the same name", firstId: "a", secondId: "b", continues: false },

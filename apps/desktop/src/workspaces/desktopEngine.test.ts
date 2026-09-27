@@ -24,7 +24,7 @@ vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerD
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
 
 type State = {
-  collectionAutomations: { notifyClaimed: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };
+  collectionAutomations: { notifyClaimed: Mock<() => void>; failuresChanged: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };
 };
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
 
@@ -69,7 +69,7 @@ function fixture() {
     findWorkspace: (id) => rows.get(id) ?? null,
     canonicalizeRoot: resolve,
     createState: (binding): State => {
-      const state = { collectionAutomations: { notifyClaimed: vi.fn(), pauseForEngineRestart: vi.fn(), resumeAfterEngineRestart: vi.fn() } };
+      const state = { collectionAutomations: { notifyClaimed: vi.fn(), failuresChanged: vi.fn(), pauseForEngineRestart: vi.fn(), resumeAfterEngineRestart: vi.fn() } };
       states.set(binding.workspaceId, state);
       return state;
     },
@@ -102,7 +102,7 @@ function fixture() {
     recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
     collectionAutomations: { current: (id) => rows.has(id) ? states.get(id)?.collectionAutomations : undefined },
-    notifyRenderer: vi.fn(), notifyAutomationFailuresChanged: vi.fn(),
+    notifyRenderer: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
@@ -593,7 +593,7 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "failed" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
-      expect(f.dependencies.notifyAutomationFailuresChanged).toHaveBeenCalledWith("workspace");
+      expect(collection.failuresChanged).toHaveBeenCalledOnce();
       f.rows.delete("workspace");
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
