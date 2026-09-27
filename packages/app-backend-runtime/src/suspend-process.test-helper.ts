@@ -27,6 +27,8 @@ export function processSuspender() {
       failed:new Promise<never>(()=>{}),
       suspend(pid:number) {
         return stopped=(async()=>{
+          // If the test process itself dies during the pause, SIGCONT never runs and the
+          // stopped worker is left for the OS to reap with its killed parent's process group.
           process.kill(pid,"SIGSTOP");
           let resumedAt:number;
           try {await pause(6_000,undefined,{signal:cancel.signal});}
